@@ -13,7 +13,7 @@ The philosophy is a simple setup: a one-program install from the command line th
 
 ## Hard constraints
 
-- **All development must use Test-Driven Development.** CI is used heavily, and is also essential for deployment when building the application for different targets (PC, Mac, Raspberry Pi). Dev/testing happens on Mac; the target scanner runs on a Raspberry Pi 5.
+- **All development must use Test-Driven Development.** CI is used heavily, and is also essential for deployment when building the application for different targets (PC, Mac, Raspberry Pi). Dev/testing happens on Mac; the target scanner runs on a Raspberry Pi 5. **Prefer native tests as the red-green-refactor loop:** Rust `cargo test` (backend unit tests + the in-process HTTP/WS integration harness) and Vitest + React Testing Library (frontend). **Playwright is installed and available** for end-to-end browser tests, but reserve it for flows native tests can't reach — Media Session / lock-screen controls, PWA install, and iOS/WebKit background audio. It complements the TDD loop; it is not the default loop.
 - **Performance is first-class.** The app must be fast and performant on hardware as low as a Raspberry Pi.
 - **Simple install.** A one-command install that just works.
 - **rdio-scanner compatibility.** Figure out what features exist in rdio-scanner — all of them need to work in Radio-Scout. Upstream and downstream must exist and should be backwards compatible with rdio-scanner if at all possible.
@@ -50,6 +50,16 @@ cargo clippy --all-targets  # lint
 ```
 
 Frontend: once `client/` is scaffolded with Vite, commands run from inside `client/` (`npm run dev`, `npm run build`, `npm run test`, `npm run lint`). Update this section when the frontend is set up.
+
+End-to-end (Playwright) — installed and available now:
+
+```bash
+playwright --version        # v1.61.1, installed globally
+playwright test             # run E2E specs (all browsers incl. WebKit already downloaded)
+playwright test --project=webkit   # iOS/Safari — Media Session, background audio, PWA install
+```
+
+When `client/` is scaffolded, also add `@playwright/test` as a `client/` devDependency so E2E runs via `npx playwright test` and in CI next to the unit suite. Default to the native tests above; use Playwright only for the browser-level flows they can't cover.
 
 ## Agent skills
 
