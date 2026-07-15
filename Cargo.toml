@@ -3,4 +3,23 @@ name = "radio-scout"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "radio_scout"
+path = "src/lib.rs"
+
+[[bin]]
+name = "radio-scout"
+path = "src/main.rs"
+
 [dependencies]
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "json"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+tempfile = "3"
