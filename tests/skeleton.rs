@@ -175,35 +175,6 @@ async fn ingested_call_is_pushed_to_subscribed_ws_client() {
     assert_eq!(v["call"]["audioUrl"], "/api/call/1/audio");
 }
 
-/// The skeleton serves a client page at `/` that wires up the live feed and an
-/// HTML5 `<audio>` element — enough to prove end-to-end playback by hand.
-#[tokio::test]
-async fn serves_client_page_at_root() {
-    let (addr, _tmp) = spawn_app().await;
-
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/"))
-        .send()
-        .await
-        .expect("get index");
-
-    assert_eq!(resp.status().as_u16(), 200);
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        content_type.starts_with("text/html"),
-        "got {content_type:?}"
-    );
-    let body = resp.text().await.expect("body");
-    assert!(body.contains("<audio"), "page has an audio element");
-    assert!(body.contains("/api/live"), "page connects the live feed");
-    assert!(body.contains("mediaSession"), "page wires Media Session");
-}
-
 /// Server-side filtering (ADR-0004): a client subscribed to a *different*
 /// talkgroup must NOT receive the call — bandwidth/battery aren't wasted.
 #[tokio::test]

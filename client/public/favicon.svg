@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Radio-Scout">
+  <rect width="32" height="32" rx="7" fill="#09090b" />
+  <g fill="none" stroke="#fafafa" stroke-width="2.2" stroke-linecap="round">
+    <path d="M11.6 20.4a6 6 0 0 1 8.8 0" />
+    <path d="M8.4 23.2a10.5 10.5 0 0 1 15.2 0" opacity="0.5" />
+  </g>
+  <circle cx="16" cy="20.5" r="2.6" fill="#3ddc84" />
+</svg>

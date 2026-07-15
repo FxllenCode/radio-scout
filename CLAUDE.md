@@ -49,7 +49,19 @@ cargo fmt                   # format
 cargo clippy --all-targets  # lint
 ```
 
-Frontend: once `client/` is scaffolded with Vite, commands run from inside `client/` (`npm run dev`, `npm run build`, `npm run test`, `npm run lint`). Update this section when the frontend is set up.
+Frontend (React + TS + Vite + Tailwind v4 + shadcn/ui + Redux Toolkit/RTK Query), in `client/` — run from inside `client/`:
+
+```bash
+npm install                 # first-time setup
+npm run dev                 # Vite dev server (proxies /api + /healthz + the WS to the backend on :3000)
+npm run build               # type-check + production build to client/dist/ (embedded by the binary)
+npm run typecheck           # tsc -b
+npm run test                # Vitest + React Testing Library (single run)
+npm run test:watch          # Vitest watch mode
+npm run lint                # oxlint
+```
+
+**Embedded UI:** the Rust binary serves `client/dist/` via `rust-embed` (`src/web.rs`), so **`npm run build` (in `client/`) must run before `cargo build`/`cargo test`** for the real UI to be served; without it the backend serves a minimal fallback page and the frontend-serving tests assert that fallback instead. `client/dist/` is gitignored; `build.rs` creates the (empty) folder so `rust-embed` compiles on a fresh checkout even before the frontend is built. CI (#22) runs the client build before the Rust build.
 
 End-to-end (Playwright) — installed and available now:
 

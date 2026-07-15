@@ -52,11 +52,13 @@ impl AppState {
 /// audio serving. This is the single seam the binary and tests share.
 pub fn build_app(state: AppState) -> Router {
     Router::new()
-        .route("/", get(web::index))
         .route("/api/call-upload", post(ingest::call_upload))
         .route("/api/live", any(live::ws_handler))
         .route("/api/call/{id}/audio", get(serve_audio))
         .route("/healthz", get(healthz))
+        // Everything else is the frontend: embedded SPA assets + client-side
+        // routing (ADR-0007). The API/WS/health routes above take precedence.
+        .fallback(web::spa_handler)
         .with_state(state)
 }
 
