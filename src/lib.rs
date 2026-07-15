@@ -6,6 +6,7 @@
 //! over its real HTTP + WS boundary (ADR-0009).
 
 pub mod call;
+pub mod db;
 pub mod ingest;
 pub mod live;
 pub mod store;
