@@ -1,4 +1,4 @@
-# PRD — Radio-Scout v1
+# Spec — Radio-Scout v1
 
 Status: ready-for-agent · Scope: v1 (the core listening product) · Decisions: see `docs/adr/0001`–`0009`, `CONTEXT.md`, `docs/design/brief.md`, `docs/research/`.
 
@@ -127,4 +127,4 @@ Deferred to **later:** downstream forwarding to other instances; broadcast **del
 
 **Research/design references:** `docs/research/audio-pipeline.md`, `docs/research/ios-background-audio.md`, `docs/design/brief.md`.
 
-**Publishing:** this repo has no git remote yet, so the PRD and its issues cannot be pushed to GitHub Issues. Add an `origin` remote, then this PRD is published as an issue (labelled `ready-for-agent`) and split into the v1 issue set.
+**Publishing:** published to GitHub Issues (`origin` → github.com/FxllenCode/radio-scout). This spec is the tracker/epic issue **#24** (labelled `ready-for-agent` + `epic`), split into the v1 ticket set **#1–#23** — linked as native sub-issues of #24 with blocking edges expressing their dependency order.
