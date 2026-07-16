@@ -1,10 +1,11 @@
 //! Radio-Scout library crate.
 //!
-//! Ticket #1 (the walking skeleton): a real Call flows ingest -> object store ->
-//! live-feed WebSocket -> audio served back over HTTP. `build_app` returns the
-//! Axum router the binary serves and the integration harness drives in-process
-//! over its real HTTP + WS boundary (ADR-0009).
+//! A real Call flows ingest -> blob store (ADR-0002) -> live-feed WebSocket ->
+//! audio served back over HTTP with range support. `build_app` returns the Axum
+//! router the binary serves and the integration harness drives in-process over
+//! its real HTTP + WS boundary (ADR-0009).
 
+pub mod blob;
 pub mod call;
 pub mod db;
 pub mod ingest;
@@ -16,31 +17,32 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 
 use crate::call::CallId;
 use crate::live::LiveFeed;
-use crate::store::{AudioStore, CallRepository};
+use crate::store::CallRepository;
 
 // Re-exported so the binary and the integration harness can wire the app up
 // without reaching into module paths.
-pub use crate::store::{FilesystemAudioStore, InMemoryCallRepository};
+pub use crate::blob::{BlobStore, S3Config, StorageConfig};
+pub use crate::store::InMemoryCallRepository;
 
 /// Shared application state, cloned into every handler. All fields are cheap to
 /// clone (Arc / channel handle).
 #[derive(Clone)]
 pub struct AppState {
-    pub audio: Arc<dyn AudioStore>,
+    pub audio: Arc<BlobStore>,
     pub calls: Arc<dyn CallRepository>,
     pub live: LiveFeed,
 }
 
 impl AppState {
-    /// Assemble state from an audio store and a call repository, with a fresh
+    /// Assemble state from a blob store and a call repository, with a fresh
     /// live-feed hub.
-    pub fn new(audio: Arc<dyn AudioStore>, calls: Arc<dyn CallRepository>) -> Self {
+    pub fn new(audio: Arc<BlobStore>, calls: Arc<dyn CallRepository>) -> Self {
         AppState {
             audio,
             calls,
@@ -63,21 +65,52 @@ pub fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// `GET /api/call/{id}/audio` — stream a stored call's audio.
+/// `GET /api/call/{id}/audio` — serve a stored call's audio (ADR-0002).
 ///
-/// Skeleton: whole-body response. Ticket #4 adds HTTP range support and, for the
-/// S3 backend, short-lived presigned redirects after an access-scope check.
-async fn serve_audio(State(state): State<AppState>, Path(id): Path<CallId>) -> Response {
+/// The filesystem backend proxies with HTTP range support (iOS `<audio>` needs
+/// it). The S3 backend instead redirects to a short-lived presigned URL after an
+/// access-scope check (listening is open in v1, so the check is a no-op).
+async fn serve_audio(
+    State(state): State<AppState>,
+    Path(id): Path<CallId>,
+    headers: HeaderMap,
+) -> Response {
     let Some(call) = state.calls.get(id) else {
         return (StatusCode::NOT_FOUND, "call not found\n").into_response();
     };
 
-    match state.audio.get(&call.object_key) {
-        Ok(Some(bytes)) => {
-            let mime = call
-                .audio_mime
-                .unwrap_or_else(|| "application/octet-stream".to_string());
-            (
+    if state.audio.is_presigning() {
+        match state.audio.presigned_get_url(&call.object_key).await {
+            Some(Ok(url)) => return Redirect::temporary(&url).into_response(),
+            Some(Err(err)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("could not sign audio url: {err}\n"),
+                )
+                    .into_response();
+            }
+            None => {}
+        }
+    }
+
+    let size = match state.audio.size(&call.object_key).await {
+        Ok(Some(size)) => size,
+        Ok(None) => return (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not stat audio: {err}\n"),
+            )
+                .into_response();
+        }
+    };
+    let mime = call
+        .audio_mime
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    match parse_range_header(headers.get(header::RANGE), size) {
+        RangeOutcome::None => match state.audio.get(&call.object_key).await {
+            Ok(Some(bytes)) => (
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, mime),
@@ -85,15 +118,113 @@ async fn serve_audio(State(state): State<AppState>, Path(id): Path<CallId>) -> R
                 ],
                 bytes,
             )
-                .into_response()
+                .into_response(),
+            Ok(None) => (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not read audio: {err}\n"),
+            )
+                .into_response(),
+        },
+        RangeOutcome::Range { start, end } => {
+            match state
+                .audio
+                .get_range(&call.object_key, start, end + 1)
+                .await
+            {
+                Ok(bytes) => (
+                    StatusCode::PARTIAL_CONTENT,
+                    [
+                        (header::CONTENT_TYPE, mime),
+                        (header::ACCEPT_RANGES, "bytes".to_string()),
+                        (header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}")),
+                    ],
+                    bytes,
+                )
+                    .into_response(),
+                Err(err) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("could not read audio: {err}\n"),
+                )
+                    .into_response(),
+            }
         }
-        Ok(None) => (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not read audio: {err}\n"),
+        RangeOutcome::Unsatisfiable => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [(header::CONTENT_RANGE, format!("bytes */{size}"))],
+            "range not satisfiable\n",
         )
             .into_response(),
     }
+}
+
+/// The parsed outcome of a `Range` request header.
+enum RangeOutcome {
+    /// No (usable) range header — serve the whole object.
+    None,
+    /// A satisfiable single byte range, inclusive `[start, end]`.
+    Range { start: u64, end: u64 },
+    /// A malformed or unsatisfiable range.
+    Unsatisfiable,
+}
+
+/// Parse a single-range `Range: bytes=...` header against an object of `size`
+/// bytes. Multi-range requests are treated as unsatisfiable (we don't emit
+/// multipart/byteranges).
+fn parse_range_header(value: Option<&HeaderValue>, size: u64) -> RangeOutcome {
+    let Some(value) = value else {
+        return RangeOutcome::None;
+    };
+    let Ok(text) = value.to_str() else {
+        return RangeOutcome::Unsatisfiable;
+    };
+    let Some(spec) = text.trim().strip_prefix("bytes=") else {
+        return RangeOutcome::Unsatisfiable;
+    };
+    let spec = spec.trim();
+    if spec.is_empty() || spec.contains(',') {
+        return RangeOutcome::Unsatisfiable;
+    }
+    let Some((raw_start, raw_end)) = spec.split_once('-') else {
+        return RangeOutcome::Unsatisfiable;
+    };
+    if size == 0 {
+        return RangeOutcome::Unsatisfiable;
+    }
+
+    let (start, end) = match (raw_start.trim(), raw_end.trim()) {
+        ("", "") => return RangeOutcome::Unsatisfiable,
+        // Suffix range: the last N bytes.
+        ("", suffix) => {
+            let Ok(n) = suffix.parse::<u64>() else {
+                return RangeOutcome::Unsatisfiable;
+            };
+            if n == 0 {
+                return RangeOutcome::Unsatisfiable;
+            }
+            let n = n.min(size);
+            (size - n, size - 1)
+        }
+        // Open-ended: from `start` to the end.
+        (start, "") => {
+            let Ok(start) = start.parse::<u64>() else {
+                return RangeOutcome::Unsatisfiable;
+            };
+            (start, size - 1)
+        }
+        // Closed range.
+        (start, end) => {
+            let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+                return RangeOutcome::Unsatisfiable;
+            };
+            (start, end.min(size - 1))
+        }
+    };
+
+    if start > end || start >= size {
+        return RangeOutcome::Unsatisfiable;
+    }
+    RangeOutcome::Range { start, end }
 }
 
 /// `GET /healthz` — liveness probe.

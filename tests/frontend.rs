@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
-use radio_scout::{AppState, FilesystemAudioStore, InMemoryCallRepository, build_app, web};
+use radio_scout::{AppState, BlobStore, InMemoryCallRepository, build_app, web};
 
 async fn spawn_app() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let audio = Arc::new(FilesystemAudioStore::new(tmp.path().join("audio")));
+    let audio = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob store"));
     let calls = Arc::new(InMemoryCallRepository::new());
     let app = build_app(AppState::new(audio, calls));
 

@@ -97,7 +97,7 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
         _ => return incomplete("no audio"),
     };
 
-    let ingested = IngestedCall {
+    let mut ingested = IngestedCall {
         system_ref: upload.system.as_deref().and_then(parse_i64).unwrap_or(0),
         system_label: upload.system_label,
         talkgroup_ref,
@@ -114,13 +114,12 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
     };
 
     // Serialized pipeline (ADR-0001): write the audio object first, then insert
-    // the metadata row (which references it), then emit to the live feed.
-    let object_key = format!(
-        "{}.{}",
-        uuid::Uuid::new_v4().simple(),
-        ingested.audio_extension()
-    );
-    if let Err(err) = state.audio.put(&object_key, &ingested.audio) {
+    // the metadata row (which references it), then emit to the live feed. The
+    // key is sharded by a two-char prefix so no directory grows unbounded.
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    let object_key = format!("{}/{}.{}", &uuid[0..2], uuid, ingested.audio_extension());
+    let audio = bytes::Bytes::from(std::mem::take(&mut ingested.audio));
+    if let Err(err) = state.audio.put(&object_key, audio).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("could not store audio: {err}\n"),

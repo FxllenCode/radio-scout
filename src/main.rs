@@ -1,13 +1,14 @@
 //! Radio-Scout binary entrypoint.
 //!
-//! Skeleton: zero-config first run — create the base dir, wire up the
-//! filesystem audio store + in-memory call repository, and serve. Ticket #17
-//! adds the real TOML + CLI config and #3 swaps in the SeaORM-backed repository.
+//! Zero-config first run — create the base dir, wire up the filesystem blob
+//! store and in-memory call repository, and serve. Ticket #17 adds the real
+//! TOML/CLI config (including the S3/Garage storage backend) and #5 swaps in
+//! the SeaORM-backed repository.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use radio_scout::{AppState, FilesystemAudioStore, InMemoryCallRepository, build_app};
+use radio_scout::{AppState, BlobStore, InMemoryCallRepository, build_app};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -19,9 +20,10 @@ async fn main() -> std::io::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
 
-    std::fs::create_dir_all(base_dir.join("audio"))?;
-
-    let audio = Arc::new(FilesystemAudioStore::new(base_dir.join("audio")));
+    let audio = Arc::new(
+        BlobStore::filesystem(base_dir.join("audio"))
+            .map_err(|e| std::io::Error::other(e.to_string()))?,
+    );
     let calls = Arc::new(InMemoryCallRepository::new());
     let app = build_app(AppState::new(audio, calls));
 

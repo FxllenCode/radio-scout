@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use radio_scout::{AppState, FilesystemAudioStore, InMemoryCallRepository, build_app};
+use radio_scout::{AppState, BlobStore, InMemoryCallRepository, build_app};
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -22,7 +22,7 @@ type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 /// (kept alive by the caller so the store isn't deleted mid-test).
 async fn spawn_app() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let audio = Arc::new(FilesystemAudioStore::new(tmp.path().join("audio")));
+    let audio = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob store"));
     let calls = Arc::new(InMemoryCallRepository::new());
     let state = AppState::new(audio, calls);
     let app = build_app(state);
@@ -104,6 +104,62 @@ async fn ingest_stores_call_and_serves_audio() {
     assert_eq!(audio_resp.status().as_u16(), 200);
     let served = audio_resp.bytes().await.expect("audio bytes");
     assert_eq!(served.as_ref(), audio_bytes.as_slice(), "audio round-trips");
+}
+
+/// Audio is served with HTTP range support (ADR-0002 / #4) — iOS `<audio>` needs
+/// it. Full GET is 200 + `Accept-Ranges`; a `Range` request is 206 + the partial
+/// bytes + `Content-Range`; an out-of-bounds range is 416.
+#[tokio::test]
+async fn serves_audio_with_http_range() {
+    let (addr, _tmp) = spawn_app().await;
+    let audio_bytes = b"0123456789ABCDEFGHIJ".to_vec();
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("http://{addr}/api/call-upload"))
+        .multipart(call_form(11, 54241, audio_bytes.clone()))
+        .send()
+        .await
+        .expect("upload");
+    let url = format!("http://{addr}/api/call/1/audio");
+
+    // Full request.
+    let full = client.get(&url).send().await.expect("full get");
+    assert_eq!(full.status().as_u16(), 200);
+    assert_eq!(full.headers()["accept-ranges"], "bytes");
+    assert_eq!(full.bytes().await.unwrap().as_ref(), audio_bytes.as_slice());
+
+    // Range request bytes=4-9 -> 206 with bytes [4, 9].
+    let part = client
+        .get(&url)
+        .header("Range", "bytes=4-9")
+        .send()
+        .await
+        .expect("range get");
+    assert_eq!(part.status().as_u16(), 206);
+    assert_eq!(
+        part.headers()["content-range"],
+        format!("bytes 4-9/{}", audio_bytes.len()).as_str()
+    );
+    assert_eq!(part.bytes().await.unwrap().as_ref(), &audio_bytes[4..=9]);
+
+    // Open-ended suffix and an out-of-bounds range.
+    let suffix = client
+        .get(&url)
+        .header("Range", "bytes=-4")
+        .send()
+        .await
+        .expect("suffix get");
+    assert_eq!(suffix.status().as_u16(), 206);
+    assert_eq!(suffix.bytes().await.unwrap().as_ref(), &audio_bytes[16..]);
+
+    let bad = client
+        .get(&url)
+        .header("Range", format!("bytes={}-", audio_bytes.len() + 5))
+        .send()
+        .await
+        .expect("bad range get");
+    assert_eq!(bad.status().as_u16(), 416);
 }
 
 /// The other load-bearing rdio string: a call with no talkgroup is rejected as
