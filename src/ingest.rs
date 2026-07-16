@@ -140,9 +140,11 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
         system_ref,
         system_label: upload.system_label,
         talkgroup_ref,
-        talkgroup_label: upload.talkgroup_label,
-        talkgroup_name: upload.talkgroup_name,
-        talkgroup_tag: upload.talkgroup_tag,
+        // rdio drops empty and the "-" placeholder (parsers.go); recorders send
+        // these parts even when the talkgroup is unknown, so clean them to NULL.
+        talkgroup_label: clean(upload.talkgroup_label),
+        talkgroup_name: clean(upload.talkgroup_name),
+        talkgroup_tag: clean(upload.talkgroup_tag),
         talkgroup_groups: parse_groups(upload.talkgroup_group, upload.talkgroup_groups),
         call_at_ms,
         frequency: upload.frequency.as_deref().and_then(parse_i64),
@@ -388,9 +390,16 @@ fn tr_call_time(meta: &TrMeta) -> Option<i64> {
     meta.start_time.map(|seconds| (seconds * 1000.0) as i64)
 }
 
+/// rdio's placeholder test: an empty string or the literal `"-"` means "no
+/// value" — rdio's `parsers.go` guards talkgroup label/name/tag/group with
+/// `len > 0 && != "-"`. The single source of truth for that rule.
+fn is_placeholder(value: &str) -> bool {
+    value.is_empty() || value == "-"
+}
+
 /// Drop empty and rdio's `"-"` placeholder strings.
 fn clean(value: Option<String>) -> Option<String> {
-    value.filter(|v| !v.is_empty() && v != "-")
+    value.filter(|v| !is_placeholder(v))
 }
 
 fn build_tr_call(
@@ -508,21 +517,26 @@ fn parse_call_time(timestamp: Option<&str>, date_time: Option<&str>) -> Option<i
         .map(|dt| (dt.unix_timestamp_nanos() / 1_000_000) as i64)
 }
 
-/// Combine the single `talkgroupGroup` and comma-separated `talkgroupGroups`.
+/// Combine the single `talkgroupGroup` with the comma-separated `talkgroupGroups`
+/// list. Empty and rdio's `"-"` placeholder are dropped — mirroring rdio's
+/// per-field guard (parsers.go) for the singular field; for the multi-value list
+/// we additionally trim and de-duplicate as a data-quality step (rdio splits the
+/// list raw). Real recorders send only the singular field, so the two agree in
+/// practice.
 fn parse_groups(single: Option<String>, multiple: Option<String>) -> Vec<String> {
     let mut groups = Vec::new();
-    if let Some(g) = single {
+    let push = |g: &str, groups: &mut Vec<String>| {
         let g = g.trim();
-        if !g.is_empty() {
+        if !is_placeholder(g) && !groups.iter().any(|existing| existing == g) {
             groups.push(g.to_string());
         }
+    };
+    if let Some(g) = single {
+        push(&g, &mut groups);
     }
     if let Some(list) = multiple {
         for g in list.split(',') {
-            let g = g.trim();
-            if !g.is_empty() && !groups.iter().any(|existing| existing == g) {
-                groups.push(g.to_string());
-            }
+            push(g, &mut groups);
         }
     }
     groups
@@ -704,6 +718,19 @@ mod tests {
     fn groups_combine_single_and_comma_list_without_dupes() {
         assert_eq!(
             parse_groups(Some("Fire".into()), Some("Fire, Law".into())),
+            vec!["Fire".to_string(), "Law".to_string()]
+        );
+    }
+
+    #[test]
+    fn groups_drop_empty_and_dash_placeholder() {
+        // Singular field: empty / "-" dropped, mirroring rdio (parsers.go).
+        assert!(parse_groups(Some("-".into()), None).is_empty());
+        assert!(parse_groups(Some(String::new()), None).is_empty());
+        // Multi-value list: placeholders dropped + trimmed + de-duped (our
+        // normalization; rdio splits the list raw).
+        assert_eq!(
+            parse_groups(Some("-".into()), Some("Fire,-, ,Law".into())),
             vec!["Fire".to_string(), "Law".to_string()]
         );
     }
