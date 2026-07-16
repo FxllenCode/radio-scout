@@ -10,21 +10,26 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use radio_scout::{AppState, BlobStore, InMemoryCallRepository, build_app};
+use radio_scout::db::{self, repo};
+use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Bring up the real app on an ephemeral port with a temp filesystem store and
-/// an in-memory call repository. Returns the base `host:port` and the TempDir
-/// (kept alive by the caller so the store isn't deleted mid-test).
+/// Bring up the real app on an ephemeral port with a temp filesystem blob store
+/// and a fresh SQLite DB seeded with the `test-key` API key. Returns the base
+/// `host:port` and the TempDir (kept alive so nothing is deleted mid-test).
 async fn spawn_app() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let audio = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob store"));
-    let calls = Arc::new(InMemoryCallRepository::new());
-    let state = AppState::new(audio, calls);
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
+    let dbc = db::connect(&url).await.expect("db connect");
+    repo::create_api_key(&dbc, "test-key", None, None, 0)
+        .await
+        .expect("seed api key");
+    let state = AppState::new(audio, dbc, IngestConfig::default());
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

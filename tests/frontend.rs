@@ -5,13 +5,15 @@
 
 use std::sync::Arc;
 
-use radio_scout::{AppState, BlobStore, InMemoryCallRepository, build_app, web};
+use radio_scout::db;
+use radio_scout::{AppState, BlobStore, IngestConfig, build_app, web};
 
 async fn spawn_app() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let audio = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob store"));
-    let calls = Arc::new(InMemoryCallRepository::new());
-    let app = build_app(AppState::new(audio, calls));
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
+    let dbc = db::connect(&url).await.expect("db connect");
+    let app = build_app(AppState::new(audio, dbc, IngestConfig::default()));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

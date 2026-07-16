@@ -11,12 +11,14 @@
 //! are loaded separately and assembled in Rust.
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, JoinType, QueryFilter,
-    QueryOrder, QuerySelect, RelationTrait, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, JoinType, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
 };
 
+use crate::call::{CallId, StoredCall};
 use crate::db::entities::{
-    call, call_frequency, call_patch, call_unit, group, system, tag, talkgroup, talkgroup_group,
+    api_key, call, call_frequency, call_patch, call_unit, group, system, tag, talkgroup,
+    talkgroup_group,
 };
 
 /// Find a System by its Ref, creating it if absent.
@@ -377,4 +379,151 @@ pub async fn calls_patched_to<C: ConnectionTrait>(
         .order_by_desc(call::Column::CallAtMs)
         .all(db)
         .await
+}
+
+// ---------------------------------------------------------------------------
+// Ingest auth (ADR-0008) and duplicate detection (ADR-0001) — ticket #5.
+// ---------------------------------------------------------------------------
+
+/// SHA-256 hex of an API key. Keys are high-entropy secrets, so a fast hash is
+/// sufficient (no salt/KDF needed); admin passwords (#19) use argon2.
+pub fn hash_key(raw: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(raw.as_bytes()) {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Store a new API key (hashed). `system_ref = None` grants all Systems.
+pub async fn create_api_key<C: ConnectionTrait>(
+    db: &C,
+    raw_key: &str,
+    system_ref: Option<i64>,
+    label: Option<String>,
+    now_ms: i64,
+) -> Result<api_key::Model, DbErr> {
+    api_key::ActiveModel {
+        key_hash: Set(hash_key(raw_key)),
+        label: Set(label),
+        system_ref: Set(system_ref),
+        disabled: Set(false),
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+}
+
+/// Number of API keys configured. First run generates one when this is zero.
+pub async fn count_api_keys<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
+    api_key::Entity::find().count(db).await
+}
+
+/// Whether `raw_key` is a valid, enabled key scoped to `system_ref`. Denied when
+/// the key is missing, disabled, or scoped to a different System (ADR-0008:
+/// recorders always require a valid per-system key).
+pub async fn authorize_ingest<C: ConnectionTrait>(
+    db: &C,
+    raw_key: &str,
+    system_ref: i64,
+) -> Result<bool, DbErr> {
+    let Some(key) = api_key::Entity::find()
+        .filter(api_key::Column::KeyHash.eq(hash_key(raw_key)))
+        .one(db)
+        .await?
+    else {
+        return Ok(false);
+    };
+    if key.disabled {
+        return Ok(false);
+    }
+    Ok(match key.system_ref {
+        None => true,
+        Some(scoped) => scoped == system_ref,
+    })
+}
+
+/// Is there already a call for this System+Talkgroup within `±window_ms` of
+/// `call_at_ms`? (ADR-0001 duplicate detection.)
+pub async fn is_duplicate_call<C: ConnectionTrait>(
+    db: &C,
+    system_ref: i64,
+    talkgroup_ref: i64,
+    call_at_ms: i64,
+    window_ms: i64,
+) -> Result<bool, DbErr> {
+    let count = call::Entity::find()
+        .join(JoinType::InnerJoin, call::Relation::System.def())
+        .join(JoinType::InnerJoin, call::Relation::Talkgroup.def())
+        .filter(system::Column::Ref.eq(system_ref))
+        .filter(talkgroup::Column::Ref.eq(talkgroup_ref))
+        .filter(call::Column::CallAtMs.gte(call_at_ms - window_ms))
+        .filter(call::Column::CallAtMs.lte(call_at_ms + window_ms))
+        .count(db)
+        .await?;
+    Ok(count > 0)
+}
+
+/// The object key + mime for a call's audio (the serve path — lightweight).
+pub async fn get_call_audio<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<(String, Option<String>)>, DbErr> {
+    Ok(call::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .map(|c| (c.object_key, c.audio_mime)))
+}
+
+/// Build the denormalized `StoredCall` view (the live-feed / serve DTO) for a
+/// stored call by joining its System, Talkgroup, Tag, and Groups.
+pub async fn stored_call<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<StoredCall>, DbErr> {
+    let Some(call) = call::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+
+    let (system_ref, system_label) =
+        match system::Entity::find_by_id(call.system_id).one(db).await? {
+            Some(s) => (s.r#ref, s.label),
+            None => (0, None),
+        };
+    let (talkgroup_ref, talkgroup_label, tag_id) =
+        match talkgroup::Entity::find_by_id(call.talkgroup_id)
+            .one(db)
+            .await?
+        {
+            Some(t) => (t.r#ref, t.label, t.tag_id),
+            None => (0, None, None),
+        };
+    let talkgroup_tag = match tag_id {
+        Some(tid) => tag::Entity::find_by_id(tid).one(db).await?.map(|t| t.name),
+        None => None,
+    };
+    let talkgroup_group = groups_for_talkgroup(db, call.talkgroup_id)
+        .await?
+        .into_iter()
+        .next();
+
+    Ok(Some(StoredCall {
+        id: call.id,
+        system_ref,
+        system_label,
+        talkgroup_ref,
+        talkgroup_label,
+        talkgroup_group,
+        talkgroup_tag,
+        frequency: call.frequency,
+        source: call.source_ref,
+        date_time: None,
+        timestamp: Some(call.call_at_ms),
+        audio_mime: call.audio_mime,
+        object_key: call.object_key,
+        audio_url: format!("/api/call/{}/audio", call.id),
+    }))
 }

@@ -7,7 +7,7 @@ use sea_orm::Schema;
 use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
-    call, call_frequency, call_patch, call_unit, group, site, system, tag, talkgroup,
+    api_key, call, call_frequency, call_patch, call_unit, group, site, system, tag, talkgroup,
     talkgroup_group, unit,
 };
 
@@ -16,7 +16,10 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m0001_init::Migration)]
+        vec![
+            Box::new(m0001_init::Migration),
+            Box::new(m0002_api_keys::Migration),
+        ]
     }
 }
 
@@ -159,6 +162,34 @@ mod m0001_init {
                 manager.drop_table(stmt).await?;
             }
             Ok(())
+        }
+    }
+}
+
+mod m0002_api_keys {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0002_api_keys"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(api_key::Entity))
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(api_key::Entity).to_owned())
+                .await
         }
     }
 }

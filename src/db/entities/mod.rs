@@ -5,6 +5,7 @@
 //! joins. Timestamps are stored as unix-milliseconds `i64` to stay
 //! dialect-agnostic across SQLite and Postgres.
 
+pub mod api_key;
 pub mod call;
 pub mod call_frequency;
 pub mod call_patch;

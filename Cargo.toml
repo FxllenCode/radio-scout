@@ -22,6 +22,8 @@ object_store = { version = "0.14", features = ["aws"] }
 bytes = "1"
 futures-util = "0.3"
 http = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["parsing"] }
 sea-orm = { version = "1", features = [
     "sqlx-sqlite",
     "sqlx-postgres",

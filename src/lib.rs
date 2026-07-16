@@ -10,7 +10,6 @@ pub mod call;
 pub mod db;
 pub mod ingest;
 pub mod live;
-pub mod store;
 pub mod web;
 
 use std::sync::Arc;
@@ -20,33 +19,36 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
+use sea_orm::DatabaseConnection;
 
 use crate::call::CallId;
+use crate::db::repo;
 use crate::live::LiveFeed;
-use crate::store::CallRepository;
 
 // Re-exported so the binary and the integration harness can wire the app up
 // without reaching into module paths.
 pub use crate::blob::{BlobStore, S3Config, StorageConfig};
-pub use crate::store::InMemoryCallRepository;
+pub use crate::ingest::IngestConfig;
 
 /// Shared application state, cloned into every handler. All fields are cheap to
-/// clone (Arc / channel handle).
+/// clone (Arc / channel / DB pool handle).
 #[derive(Clone)]
 pub struct AppState {
     pub audio: Arc<BlobStore>,
-    pub calls: Arc<dyn CallRepository>,
+    pub db: DatabaseConnection,
     pub live: LiveFeed,
+    pub ingest: IngestConfig,
 }
 
 impl AppState {
-    /// Assemble state from a blob store and a call repository, with a fresh
-    /// live-feed hub.
-    pub fn new(audio: Arc<BlobStore>, calls: Arc<dyn CallRepository>) -> Self {
+    /// Assemble state from a blob store, a database connection, and ingest
+    /// config, with a fresh live-feed hub.
+    pub fn new(audio: Arc<BlobStore>, db: DatabaseConnection, ingest: IngestConfig) -> Self {
         AppState {
             audio,
-            calls,
+            db,
             live: LiveFeed::new(),
+            ingest,
         }
     }
 }
@@ -75,12 +77,20 @@ async fn serve_audio(
     Path(id): Path<CallId>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(call) = state.calls.get(id) else {
-        return (StatusCode::NOT_FOUND, "call not found\n").into_response();
+    let (object_key, audio_mime) = match repo::get_call_audio(&state.db, id).await {
+        Ok(Some(audio)) => audio,
+        Ok(None) => return (StatusCode::NOT_FOUND, "call not found\n").into_response(),
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not look up call: {err}\n"),
+            )
+                .into_response();
+        }
     };
 
     if state.audio.is_presigning() {
-        match state.audio.presigned_get_url(&call.object_key).await {
+        match state.audio.presigned_get_url(&object_key).await {
             Some(Ok(url)) => return Redirect::temporary(&url).into_response(),
             Some(Err(err)) => {
                 return (
@@ -93,7 +103,7 @@ async fn serve_audio(
         }
     }
 
-    let size = match state.audio.size(&call.object_key).await {
+    let size = match state.audio.size(&object_key).await {
         Ok(Some(size)) => size,
         Ok(None) => return (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
         Err(err) => {
@@ -104,12 +114,10 @@ async fn serve_audio(
                 .into_response();
         }
     };
-    let mime = call
-        .audio_mime
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let mime = audio_mime.unwrap_or_else(|| "application/octet-stream".to_string());
 
     match parse_range_header(headers.get(header::RANGE), size) {
-        RangeOutcome::None => match state.audio.get(&call.object_key).await {
+        RangeOutcome::None => match state.audio.get(&object_key).await {
             Ok(Some(bytes)) => (
                 StatusCode::OK,
                 [
@@ -127,11 +135,7 @@ async fn serve_audio(
                 .into_response(),
         },
         RangeOutcome::Range { start, end } => {
-            match state
-                .audio
-                .get_range(&call.object_key, start, end + 1)
-                .await
-            {
+            match state.audio.get_range(&object_key, start, end + 1).await {
                 Ok(bytes) => (
                     StatusCode::PARTIAL_CONTENT,
                     [

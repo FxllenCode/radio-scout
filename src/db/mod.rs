@@ -18,11 +18,12 @@ pub use sea_orm::DbBackend;
 pub async fn connect(url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(url).await?;
     if db.get_database_backend() == DbBackend::Sqlite {
-        db.execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA foreign_keys = ON;",
-        ))
-        .await?;
+        // WAL persists in the file header (set once); foreign_keys is
+        // per-connection (see the note in `authorize_ingest` callers / #5).
+        for pragma in ["PRAGMA journal_mode = WAL;", "PRAGMA foreign_keys = ON;"] {
+            db.execute(Statement::from_string(DbBackend::Sqlite, pragma))
+                .await?;
+        }
     }
     migration::Migrator::up(&db, None).await?;
     Ok(db)
