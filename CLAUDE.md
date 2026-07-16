@@ -13,12 +13,34 @@ The philosophy is a simple setup: a one-program install from the command line th
 
 ## Hard constraints
 
-- **All development must use Test-Driven Development.** CI is used heavily, and is also essential for deployment when building the application for different targets (PC, Mac, Raspberry Pi). Dev/testing happens on Mac; the target scanner runs on a Raspberry Pi 5. **Prefer native tests as the red-green-refactor loop:** Rust `cargo test` (backend unit tests + the in-process HTTP/WS integration harness) and Vitest + React Testing Library (frontend). **Playwright is installed and available** for end-to-end browser tests, but reserve it for flows native tests can't reach — Media Session / lock-screen controls, PWA install, and iOS/WebKit background audio. It complements the TDD loop; it is not the default loop.
+- **All development is Test-Driven Development, under a quantified coverage policy** — see [Testing & coverage policy](#testing--coverage-policy) below ([ADR-0009](docs/adr/0009-testing-strategy.md) + [ADR-0010](docs/adr/0010-coverage-policy-and-test-tooling.md)). CI is used heavily and is essential for deployment across targets (PC, Mac, Raspberry Pi); dev/testing happens on Mac, the target scanner runs on a Raspberry Pi 5. Red-green-refactor on **native tests** — Rust `cargo nextest` (unit + the in-process HTTP/WS integration harness) and Vitest + React Testing Library (frontend). Every PR must hold **100% patch/diff coverage** (every new/changed line tested) over a **ratcheting project floor**, with quality enforced by **mutation testing** (`cargo-mutants` + `proptest`) — *not* by a 100%-total gate. Reserve Playwright for browser-only flows; iOS background audio / lock-screen controls are a **real-device manual gate**.
 - **Performance is first-class.** The app must be fast and performant on hardware as low as a Raspberry Pi.
 - **Simple install.** A one-command install that just works.
 - **rdio-scanner compatibility.** Figure out what features exist in rdio-scanner — all of them need to work in Radio-Scout. Upstream and downstream must exist and should be backwards compatible with rdio-scanner if at all possible.
 - **Recorder integrations.** Create an integration or plugin (per their docs) for both SDRTrunk and Trunk Recorder. The maintainer runs Trunk Recorder on their scanner, so have a plugin/integration ready for that testing phase.
 - **PWA / mobile support is extremely important.** You must be able to add the website to your phone and have scanner audio actually work correctly within the OS — e.g. functioning pause/next/previous buttons — and work correctly in the background, especially on iOS. This is lacking in rdio-scanner and is a big problem with it.
+
+## Testing & coverage policy
+
+Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integration harness, recorder golden suite) + [ADR-0010](docs/adr/0010-coverage-policy-and-test-tooling.md) (coverage numbers, tool stack). The rules that bind day-to-day work, symmetric for backend and frontend:
+
+**Coverage gates:**
+- **100% patch/diff coverage** on every PR — every new or changed line is tested. This is the hard gate; it makes "new code ships with tests" true by construction.
+- A **ratcheting project floor** (enforced in-repo: `cargo llvm-cov --fail-under-lines`, Vitest `thresholds`) — rises, never falls; set to the measured baseline.
+- **No hard 100%-total gate** — it produces coverage theater. Quality is proven by mutation testing, not by chasing 100%.
+
+**Edge cases are required and operationalized.** "Multiple tests covering edge cases" means `proptest` (property-based — parsers, dedup window, range headers, protocol framing), `rstest` parametrized case tables (multiple named cases per behavior), and `cargo-mutants` mutation testing to prove the assertions actually catch regressions. A test that runs a line without asserting behavior does not count.
+
+**The pyramid (where each layer pays off):**
+- **Backend** — unit (`#[cfg(test)] mod tests`, incl. edge-branch tables) for pure logic; **integration** (`tests/`, real HTTP/WS via the harness in `tests/common/mod.rs`) for behavior + contracts. Dual-dialect Postgres + real-S3 (MinIO/Garage) via **testcontainers** in CI. rdio-scanner wire responses pinned with **insta** snapshots.
+- **Frontend** — Vitest + RTL **integration is the workhorse** (network mocked with **MSW** at the boundary — never fetch/module mocking); unit for pure logic (`store/`, `lib/`, `utils/` at per-file 100%); **Vitest Browser Mode** (real browser) for audio-player + Media-Session component wiring; **narrow Playwright E2E** (PWA install/offline/service-worker), added when those features land.
+- **iOS background audio, lock-screen/Control-Center controls, and Add-to-Home-Screen install are a real-device MANUAL release gate.** Playwright's WebKit is not iOS Safari and cannot validate them ([ADR-0005](docs/adr/0005-client-audio-media-session-background.md)).
+
+**Tooling** — backend: `cargo-nextest` (runner), `cargo-llvm-cov` (coverage), `proptest`, `rstest`, `insta`, `tokio::time::pause`, `assert_cmd`/`trycmd`; `cargo-mutants` + `testcontainers` in CI. Frontend: `@vitest/coverage-v8`, `msw`, `vitest-axe`, `jsdom`; Vitest Browser Mode + Playwright when audio/PWA lands. **Skip:** tarpaulin, quickcheck, loom, Playwright component-testing (Browser Mode supersedes it).
+
+**Coverage exclusions (documented + auditable — never silent gaming):** generated SeaORM entities + migrations, `main()` bootstrap glue, `build.rs`, shadcn `client/src/components/ui/**`, `client/src/main.tsx`, `.d.ts`, test files.
+
+**Enforcement** — the tooling above is stood up (and high-risk gaps in already-shipped code backfilled) by the **"Test hardening + coverage baseline"** ticket; CI (#22) is not built yet. Until #22, coverage + mutation join the local merge-gate ritual: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo nextest run` (+ `cargo test --doc`), `cargo llvm-cov` over the floor, and the client `tsc`/`oxlint`/`vitest --coverage` gates must pass before a commit lands. #22 wires it all into CI with a **100% patch-coverage** Codecov gate (separate backend/frontend flags).
 
 ## Approach
 
@@ -42,12 +64,18 @@ Backend (Rust):
 ```bash
 cargo build                 # build
 cargo run                   # run the binary
-cargo test                  # run all tests
+cargo nextest run           # run all tests (preferred runner; `cargo test` still works)
+cargo test --doc            # doctests (nextest does not run these)
 cargo test <name>           # run tests matching a substring
 cargo test <mod>::<test> -- --exact --nocapture   # single test, with stdout
+cargo llvm-cov nextest --html                 # coverage report -> target/llvm-cov/html
+cargo llvm-cov nextest --fail-under-lines <N>  # enforce the ratcheting project floor
+cargo mutants --in-diff <(git diff origin/master...)   # mutation-test only changed code
 cargo fmt                   # format
 cargo clippy --all-targets  # lint
 ```
+
+`cargo-nextest`, `cargo-llvm-cov`, and `cargo-mutants` (plus `proptest`/`rstest`/`insta`/`testcontainers` dev-deps) are introduced by the **"Test hardening + coverage baseline"** ticket; until it lands, `cargo test` is the runner. See [Testing & coverage policy](#testing--coverage-policy).
 
 Frontend (React + TS + Vite + Tailwind v4 + shadcn/ui + Redux Toolkit/RTK Query), in `client/` — run from inside `client/`:
 
@@ -58,20 +86,17 @@ npm run build               # type-check + production build to client/dist/ (emb
 npm run typecheck           # tsc -b
 npm run test                # Vitest + React Testing Library (single run)
 npm run test:watch          # Vitest watch mode
+npm run test:coverage       # Vitest with @vitest/coverage-v8 + thresholds (added by the hardening ticket)
 npm run lint                # oxlint
 ```
 
 **Embedded UI:** the Rust binary serves `client/dist/` via `rust-embed` (`src/web.rs`), so **`npm run build` (in `client/`) must run before `cargo build`/`cargo test`** for the real UI to be served; without it the backend serves a minimal fallback page and the frontend-serving tests assert that fallback instead. `client/dist/` is gitignored; `build.rs` creates the (empty) folder so `rust-embed` compiles on a fresh checkout even before the frontend is built. CI (#22) runs the client build before the Rust build.
 
-End-to-end (Playwright) — installed and available now:
+**End-to-end (Playwright) — NOT wired up yet** (contrary to earlier notes, it is not installed). It is added when the browser-only flows exist (#11/#14/#15), as a `@playwright/test` `client/` devDependency run via `npx playwright test` next to the unit suite and in CI (sharded). Layering, per [Testing & coverage policy](#testing--coverage-policy):
 
-```bash
-playwright --version        # v1.61.1, installed globally
-playwright test             # run E2E specs (all browsers incl. WebKit already downloaded)
-playwright test --project=webkit   # iOS/Safari — Media Session, background audio, PWA install
-```
-
-When `client/` is scaffolded, also add `@playwright/test` as a `client/` devDependency so E2E runs via `npx playwright test` and in CI next to the unit suite. Default to the native tests above; use Playwright only for the browser-level flows they can't cover.
+- **Vitest Browser Mode** is the middle layer — real-browser component tests for the audio player + Media-Session *wiring*. Prefer it over Playwright component-testing.
+- **Narrow Playwright E2E** covers PWA install/offline/service-worker + a Media-Session smoke test.
+- **iOS background audio + lock-screen/Control-Center controls are a real-device manual gate** — Playwright's bundled WebKit is not iOS Safari and cannot validate them. There is no CI substitute.
 
 ## Agent skills
 
