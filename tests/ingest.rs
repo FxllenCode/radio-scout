@@ -2,33 +2,14 @@
 //! duplicate detection, and full-field persistence — driven over the real HTTP
 //! boundary against a DB-backed app.
 
-use std::sync::Arc;
-
 use radio_scout::db::entities::{
     call, call_frequency, call_patch, call_unit, system, tag, talkgroup,
 };
-use radio_scout::db::{self, repo};
-use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
-use sea_orm::{DatabaseConnection, EntityTrait, PaginatorTrait};
+use radio_scout::db::repo;
+use sea_orm::{EntityTrait, PaginatorTrait};
 
-/// Bring up a DB-backed app; return its address, a DB handle (for seeding keys /
-/// asserting rows), and the TempDir.
-async fn spawn() -> (String, DatabaseConnection, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let audio = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob"));
-    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
-    let dbc = db::connect(&url).await.expect("db");
-    let app = build_app(AppState::new(audio, dbc.clone(), IngestConfig::default()));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
-    (format!("127.0.0.1:{}", addr.port()), dbc, tmp)
-}
+mod common;
+use common::spawn;
 
 fn form(key: &str, system: i64, talkgroup: i64, timestamp_ms: i64) -> reqwest::multipart::Form {
     let audio = reqwest::multipart::Part::bytes(b"audio-bytes".to_vec())
