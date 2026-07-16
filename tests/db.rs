@@ -47,10 +47,10 @@ async fn resolve_or_create_is_idempotent_and_scoped() {
     let other = repo::resolve_or_create_system(&db, 22, None, NOW)
         .await
         .unwrap();
-    let tg_a = repo::resolve_or_create_talkgroup(&db, a.id, 5, None, None, NOW)
+    let tg_a = repo::resolve_or_create_talkgroup(&db, a.id, 5, None, None, None, NOW)
         .await
         .unwrap();
-    let tg_b = repo::resolve_or_create_talkgroup(&db, other.id, 5, None, None, NOW)
+    let tg_b = repo::resolve_or_create_talkgroup(&db, other.id, 5, None, None, None, NOW)
         .await
         .unwrap();
     assert_ne!(

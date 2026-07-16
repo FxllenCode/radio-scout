@@ -96,6 +96,7 @@ pub async fn resolve_or_create_talkgroup<C: ConnectionTrait>(
     system_id: i64,
     ext_ref: i64,
     label: Option<String>,
+    name: Option<String>,
     tag_id: Option<i64>,
     now_ms: i64,
 ) -> Result<talkgroup::Model, DbErr> {
@@ -111,7 +112,7 @@ pub async fn resolve_or_create_talkgroup<C: ConnectionTrait>(
         system_id: Set(system_id),
         r#ref: Set(ext_ref),
         label: Set(label),
-        name: Set(None),
+        name: Set(name),
         tag_id: Set(tag_id),
         led: Set(None),
         created_at_ms: Set(now_ms),
@@ -168,6 +169,7 @@ pub struct NewCall {
     pub system_label: Option<String>,
     pub talkgroup_ref: i64,
     pub talkgroup_label: Option<String>,
+    pub talkgroup_name: Option<String>,
     pub talkgroup_tag: Option<String>,
     pub talkgroup_groups: Vec<String>,
     pub call_at_ms: i64,
@@ -205,6 +207,7 @@ pub async fn insert_call<C: ConnectionTrait>(
         sys.id,
         new.talkgroup_ref,
         new.talkgroup_label.clone(),
+        new.talkgroup_name.clone(),
         tag_id,
         now_ms,
     )
@@ -526,4 +529,32 @@ pub async fn stored_call<C: ConnectionTrait>(
         object_key: call.object_key,
         audio_url: format!("/api/call/{}/audio", call.id),
     }))
+}
+
+/// The System Ref for a Trunk Recorder `short_name` (which carries no numeric
+/// ref). If a System already has that label, reuse its Ref so TR and generic
+/// uploads converge; otherwise synthesize a stable Ref from the name. Read-only
+/// — the System row is created (if new) by the ingest pipeline. Full Ref
+/// curation / label reconciliation is #8.
+pub async fn system_ref_for_short_name<C: ConnectionTrait>(
+    db: &C,
+    short_name: &str,
+) -> Result<i64, DbErr> {
+    if let Some(sys) = system::Entity::find()
+        .filter(system::Column::Label.eq(short_name))
+        .one(db)
+        .await?
+    {
+        return Ok(sys.r#ref);
+    }
+    Ok(synthetic_system_ref(short_name))
+}
+
+/// A deterministic positive Ref derived from a string (stable across restarts).
+fn synthetic_system_ref(name: &str) -> i64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(name.as_bytes());
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    (u64::from_be_bytes(bytes) & 0x7FFF_FFFF_FFFF_FFFF) as i64
 }

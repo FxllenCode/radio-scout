@@ -58,6 +58,10 @@ impl AppState {
 pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/api/call-upload", post(ingest::call_upload))
+        .route(
+            "/api/trunk-recorder-call-upload",
+            post(ingest::trunk_recorder_call_upload),
+        )
         .route("/api/live", any(live::ws_handler))
         .route("/api/call/{id}/audio", get(serve_audio))
         .route("/healthz", get(healthz))

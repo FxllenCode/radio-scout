@@ -51,6 +51,7 @@ struct RawUpload {
     system_label: Option<String>,
     talkgroup: Option<String>,
     talkgroup_label: Option<String>,
+    talkgroup_name: Option<String>,
     talkgroup_group: Option<String>,
     talkgroup_groups: Option<String>,
     talkgroup_tag: Option<String>,
@@ -102,6 +103,7 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
             "systemLabel" => upload.system_label = Some(value),
             "talkgroup" => upload.talkgroup = Some(value),
             "talkgroupLabel" => upload.talkgroup_label = Some(value),
+            "talkgroupName" => upload.talkgroup_name = Some(value),
             "talkgroupGroup" => upload.talkgroup_group = Some(value),
             "talkgroupGroups" => upload.talkgroup_groups = Some(value),
             "talkgroupTag" => upload.talkgroup_tag = Some(value),
@@ -130,59 +132,22 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
         _ => return incomplete("no audio"),
     };
     let system_ref = upload.system.as_deref().and_then(parse_i64).unwrap_or(0);
-
-    // Auth (ADR-0008): recorders always require a valid, in-scope API key.
-    let key = upload.key.as_deref().unwrap_or("");
-    match repo::authorize_ingest(&state.db, key, system_ref).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                format!("Invalid API key for system {system_ref} talkgroup {talkgroup_ref}.\n"),
-            )
-                .into_response();
-        }
-        Err(err) => return server_error("auth", err),
-    }
-
+    let key = upload.key.take().unwrap_or_default();
     let call_at_ms = parse_call_time(upload.timestamp.as_deref(), upload.date_time.as_deref())
         .unwrap_or_else(now_ms);
-
-    // Dedup (ADR-0001): same System + Talkgroup within the window.
-    match repo::is_duplicate_call(
-        &state.db,
-        system_ref,
-        talkgroup_ref,
-        call_at_ms,
-        state.ingest.dedup_window_ms,
-    )
-    .await
-    {
-        Ok(true) => return (StatusCode::OK, DUPLICATE_REJECTED).into_response(),
-        Ok(false) => {}
-        Err(err) => return server_error("dedup", err),
-    }
-
-    // Key is sharded by a two-char prefix so no directory grows unbounded.
-    let uuid = uuid::Uuid::new_v4().simple().to_string();
-    let object_key = format!(
-        "{}/{}.{}",
-        &uuid[0..2],
-        uuid,
-        audio_extension(&upload.audio_name)
-    );
 
     let new_call = NewCall {
         system_ref,
         system_label: upload.system_label,
         talkgroup_ref,
         talkgroup_label: upload.talkgroup_label,
+        talkgroup_name: upload.talkgroup_name,
         talkgroup_tag: upload.talkgroup_tag,
         talkgroup_groups: parse_groups(upload.talkgroup_group, upload.talkgroup_groups),
         call_at_ms,
         frequency: upload.frequency.as_deref().and_then(parse_i64),
         source_ref: upload.source.as_deref().and_then(parse_i64),
-        object_key: object_key.clone(),
+        object_key: String::new(),
         audio_mime: upload.audio_mime,
         audio_name: upload.audio_name,
         duration_ms: None,
@@ -195,11 +160,63 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
         frequencies: parse_frequencies(upload.frequencies.as_deref()),
     };
 
+    ingest_call(&state, &key, new_call, audio).await
+}
+
+/// The shared ingest pipeline used by both upload endpoints (ADR-0001):
+/// authorize -> dedup -> write audio object -> insert row (+children) in a
+/// transaction -> emit to the live feed. `new_call.object_key` is filled here.
+async fn ingest_call(
+    state: &AppState,
+    key: &str,
+    mut new_call: NewCall,
+    audio: Vec<u8>,
+) -> Response {
+    // Auth (ADR-0008): recorders always require a valid, in-scope API key.
+    match repo::authorize_ingest(&state.db, key, new_call.system_ref).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                format!(
+                    "Invalid API key for system {} talkgroup {}.\n",
+                    new_call.system_ref, new_call.talkgroup_ref
+                ),
+            )
+                .into_response();
+        }
+        Err(err) => return server_error("auth", err),
+    }
+
+    // Dedup (ADR-0001): same System + Talkgroup within the window.
+    match repo::is_duplicate_call(
+        &state.db,
+        new_call.system_ref,
+        new_call.talkgroup_ref,
+        new_call.call_at_ms,
+        state.ingest.dedup_window_ms,
+    )
+    .await
+    {
+        Ok(true) => return (StatusCode::OK, DUPLICATE_REJECTED).into_response(),
+        Ok(false) => {}
+        Err(err) => return server_error("dedup", err),
+    }
+
+    // Key is sharded by a two-char prefix so no directory grows unbounded.
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    new_call.object_key = format!(
+        "{}/{}.{}",
+        &uuid[0..2],
+        uuid,
+        audio_extension(&new_call.audio_name)
+    );
+
     // Write the audio object first (ADR-0001); a failed DB insert afterward leaves
     // an orphan the GC sweep reclaims (#10).
     if let Err(err) = state
         .audio
-        .put(&object_key, bytes::Bytes::from(audio))
+        .put(&new_call.object_key, bytes::Bytes::from(audio))
         .await
     {
         return (
@@ -210,8 +227,7 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
     }
 
     // Insert the row (+ children) atomically.
-    let now = now_ms();
-    let call = match insert_in_txn(&state.db, &new_call, now).await {
+    let call = match insert_in_txn(&state.db, &new_call, now_ms()).await {
         Ok(call) => call,
         Err(err) => return server_error("store call", err),
     };
@@ -235,6 +251,205 @@ async fn insert_in_txn(
     let call = repo::insert_call(&txn, new_call, now_ms).await?;
     txn.commit().await?;
     Ok(call)
+}
+
+/// `POST /api/trunk-recorder-call-upload` — Trunk Recorder's native
+/// `.wav`+`.json` upload: the metadata rides as a single JSON `meta` part rather
+/// than individual form fields (rdio `parsers.go` mapping).
+pub async fn trunk_recorder_call_upload(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Response {
+    let mut key = String::new();
+    let mut meta_json: Option<String> = None;
+    let mut audio: Option<Vec<u8>> = None;
+    let mut audio_name = None;
+    let mut audio_mime = None;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(_) => return incomplete("malformed multipart body"),
+        };
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "audio" => {
+                audio_name = field.file_name().map(str::to_string);
+                audio_mime = field.content_type().map(str::to_string);
+                match field.bytes().await {
+                    Ok(bytes) => audio = Some(bytes.to_vec()),
+                    Err(_) => return incomplete("could not read audio"),
+                }
+            }
+            "key" => key = field.text().await.unwrap_or_default(),
+            "meta" => meta_json = field.text().await.ok(),
+            _ => {}
+        }
+    }
+
+    let Some(meta_json) = meta_json else {
+        return incomplete("no meta");
+    };
+    let meta: TrMeta = match serde_json::from_str(&meta_json) {
+        Ok(meta) => meta,
+        Err(_) => return (StatusCode::EXPECTATION_FAILED, "Invalid call data\n").into_response(),
+    };
+
+    let Some(talkgroup_ref) = meta.talkgroup.filter(|tg| *tg > 0) else {
+        return incomplete("no talkgroup");
+    };
+    let audio = match audio {
+        Some(audio) if !audio.is_empty() => audio,
+        _ => return incomplete("no audio"),
+    };
+
+    // TR has no numeric system ref — resolve one from `short_name`.
+    let short_name = clean(meta.short_name.clone());
+    let system_ref = match &short_name {
+        Some(name) => match repo::system_ref_for_short_name(&state.db, name).await {
+            Ok(system_ref) => system_ref,
+            Err(err) => return server_error("resolve system", err),
+        },
+        None => 0,
+    };
+
+    let new_call = build_tr_call(
+        meta,
+        system_ref,
+        short_name,
+        talkgroup_ref,
+        audio_name,
+        audio_mime,
+    );
+    ingest_call(&state, &key, new_call, audio).await
+}
+
+/// Trunk Recorder's call `.json` metadata (the fields rdio's `parsers.go` reads).
+#[derive(Deserialize, Default)]
+struct TrMeta {
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    talkgroup: Option<i64>,
+    #[serde(default)]
+    talkgroup_tag: Option<String>, // -> talkgroup label
+    #[serde(default)]
+    talkgroup_description: Option<String>, // -> talkgroup name
+    #[serde(default)]
+    talkgroup_group: Option<String>, // -> group
+    #[serde(default)]
+    talkgroup_group_tag: Option<String>, // -> tag
+    #[serde(default)]
+    start_time: Option<f64>, // unix seconds
+    #[serde(default)]
+    timestamp: Option<f64>, // unix milliseconds (overrides start_time)
+    #[serde(default)]
+    freq: Option<f64>,
+    #[serde(default)]
+    patched_talkgroups: Vec<f64>,
+    #[serde(default, rename = "freqList")]
+    freq_list: Vec<TrFreq>,
+    #[serde(default, rename = "srcList")]
+    src_list: Vec<TrSrc>,
+}
+
+#[derive(Deserialize, Default)]
+struct TrFreq {
+    #[serde(default)]
+    freq: f64,
+    #[serde(default)]
+    pos: f64,
+    #[serde(default)]
+    len: f64,
+    #[serde(default)]
+    error_count: Option<i64>,
+    #[serde(default)]
+    spike_count: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+struct TrSrc {
+    #[serde(default)]
+    src: i64,
+    #[serde(default)]
+    pos: f64,
+    #[serde(default)]
+    tag: Option<String>,
+}
+
+/// The TR call time: `timestamp` (unix ms) if present, else `start_time`
+/// (unix s). Deliberately does NOT clobber it with `now()` — rdio's parser has a
+/// leftover-debug bug that does, which this ticket exists to avoid.
+fn tr_call_time(meta: &TrMeta) -> Option<i64> {
+    if let Some(ms) = meta.timestamp {
+        return Some(ms as i64);
+    }
+    meta.start_time.map(|seconds| (seconds * 1000.0) as i64)
+}
+
+/// Drop empty and rdio's `"-"` placeholder strings.
+fn clean(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty() && v != "-")
+}
+
+fn build_tr_call(
+    meta: TrMeta,
+    system_ref: i64,
+    short_name: Option<String>,
+    talkgroup_ref: i64,
+    audio_name: Option<String>,
+    audio_mime: Option<String>,
+) -> NewCall {
+    let call_at_ms = tr_call_time(&meta).unwrap_or_else(now_ms);
+    let frequencies = meta
+        .freq_list
+        .into_iter()
+        .map(|f| NewCallFrequency {
+            freq: f.freq as i64,
+            pos_ms: Some((f.pos * 1000.0) as i64),
+            len_ms: Some((f.len * 1000.0) as i64),
+            dbm: None,
+            error_count: f.error_count.map(|n| n as i32),
+            spike_count: f.spike_count.map(|n| n as i32),
+        })
+        .collect();
+    let units = meta
+        .src_list
+        .into_iter()
+        .filter(|s| s.src > 0)
+        .map(|s| NewCallUnit {
+            unit_ref: s.src,
+            label: clean(s.tag),
+            offset_ms: Some((s.pos * 1000.0) as i64),
+        })
+        .collect();
+    let patches = meta
+        .patched_talkgroups
+        .into_iter()
+        .filter(|p| *p > 0.0)
+        .map(|p| p as i64)
+        .collect();
+
+    NewCall {
+        system_ref,
+        system_label: short_name,
+        talkgroup_ref,
+        talkgroup_label: clean(meta.talkgroup_tag), // TR talkgroup_tag -> label
+        talkgroup_name: clean(meta.talkgroup_description), // TR description -> name
+        talkgroup_tag: clean(meta.talkgroup_group_tag), // TR group_tag -> tag
+        talkgroup_groups: clean(meta.talkgroup_group).into_iter().collect(),
+        call_at_ms,
+        frequency: meta.freq.map(|f| f as i64),
+        source_ref: None,
+        object_key: String::new(),
+        audio_mime,
+        audio_name,
+        duration_ms: None,
+        patches,
+        units,
+        frequencies,
+    }
 }
 
 /// The rdio-scanner incomplete-data response: HTTP 417 + `Incomplete call data: <reason>\n`.
@@ -498,5 +713,25 @@ mod tests {
         assert_eq!(audio_extension(&Some("call.m4a".into())), "m4a");
         assert_eq!(audio_extension(&Some("weird".into())), "wav");
         assert_eq!(audio_extension(&None), "wav");
+    }
+
+    #[test]
+    fn tr_time_uses_start_time_not_now() {
+        let meta = TrMeta {
+            start_time: Some(1669740338.0),
+            ..Default::default()
+        };
+        // start_time (seconds) -> milliseconds, NOT clobbered with now().
+        assert_eq!(tr_call_time(&meta), Some(1669740338000));
+    }
+
+    #[test]
+    fn tr_time_prefers_timestamp_millis() {
+        let meta = TrMeta {
+            start_time: Some(1669740338.0),
+            timestamp: Some(1669740999000.0),
+            ..Default::default()
+        };
+        assert_eq!(tr_call_time(&meta), Some(1669740999000));
     }
 }
