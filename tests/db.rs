@@ -6,9 +6,11 @@
 //! fresh Postgres and sets it (ADR-0003: every migration and query is exercised
 //! on both dialects). Locally that test skips (no Docker here).
 
-use radio_scout::db::entities::{call_frequency, call_patch, call_unit, system, talkgroup};
+use radio_scout::db::entities::{
+    api_key, call_frequency, call_patch, call_unit, system, talkgroup,
+};
 use radio_scout::db::{self, repo};
-use sea_orm::{DatabaseConnection, EntityTrait, PaginatorTrait};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, PaginatorTrait, Set};
 
 const NOW: i64 = 1_700_000_000_000;
 
@@ -28,6 +30,43 @@ async fn migrations_apply_and_tables_are_queryable() {
     assert_eq!(system::Entity::find().count(&db).await.unwrap(), 0);
     assert_eq!(talkgroup::Entity::find().count(&db).await.unwrap(), 0);
     assert_eq!(call_patch::Entity::find().count(&db).await.unwrap(), 0);
+}
+
+/// `authorize_ingest` at the repo boundary (unit half; the HTTP integration test
+/// lives in `tests/ingest.rs`). Covers the missing / global / scoped / **disabled**
+/// branches (ADR-0008) — the disabled case is the load-bearing security check.
+#[tokio::test]
+async fn authorize_ingest_enforces_validity_scope_and_disabled() {
+    let (db, _dir) = sqlite().await;
+
+    // Unknown key -> denied.
+    assert!(!repo::authorize_ingest(&db, "nope", 11).await.unwrap());
+
+    // Global (unscoped) key -> allowed for any system.
+    repo::create_api_key(&db, "global", None, None, NOW)
+        .await
+        .unwrap();
+    assert!(repo::authorize_ingest(&db, "global", 11).await.unwrap());
+    assert!(repo::authorize_ingest(&db, "global", 22).await.unwrap());
+
+    // System-scoped key -> only its own system.
+    repo::create_api_key(&db, "sys11", Some(11), None, NOW)
+        .await
+        .unwrap();
+    assert!(repo::authorize_ingest(&db, "sys11", 11).await.unwrap());
+    assert!(!repo::authorize_ingest(&db, "sys11", 22).await.unwrap());
+
+    // Disabled key -> denied even though the hash matches.
+    api_key::ActiveModel {
+        key_hash: Set(repo::hash_key("revoked")),
+        disabled: Set(true),
+        created_at_ms: Set(NOW),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    assert!(!repo::authorize_ingest(&db, "revoked", 11).await.unwrap());
 }
 
 #[tokio::test]

@@ -44,3 +44,65 @@ pub struct StoredCall {
     /// The URL a client fetches the audio from (audio never rides the socket).
     pub audio_url: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn full() -> StoredCall {
+        StoredCall {
+            id: 42,
+            system_ref: 11,
+            system_label: Some("butco".into()),
+            talkgroup_ref: 54241,
+            talkgroup_label: Some("TDB A1".into()),
+            talkgroup_group: Some("Fire".into()),
+            talkgroup_tag: Some("Fire Dispatch".into()),
+            frequency: Some(774_031_250),
+            source: Some(1_610_092),
+            date_time: Some("2022-11-29T18:05:38Z".into()),
+            timestamp: Some(1_669_740_338_000),
+            audio_mime: Some("audio/mp4".into()),
+            object_key: "ab/secret-internal-key.m4a".into(),
+            audio_url: "/api/call/42/audio".into(),
+        }
+    }
+
+    #[test]
+    fn object_key_is_never_serialized() {
+        // `object_key` is an internal storage detail; leaking it to live-feed
+        // clients would be a contract break (ADR-0004).
+        let json = serde_json::to_value(full()).unwrap();
+        assert!(json.get("objectKey").is_none());
+        assert!(json.get("object_key").is_none());
+    }
+
+    /// Pin the exact live-feed wire shape: camelCase keys, `object_key` hidden,
+    /// all fields present.
+    #[test]
+    fn full_call_wire_shape() {
+        insta::assert_json_snapshot!("stored_call_full", full());
+    }
+
+    /// `None` fields are omitted entirely, keeping the socket payload compact.
+    #[test]
+    fn none_fields_are_omitted() {
+        let minimal = StoredCall {
+            id: 1,
+            system_ref: 11,
+            system_label: None,
+            talkgroup_ref: 5,
+            talkgroup_label: None,
+            talkgroup_group: None,
+            talkgroup_tag: None,
+            frequency: None,
+            source: None,
+            date_time: None,
+            timestamp: None,
+            audio_mime: None,
+            object_key: "internal".into(),
+            audio_url: "/api/call/1/audio".into(),
+        };
+        insta::assert_json_snapshot!("stored_call_minimal", minimal);
+    }
+}

@@ -41,3 +41,9 @@ reqwest = { version = "0.12", default-features = false, features = ["multipart",
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tempfile = "3"
+# Test-hardening tooling (ADR-0010): property-based edge-case generation,
+# parametrized case tables, and wire-format snapshots. cargo-nextest /
+# cargo-llvm-cov / cargo-mutants are external binaries, not deps.
+proptest = "1"
+rstest = "0.26"
+insta = { version = "1", features = ["json"] }

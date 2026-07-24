@@ -3,10 +3,10 @@
 //! boundary against a DB-backed app.
 
 use radio_scout::db::entities::{
-    call, call_frequency, call_patch, call_unit, system, tag, talkgroup,
+    api_key, call, call_frequency, call_patch, call_unit, system, tag, talkgroup,
 };
 use radio_scout::db::repo;
-use sea_orm::{EntityTrait, PaginatorTrait};
+use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, Set};
 
 mod common;
 use common::spawn;
@@ -303,4 +303,155 @@ async fn trunk_recorder_same_short_name_reuses_one_system() {
         1,
         "the same short_name maps to one System (stable synthetic Ref)"
     );
+}
+
+/// A **disabled** API key is denied even though its hash matches (ADR-0008). This
+/// is the load-bearing security branch `authorize_ingest` guards — a revoked key
+/// must not ingest.
+#[tokio::test]
+async fn disabled_api_key_is_rejected() {
+    let (addr, db, _tmp) = spawn().await;
+    api_key::ActiveModel {
+        key_hash: Set(repo::hash_key("revoked-key")),
+        label: Set(None),
+        system_ref: Set(None),
+        disabled: Set(true),
+        created_at_ms: Set(0),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+    let (status, body) = post(&addr, form("revoked-key", 11, 54241, 1000)).await;
+    assert_eq!(status, 401, "disabled key is denied");
+    assert!(
+        body.contains("Invalid API key for system 11 talkgroup 54241."),
+        "{body:?}"
+    );
+    // And nothing was stored.
+    assert_eq!(call::Entity::find().count(&db).await.unwrap(), 0);
+}
+
+/// A call with a talkgroup but no audio part is incomplete (417) — checked before
+/// auth, so it never touches the DB.
+#[tokio::test]
+async fn upload_without_audio_is_incomplete() {
+    let (addr, db, _tmp) = spawn().await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+
+    let no_audio = reqwest::multipart::Form::new()
+        .text("key", "k")
+        .text("system", "11")
+        .text("talkgroup", "54241")
+        .text("timestamp", "1000"); // no audio part at all
+    let (status, body) = post(&addr, no_audio).await;
+    assert_eq!(status, 417);
+    assert!(
+        body.to_lowercase()
+            .starts_with("incomplete call data: no audio"),
+        "{body:?}"
+    );
+}
+
+/// An empty audio part is treated as no audio (417).
+#[tokio::test]
+async fn empty_audio_is_incomplete() {
+    let (addr, db, _tmp) = spawn().await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+
+    let empty = reqwest::multipart::Form::new()
+        .text("key", "k")
+        .text("system", "11")
+        .text("talkgroup", "54241")
+        .text("timestamp", "1000")
+        .part(
+            "audio",
+            reqwest::multipart::Part::bytes(Vec::new())
+                .file_name("a.wav")
+                .mime_str("audio/x-wav")
+                .unwrap(),
+        );
+    let (status, body) = post(&addr, empty).await;
+    assert_eq!(status, 417);
+    assert!(
+        body.to_lowercase()
+            .starts_with("incomplete call data: no audio"),
+        "{body:?}"
+    );
+}
+
+/// Trunk Recorder native upload with unparseable `meta` JSON → 417 `Invalid call
+/// data` (the exact rdio string), before auth.
+#[tokio::test]
+async fn trunk_recorder_invalid_meta_json_is_rejected() {
+    let (addr, _db, _tmp) = spawn().await;
+    let (status, body) = post_tr(&addr, "this is not json {", b"audio").await;
+    assert_eq!(status, 417);
+    assert_eq!(body, "Invalid call data\n");
+}
+
+/// Trunk Recorder native upload with no `meta` part at all → incomplete (417).
+#[tokio::test]
+async fn trunk_recorder_without_meta_is_incomplete() {
+    let (addr, _db, _tmp) = spawn().await;
+    let audio = reqwest::multipart::Part::bytes(b"audio".to_vec())
+        .file_name("call.wav")
+        .mime_str("audio/x-wav")
+        .unwrap();
+    let form = reqwest::multipart::Form::new()
+        .text("key", "k")
+        .part("audio", audio); // no `meta`
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/trunk-recorder-call-upload"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 417);
+    assert!(
+        body.to_lowercase()
+            .starts_with("incomplete call data: no meta"),
+        "{body:?}"
+    );
+}
+
+/// The rdio-compatible field aliases are honored: `patched_talkgroups` (== the
+/// `patches` array) and `audioType`/`audioName` (the MIME + filename carried as
+/// form fields rather than on the audio part).
+#[tokio::test]
+async fn field_aliases_are_accepted() {
+    let (addr, db, _tmp) = spawn().await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+
+    // Audio part carries neither filename nor MIME; the fields supply both.
+    // Order matches real recorders (Trunk Recorder): the audio part comes first,
+    // then the metadata fields, so the fields win (last-write).
+    let audio = reqwest::multipart::Part::bytes(b"audio-bytes".to_vec());
+    let form = reqwest::multipart::Form::new()
+        .part("audio", audio)
+        .text("key", "k")
+        .text("system", "11")
+        .text("talkgroup", "54241")
+        .text("timestamp", "1000")
+        .text("patched_talkgroups", "[100, 200]")
+        .text("audioType", "audio/mpeg")
+        .text("audioName", "clip.mp3");
+    let (status, body) = post(&addr, form).await;
+    assert_eq!(status, 200, "{body:?}");
+
+    assert_eq!(
+        call_patch::Entity::find().count(&db).await.unwrap(),
+        2,
+        "patched_talkgroups is the patches alias"
+    );
+    let stored = call::Entity::find().one(&db).await.unwrap().unwrap();
+    assert_eq!(
+        stored.audio_mime.as_deref(),
+        Some("audio/mpeg"),
+        "audioType"
+    );
+    assert_eq!(stored.audio_name.as_deref(), Some("clip.mp3"), "audioName");
 }

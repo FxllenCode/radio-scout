@@ -9,14 +9,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use radio_scout::db::{self, repo};
 use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
-use tokio_tungstenite::MaybeTlsStream;
-use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+mod common;
+use common::next_text;
 
 /// Bring up the real app on an ephemeral port with a temp filesystem blob store
 /// and a fresh SQLite DB seeded with the `test-key` API key. Returns the base
@@ -62,19 +61,6 @@ fn call_form(system: i64, talkgroup: i64, audio_bytes: Vec<u8>) -> reqwest::mult
         .text("source", "4424000")
         .text("dateTime", "2022-11-29T18:05:38.000Z")
         .part("audio", audio)
-}
-
-/// Read the next text frame from the socket, skipping control frames.
-async fn next_text(ws: &mut Ws) -> String {
-    loop {
-        match ws.next().await {
-            Some(Ok(WsMessage::Text(t))) => return t.as_str().to_owned(),
-            Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
-            Some(Ok(WsMessage::Close(_))) | None => panic!("ws closed before a text frame"),
-            Some(Ok(_)) => continue,
-            Some(Err(e)) => panic!("ws error: {e}"),
-        }
-    }
 }
 
 /// The load-bearing rdio-scanner success contract: a valid call POSTed to

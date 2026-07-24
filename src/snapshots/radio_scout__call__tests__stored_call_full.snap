@@ -1,0 +1,19 @@
+---
+source: src/call.rs
+expression: full()
+---
+{
+  "id": 42,
+  "systemRef": 11,
+  "systemLabel": "butco",
+  "talkgroupRef": 54241,
+  "talkgroupLabel": "TDB A1",
+  "talkgroupGroup": "Fire",
+  "talkgroupTag": "Fire Dispatch",
+  "frequency": 774031250,
+  "source": 1610092,
+  "dateTime": "2022-11-29T18:05:38Z",
+  "timestamp": 1669740338000,
+  "audioMime": "audio/mp4",
+  "audioUrl": "/api/call/42/audio"
+}

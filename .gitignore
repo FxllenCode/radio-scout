@@ -1,6 +1,13 @@
 /target
+
+# Generated coverage + mutation-testing output (ADR-0010 tooling)
+/mutants.out
+/mutants.out.old
+client/coverage
+
 /rdio-scanner
 /sdrtrunk
+/radio-scout-data
 /trunk-recorder
 
 THEPROJECT.md

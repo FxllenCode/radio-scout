@@ -167,6 +167,7 @@ async fn serve_audio(
 }
 
 /// The parsed outcome of a `Range` request header.
+#[derive(Debug, PartialEq, Eq)]
 enum RangeOutcome {
     /// No (usable) range header — serve the whole object.
     None,
@@ -190,9 +191,9 @@ fn parse_range_header(value: Option<&HeaderValue>, size: u64) -> RangeOutcome {
         return RangeOutcome::Unsatisfiable;
     };
     let spec = spec.trim();
-    if spec.is_empty() || spec.contains(',') {
-        return RangeOutcome::Unsatisfiable;
-    }
+    // Multi-range (`a-b,c-d`) and empty specs need no explicit guard: a comma
+    // makes one side fail to parse below, and an empty spec has no `-` to split.
+    // (Keeping the guard would be an equivalent mutant — dead by construction.)
     let Some((raw_start, raw_end)) = spec.split_once('-') else {
         return RangeOutcome::Unsatisfiable;
     };
@@ -238,4 +239,99 @@ fn parse_range_header(value: Option<&HeaderValue>, size: u64) -> RangeOutcome {
 /// `GET /healthz` — liveness probe.
 async fn healthz() -> &'static str {
     "ok"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    fn parse(header: &str, size: u64) -> RangeOutcome {
+        parse_range_header(Some(&HeaderValue::from_str(header).unwrap()), size)
+    }
+
+    #[rstest]
+    // Satisfiable ranges (size = 10 unless noted).
+    #[case("bytes=0-9", 10, RangeOutcome::Range { start: 0, end: 9 })]
+    #[case("bytes=4-9", 10, RangeOutcome::Range { start: 4, end: 9 })]
+    #[case("bytes=0-0", 10, RangeOutcome::Range { start: 0, end: 0 })]
+    // Closed end past EOF clamps to size-1.
+    #[case("bytes=4-100", 10, RangeOutcome::Range { start: 4, end: 9 })]
+    // Open-ended runs to EOF.
+    #[case("bytes=5-", 10, RangeOutcome::Range { start: 5, end: 9 })]
+    // Suffix = last N bytes; over-long suffix clamps to the whole object.
+    #[case("bytes=-4", 10, RangeOutcome::Range { start: 6, end: 9 })]
+    #[case("bytes=-100", 10, RangeOutcome::Range { start: 0, end: 9 })]
+    // Whitespace around the numbers is tolerated.
+    #[case("bytes= 4 - 9 ", 10, RangeOutcome::Range { start: 4, end: 9 })]
+    // Unsatisfiable / malformed.
+    #[case("bytes=9-4", 10, RangeOutcome::Unsatisfiable)] // start > end
+    #[case("bytes=10-20", 10, RangeOutcome::Unsatisfiable)] // start >= size
+    #[case("bytes=a-9", 10, RangeOutcome::Unsatisfiable)] // non-numeric start
+    #[case("bytes=4-b", 10, RangeOutcome::Unsatisfiable)] // non-numeric end
+    #[case("bytes=x-", 10, RangeOutcome::Unsatisfiable)] // non-numeric open-ended
+    #[case("bytes=5", 10, RangeOutcome::Unsatisfiable)] // missing '-'
+    #[case("bytes=", 10, RangeOutcome::Unsatisfiable)] // empty spec
+    #[case("bytes=-", 10, RangeOutcome::Unsatisfiable)] // both empty
+    #[case("bytes=-0", 10, RangeOutcome::Unsatisfiable)] // zero-length suffix
+    #[case("bytes=0-1,2-3", 10, RangeOutcome::Unsatisfiable)] // multi-range not emitted
+    #[case("items=0-9", 10, RangeOutcome::Unsatisfiable)] // wrong unit prefix
+    #[case("bytes=0-9", 0, RangeOutcome::Unsatisfiable)] // zero-length object
+    fn range_header_cases(#[case] header: &str, #[case] size: u64, #[case] expected: RangeOutcome) {
+        assert_eq!(
+            parse(header, size),
+            expected,
+            "header={header:?} size={size}"
+        );
+    }
+
+    #[test]
+    fn no_range_header_serves_the_whole_object() {
+        assert_eq!(parse_range_header(None, 10), RangeOutcome::None);
+    }
+
+    #[test]
+    fn non_ascii_range_header_is_unsatisfiable() {
+        // A header value that isn't valid UTF-8 -> `to_str()` fails.
+        let value = HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap();
+        assert_eq!(
+            parse_range_header(Some(&value), 10),
+            RangeOutcome::Unsatisfiable
+        );
+    }
+
+    proptest! {
+        /// A well-formed closed range fully inside the object round-trips exactly.
+        #[test]
+        fn closed_range_within_bounds_round_trips(
+            size in 1u64..10_000,
+            start in 0u64..10_000,
+            len in 0u64..10_000,
+        ) {
+            prop_assume!(start < size);
+            let end = (start + len).min(size - 1);
+            let header = format!("bytes={start}-{end}");
+            prop_assert_eq!(
+                parse(&header, size),
+                RangeOutcome::Range { start, end }
+            );
+        }
+
+        /// Whatever the input, a `Range` outcome is always a valid slice: no
+        /// panic, `start <= end`, and `end` inside the object.
+        #[test]
+        fn parsed_range_is_always_a_valid_slice(
+            size in 1u64..10_000,
+            body in "[ -~]{0,24}",
+        ) {
+            let header = format!("bytes={body}");
+            if let Ok(value) = HeaderValue::from_str(&header)
+                && let RangeOutcome::Range { start, end } = parse_range_header(Some(&value), size)
+            {
+                prop_assert!(start <= end, "start {start} > end {end}");
+                prop_assert!(end < size, "end {end} >= size {size}");
+            }
+        }
+    }
 }

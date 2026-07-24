@@ -1,0 +1,10 @@
+---
+source: src/call.rs
+expression: minimal
+---
+{
+  "id": 1,
+  "systemRef": 11,
+  "talkgroupRef": 5,
+  "audioUrl": "/api/call/1/audio"
+}

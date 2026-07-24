@@ -1,9 +1,12 @@
 import { configureStore } from '@reduxjs/toolkit'
 import { render, screen } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { Provider } from 'react-redux'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { api } from '@/store/api'
+import { ORIGIN } from '@/test/handlers'
+import { server } from '@/test/setup'
 
 import { SettingsScreen } from './SettingsScreen'
 
@@ -21,21 +24,20 @@ function renderWithStore() {
 }
 
 describe('SettingsScreen', () => {
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
   it('reports the server online when /healthz returns ok', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('ok', { status: 200 }),
-    )
-    renderWithStore()
+    renderWithStore() // default handler answers "ok"
     expect(await screen.findByText('online')).toBeInTheDocument()
   })
 
   it('reports the server unreachable when /healthz fails', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network down'))
+    server.use(http.get(`${ORIGIN}/healthz`, () => HttpResponse.error()))
     renderWithStore()
     expect(await screen.findByText('unreachable')).toBeInTheDocument()
+  })
+
+  it('reports unknown before the health check resolves', () => {
+    renderWithStore()
+    // Synchronous first paint, before the query settles.
+    expect(screen.getByText('checking…')).toBeInTheDocument()
   })
 })

@@ -26,7 +26,7 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 
 **Coverage gates:**
 - **100% patch/diff coverage** on every PR — every new or changed line is tested. This is the hard gate; it makes "new code ships with tests" true by construction.
-- A **ratcheting project floor** (enforced in-repo: `cargo llvm-cov --fail-under-lines`, Vitest `thresholds`) — rises, never falls; set to the measured baseline.
+- A **ratcheting project floor** (enforced in-repo: `cargo llvm-cov --fail-under-lines`, Vitest `thresholds`) — rises, never falls. Current baselines: **backend ~92% lines → floor 90**; **frontend ~94% → floor 85 lines / 80 branches** (`client/vite.config.ts`).
 - **No hard 100%-total gate** — it produces coverage theater. Quality is proven by mutation testing, not by chasing 100%.
 
 **Edge cases are required and operationalized.** "Multiple tests covering edge cases" means `proptest` (property-based — parsers, dedup window, range headers, protocol framing), `rstest` parametrized case tables (multiple named cases per behavior), and `cargo-mutants` mutation testing to prove the assertions actually catch regressions. A test that runs a line without asserting behavior does not count.
@@ -69,13 +69,15 @@ cargo test --doc            # doctests (nextest does not run these)
 cargo test <name>           # run tests matching a substring
 cargo test <mod>::<test> -- --exact --nocapture   # single test, with stdout
 cargo llvm-cov nextest --html                 # coverage report -> target/llvm-cov/html
-cargo llvm-cov nextest --fail-under-lines <N>  # enforce the ratcheting project floor
+# enforce the ratcheting project floor (exclude generated/glue code)
+cargo llvm-cov nextest --fail-under-lines 90 \
+  --ignore-filename-regex '(db/entities/|db/migration\.rs|src/main\.rs|build\.rs)'
 cargo mutants --in-diff <(git diff origin/master...)   # mutation-test only changed code
 cargo fmt                   # format
 cargo clippy --all-targets  # lint
 ```
 
-`cargo-nextest`, `cargo-llvm-cov`, and `cargo-mutants` (plus `proptest`/`rstest`/`insta`/`testcontainers` dev-deps) are introduced by the **"Test hardening + coverage baseline"** ticket; until it lands, `cargo test` is the runner. See [Testing & coverage policy](#testing--coverage-policy).
+`cargo-nextest`, `cargo-llvm-cov`, and `cargo-mutants` are external binaries (`cargo install …`); `proptest`/`rstest`/`insta` are dev-deps. `testcontainers` (real Postgres/S3) lands with CI (#22). See [Testing & coverage policy](#testing--coverage-policy).
 
 Frontend (React + TS + Vite + Tailwind v4 + shadcn/ui + Redux Toolkit/RTK Query), in `client/` — run from inside `client/`:
 
@@ -86,7 +88,7 @@ npm run build               # type-check + production build to client/dist/ (emb
 npm run typecheck           # tsc -b
 npm run test                # Vitest + React Testing Library (single run)
 npm run test:watch          # Vitest watch mode
-npm run test:coverage       # Vitest with @vitest/coverage-v8 + thresholds (added by the hardening ticket)
+npm run test:coverage       # Vitest with @vitest/coverage-v8 + thresholds (MSW at the network boundary)
 npm run lint                # oxlint
 ```
 
