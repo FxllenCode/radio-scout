@@ -12,6 +12,14 @@ pub struct Model {
     #[sea_orm(unique)]
     pub r#ref: i64,
     pub label: Option<String>,
+    /// Per-system auto-populate toggle (#8, ADR-0001). When the global toggle is
+    /// off, unknown talkgroups/units under this system are still auto-created if
+    /// this is set. A brand-new *system* is only auto-created when the *global*
+    /// toggle is on (mirrors rdio-scanner: new systems need `Options.AutoPopulate`).
+    pub auto_populate: bool,
+    /// Comma-separated Talkgroup Refs never ingested for this system (#8). `NULL`
+    /// or empty blacklists nothing. Mirrors rdio-scanner's per-system `blacklists`.
+    pub blacklist: Option<String>,
     pub created_at_ms: i64,
 }
 

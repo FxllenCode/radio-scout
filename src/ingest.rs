@@ -8,9 +8,12 @@
 //! - no talkgroup: HTTP 417 `Incomplete call data: no talkgroup\n`
 //! - bad key: HTTP 401 `Invalid API key for system <s> talkgroup <t>.\n`
 //!
-//! The serialized pipeline (ADR-0001): authorize -> validate -> dedup -> write
-//! audio object -> insert DB row (in a transaction) -> emit to the live feed.
-//! Auto-populate enrichment (blacklist, default Group/Tag) is #8.
+//! The serialized pipeline (ADR-0001): authorize -> auto-populate/blacklist
+//! policy (#8) -> dedup -> write audio object -> insert DB row (in a transaction)
+//! -> emit to the live feed. A Call dropped by the policy (blacklisted, or an
+//! unknown System/Talkgroup with auto-populate off) still returns HTTP 200
+//! `Call imported successfully.` so the recorder never retries — matching rdio,
+//! which likewise 200s and drops the call asynchronously.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,12 +35,17 @@ const DUPLICATE_REJECTED: &str = "duplicate call rejected\n";
 pub struct IngestConfig {
     /// Duplicate-detection window in milliseconds (rdio's default is ~500ms).
     pub dedup_window_ms: i64,
+    /// Global auto-populate toggle (#8). On by default, matching rdio-scanner.
+    /// When off, unknown Systems are dropped and only Systems whose own
+    /// per-system flag is set still auto-create Talkgroups/Units.
+    pub auto_populate: bool,
 }
 
 impl Default for IngestConfig {
     fn default() -> Self {
         IngestConfig {
             dedup_window_ms: 500,
+            auto_populate: true,
         }
     }
 }
@@ -131,7 +139,15 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
         Some(audio) if !audio.is_empty() => audio,
         _ => return incomplete("no audio"),
     };
-    let system_ref = upload.system.as_deref().and_then(parse_i64).unwrap_or(0);
+    // A recorder normally sends a numeric `system`; if it doesn't (or sends a
+    // non-positive value), give the new System the lowest-free Ref (#8).
+    let system_ref = match upload.system.as_deref().and_then(parse_i64) {
+        Some(system_ref) if system_ref > 0 => system_ref,
+        _ => match repo::lowest_free_system_ref(&state.db).await {
+            Ok(system_ref) => system_ref,
+            Err(err) => return server_error("assign system ref", err),
+        },
+    };
     let key = upload.key.take().unwrap_or_default();
     let call_at_ms = parse_call_time(upload.timestamp.as_deref(), upload.date_time.as_deref())
         .unwrap_or_else(now_ms);
@@ -190,6 +206,21 @@ async fn ingest_call(
         Err(err) => return server_error("auth", err),
     }
 
+    // Auto-populate + blacklist policy (#8): decide before any audio is written.
+    // A dropped Call still returns success so the recorder doesn't retry.
+    let auto_populate = match repo::ingest_disposition(
+        &state.db,
+        new_call.system_ref,
+        new_call.talkgroup_ref,
+        state.ingest.auto_populate,
+    )
+    .await
+    {
+        Ok(repo::Disposition::Store { auto_populate }) => auto_populate,
+        Ok(repo::Disposition::Drop(_)) => return (StatusCode::OK, CALL_IMPORTED).into_response(),
+        Err(err) => return server_error("auto-populate policy", err),
+    };
+
     // Dedup (ADR-0001): same System + Talkgroup within the window.
     match repo::is_duplicate_call(
         &state.db,
@@ -229,7 +260,7 @@ async fn ingest_call(
     }
 
     // Insert the row (+ children) atomically.
-    let call = match insert_in_txn(&state.db, &new_call, now_ms()).await {
+    let call = match insert_in_txn(&state.db, &new_call, auto_populate, now_ms()).await {
         Ok(call) => call,
         Err(err) => return server_error("store call", err),
     };
@@ -247,10 +278,11 @@ async fn ingest_call(
 async fn insert_in_txn(
     db: &sea_orm::DatabaseConnection,
     new_call: &NewCall,
+    auto_populate: bool,
     now_ms: i64,
 ) -> Result<crate::db::entities::call::Model, sea_orm::DbErr> {
     let txn = db.begin().await?;
-    let call = repo::insert_call(&txn, new_call, now_ms).await?;
+    let call = repo::insert_call(&txn, new_call, auto_populate, now_ms).await?;
     txn.commit().await?;
     Ok(call)
 }

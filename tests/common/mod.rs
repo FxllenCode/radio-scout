@@ -19,9 +19,17 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 /// seed keys / assert rows), and the TempDir (drop it last — it owns the DB +
 /// audio files).
 pub async fn spawn() -> (String, DatabaseConnection, tempfile::TempDir) {
+    spawn_with_ingest(IngestConfig::default()).await
+}
+
+/// Like [`spawn`] but with a custom [`IngestConfig`] — e.g. `auto_populate: false`
+/// to exercise the auto-populate toggle (#8).
+pub async fn spawn_with_ingest(
+    ingest: IngestConfig,
+) -> (String, DatabaseConnection, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let audio = BlobStore::filesystem(tmp.path().join("audio")).expect("blob");
-    let (addr, dbc) = spawn_with_blob(audio, tmp.path()).await;
+    let (addr, dbc) = spawn_with_config(audio, tmp.path(), ingest).await;
     (addr, dbc, tmp)
 }
 
@@ -29,10 +37,20 @@ pub async fn spawn() -> (String, DatabaseConnection, tempfile::TempDir) {
 /// exercise the presigned-redirect serve path); the SQLite DB lives under `dir`.
 /// The caller owns `dir` and must keep it alive for the app's lifetime.
 pub async fn spawn_with_blob(audio: BlobStore, dir: &Path) -> (String, DatabaseConnection) {
+    spawn_with_config(audio, dir, IngestConfig::default()).await
+}
+
+/// Shared bring-up: a fresh SQLite DB under `dir` + the given blob store and
+/// ingest config, served on an ephemeral port.
+pub async fn spawn_with_config(
+    audio: BlobStore,
+    dir: &Path,
+    ingest: IngestConfig,
+) -> (String, DatabaseConnection) {
     let audio = Arc::new(audio);
     let url = format!("sqlite://{}?mode=rwc", dir.join("t.db").display());
     let dbc = db::connect(&url).await.expect("db");
-    let app = build_app(AppState::new(audio, dbc.clone(), IngestConfig::default()));
+    let app = build_app(AppState::new(audio, dbc.clone(), ingest));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

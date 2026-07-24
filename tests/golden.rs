@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use radio_scout::db::entities::{
-    call, call_frequency, call_patch, call_unit, system, tag, talkgroup,
+    call, call_frequency, call_patch, call_unit, system, tag, talkgroup, unit,
 };
 use radio_scout::db::repo;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
@@ -150,6 +150,18 @@ async fn golden_trunk_recorder_plugin_upload() {
     let untagged = units.iter().find(|u| u.unit_ref == 1610092).unwrap();
     assert_eq!(untagged.label, None);
 
+    // Auto-populate (#8): a heard radio joins the Unit roster only when it carries
+    // an alias (rdio parity) — so "Engine 5" is rostered, but the anonymous
+    // 1610092 is not, even though both appear in the per-call `call_units` above.
+    let roster = unit::Entity::find()
+        .filter(unit::Column::SystemId.eq(call.system_id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(roster.len(), 1, "only the aliased source is rostered");
+    assert_eq!(roster[0].r#ref, 1610051);
+    assert_eq!(roster[0].label.as_deref(), Some("Engine 5"));
+
     // Empty `patches` array -> no patch rows.
     assert_eq!(call_patch::Entity::find().count(&db).await.unwrap(), 0);
 
@@ -201,8 +213,15 @@ async fn golden_sdrtrunk_upload() {
     let tg = the_talkgroup(&db, call.talkgroup_id).await;
     assert_eq!(tg.r#ref, 54241);
     assert_eq!(tg.label.as_deref(), Some("PD Disp"));
-    assert_eq!(tg.name, None, "SDRTrunk sends no talkgroupName");
-    assert_eq!(tg.tag_id, None, "SDRTrunk sends no talkgroupTag");
+    // SDRTrunk sends no talkgroupName / talkgroupTag; auto-populate (#8) fills
+    // rdio-scanner's defaults on create rather than leaving them NULL.
+    assert_eq!(tg.name.as_deref(), Some("Talkgroup 54241"), "default name");
+    let tg_tag = tag::Entity::find_by_id(tg.tag_id.expect("default tag"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tg_tag.name, "Untagged", "default Untagged tag");
     assert_eq!(
         repo::groups_for_talkgroup(&db, tg.id).await.unwrap(),
         vec!["Law Dispatch".to_string()]
@@ -262,8 +281,14 @@ async fn golden_trunk_recorder_native_meta_upload() {
         Some("EMS Dispatch"),
         "talkgroup_description->name"
     );
-    // talkgroup_group_tag is the "-" placeholder -> dropped, no tag.
-    assert_eq!(tg.tag_id, None, "\"-\" group_tag dropped");
+    // talkgroup_group_tag is the "-" placeholder -> dropped (parsers.go), then
+    // auto-populate (#8) fills rdio's default `Untagged` tag on create.
+    let tg_tag = tag::Entity::find_by_id(tg.tag_id.expect("default tag"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tg_tag.name, "Untagged", "\"-\" group_tag -> default tag");
     assert_eq!(
         repo::groups_for_talkgroup(&db, tg.id).await.unwrap(),
         vec!["EMS".to_string()]
@@ -284,11 +309,12 @@ async fn golden_trunk_recorder_native_meta_upload() {
 
 // ---- Parity: rdio drops empty / "-" placeholder talkgroup fields -----------
 
-/// rdio-scanner's `ParseMultipartContent` stores `talkgroupLabel/Name/Tag/Group`
-/// only when `len > 0 && != "-"` (`parsers.go`). Recorders (Trunk Recorder always,
-/// SDRTrunk often) send those parts even when the talkgroup is unknown — as empty
-/// strings or a `"-"` placeholder. We must drop them to NULL like rdio, not
-/// persist `""`/`"-"` as a bogus label/tag/group.
+/// rdio-scanner reads `talkgroupLabel/Name/Tag/Group` only when
+/// `len > 0 && != "-"` (`parsers.go`), then auto-populate fills the blanks with
+/// its defaults (`controller.go`). Recorders (Trunk Recorder always, SDRTrunk
+/// often) send those parts even for an unknown talkgroup — as empty strings or a
+/// `"-"` placeholder. We must never persist `""`/`"-"` as a bogus label/tag/group:
+/// they are dropped, then #8 auto-populate substitutes rdio's defaults on create.
 #[tokio::test]
 async fn golden_generic_upload_drops_empty_and_dash_talkgroup_fields() {
     let (addr, db, _tmp) = spawn().await;
@@ -317,15 +343,24 @@ async fn golden_generic_upload_drops_empty_and_dash_talkgroup_fields() {
     assert_eq!(resp.status().as_u16(), 200);
 
     let call = the_call(&db).await;
+    // Every placeholder field was dropped, then auto-populated with rdio's default
+    // — never persisted as the literal "" / "-".
     let tg = the_talkgroup(&db, call.talkgroup_id).await;
-    assert_eq!(tg.label, None, "empty talkgroupLabel -> NULL");
-    assert_eq!(tg.name, None, "\"-\" talkgroupName -> NULL");
-    assert_eq!(tg.tag_id, None, "\"-\" talkgroupTag -> no tag");
-    assert!(
-        repo::groups_for_talkgroup(&db, tg.id)
-            .await
-            .unwrap()
-            .is_empty(),
-        "\"-\" talkgroupGroup -> no group"
+    assert_eq!(tg.label.as_deref(), Some("54241"), "empty label -> Ref");
+    assert_eq!(
+        tg.name.as_deref(),
+        Some("Talkgroup 54241"),
+        "\"-\" name -> default"
+    );
+    let tg_tag = tag::Entity::find_by_id(tg.tag_id.expect("default tag"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tg_tag.name, "Untagged", "\"-\" tag -> Untagged");
+    assert_eq!(
+        repo::groups_for_talkgroup(&db, tg.id).await.unwrap(),
+        vec!["Unknown".to_string()],
+        "\"-\" group -> Unknown"
     );
 }

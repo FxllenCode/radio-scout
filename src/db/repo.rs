@@ -1,9 +1,14 @@
 //! Repository functions over the domain entities.
 //!
-//! Resolve-or-create-by-Ref is the minimal population needed to persist a Call
-//! under the Ref-vs-Id model; the richer auto-populate semantics (blacklist,
-//! default Group/Tag, lowest-free-Ref, label reconciliation) are #8, and wiring
-//! this into the ingest pipeline inside a transaction is #5.
+//! **Auto-populate** (#8, ADR-0001) is the policy that keeps the archive usable
+//! with zero manual config: an unknown System/Talkgroup/Unit is created the first
+//! time a Call for it is ingested, using the recorder's labels and falling back
+//! to rdio-scanner's defaults (`Untagged` Tag, `Unknown` Group, numeric Talkgroup
+//! label, `Talkgroup <ref>` name, lowest-free Ref for new Systems). Two toggles
+//! gate it — a global one ([`IngestConfig`](crate::ingest::IngestConfig)) and a
+//! per-system one ([`system::Model::auto_populate`]) — and a per-system blacklist
+//! drops chosen Talkgroups outright. [`ingest_disposition`] is the single place
+//! that decision is made; [`insert_call`] applies the defaults on create.
 //!
 //! The archive-search query filters via joins + `DISTINCT` (portable across
 //! SQLite/Postgres). It deliberately does **no** DB-side list aggregation
@@ -18,8 +23,15 @@ use sea_orm::{
 use crate::call::{CallId, StoredCall};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, group, system, tag, talkgroup,
-    talkgroup_group,
+    talkgroup_group, unit,
 };
+
+/// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
+/// (rdio-scanner `controller.go`).
+const DEFAULT_TAG: &str = "Untagged";
+/// Default Group label for an auto-populated Talkgroup the recorder sent no group
+/// for (rdio-scanner `controller.go`).
+const DEFAULT_GROUP: &str = "Unknown";
 
 /// Find a System by its Ref, creating it if absent.
 pub async fn resolve_or_create_system<C: ConnectionTrait>(
@@ -38,6 +50,10 @@ pub async fn resolve_or_create_system<C: ConnectionTrait>(
     system::ActiveModel {
         r#ref: Set(ext_ref),
         label: Set(label),
+        // Per-system auto-populate defaults off (rdio-scanner); the global toggle
+        // governs unless an operator flips this on later (#8). `blacklist` is left
+        // unset (NULL — nothing blacklisted).
+        auto_populate: Set(false),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
@@ -89,39 +105,6 @@ pub async fn resolve_or_create_group<C: ConnectionTrait>(
     .await
 }
 
-/// Find a Talkgroup by (System, Ref), creating it if absent. A Ref is unique
-/// only within its System.
-pub async fn resolve_or_create_talkgroup<C: ConnectionTrait>(
-    db: &C,
-    system_id: i64,
-    ext_ref: i64,
-    label: Option<String>,
-    name: Option<String>,
-    tag_id: Option<i64>,
-    now_ms: i64,
-) -> Result<talkgroup::Model, DbErr> {
-    if let Some(found) = talkgroup::Entity::find()
-        .filter(talkgroup::Column::SystemId.eq(system_id))
-        .filter(talkgroup::Column::Ref.eq(ext_ref))
-        .one(db)
-        .await?
-    {
-        return Ok(found);
-    }
-    talkgroup::ActiveModel {
-        system_id: Set(system_id),
-        r#ref: Set(ext_ref),
-        label: Set(label),
-        name: Set(name),
-        tag_id: Set(tag_id),
-        led: Set(None),
-        created_at_ms: Set(now_ms),
-        ..Default::default()
-    }
-    .insert(db)
-    .await
-}
-
 /// Associate a Talkgroup with a Group (idempotent).
 pub async fn link_talkgroup_group<C: ConnectionTrait>(
     db: &C,
@@ -141,6 +124,35 @@ pub async fn link_talkgroup_group<C: ConnectionTrait>(
         .await?;
     }
     Ok(())
+}
+
+/// Find a Unit by (System, Ref), creating it if absent. A Ref is unique only
+/// within its System. `label` (a radio alias) is recorded only on create — an
+/// existing Unit keeps its curated alias (#8 auto-populate).
+pub async fn resolve_or_create_unit<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    ext_ref: i64,
+    label: Option<String>,
+    now_ms: i64,
+) -> Result<unit::Model, DbErr> {
+    if let Some(found) = unit::Entity::find()
+        .filter(unit::Column::SystemId.eq(system_id))
+        .filter(unit::Column::Ref.eq(ext_ref))
+        .one(db)
+        .await?
+    {
+        return Ok(found);
+    }
+    unit::ActiveModel {
+        system_id: Set(system_id),
+        r#ref: Set(ext_ref),
+        label: Set(label),
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
 }
 
 /// A unit heard within a call (rdio `sources[]`/`units[]`).
@@ -184,39 +196,37 @@ pub struct NewCall {
     pub frequencies: Vec<NewCallFrequency>,
 }
 
-/// Resolve the Call's System/Talkgroup/Tag/Groups by Ref (creating as needed),
-/// then insert the Call and its child rows. Returns the stored Call.
+/// Resolve the Call's System/Talkgroup/Tag/Groups by Ref (creating as needed with
+/// auto-populate defaults), then insert the Call and its child rows. Returns the
+/// stored Call.
 ///
-/// Not internally transactional — the caller (ingest, #5) wraps this in one so
-/// the resolve → insert sequence is atomic with the audio write (ADR-0001).
+/// A brand-new Talkgroup is auto-populated (#8) with the recorder's labels,
+/// falling back to rdio-scanner's defaults (numeric label, `Talkgroup <ref>`
+/// name, `Untagged` Tag, `Unknown` Group). An **existing** Talkgroup is left
+/// untouched — auto-populate fills unknowns, it never rewrites curated rows. The
+/// `auto_populate` flag (the effective global-or-per-system value from
+/// [`ingest_disposition`]) gates only the Unit roster, matching rdio.
+///
+/// Not internally transactional — the caller (ingest) wraps this in one so the
+/// resolve → insert sequence is atomic with the audio write (ADR-0001).
 pub async fn insert_call<C: ConnectionTrait>(
     db: &C,
     new: &NewCall,
+    auto_populate: bool,
     now_ms: i64,
 ) -> Result<call::Model, DbErr> {
-    let sys =
-        resolve_or_create_system(db, new.system_ref, new.system_label.clone(), now_ms).await?;
+    // System gets a `System <ref>` default label when the recorder sent none.
+    // The label is only applied on create; an existing System keeps its own.
+    let system_label = new
+        .system_label
+        .clone()
+        .or_else(|| Some(format!("System {}", new.system_ref)));
+    let sys = resolve_or_create_system(db, new.system_ref, system_label, now_ms).await?;
 
-    let tag_id = match &new.talkgroup_tag {
-        Some(name) => Some(resolve_or_create_tag(db, name, now_ms).await?.id),
-        None => None,
+    let tg = match find_talkgroup(db, sys.id, new.talkgroup_ref).await? {
+        Some(existing) => existing,
+        None => create_populated_talkgroup(db, sys.id, new, now_ms).await?,
     };
-
-    let tg = resolve_or_create_talkgroup(
-        db,
-        sys.id,
-        new.talkgroup_ref,
-        new.talkgroup_label.clone(),
-        new.talkgroup_name.clone(),
-        tag_id,
-        now_ms,
-    )
-    .await?;
-
-    for group_name in &new.talkgroup_groups {
-        let grp = resolve_or_create_group(db, group_name, now_ms).await?;
-        link_talkgroup_group(db, tg.id, grp.id).await?;
-    }
 
     let stored = call::ActiveModel {
         system_id: Set(sys.id),
@@ -269,7 +279,80 @@ pub async fn insert_call<C: ConnectionTrait>(
         .await?;
     }
 
+    // Unit roster (#8): a heard radio becomes a Unit entity only when the recorder
+    // gave it an alias — rdio rosters units with a non-empty label (`controller.go`),
+    // not every anonymous Ref. Gated on auto-populate like rdio; the per-call
+    // `call_units` detail above is always recorded regardless.
+    if auto_populate {
+        for u in &new.units {
+            if u.unit_ref > 0 && u.label.is_some() {
+                resolve_or_create_unit(db, sys.id, u.unit_ref, u.label.clone(), now_ms).await?;
+            }
+        }
+    }
+
     Ok(stored)
+}
+
+/// Find a Talkgroup by (System, Ref). A Ref is unique only within its System.
+async fn find_talkgroup<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    ext_ref: i64,
+) -> Result<Option<talkgroup::Model>, DbErr> {
+    talkgroup::Entity::find()
+        .filter(talkgroup::Column::SystemId.eq(system_id))
+        .filter(talkgroup::Column::Ref.eq(ext_ref))
+        .one(db)
+        .await
+}
+
+/// Create a Talkgroup, auto-populating (#8) any field the recorder left blank
+/// with rdio-scanner's defaults: the numeric Ref as the label, `Talkgroup <ref>`
+/// as the name, the `Untagged` Tag, and the `Unknown` Group. The Tag and Group
+/// rows are created here (not for existing Talkgroups) so curated archives aren't
+/// polluted with defaults on every subsequent call.
+async fn create_populated_talkgroup<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    new: &NewCall,
+    now_ms: i64,
+) -> Result<talkgroup::Model, DbErr> {
+    let tag_name = new.talkgroup_tag.as_deref().unwrap_or(DEFAULT_TAG);
+    let tag_id = resolve_or_create_tag(db, tag_name, now_ms).await?.id;
+    let label = new
+        .talkgroup_label
+        .clone()
+        .unwrap_or_else(|| new.talkgroup_ref.to_string());
+    let name = new
+        .talkgroup_name
+        .clone()
+        .unwrap_or_else(|| format!("Talkgroup {}", new.talkgroup_ref));
+
+    let tg = talkgroup::ActiveModel {
+        system_id: Set(system_id),
+        r#ref: Set(new.talkgroup_ref),
+        label: Set(Some(label)),
+        name: Set(Some(name)),
+        tag_id: Set(Some(tag_id)),
+        // `led` is left unset (NULL) — LED colours are assigned by curation (#18).
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+
+    let group_labels: Vec<&str> = if new.talkgroup_groups.is_empty() {
+        vec![DEFAULT_GROUP]
+    } else {
+        new.talkgroup_groups.iter().map(String::as_str).collect()
+    };
+    for group_name in group_labels {
+        let grp = resolve_or_create_group(db, group_name, now_ms).await?;
+        link_talkgroup_group(db, tg.id, grp.id).await?;
+    }
+
+    Ok(tg)
 }
 
 /// Cascading archive-search filters. All are optional and combine with AND;
@@ -470,6 +553,111 @@ pub async fn is_duplicate_call<C: ConnectionTrait>(
     Ok(count > 0)
 }
 
+// ---------------------------------------------------------------------------
+// Auto-populate + blacklist policy (#8, ADR-0001).
+// ---------------------------------------------------------------------------
+
+/// Why an incoming Call was dropped by [`ingest_disposition`]. The two paths are
+/// distinct behaviours worth telling apart (in tests today, in operator logs once
+/// #17 lands), though the recorder gets the same HTTP 200 either way so it never
+/// retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropReason {
+    /// The Talkgroup Ref is on the System's blacklist.
+    Blacklisted,
+    /// The System (or Talkgroup) is unknown and auto-populate is off, so there is
+    /// nothing to attach the Call to.
+    NotPopulated,
+}
+
+/// What to do with an incoming Call once the auto-populate + blacklist policy is
+/// applied (#8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// Persist the Call. `auto_populate` is the **effective** flag (global OR the
+    /// System's per-system flag) that [`insert_call`] uses to gate the Unit roster.
+    Store { auto_populate: bool },
+    /// Drop it silently.
+    Drop(DropReason),
+}
+
+/// Is `talkgroup_ref` on a System's comma-separated `blacklist`? Empty entries
+/// and non-numeric junk are ignored (rdio-scanner stores the list as free text).
+pub fn is_blacklisted(blacklist: Option<&str>, talkgroup_ref: i64) -> bool {
+    let Some(list) = blacklist else {
+        return false;
+    };
+    list.split(',')
+        .filter_map(|entry| entry.trim().parse::<i64>().ok())
+        .any(|ref_| ref_ == talkgroup_ref)
+}
+
+/// Decide what to do with an incoming Call before any audio is written (#8).
+///
+/// Mirrors rdio-scanner's `controller.go`: a brand-new System is auto-created
+/// only when the **global** toggle is on; an unknown Talkgroup under a known
+/// System is auto-created when either the global or that System's per-system flag
+/// is on; and a blacklisted Talkgroup Ref is dropped regardless. Unlike rdio
+/// (which only blacklist-checks already-known Talkgroups), the blacklist here
+/// applies to a Talkgroup Ref even on its first sighting — "never ingest this"
+/// should hold from the first call.
+pub async fn ingest_disposition<C: ConnectionTrait>(
+    db: &C,
+    system_ref: i64,
+    talkgroup_ref: i64,
+    global_auto_populate: bool,
+) -> Result<Disposition, DbErr> {
+    let Some(sys) = system::Entity::find()
+        .filter(system::Column::Ref.eq(system_ref))
+        .one(db)
+        .await?
+    else {
+        // Unknown System: only auto-created when the global toggle is on.
+        return Ok(if global_auto_populate {
+            Disposition::Store {
+                auto_populate: true,
+            }
+        } else {
+            Disposition::Drop(DropReason::NotPopulated)
+        });
+    };
+
+    if is_blacklisted(sys.blacklist.as_deref(), talkgroup_ref) {
+        return Ok(Disposition::Drop(DropReason::Blacklisted));
+    }
+
+    let effective = global_auto_populate || sys.auto_populate;
+    // A Call for an already-known Talkgroup is always stored; an unknown one needs
+    // auto-populate to bring it into being.
+    let known_talkgroup = find_talkgroup(db, sys.id, talkgroup_ref).await?.is_some();
+    Ok(if known_talkgroup || effective {
+        Disposition::Store {
+            auto_populate: effective,
+        }
+    } else {
+        Disposition::Drop(DropReason::NotPopulated)
+    })
+}
+
+/// The lowest positive Ref not yet used by any System (rdio-scanner's
+/// `GetNewSystemRef`). Used to number a new System a recorder gave no numeric Ref
+/// for (#8) — Trunk Recorder's native upload identifies systems by name only.
+pub async fn lowest_free_system_ref<C: ConnectionTrait>(db: &C) -> Result<i64, DbErr> {
+    let taken: std::collections::HashSet<i64> = system::Entity::find()
+        .select_only()
+        .column(system::Column::Ref)
+        .into_tuple()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect();
+    let mut next = 1;
+    while taken.contains(&next) {
+        next += 1;
+    }
+    Ok(next)
+}
+
 /// The object key + mime for a call's audio (the serve path — lightweight).
 pub async fn get_call_audio<C: ConnectionTrait>(
     db: &C,
@@ -533,9 +721,9 @@ pub async fn stored_call<C: ConnectionTrait>(
 
 /// The System Ref for a Trunk Recorder `short_name` (which carries no numeric
 /// ref). If a System already has that label, reuse its Ref so TR and generic
-/// uploads converge; otherwise synthesize a stable Ref from the name. Read-only
-/// — the System row is created (if new) by the ingest pipeline. Full Ref
-/// curation / label reconciliation is #8.
+/// uploads converge; otherwise assign the lowest-free Ref (#8, rdio-scanner's
+/// `GetNewSystemRef`). Read-only — the System row is created (if new) by the
+/// ingest pipeline with this Ref and the `short_name` as its label.
 pub async fn system_ref_for_short_name<C: ConnectionTrait>(
     db: &C,
     short_name: &str,
@@ -547,14 +735,32 @@ pub async fn system_ref_for_short_name<C: ConnectionTrait>(
     {
         return Ok(sys.r#ref);
     }
-    Ok(synthetic_system_ref(short_name))
+    lowest_free_system_ref(db).await
 }
 
-/// A deterministic positive Ref derived from a string (stable across restarts).
-fn synthetic_system_ref(name: &str) -> i64 {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(name.as_bytes());
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    (u64::from_be_bytes(bytes) & 0x7FFF_FFFF_FFFF_FFFF) as i64
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    // Present in the list (whitespace tolerated).
+    #[case(Some("54241"), 54241, true)]
+    #[case(Some("100,54241,200"), 54241, true)]
+    #[case(Some(" 100 , 54241 , 200 "), 54241, true)]
+    // Absent / empty / junk.
+    #[case(Some("100,200"), 54241, false)]
+    #[case(Some(""), 54241, false)]
+    #[case(Some(",,"), 54241, false)]
+    #[case(Some("abc,54241x"), 54241, false)] // non-numeric junk never matches
+    #[case(None, 54241, false)]
+    // A prefix/substring must not match: "5424" is not "54241".
+    #[case(Some("5424"), 54241, false)]
+    fn blacklist_membership(
+        #[case] blacklist: Option<&str>,
+        #[case] talkgroup_ref: i64,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_blacklisted(blacklist, talkgroup_ref), expected);
+    }
 }

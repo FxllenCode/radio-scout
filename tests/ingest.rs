@@ -2,14 +2,15 @@
 //! duplicate detection, and full-field persistence — driven over the real HTTP
 //! boundary against a DB-backed app.
 
+use radio_scout::IngestConfig;
 use radio_scout::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, system, tag, talkgroup,
+    api_key, call, call_frequency, call_patch, call_unit, system, tag, talkgroup, unit,
 };
 use radio_scout::db::repo;
-use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
 
 mod common;
-use common::spawn;
+use common::{spawn, spawn_with_ingest};
 
 fn form(key: &str, system: i64, talkgroup: i64, timestamp_ms: i64) -> reqwest::multipart::Form {
     let audio = reqwest::multipart::Part::bytes(b"audio-bytes".to_vec())
@@ -454,4 +455,179 @@ async fn field_aliases_are_accepted() {
         "audioType"
     );
     assert_eq!(stored.audio_name.as_deref(), Some("clip.mp3"), "audioName");
+}
+
+// ---------------------------------------------------------------------------
+// Auto-populate + blacklist over the real HTTP boundary (#8).
+// ---------------------------------------------------------------------------
+
+/// Seed a System row directly with an explicit per-system auto-populate flag and
+/// blacklist (no admin surface sets these yet — that's config #17).
+async fn seed_system(
+    db: &sea_orm::DatabaseConnection,
+    ext_ref: i64,
+    auto_populate: bool,
+    blacklist: Option<&str>,
+) {
+    system::ActiveModel {
+        r#ref: Set(ext_ref),
+        label: Set(Some(format!("sys{ext_ref}"))),
+        auto_populate: Set(auto_populate),
+        blacklist: Set(blacklist.map(str::to_string)),
+        created_at_ms: Set(0),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .unwrap();
+}
+
+/// A blacklisted Talkgroup is dropped — but the recorder still gets HTTP 200
+/// `Call imported successfully.` so it never retries.
+#[tokio::test]
+async fn blacklisted_talkgroup_is_dropped_but_reports_success() {
+    let (addr, db, _tmp) = spawn().await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+    seed_system(&db, 11, false, Some("54241")).await;
+
+    let (status, body) = post(&addr, form("k", 11, 54241, 1000)).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Call imported successfully."), "{body:?}");
+    assert_eq!(
+        call::Entity::find().count(&db).await.unwrap(),
+        0,
+        "blacklisted call not stored"
+    );
+
+    // A different talkgroup on the same system is ingested normally.
+    let (status, _) = post(&addr, form("k", 11, 99999, 1000)).await;
+    assert_eq!(status, 200);
+    assert_eq!(call::Entity::find().count(&db).await.unwrap(), 1);
+}
+
+/// With the global toggle off, a Call for an unknown System is dropped (nothing to
+/// attach it to) — still HTTP 200, nothing stored.
+#[tokio::test]
+async fn auto_populate_off_drops_unknown_system() {
+    let ingest = IngestConfig {
+        auto_populate: false,
+        ..Default::default()
+    };
+    let (addr, db, _tmp) = spawn_with_ingest(ingest).await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+
+    let (status, body) = post(&addr, form("k", 11, 54241, 1000)).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Call imported successfully."), "{body:?}");
+    assert_eq!(system::Entity::find().count(&db).await.unwrap(), 0);
+    assert_eq!(call::Entity::find().count(&db).await.unwrap(), 0);
+}
+
+/// With the global toggle off, a System that opts in per-system still auto-creates
+/// unknown Talkgroups under it.
+#[tokio::test]
+async fn per_system_auto_populate_overrides_global_off() {
+    let ingest = IngestConfig {
+        auto_populate: false,
+        ..Default::default()
+    };
+    let (addr, db, _tmp) = spawn_with_ingest(ingest).await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+    seed_system(&db, 11, true, None).await; // opts in
+
+    let (status, _) = post(&addr, form("k", 11, 54241, 1000)).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        call::Entity::find().count(&db).await.unwrap(),
+        1,
+        "opted-in system auto-creates the talkgroup"
+    );
+    let tg = talkgroup::Entity::find()
+        .filter(talkgroup::Column::Ref.eq(54241))
+        .one(&db)
+        .await
+        .unwrap();
+    assert!(tg.is_some(), "unknown talkgroup was auto-populated");
+}
+
+/// End-to-end auto-populate defaults over the generic upload: a bare Call with a
+/// heard source yields rdio's default labels/tag/group and rosters the Unit.
+#[tokio::test]
+async fn auto_populate_defaults_persist_over_http() {
+    let (addr, db, _tmp) = spawn().await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+
+    let audio = reqwest::multipart::Part::bytes(b"audio-bytes".to_vec())
+        .file_name("a.wav")
+        .mime_str("audio/x-wav")
+        .unwrap();
+    let form = reqwest::multipart::Form::new()
+        .text("key", "k")
+        .text("system", "11")
+        .text("talkgroup", "54241")
+        .text("timestamp", "1000")
+        .text("sources", r#"[{"src":4242,"pos":0,"tag":"Medic 7"}]"#)
+        .part("audio", audio);
+    let (status, _) = post(&addr, form).await;
+    assert_eq!(status, 200);
+
+    let stored = call::Entity::find().one(&db).await.unwrap().unwrap();
+    let sys = system::Entity::find_by_id(stored.system_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sys.label.as_deref(), Some("System 11"));
+    let tg = talkgroup::Entity::find_by_id(stored.talkgroup_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tg.label.as_deref(), Some("54241"));
+    assert_eq!(tg.name.as_deref(), Some("Talkgroup 54241"));
+    let tg_tag = tag::Entity::find_by_id(tg.tag_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tg_tag.name, "Untagged");
+    assert_eq!(
+        repo::groups_for_talkgroup(&db, tg.id).await.unwrap(),
+        vec!["Unknown".to_string()]
+    );
+    let rostered = unit::Entity::find().one(&db).await.unwrap().unwrap();
+    assert_eq!(rostered.r#ref, 4242);
+    assert_eq!(rostered.label.as_deref(), Some("Medic 7"));
+}
+
+/// A generic upload with no numeric `system` (absent, or a non-positive value)
+/// gets the lowest-free System Ref (#8), not a bogus Ref 0.
+#[rstest::rstest]
+#[case::absent(None)]
+#[case::zero(Some("0"))]
+#[case::negative(Some("-4"))]
+#[tokio::test]
+async fn generic_upload_without_positive_system_gets_lowest_free_ref(
+    #[case] system_field: Option<&str>,
+) {
+    let (addr, db, _tmp) = spawn().await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+
+    let audio = reqwest::multipart::Part::bytes(b"audio-bytes".to_vec())
+        .file_name("a.wav")
+        .mime_str("audio/x-wav")
+        .unwrap();
+    let mut form = reqwest::multipart::Form::new()
+        .text("key", "k")
+        .text("talkgroup", "54241")
+        .text("timestamp", "1000")
+        .part("audio", audio);
+    if let Some(system) = system_field {
+        form = form.text("system", system.to_string());
+    }
+    let (status, _) = post(&addr, form).await;
+    assert_eq!(status, 200);
+
+    let sys = system::Entity::find().one(&db).await.unwrap().unwrap();
+    assert_eq!(sys.r#ref, 1, "first System gets the lowest-free Ref 1");
 }

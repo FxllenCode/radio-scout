@@ -22,7 +22,7 @@ async fn insert_call(db: &DatabaseConnection, object_key: &str, mime: Option<&st
         audio_mime: mime.map(str::to_string),
         ..Default::default()
     };
-    repo::insert_call(db, &new, 0)
+    repo::insert_call(db, &new, false, 0)
         .await
         .expect("insert call")
         .id
