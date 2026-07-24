@@ -1,35 +1,80 @@
 //! The live feed: a raw WebSocket (ADR-0004) that pushes call metadata to
 //! subscribed listeners. Audio never rides the socket — only compact JSON.
 //!
-//! Skeleton scope: a broadcast hub plus per-connection subscription filtering.
-//! Ticket #9 layers on access scope, patches, heartbeat, and reconnect.
+//! Ticket #9 turns the skeleton's broadcast+filter into the full protocol, and
+//! deliberately *improves* on rdio-scanner rather than cloning it:
+//!
+//! - **Patch fanout** — a Call reaches a subscriber of any Talkgroup it's patched
+//!   to, not just its own (rdio's `IsEnabled`, plus we carry `patches[]` on the
+//!   wire so the client can display cross-patched traffic).
+//! - **Access scope** — every delivery is gated by both the subscription matrix
+//!   and an access scope (ADR-0008). v1 listening is open (`AccessScope::All`);
+//!   the restricted variant is the v2 access-code seam.
+//! - **Heartbeat + dead-connection reaping** — rdio has no heartbeat of its own.
+//!   The server pings on an interval and reaps half-open connections, keeping
+//!   proxies warm and freeing resources promptly.
+//! - **Reconnect catch-up** — rdio silently drops any Call that arrives while a
+//!   listener is briefly disconnected (the core mobile pain). A reconnecting
+//!   client sends the last Call id it saw as `since`; the server backfills what
+//!   it missed (bounded) before resuming live.
+//! - **`hello` greeting + `lagged` notice** — the server announces its protocol
+//!   version + heartbeat cadence on connect, and tells a lagging client how many
+//!   Calls it skipped so the client can refetch from the archive (#13).
+//!
+//! The pure decision logic (`ConnState::wants`, `AccessScope::permits`,
+//! `Heartbeat`, `on_broadcast`) is factored out of the socket I/O so every branch
+//! is unit-testable; `handle_socket` is the thin async glue over it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use serde::Deserialize;
 use tokio::sync::broadcast;
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use crate::AppState;
-use crate::call::StoredCall;
+use crate::call::{CallId, StoredCall};
+use crate::db::repo;
+
+/// Live-feed protocol version, announced in the `hello` frame. Bumped on a
+/// breaking wire change so clients can negotiate.
+const PROTOCOL_VERSION: u32 = 1;
 
 /// Channel capacity for the fanout broadcast. Ample for the low-hundreds of
-/// listeners this targets; a slow client that lags is simply skipped forward.
+/// listeners this targets; a slow client that lags is told and skipped forward.
 const LIVE_FEED_CAPACITY: usize = 1024;
+
+/// Default server heartbeat period. Long enough to be negligible on a Pi, short
+/// enough to reap a dead connection within ~1 minute — one ping goes out, and if
+/// it's still unanswered a period later (two missed intervals) the peer is reaped.
+const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(30);
+
+/// Upper bound on Calls replayed to a reconnecting client (catch-up, #9). A
+/// client returning after a long gap gets a recent slice and falls back to
+/// archive search (#13) for the rest — the live socket never replays the world.
+const CATCHUP_MAX_CALLS: u64 = 100;
 
 /// A clonable handle to the live-feed fanout. Cloning shares one channel.
 #[derive(Clone)]
 pub struct LiveFeed {
     tx: broadcast::Sender<Arc<StoredCall>>,
+    heartbeat: Duration,
 }
 
 impl LiveFeed {
+    /// A hub with the default heartbeat period.
     pub fn new() -> Self {
+        Self::with_heartbeat(DEFAULT_HEARTBEAT)
+    }
+
+    /// A hub with a custom heartbeat period (tests drive this short).
+    pub fn with_heartbeat(heartbeat: Duration) -> Self {
         let (tx, _rx) = broadcast::channel(LIVE_FEED_CAPACITY);
-        LiveFeed { tx }
+        LiveFeed { tx, heartbeat }
     }
 
     fn subscribe(&self) -> broadcast::Receiver<Arc<StoredCall>> {
@@ -41,6 +86,10 @@ impl LiveFeed {
     pub fn publish(&self, call: Arc<StoredCall>) {
         let _ = self.tx.send(call);
     }
+
+    fn heartbeat(&self) -> Duration {
+        self.heartbeat
+    }
 }
 
 impl Default for LiveFeed {
@@ -49,9 +98,54 @@ impl Default for LiveFeed {
     }
 }
 
+/// A listener's Talkgroup access within one System (the v2 access-code shape).
+///
+/// v1 listening is open ([`AccessScope::All`]), so these restricted variants are
+/// never constructed at runtime yet — they're the documented ADR-0008 seam for
+/// v2 access codes, and [`AccessScope::permits`]'s handling of them is proven by
+/// unit tests so the logic is ready when v2 wires a PIN to a scope.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+enum TalkgroupScope {
+    /// Every Talkgroup in the System.
+    All,
+    /// Only these Talkgroup Refs.
+    Only(HashSet<i64>),
+}
+
+/// A connection's access scope (ADR-0008). v1 listening is open, so every
+/// connection is `All`; v2 access codes will populate `Systems` from a
+/// per-listener PIN (the documented scope model `"*"` | `[{id, talkgroups}]`).
+/// A Call is delivered only when **both** the subscription matrix and the access
+/// scope admit it.
+#[derive(Debug, Clone)]
+enum AccessScope {
+    /// Full access (v1 default; scope `"*"`).
+    All,
+    /// Restricted to specific Systems, each optionally down to specific
+    /// Talkgroups (v2; scope `[{id, talkgroups}]`). Not constructed at runtime in
+    /// v1 (open listening) — the ADR-0008 seam, exercised by unit tests.
+    #[allow(dead_code)]
+    Systems(HashMap<i64, TalkgroupScope>),
+}
+
+impl AccessScope {
+    /// May this scope hear `(system_ref, talkgroup_ref)`?
+    fn permits(&self, system_ref: i64, talkgroup_ref: i64) -> bool {
+        match self {
+            AccessScope::All => true,
+            AccessScope::Systems(systems) => match systems.get(&system_ref) {
+                None => false,
+                Some(TalkgroupScope::All) => true,
+                Some(TalkgroupScope::Only(talkgroups)) => talkgroups.contains(&talkgroup_ref),
+            },
+        }
+    }
+}
+
 /// The listener's subscription matrix: `systemRef -> talkgroupRef -> enabled`.
 /// JSON object keys are strings, so refs are compared as strings. `all` is the
-/// spec's global all-on (story 21) — handy for a "monitor everything" client.
+/// spec's global all-on (story 21) — a "monitor everything" client.
 #[derive(Debug, Default)]
 struct Subscription {
     selection: HashMap<String, HashMap<String, bool>>,
@@ -59,17 +153,131 @@ struct Subscription {
 }
 
 impl Subscription {
-    /// Does this subscription want the given call? (Skeleton: global all-on, or
-    /// exact system+talkgroup match. Patches and access scope are ticket #9.)
-    fn matches(&self, call: &StoredCall) -> bool {
+    /// Is `(system_ref, talkgroup_ref)` selected? Global-all wins; otherwise it's
+    /// an explicit `true` in the matrix.
+    fn selects(&self, system_ref: i64, talkgroup_ref: i64) -> bool {
         if self.all {
             return true;
         }
         self.selection
-            .get(&call.system_ref.to_string())
-            .and_then(|talkgroups| talkgroups.get(&call.talkgroup_ref.to_string()))
+            .get(&system_ref.to_string())
+            .and_then(|talkgroups| talkgroups.get(&talkgroup_ref.to_string()))
             .copied()
             .unwrap_or(false)
+    }
+
+    /// Nothing is selected at all (rdio's `IsAllOff`): no global-all and no
+    /// enabled entry. Lets [`ConnState::wants`] skip patch resolution for an idle
+    /// connection.
+    fn is_all_off(&self) -> bool {
+        !self.all
+            && self
+                .selection
+                .values()
+                .all(|talkgroups| talkgroups.values().all(|&on| !on))
+    }
+}
+
+/// Per-connection filtering state: the subscription matrix, the access scope, and
+/// the heartbeat tracker.
+struct ConnState {
+    sub: Subscription,
+    scope: AccessScope,
+    heartbeat: Heartbeat,
+}
+
+impl ConnState {
+    /// A fresh connection: nothing selected, full access (v1 open listening).
+    fn new() -> Self {
+        ConnState {
+            sub: Subscription::default(),
+            scope: AccessScope::All,
+            heartbeat: Heartbeat::new(),
+        }
+    }
+
+    /// Does this connection receive `call`? Yes when some Talkgroup the Call
+    /// reaches — its own, or any patched one within the Call's System — is both
+    /// selected by the subscription matrix and permitted by the access scope.
+    /// Mirrors rdio's `IsEnabled` (primary OR patch) and adds the scope gate.
+    fn wants(&self, call: &StoredCall) -> bool {
+        if self.sub.is_all_off() {
+            return false;
+        }
+        let system_ref = call.system_ref;
+        std::iter::once(call.talkgroup_ref)
+            .chain(call.patches.iter().copied())
+            .any(|talkgroup_ref| {
+                self.sub.selects(system_ref, talkgroup_ref)
+                    && self.scope.permits(system_ref, talkgroup_ref)
+            })
+    }
+}
+
+/// The server-side heartbeat state machine. Each tick, if the previous ping went
+/// unanswered the connection is declared dead; otherwise a fresh ping is sent.
+/// Any inbound frame (pong, message, …) counts as liveness.
+#[derive(Debug, Default)]
+struct Heartbeat {
+    awaiting_pong: bool,
+}
+
+/// What a heartbeat tick decides.
+#[derive(Debug, PartialEq, Eq)]
+enum Beat {
+    /// Send a ping and expect a pong before the next tick.
+    Ping,
+    /// The previous ping went unanswered — reap the connection.
+    Dead,
+}
+
+impl Heartbeat {
+    fn new() -> Self {
+        Heartbeat::default()
+    }
+
+    fn on_tick(&mut self) -> Beat {
+        if self.awaiting_pong {
+            Beat::Dead
+        } else {
+            self.awaiting_pong = true;
+            Beat::Ping
+        }
+    }
+
+    fn on_activity(&mut self) {
+        self.awaiting_pong = false;
+    }
+}
+
+/// What to do with a broadcast result for one connection — a pure decision kept
+/// separate from the socket I/O so every branch (deliver, filter, lag, close) is
+/// unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+enum BroadcastAction {
+    /// Send this text frame to the client.
+    Send(String),
+    /// This Call isn't for this connection — do nothing.
+    Skip,
+    /// The broadcast channel is gone — end the connection.
+    Close,
+}
+
+/// Decide what a connection does with a fanout result.
+fn on_broadcast(
+    result: Result<Arc<StoredCall>, broadcast::error::RecvError>,
+    conn: &ConnState,
+) -> BroadcastAction {
+    match result {
+        Ok(call) if conn.wants(&call) => BroadcastAction::Send(call_frame(&call)),
+        Ok(_) => BroadcastAction::Skip,
+        // A slow client fell behind the fanout: tell it how many Calls it missed
+        // so it can refetch from the archive (#13) rather than silently losing
+        // them (rdio just drops them).
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            BroadcastAction::Send(lagged_frame(skipped))
+        }
+        Err(broadcast::error::RecvError::Closed) => BroadcastAction::Close,
     }
 }
 
@@ -77,14 +285,51 @@ impl Subscription {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t")]
 enum ClientMessage {
-    /// Replace the subscription matrix.
+    /// Replace the subscription matrix, optionally with a reconnect catch-up
+    /// cursor.
     #[serde(rename = "sub")]
     Sub {
         #[serde(default)]
         sel: HashMap<String, HashMap<String, bool>>,
         #[serde(default)]
         all: bool,
+        /// The last Call id the client received. When present, the server
+        /// backfills matching Calls with a greater id before resuming live.
+        #[serde(default)]
+        since: Option<CallId>,
     },
+}
+
+/// The greeting sent on connect: protocol version + heartbeat cadence so the
+/// client can (re)subscribe and time its own reconnect logic.
+fn hello_frame(heartbeat: Duration) -> String {
+    serde_json::json!({
+        "t": "hello",
+        "protocol": PROTOCOL_VERSION,
+        "heartbeatMs": heartbeat.as_millis() as u64,
+    })
+    .to_string()
+}
+
+/// The ack confirming a subscription is live.
+fn subscribed_frame() -> &'static str {
+    r#"{"t":"subscribed"}"#
+}
+
+/// A live Call push.
+fn call_frame(call: &StoredCall) -> String {
+    serde_json::json!({ "t": "call", "call": call }).to_string()
+}
+
+/// A reconnect-catch-up Call push — same shape as a live one, flagged so the
+/// client can enqueue it as history rather than as fresh live activity.
+fn catchup_frame(call: &StoredCall) -> String {
+    serde_json::json!({ "t": "call", "call": call, "catchup": true }).to_string()
+}
+
+/// A notice that the client lagged the fanout and `skipped` Calls were dropped.
+fn lagged_frame(skipped: u64) -> String {
+    serde_json::json!({ "t": "lagged", "skipped": skipped }).to_string()
 }
 
 /// `GET /api/live` — upgrade to a WebSocket and run the per-connection loop.
@@ -94,62 +339,144 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut receiver = state.live.subscribe();
-    let mut subscription = Subscription::default();
+    let heartbeat_period = state.live.heartbeat();
+    let mut conn = ConnState::new();
+
+    // Greet the client before anything else.
+    if socket
+        .send(Message::Text(hello_frame(heartbeat_period).into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    // First heartbeat fires one full period from now — no ping on connect.
+    let mut ticker = interval_at(Instant::now() + heartbeat_period, heartbeat_period);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             incoming = socket.recv() => {
                 match incoming {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(ClientMessage::Sub { sel, all }) =
-                            serde_json::from_str::<ClientMessage>(text.as_str())
-                        {
-                            subscription.selection = sel;
-                            subscription.all = all;
-                            // Ack so the client knows the subscription is live
-                            // before it relies on receiving matching calls.
-                            if socket
-                                .send(Message::Text(r#"{"t":"subscribed"}"#.into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
+                    Some(Ok(message)) => {
+                        // Any inbound frame proves the connection is alive.
+                        conn.heartbeat.on_activity();
+                        match message {
+                            Message::Text(text) => {
+                                if handle_text(&mut socket, &state, &mut conn, text.as_str())
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
+                            Message::Close(_) => break,
+                            // ping/pong/binary: liveness already recorded above.
+                            _ => {}
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {} // ignore ping/pong/binary in the skeleton
-                    Some(Err(_)) => break,
+                    Some(Err(_)) | None => break,
                 }
             }
             broadcasted = receiver.recv() => {
-                match broadcasted {
-                    Ok(call) => {
-                        if subscription.matches(&call) {
-                            let payload = serde_json::json!({ "t": "call", "call": &*call });
-                            if socket
-                                .send(Message::Text(payload.to_string().into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
+                match on_broadcast(broadcasted, &conn) {
+                    BroadcastAction::Send(text) => {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
                         }
                     }
-                    // A lagging slow client skips ahead rather than dying.
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    BroadcastAction::Skip => {}
+                    BroadcastAction::Close => break,
+                }
+            }
+            _ = ticker.tick() => {
+                match conn.heartbeat.on_tick() {
+                    Beat::Ping => {
+                        if socket.send(Message::Ping(bytes::Bytes::new())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Beat::Dead => break,
                 }
             }
         }
     }
 }
 
+/// Signals that a socket send failed — the peer is gone, so the caller ends the
+/// connection loop. A named marker beats a bare `Err(())` for intent.
+struct Disconnected;
+
+/// Apply a client text message. Fails only if the socket died mid-send (the
+/// caller then ends the loop); malformed/unknown frames are ignored.
+async fn handle_text(
+    socket: &mut WebSocket,
+    state: &AppState,
+    conn: &mut ConnState,
+    text: &str,
+) -> Result<(), Disconnected> {
+    let Ok(ClientMessage::Sub { sel, all, since }) = serde_json::from_str::<ClientMessage>(text)
+    else {
+        return Ok(());
+    };
+    conn.sub.selection = sel;
+    conn.sub.all = all;
+    // Ack so the client knows the subscription is live before it relies on
+    // receiving matching Calls.
+    socket
+        .send(Message::Text(subscribed_frame().into()))
+        .await
+        .map_err(|_| Disconnected)?;
+    if let Some(since) = since {
+        send_catchup(socket, &state.db, conn, since).await?;
+    }
+    Ok(())
+}
+
+/// Backfill the Calls a reconnecting client missed (#9): every matching Call with
+/// `id > since`, bounded by [`CATCHUP_MAX_CALLS`], oldest-first, each flagged
+/// `catchup`. Best-effort — a DB error is swallowed so a transient failure never
+/// kills the live connection; only a dead socket propagates.
+///
+/// Delivery is **at-least-once**: a Call ingested in the window between the
+/// client's connect and this query can be delivered both here (catch-up) and via
+/// the live stream. Call ids are unique, so the client dedups by id — which it
+/// does anyway to drive replay/history — rather than the server tracking a
+/// high-water mark (unsafe, since concurrent ingests can broadcast out of id
+/// order).
+async fn send_catchup(
+    socket: &mut WebSocket,
+    db: &sea_orm::DatabaseConnection,
+    conn: &ConnState,
+    since: CallId,
+) -> Result<(), Disconnected> {
+    let Ok(models) = repo::recent_calls_since(db, since, CATCHUP_MAX_CALLS).await else {
+        return Ok(());
+    };
+    for model in models {
+        if let Ok(Some(view)) = repo::stored_call(db, model.id).await
+            && conn.wants(&view)
+        {
+            socket
+                .send(Message::Text(catchup_frame(&view).into()))
+                .await
+                .map_err(|_| Disconnected)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn call(system_ref: i64, talkgroup_ref: i64) -> StoredCall {
+        call_with_patches(system_ref, talkgroup_ref, vec![])
+    }
+
+    fn call_with_patches(system_ref: i64, talkgroup_ref: i64, patches: Vec<i64>) -> StoredCall {
         StoredCall {
             id: 1,
             system_ref,
@@ -158,6 +485,7 @@ mod tests {
             talkgroup_label: None,
             talkgroup_group: None,
             talkgroup_tag: None,
+            patches,
             frequency: None,
             source: None,
             date_time: None,
@@ -168,7 +496,7 @@ mod tests {
         }
     }
 
-    fn subscribed_to(pairs: &[(&str, &str)]) -> Subscription {
+    fn subscription(pairs: &[(&str, &str)], all: bool) -> Subscription {
         let mut selection: HashMap<String, HashMap<String, bool>> = HashMap::new();
         for (system, talkgroup) in pairs {
             selection
@@ -176,47 +504,283 @@ mod tests {
                 .or_default()
                 .insert((*talkgroup).to_string(), true);
         }
-        Subscription {
-            selection,
-            all: false,
+        Subscription { selection, all }
+    }
+
+    /// A connection with the given selection, full v1 access scope.
+    fn conn(pairs: &[(&str, &str)]) -> ConnState {
+        conn_scoped(pairs, AccessScope::All)
+    }
+
+    fn conn_scoped(pairs: &[(&str, &str)], scope: AccessScope) -> ConnState {
+        ConnState {
+            sub: subscription(pairs, false),
+            scope,
+            heartbeat: Heartbeat::new(),
         }
     }
 
+    // --- Subscription matrix + patch matching (ConnState::wants) --------------
+
     #[test]
-    fn matches_exact_system_and_talkgroup() {
-        let sub = subscribed_to(&[("11", "54241")]);
-        assert!(sub.matches(&call(11, 54241)));
+    fn wants_exact_system_and_talkgroup() {
+        assert!(conn(&[("11", "54241")]).wants(&call(11, 54241)));
     }
 
     #[test]
-    fn does_not_match_other_talkgroup_or_system() {
-        let sub = subscribed_to(&[("11", "54241")]);
-        assert!(!sub.matches(&call(11, 99999)), "wrong talkgroup");
-        assert!(!sub.matches(&call(22, 54241)), "wrong system");
+    fn does_not_want_other_talkgroup_or_system() {
+        let c = conn(&[("11", "54241")]);
+        assert!(!c.wants(&call(11, 99999)), "wrong talkgroup");
+        assert!(!c.wants(&call(22, 54241)), "wrong system");
     }
 
     #[test]
-    fn explicitly_disabled_talkgroup_does_not_match() {
-        let mut sub = subscribed_to(&[]);
-        sub.selection
+    fn explicitly_disabled_talkgroup_is_not_wanted() {
+        let mut c = conn(&[]);
+        c.sub
+            .selection
             .entry("11".to_string())
             .or_default()
             .insert("54241".to_string(), false);
-        assert!(!sub.matches(&call(11, 54241)));
+        assert!(!c.wants(&call(11, 54241)));
     }
 
     #[test]
-    fn all_matches_everything() {
-        let sub = Subscription {
-            selection: HashMap::new(),
-            all: true,
+    fn all_wants_everything() {
+        let c = ConnState {
+            sub: subscription(&[], true),
+            scope: AccessScope::All,
+            heartbeat: Heartbeat::new(),
         };
-        assert!(sub.matches(&call(1, 2)));
-        assert!(sub.matches(&call(999, 888)));
+        assert!(c.wants(&call(1, 2)));
+        assert!(c.wants(&call(999, 888)));
     }
 
     #[test]
-    fn empty_subscription_matches_nothing() {
-        assert!(!Subscription::default().matches(&call(11, 54241)));
+    fn empty_subscription_wants_nothing() {
+        assert!(!conn(&[]).wants(&call(11, 54241)));
+    }
+
+    /// Patch fanout: a Call on a Talkgroup the listener didn't select still
+    /// reaches them if they subscribe to one it's patched to (same System).
+    #[test]
+    fn wants_call_via_patched_talkgroup() {
+        let c = conn(&[("11", "300")]); // subscribed to 300 only
+        let patched = call_with_patches(11, 100, vec![200, 300]); // call on 100, patched to 300
+        assert!(c.wants(&patched), "patched talkgroup 300 should match");
+    }
+
+    /// A patch only matches within the Call's own System.
+    #[test]
+    fn patch_match_is_system_scoped() {
+        let c = conn(&[("22", "300")]); // 300 but under a different system
+        let patched = call_with_patches(11, 100, vec![300]);
+        assert!(!c.wants(&patched), "patch is same-system only");
+    }
+
+    /// An all-off subscription short-circuits even when a patch would otherwise
+    /// be considered.
+    #[test]
+    fn all_off_short_circuits_patch_matching() {
+        let c = conn(&[]); // nothing selected
+        let patched = call_with_patches(11, 100, vec![200, 300]);
+        assert!(!c.wants(&patched));
+    }
+
+    // --- Access scope (AccessScope::permits) ---------------------------------
+
+    #[test]
+    fn scope_all_permits_anything() {
+        assert!(AccessScope::All.permits(1, 2));
+        assert!(AccessScope::All.permits(999, 888));
+    }
+
+    #[test]
+    fn scope_systems_all_permits_the_whole_system_only() {
+        let scope = AccessScope::Systems(HashMap::from([(11, TalkgroupScope::All)]));
+        assert!(scope.permits(11, 54241), "any tg in the permitted system");
+        assert!(!scope.permits(22, 54241), "other system denied");
+    }
+
+    #[test]
+    fn scope_systems_only_permits_listed_talkgroups() {
+        let scope = AccessScope::Systems(HashMap::from([(
+            11,
+            TalkgroupScope::Only(HashSet::from([100, 200])),
+        )]));
+        assert!(scope.permits(11, 100));
+        assert!(!scope.permits(11, 300), "tg not in the allow-list");
+        assert!(!scope.permits(22, 100), "other system denied");
+    }
+
+    /// The scope gate applies on top of the subscription: subscribing to a
+    /// Talkgroup you're not permitted to hear delivers nothing.
+    #[test]
+    fn scope_denies_even_a_subscribed_talkgroup() {
+        let scope = AccessScope::Systems(HashMap::from([(
+            11,
+            TalkgroupScope::Only(HashSet::from([100])),
+        )]));
+        let c = conn_scoped(&[("11", "300")], scope); // subscribed to 300, only allowed 100
+        assert!(!c.wants(&call(11, 300)));
+    }
+
+    /// Scope gates patch matching too: a patched Talkgroup outside the scope
+    /// doesn't leak the Call.
+    #[test]
+    fn scope_gates_patched_talkgroup() {
+        let scope = AccessScope::Systems(HashMap::from([(
+            11,
+            TalkgroupScope::Only(HashSet::from([300])),
+        )]));
+        // Subscribed to both, but only 300 is in scope; call on 100 patched to 300.
+        let c = conn_scoped(&[("11", "100"), ("11", "300")], scope);
+        let patched = call_with_patches(11, 100, vec![300]);
+        assert!(c.wants(&patched), "matches on the in-scope patch 300");
+
+        // Now only 100 is in scope, but the listener didn't subscribe to 100.
+        let scope2 = AccessScope::Systems(HashMap::from([(
+            11,
+            TalkgroupScope::Only(HashSet::from([100])),
+        )]));
+        let c2 = conn_scoped(&[("11", "300")], scope2);
+        assert!(
+            !c2.wants(&patched),
+            "subscribed to 300 (out of scope) and not to 100"
+        );
+    }
+
+    // --- is_all_off ----------------------------------------------------------
+
+    #[rstest]
+    #[case(subscription(&[], false), true)] // truly empty
+    #[case(subscription(&[("11", "100")], false), false)] // one enabled
+    #[case(subscription(&[], true), false)] // global all-on
+    fn is_all_off_cases(#[case] sub: Subscription, #[case] expected: bool) {
+        assert_eq!(sub.is_all_off(), expected);
+    }
+
+    #[test]
+    fn is_all_off_with_only_disabled_entries() {
+        let mut sub = subscription(&[], false);
+        sub.selection
+            .entry("11".to_string())
+            .or_default()
+            .insert("100".to_string(), false);
+        assert!(sub.is_all_off(), "an explicit-false entry is still all-off");
+    }
+
+    // --- LiveFeed ------------------------------------------------------------
+
+    #[test]
+    fn default_livefeed_uses_the_default_heartbeat() {
+        assert_eq!(LiveFeed::default().heartbeat(), DEFAULT_HEARTBEAT);
+    }
+
+    #[test]
+    fn with_heartbeat_sets_the_period() {
+        let feed = LiveFeed::with_heartbeat(Duration::from_millis(250));
+        assert_eq!(feed.heartbeat(), Duration::from_millis(250));
+    }
+
+    // --- Heartbeat -----------------------------------------------------------
+
+    #[test]
+    fn heartbeat_pings_then_declares_dead() {
+        let mut hb = Heartbeat::new();
+        assert_eq!(hb.on_tick(), Beat::Ping, "first tick pings");
+        assert_eq!(hb.on_tick(), Beat::Dead, "unanswered ping -> dead");
+    }
+
+    #[test]
+    fn heartbeat_activity_resets_liveness() {
+        let mut hb = Heartbeat::new();
+        assert_eq!(hb.on_tick(), Beat::Ping);
+        hb.on_activity(); // pong (or any frame) arrived
+        assert_eq!(hb.on_tick(), Beat::Ping, "answered -> ping again, not dead");
+    }
+
+    // --- on_broadcast decision ----------------------------------------------
+
+    #[test]
+    fn broadcast_delivers_a_matching_call() {
+        let c = conn(&[("11", "54241")]);
+        let action = on_broadcast(Ok(Arc::new(call(11, 54241))), &c);
+        assert_eq!(action, BroadcastAction::Send(call_frame(&call(11, 54241))));
+    }
+
+    #[test]
+    fn broadcast_skips_a_non_matching_call() {
+        let c = conn(&[("11", "54241")]);
+        assert_eq!(
+            on_broadcast(Ok(Arc::new(call(11, 99999))), &c),
+            BroadcastAction::Skip
+        );
+    }
+
+    #[test]
+    fn broadcast_lag_becomes_a_lagged_notice() {
+        let c = conn(&[("11", "54241")]);
+        let action = on_broadcast(Err(broadcast::error::RecvError::Lagged(7)), &c);
+        assert_eq!(action, BroadcastAction::Send(lagged_frame(7)));
+    }
+
+    #[test]
+    fn broadcast_closed_ends_the_connection() {
+        let c = conn(&[("11", "54241")]);
+        assert_eq!(
+            on_broadcast(Err(broadcast::error::RecvError::Closed), &c),
+            BroadcastAction::Close
+        );
+    }
+
+    // --- Frame builders ------------------------------------------------------
+
+    #[test]
+    fn hello_frame_carries_protocol_and_heartbeat() {
+        let value: serde_json::Value =
+            serde_json::from_str(&hello_frame(Duration::from_secs(30))).unwrap();
+        assert_eq!(value["t"], "hello");
+        assert_eq!(value["protocol"], PROTOCOL_VERSION);
+        assert_eq!(value["heartbeatMs"], 30_000);
+    }
+
+    #[test]
+    fn call_and_catchup_frames_differ_only_by_the_flag() {
+        let c = call(11, 54241);
+        let live: serde_json::Value = serde_json::from_str(&call_frame(&c)).unwrap();
+        let catchup: serde_json::Value = serde_json::from_str(&catchup_frame(&c)).unwrap();
+        assert_eq!(live["t"], "call");
+        assert!(live.get("catchup").is_none(), "live has no catchup flag");
+        assert_eq!(catchup["t"], "call");
+        assert_eq!(catchup["catchup"], true);
+        assert_eq!(live["call"], catchup["call"], "same call payload");
+    }
+
+    #[test]
+    fn lagged_frame_reports_the_skip_count() {
+        let value: serde_json::Value = serde_json::from_str(&lagged_frame(42)).unwrap();
+        assert_eq!(value["t"], "lagged");
+        assert_eq!(value["skipped"], 42);
+    }
+
+    // --- Client message parsing ----------------------------------------------
+
+    #[test]
+    fn sub_message_parses_since_cursor() {
+        let msg: ClientMessage =
+            serde_json::from_str(r#"{"t":"sub","sel":{"11":{"100":true}},"since":42}"#).unwrap();
+        let ClientMessage::Sub { since, all, .. } = msg;
+        assert_eq!(since, Some(42));
+        assert!(!all);
+    }
+
+    #[test]
+    fn sub_message_without_since_defaults_to_none() {
+        let msg: ClientMessage = serde_json::from_str(r#"{"t":"sub","all":true}"#).unwrap();
+        let ClientMessage::Sub { since, all, sel } = msg;
+        assert_eq!(since, None);
+        assert!(all);
+        assert!(sel.is_empty());
     }
 }

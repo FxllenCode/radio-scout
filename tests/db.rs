@@ -725,3 +725,52 @@ async fn lowest_free_system_ref_ignores_non_positive_refs() {
         "0 and negatives don't occupy Ref 1"
     );
 }
+
+/// `recent_calls_since` backs the live-feed reconnect catch-up (#9): only Calls
+/// with `id > since`, capped to the **newest** `limit`, returned oldest-first.
+/// Pins the `CATCHUP_MAX_CALLS` bound the live socket relies on.
+#[tokio::test]
+async fn recent_calls_since_is_bounded_newest_and_ascending() {
+    let (db, _dir) = sqlite().await;
+    // Five calls on distinct talkgroups -> sequential ids 1..=5.
+    let mut ids = vec![];
+    for tg in 1..=5 {
+        ids.push(
+            seed_call(
+                &db,
+                11,
+                "sys",
+                tg,
+                "Tag",
+                &["Grp"],
+                NOW + tg,
+                &format!("k{tg}"),
+            )
+            .await,
+        );
+    }
+    assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+
+    // `id > since`, ascending.
+    let after = repo::recent_calls_since(&db, 2, 10).await.unwrap();
+    assert_eq!(
+        after.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
+
+    // The limit keeps the NEWEST `limit` (not the oldest), still ascending.
+    let capped = repo::recent_calls_since(&db, 0, 2).await.unwrap();
+    assert_eq!(
+        capped.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![4, 5],
+        "newest-2, delivered oldest-first"
+    );
+
+    // Nothing newer than the last id.
+    assert!(
+        repo::recent_calls_since(&db, 5, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

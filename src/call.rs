@@ -28,6 +28,12 @@ pub struct StoredCall {
     pub talkgroup_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub talkgroup_tag: Option<String>,
+    /// Talkgroup Refs this Call is patched to (rdio `patches[]`). Carried on the
+    /// wire so the client can display cross-patched traffic; also drives live-feed
+    /// patch fanout (a subscriber of any patched Talkgroup receives the Call).
+    /// Omitted from the payload when empty to keep the socket compact.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patches: Vec<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,6 +64,7 @@ mod tests {
             talkgroup_label: Some("TDB A1".into()),
             talkgroup_group: Some("Fire".into()),
             talkgroup_tag: Some("Fire Dispatch".into()),
+            patches: vec![54001, 54002],
             frequency: Some(774_031_250),
             source: Some(1_610_092),
             date_time: Some("2022-11-29T18:05:38Z".into()),
@@ -84,6 +91,19 @@ mod tests {
         insta::assert_json_snapshot!("stored_call_full", full());
     }
 
+    /// Patches serialize as a compact array when present, and are dropped
+    /// entirely when empty (the common, un-patched case).
+    #[test]
+    fn patches_serialize_when_present_and_omit_when_empty() {
+        let with = serde_json::to_value(full()).unwrap();
+        assert_eq!(with["patches"], serde_json::json!([54001, 54002]));
+
+        let mut without = full();
+        without.patches.clear();
+        let json = serde_json::to_value(without).unwrap();
+        assert!(json.get("patches").is_none(), "empty patches omitted");
+    }
+
     /// `None` fields are omitted entirely, keeping the socket payload compact.
     #[test]
     fn none_fields_are_omitted() {
@@ -95,6 +115,7 @@ mod tests {
             talkgroup_label: None,
             talkgroup_group: None,
             talkgroup_tag: None,
+            patches: vec![],
             frequency: None,
             source: None,
             date_time: None,

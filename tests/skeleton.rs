@@ -196,6 +196,10 @@ async fn ingested_call_is_pushed_to_subscribed_ws_client() {
         .await
         .expect("ws connect");
 
+    // Consume the server's `hello` greeting (#9) before the subscription ack.
+    let hello = next_text(&mut ws).await;
+    assert!(hello.contains("hello"), "expected hello, got {hello:?}");
+
     // Subscribe to system 11, talkgroup 54241, and wait for the ack so the POST
     // below can't race ahead of the subscription being applied server-side.
     ws.send(WsMessage::Text(
@@ -231,6 +235,10 @@ async fn call_is_not_pushed_to_non_matching_subscriber() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/live"))
         .await
         .expect("ws connect");
+
+    // Consume the server's `hello` greeting (#9) before the subscription ack.
+    let hello = next_text(&mut ws).await;
+    assert!(hello.contains("hello"), "expected hello, got {hello:?}");
 
     ws.send(WsMessage::Text(
         r#"{"t":"sub","sel":{"11":{"99999":true}}}"#.into(),

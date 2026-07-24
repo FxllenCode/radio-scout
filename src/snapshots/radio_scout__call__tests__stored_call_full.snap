@@ -10,6 +10,10 @@ expression: full()
   "talkgroupLabel": "TDB A1",
   "talkgroupGroup": "Fire",
   "talkgroupTag": "Fire Dispatch",
+  "patches": [
+    54001,
+    54002
+  ],
   "frequency": 774031250,
   "source": 1610092,
   "dateTime": "2022-11-29T18:05:38Z",

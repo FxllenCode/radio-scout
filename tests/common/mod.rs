@@ -6,9 +6,12 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::Router;
 use futures_util::StreamExt;
 use radio_scout::db::{self};
+use radio_scout::live::LiveFeed;
 use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
 use sea_orm::DatabaseConnection;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -33,6 +36,21 @@ pub async fn spawn_with_ingest(
     (addr, dbc, tmp)
 }
 
+/// Like [`spawn`] but with a short live-feed heartbeat period, so heartbeat /
+/// dead-connection-reaping behavior (#9) is observable without waiting the
+/// production 30 s.
+pub async fn spawn_with_heartbeat(
+    heartbeat: Duration,
+) -> (String, DatabaseConnection, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let audio = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob"));
+    let dbc = connect_db(tmp.path()).await;
+    let mut state = AppState::new(audio, dbc.clone(), IngestConfig::default());
+    state.live = LiveFeed::with_heartbeat(heartbeat);
+    let addr = serve(build_app(state)).await;
+    (addr, dbc, tmp)
+}
+
 /// Bring up the app with a specific blob backend (e.g. an S3-backed store to
 /// exercise the presigned-redirect serve path); the SQLite DB lives under `dir`.
 /// The caller owns `dir` and must keep it alive for the app's lifetime.
@@ -48,10 +66,19 @@ pub async fn spawn_with_config(
     ingest: IngestConfig,
 ) -> (String, DatabaseConnection) {
     let audio = Arc::new(audio);
-    let url = format!("sqlite://{}?mode=rwc", dir.join("t.db").display());
-    let dbc = db::connect(&url).await.expect("db");
+    let dbc = connect_db(dir).await;
     let app = build_app(AppState::new(audio, dbc.clone(), ingest));
+    (serve(app).await, dbc)
+}
 
+/// Open a fresh SQLite DB (create-if-missing) under `dir`.
+async fn connect_db(dir: &Path) -> DatabaseConnection {
+    let url = format!("sqlite://{}?mode=rwc", dir.join("t.db").display());
+    db::connect(&url).await.expect("db")
+}
+
+/// Serve `app` on an ephemeral loopback port, returning its `host:port`.
+async fn serve(app: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -59,18 +86,34 @@ pub async fn spawn_with_config(
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
     });
-    (format!("127.0.0.1:{}", addr.port()), dbc)
+    format!("127.0.0.1:{}", addr.port())
 }
 
 /// A connected live-feed WebSocket client.
 pub type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Open a live-feed WebSocket to `/api/live`.
-pub async fn connect(addr: &str) -> Ws {
+/// Open a live-feed WebSocket to `/api/live` without reading anything — the raw
+/// socket, `hello` greeting still queued. Use [`connect`] unless the test asserts
+/// on the greeting itself.
+pub async fn connect_raw(addr: &str) -> Ws {
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/live"))
         .await
         .expect("ws connect");
     ws
+}
+
+/// Open a live-feed WebSocket and return it together with the parsed `hello`
+/// greeting the server sends on connect (#9).
+pub async fn connect_and_hello(addr: &str) -> (Ws, serde_json::Value) {
+    let mut ws = connect_raw(addr).await;
+    let hello = serde_json::from_str(&next_text(&mut ws).await).expect("hello json");
+    (ws, hello)
+}
+
+/// Open a live-feed WebSocket, consuming (and discarding) the `hello` greeting —
+/// the common case, leaving the socket ready for subscribe/call frames.
+pub async fn connect(addr: &str) -> Ws {
+    connect_and_hello(addr).await.0
 }
 
 /// Read the next text frame, skipping control frames; panics if the socket

@@ -452,6 +452,34 @@ pub async fn groups_for_talkgroup<C: ConnectionTrait>(
     Ok(names)
 }
 
+/// The most-recent up-to-`limit` Calls with `id > since_id`, returned in
+/// ascending id order (ready to enqueue oldest-first).
+///
+/// This backs the live feed's **reconnect catch-up** (#9, an improvement over
+/// rdio, which drops any Call that arrives while a listener is briefly
+/// disconnected). A reconnecting client sends the last Call id it saw as `since`;
+/// the server backfills what it missed, bounded to `limit` so a client returning
+/// after a long gap replays a recent slice (not the whole archive) and falls back
+/// to archive search (#13) for more. Ordering by `id` (monotonic insert order),
+/// not `call_at_ms`, keeps "since the last one I saw" exact even if recorder
+/// timestamps are out of order. The caller filters the result through the
+/// connection's subscription + access scope, so this deliberately does no
+/// matrix filtering of its own.
+pub async fn recent_calls_since<C: ConnectionTrait>(
+    db: &C,
+    since_id: CallId,
+    limit: u64,
+) -> Result<Vec<call::Model>, DbErr> {
+    let mut newest = call::Entity::find()
+        .filter(call::Column::Id.gt(since_id))
+        .order_by_desc(call::Column::Id)
+        .limit(limit)
+        .all(db)
+        .await?;
+    newest.reverse(); // newest-first query -> ascending for oldest-first delivery
+    Ok(newest)
+}
+
 /// Calls that reach `talkgroup_ref` via a patch (full patch resolution for the
 /// live feed is #9; this is the archive-side helper).
 pub async fn calls_patched_to<C: ConnectionTrait>(
@@ -701,6 +729,17 @@ pub async fn stored_call<C: ConnectionTrait>(
         .into_iter()
         .next();
 
+    // Patched talkgroup Refs (rdio `patches[]`): carried on the wire and used for
+    // live-feed patch fanout (#9). Ordered for a stable payload.
+    let patches = call_patch::Entity::find()
+        .filter(call_patch::Column::CallId.eq(call.id))
+        .order_by_asc(call_patch::Column::TalkgroupRef)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|p| p.talkgroup_ref)
+        .collect();
+
     Ok(Some(StoredCall {
         id: call.id,
         system_ref,
@@ -709,6 +748,7 @@ pub async fn stored_call<C: ConnectionTrait>(
         talkgroup_label,
         talkgroup_group,
         talkgroup_tag,
+        patches,
         frequency: call.frequency,
         source: call.source_ref,
         date_time: None,
