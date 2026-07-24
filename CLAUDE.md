@@ -16,7 +16,7 @@ The philosophy is a simple setup: a one-program install from the command line th
 - **All development is Test-Driven Development, under a quantified coverage policy** — see [Testing & coverage policy](#testing--coverage-policy) below ([ADR-0009](docs/adr/0009-testing-strategy.md) + [ADR-0010](docs/adr/0010-coverage-policy-and-test-tooling.md)). CI is used heavily and is essential for deployment across targets (PC, Mac, Raspberry Pi); dev/testing happens on Mac, the target scanner runs on a Raspberry Pi 5. Red-green-refactor on **native tests** — Rust `cargo nextest` (unit + the in-process HTTP/WS integration harness) and Vitest + React Testing Library (frontend). Every PR must hold **100% patch/diff coverage** (every new/changed line tested) over a **ratcheting project floor**, with quality enforced by **mutation testing** (`cargo-mutants` + `proptest`) — *not* by a 100%-total gate. Reserve Playwright for browser-only flows; iOS background audio / lock-screen controls are a **real-device manual gate**.
 - **Performance is first-class.** The app must be fast and performant on hardware as low as a Raspberry Pi.
 - **Simple install.** A one-command install that just works.
-- **rdio-scanner compatibility.** Figure out what features exist in rdio-scanner — all of them need to work in Radio-Scout. Upstream and downstream must exist and should be backwards compatible with rdio-scanner if at all possible.
+- **rdio-scanner compatibility — as a floor, not a ceiling.** Figure out what features exist in rdio-scanner — all of them need to work in Radio-Scout. Upstream and downstream must exist and should be backwards compatible with rdio-scanner if at all possible. **But Radio-Scout must _improve_ on rdio, not clone it.** For every feature, first research how rdio does it, then research how to do it *better* — the goal is a superset that fixes rdio's weaknesses (see [Improve, don't clone](#improve-dont-clone-rdio)). Compatibility is preserved at the wire/contract boundaries (ingest response strings, recorder payloads, `/rdio-scanner` legacy surface); everything behind those boundaries is free to be better.
 - **Recorder integrations.** Create an integration or plugin (per their docs) for both SDRTrunk and Trunk Recorder. The maintainer runs Trunk Recorder on their scanner, so have a plugin/integration ready for that testing phase.
 - **PWA / mobile support is extremely important.** You must be able to add the website to your phone and have scanner audio actually work correctly within the OS — e.g. functioning pause/next/previous buttons — and work correctly in the background, especially on iOS. This is lacking in rdio-scanner and is a big problem with it.
 
@@ -42,9 +42,20 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 
 **Enforcement** — the tooling above is stood up (and high-risk gaps in already-shipped code backfilled) by the **"Test hardening + coverage baseline"** ticket; CI (#22) is not built yet. Until #22, coverage + mutation join the local merge-gate ritual: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo nextest run` (+ `cargo test --doc`), `cargo llvm-cov` over the floor, and the client `tsc`/`oxlint`/`vitest --coverage` gates must pass before a commit lands. #22 wires it all into CI with a **100% patch-coverage** Codecov gate (separate backend/frontend flags).
 
+## Improve, don't clone rdio
+
+**Every feature is a chance to be better than rdio — take it.** rdio-scanner is the reference for *what* to build and the compatibility contract, never the ceiling for *how well*. The workflow for any ticket that touches an rdio-equivalent feature is:
+
+1. **Research how rdio does it** — read the actual source in `rdio-scanner/` (and the recorders when relevant), not just the docs. Understand the behavior *and its weaknesses* (rdio's real pain points: DB-stored audio, proprietary JSON-over-WS, no background/lock-screen audio, dated UI, stale/half-open connections, missed calls across reconnects, no heartbeat of its own).
+2. **Research how to do it better** — deliberately look for an improvement: robustness (heartbeat, reconnect catch-up, backpressure), performance (Pi-first), UX (mobile/PWA/background), or correctness. Cite the improvement in the ADR/PR/commit so the *why* is durable.
+3. **Preserve compatibility only where it's a contract** — recorder-facing wire formats, response strings, and the legacy `/rdio-scanner` surface stay byte-compatible; internal protocols and storage are ours to improve (e.g. our own live-feed protocol per [ADR-0004](docs/adr/0004-live-feed-raw-websocket.md), object-storage audio per [ADR-0002](docs/adr/0002-audio-object-storage.md)).
+4. **When an improvement is non-trivial or crosses an ADR boundary, surface the trade-off and get a decision** before building it — don't silently gold-plate, and don't silently settle for parity.
+
+The bar for every feature is "measurably better than rdio for our users (Pi operators + mobile listeners)," not "matches rdio."
+
 ## Approach
 
-- Start by doing deep research into rdio-scanner to figure out how it works. Agent-browser access is available, and a live instance of rdio-scanner runs at fultonscanner.com.
+- Start by doing deep research into rdio-scanner to figure out how it works — then, per [Improve, don't clone](#improve-dont-clone-rdio), research how to do it *better*. Agent-browser access is available, and a live instance of rdio-scanner runs at fultonscanner.com.
 - Do a grilling session at the start to design the project, and use Claude design to create mockups before beginning.
 - For Rust, likely libraries include Socket.IO (oxide), Axum, and Tokio, among others; the exact set is settled during the grilling phase. Additional libraries may be added as needed.
 - For TypeScript, Vite, TailwindCSS, and anything else helpful may be used; additional libraries may be added as needed.
