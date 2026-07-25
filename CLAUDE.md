@@ -111,7 +111,33 @@ npm run lint                # oxlint
 - **Narrow Playwright E2E** covers PWA install/offline/service-worker + a Media-Session smoke test.
 - **iOS background audio + lock-screen/Control-Center controls are a real-device manual gate** — Playwright's bundled WebKit is not iOS Safari and cannot validate them. There is no CI substitute.
 
+## Live testing (real binary, real browser, real recorder)
+
+The suites can't answer "does a Call actually arrive and make a sound". Full procedure: [`docs/agents/live-testing.md`](docs/agents/live-testing.md); `/live-test` runs it.
+
+**Two instances, never mixed:** `./radio-scout-live-test` is hermetic and **wiped at the start of every scripted run** (empty archive, empty queue, fresh key — so what a test observes is a fact, not leftover history); `./radio-scout-data` is the durable one a real recorder uploads to. Both gitignored.
+
+```bash
+cd client && npm run build && cd ..            # rust-embed reads client/dist AT COMPILE TIME
+rm -rf ./radio-scout-live-test
+RADIO_SCOUT_BASE_DIR=./radio-scout-live-test cargo run    # prints an ingest API key on first run
+cargo run --example feed -- --key <KEY> --interval 4s     # synthetic Calls, real WAV tones
+# browse http://localhost:3000  (phone: http://<MAC-LAN-IP>:3000)
+```
+
+`examples/feed.rs` posts rdio-format multipart with **real audio** — a mono 16-bit WAV pitched by Talkgroup, so a wrong-Call bug is audible before it's visible. `--burst N` fills the listening queue, `--patches A:B` exercises patch fanout, `--seconds 8` gives the waveform something to walk.
+
+**Browser:** live tests hit the **embedded build on `:3000`** (one origin, exactly what ships and what a phone hits), not the Vite dev server. Driving it needs the Claude browser extension installed, signed into the same account, and granted permission for `localhost:3000`. Never trigger an `alert`/`confirm` — a dialog freezes the extension until a human clears it — and read the console before calling anything a pass.
+
+**Trunk Recorder:** Radio-Scout runs on the Mac; the Pi's TR gets a **second** `rdioscanner_uploader` entry beside the existing rdio-scanner one, so the real feed is untouched (verified in TR source: `plugin_manager.cc:41` loads every `plugins` entry, and each keeps its own config). `server` is a bare base URL — the plugin appends `/api/call-upload` itself, so it lands on the generic rdio endpoint (#5), not the TR-native one (#6). Config snippet, `talkgroupAllow` globs, and how to read TR's upload-error logs: see the doc.
+
+**A live test supplements the suites, never replaces them** — fix what it finds test-first. And a desktop Chrome pass says nothing about iOS background audio, lock-screen controls, or Add-to-Home-Screen: those stay a real-device manual gate (ADR-0005).
+
 ## Agent skills
+
+### Live testing
+
+`/live-test` — build, launch hermetically, feed synthetic Calls, drive Chrome, report, tear down. See `docs/agents/live-testing.md`.
 
 ### Issue tracker
 
