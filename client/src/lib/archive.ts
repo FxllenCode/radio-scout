@@ -1,0 +1,56 @@
+/** Helpers the archive screen shares with the RTK Query layer: turning filters
+ *  into a request, and turning a Call into something a listener can read.
+ *  Mirrors the backend's `src/archive.rs`. */
+import type { SearchQuery } from '@/types'
+
+/** Serialize archive-search filters into a query string, dropping anything
+ *  unset. Keys are sorted so the same filters always produce the same URL —
+ *  stable to assert on, and friendly to HTTP caches. */
+export function searchParams(query: SearchQuery): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') continue
+    params.set(key, String(value))
+  }
+  params.sort()
+  return params.toString()
+}
+
+/** Where a Call's audio downloads from, named after the Call rather than its
+ *  object key (spec US 27). */
+export function downloadUrl(callId: number): string {
+  return `/api/call/${callId}/download`
+}
+
+/** Read an `<input type="datetime-local">` value as unix milliseconds. The
+ *  input is in the listener's own timezone — which the server has no way to
+ *  know — so the conversion happens here and the wire carries only ms. */
+export function dateTimeLocalToMs(value: string): number | undefined {
+  if (!value.trim()) return undefined
+  const ms = new Date(value).getTime()
+  return Number.isNaN(ms) ? undefined : ms
+}
+
+/** A Call's time in the listener's timezone, in a fixed `YYYY-MM-DD HH:MM:SS`
+ *  shape — a scanner log reads better aligned than localized. */
+export function formatCallTime(ms: number | undefined): string {
+  if (ms === undefined) return '—'
+  const at = new Date(ms)
+  if (Number.isNaN(at.getTime())) return '—'
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return (
+    `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}` +
+    ` ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`
+  )
+}
+
+/** The `1–100 of 421` readout under a result list. `count` is the true total,
+ *  so it stays honest across pages. */
+export function pageSummary(
+  offset: number,
+  shown: number,
+  count: number,
+): string {
+  if (count === 0 || shown === 0) return 'No calls'
+  return `${offset + 1}–${offset + shown} of ${count}`
+}

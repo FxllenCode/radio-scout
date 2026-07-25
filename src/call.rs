@@ -1,10 +1,14 @@
-//! The Call view type shared by the live feed and the audio-serve path.
+//! The Call view types shared by the live feed, the audio-serve path, and the
+//! archive.
 //!
 //! `CONTEXT.md` is the ubiquitous language: a **Call** is a single recorded
 //! transmission (audio + metadata). **Ref** is the external, recorder-supplied
 //! numeric id (`systemRef`, `talkgroupRef`, …); **Id** is Radio-Scout's internal
 //! primary key, never sent by recorders. `StoredCall` is the denormalized view
 //! built from the SeaORM rows (`crate::db::repo::stored_call`).
+//!
+//! These live here rather than beside their handlers so the data layer can build
+//! them without depending on the HTTP layer.
 
 use serde::Serialize;
 
@@ -49,6 +53,56 @@ pub struct StoredCall {
     pub object_key: String,
     /// The URL a client fetches the audio from (audio never rides the socket).
     pub audio_url: String,
+}
+
+/// One System that has Calls matching the current archive-search filters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemOption {
+    /// The recorder-supplied external id (CONTEXT.md: **Ref**).
+    pub r#ref: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// One Talkgroup that has Calls matching the current archive-search filters. A
+/// Talkgroup Ref is unique only within its System, so both are carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TalkgroupOption {
+    pub system_ref: i64,
+    pub r#ref: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+/// The values each archive-search filter can usefully take, given the *other*
+/// filters already chosen — the cascading-filter contract of
+/// `GET /api/calls/filters` (#13, spec US 24).
+///
+/// Two properties make this better than rdio-scanner's equivalent, which builds
+/// its dropdowns from the whole talkgroup config:
+/// 1. **Only values with Calls are offered** — no dead options that search to
+///    nothing.
+/// 2. **Each dimension excludes its own filter** — picking System 100 narrows
+///    the Talkgroup list but leaves the System list complete, so a choice is
+///    always reversible in one click.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterOptions {
+    pub systems: Vec<SystemOption>,
+    pub talkgroups: Vec<TalkgroupOption>,
+    pub groups: Vec<String>,
+    pub tags: Vec<String>,
+    /// Oldest / newest Call time (unix ms) the non-date filters can reach —
+    /// the bounds a date picker should offer. Computed with the date filter
+    /// itself excluded, so narrowing the range never collapses the picker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_start_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_stop_ms: Option<i64>,
 }
 
 #[cfg(test)]

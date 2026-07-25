@@ -5,6 +5,7 @@
 //! router the binary serves and the integration harness drives in-process over
 //! its real HTTP + WS boundary (ADR-0009).
 
+pub mod archive;
 pub mod blob;
 pub mod call;
 pub mod db;
@@ -64,7 +65,12 @@ pub fn build_app(state: AppState) -> Router {
             post(ingest::trunk_recorder_call_upload),
         )
         .route("/api/live", any(live::ws_handler))
+        // Archive read surface (#13): search, its cascading filter options, and
+        // per-Call download.
+        .route("/api/calls", get(archive::search))
+        .route("/api/calls/filters", get(archive::filters))
         .route("/api/call/{id}/audio", get(serve_audio))
+        .route("/api/call/{id}/download", get(archive::download))
         .route("/healthz", get(healthz))
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.

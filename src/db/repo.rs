@@ -21,7 +21,7 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
 };
 
-use crate::call::{CallId, StoredCall};
+use crate::call::{CallId, FilterOptions, StoredCall, SystemOption, TalkgroupOption};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, group, system, tag, talkgroup,
     talkgroup_group, unit,
@@ -360,6 +360,18 @@ async fn create_populated_talkgroup<C: ConnectionTrait>(
     Ok(tg)
 }
 
+/// Which end of the archive a search walks from.
+///
+/// Newest-first is the scanner default ("what just happened"); oldest-first is
+/// what **playback mode** needs, because catching up on history means walking
+/// forwards in time through the filtered results (#13, spec US 25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallSort {
+    #[default]
+    Newest,
+    Oldest,
+}
+
 /// Cascading archive-search filters. All are optional and combine with AND;
 /// `limit == 0` means unlimited.
 #[derive(Debug, Clone, Default)]
@@ -370,18 +382,31 @@ pub struct CallSearch {
     pub talkgroup_ref: Option<i64>,
     pub group_name: Option<String>,
     pub tag_name: Option<String>,
+    pub sort: CallSort,
     pub limit: u64,
     pub offset: u64,
 }
 
-/// Search calls newest-first, filtered by date range / System / Talkgroup /
-/// Group / Tag. Distinct calls only, even when a talkgroup is in several groups.
-pub async fn search_calls<C: ConnectionTrait>(
-    db: &C,
-    search: &CallSearch,
-) -> Result<Vec<call::Model>, DbErr> {
-    let mut query = call::Entity::find();
+/// Relations a caller has already joined onto a Call query, so [`apply_filters`]
+/// doesn't join them a second time (which SQL would reject as a duplicate
+/// alias). The search path joins nothing up front and lets the filters pull in
+/// only what they need; the facet queries join System/Talkgroup/Tag eagerly
+/// because they *select* from those tables.
+#[derive(Debug, Clone, Copy, Default)]
+struct Joined {
+    system: bool,
+    talkgroup: bool,
+    tag: bool,
+}
 
+/// Apply the archive-search filters to a Call query — the single definition of
+/// what each filter means, shared by the result page, the total count, and the
+/// cascading filter options.
+fn apply_filters(
+    mut query: sea_orm::Select<call::Entity>,
+    search: &CallSearch,
+    joined: Joined,
+) -> sea_orm::Select<call::Entity> {
     if let Some(after) = search.after_ms {
         query = query.filter(call::Column::CallAtMs.gte(after));
     }
@@ -389,23 +414,27 @@ pub async fn search_calls<C: ConnectionTrait>(
         query = query.filter(call::Column::CallAtMs.lte(before));
     }
     if let Some(system_ref) = search.system_ref {
-        query = query
-            .join(JoinType::InnerJoin, call::Relation::System.def())
-            .filter(system::Column::Ref.eq(system_ref));
+        if !joined.system {
+            query = query.join(JoinType::InnerJoin, call::Relation::System.def());
+        }
+        query = query.filter(system::Column::Ref.eq(system_ref));
     }
 
+    // Talkgroup is the hinge: the Talkgroup, Tag, and Group filters all reach
+    // the Call through it.
     let needs_talkgroup =
         search.talkgroup_ref.is_some() || search.tag_name.is_some() || search.group_name.is_some();
-    if needs_talkgroup {
+    if needs_talkgroup && !joined.talkgroup {
         query = query.join(JoinType::InnerJoin, call::Relation::Talkgroup.def());
     }
     if let Some(talkgroup_ref) = search.talkgroup_ref {
         query = query.filter(talkgroup::Column::Ref.eq(talkgroup_ref));
     }
     if let Some(tag_name) = &search.tag_name {
-        query = query
-            .join(JoinType::InnerJoin, talkgroup::Relation::Tag.def())
-            .filter(tag::Column::Name.eq(tag_name.clone()));
+        if !joined.tag {
+            query = query.join(JoinType::InnerJoin, talkgroup::Relation::Tag.def());
+        }
+        query = query.filter(tag::Column::Name.eq(tag_name.clone()));
     }
     if let Some(group_name) = &search.group_name {
         query = query
@@ -417,10 +446,43 @@ pub async fn search_calls<C: ConnectionTrait>(
             .filter(group::Column::Name.eq(group_name.clone()));
     }
 
-    query = query
-        .distinct()
-        .order_by_desc(call::Column::CallAtMs)
-        .order_by_desc(call::Column::Id);
+    query
+}
+
+/// The filtered Call query, without ordering or paging.
+///
+/// `DISTINCT` is applied only when the Group filter is in play — that join is
+/// the one that can multiply a Call across rows (a Talkgroup may be in several
+/// Groups). Every other join is many-to-one, so deduplicating would just cost a
+/// sort buffer on every plain search: real money on a Pi.
+fn filtered_calls(search: &CallSearch) -> sea_orm::Select<call::Entity> {
+    let query = apply_filters(call::Entity::find(), search, Joined::default());
+    if search.group_name.is_some() {
+        query.distinct()
+    } else {
+        query
+    }
+}
+
+/// Search calls, filtered by date range / System / Talkgroup / Group / Tag and
+/// ordered by [`CallSearch::sort`]. Distinct calls only, even when a talkgroup
+/// is in several groups.
+pub async fn search_calls<C: ConnectionTrait>(
+    db: &C,
+    search: &CallSearch,
+) -> Result<Vec<call::Model>, DbErr> {
+    let mut query = filtered_calls(search);
+
+    // `id` breaks ties in the same direction as the timestamp, so paging is
+    // stable even when a recorder stamps two calls at the same millisecond.
+    query = match search.sort {
+        CallSort::Newest => query
+            .order_by_desc(call::Column::CallAtMs)
+            .order_by_desc(call::Column::Id),
+        CallSort::Oldest => query
+            .order_by_asc(call::Column::CallAtMs)
+            .order_by_asc(call::Column::Id),
+    };
 
     // SQLite rejects OFFSET without LIMIT, so an offset with no explicit limit
     // gets an effectively-unbounded one; a zero offset emits no OFFSET at all.
@@ -437,6 +499,194 @@ pub async fn search_calls<C: ConnectionTrait>(
     }
 
     query.all(db).await
+}
+
+/// How many Calls match `search`, ignoring its page window — the total a
+/// paginator reports and the client uses to size its page controls.
+pub async fn count_calls<C: ConnectionTrait>(db: &C, search: &CallSearch) -> Result<u64, DbErr> {
+    filtered_calls(search).count(db).await
+}
+
+/// One distinct (System, Talkgroup, Tag) combination that has Calls matching a
+/// search — the raw material the cascading filter options are built from.
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
+struct FacetRow {
+    system_ref: i64,
+    system_label: Option<String>,
+    talkgroup_ref: i64,
+    talkgroup_label: Option<String>,
+    tag_name: Option<String>,
+}
+
+/// The distinct System/Talkgroup/Tag combinations reachable under `search`.
+async fn facet_rows<C: ConnectionTrait>(
+    db: &C,
+    search: &CallSearch,
+) -> Result<Vec<FacetRow>, DbErr> {
+    let query = call::Entity::find()
+        .select_only()
+        .column_as(system::Column::Ref, "system_ref")
+        .column_as(system::Column::Label, "system_label")
+        .column_as(talkgroup::Column::Ref, "talkgroup_ref")
+        .column_as(talkgroup::Column::Label, "talkgroup_label")
+        .column_as(tag::Column::Name, "tag_name")
+        .join(JoinType::InnerJoin, call::Relation::System.def())
+        .join(JoinType::InnerJoin, call::Relation::Talkgroup.def())
+        // A Talkgroup may carry no Tag, so this one can't be an inner join.
+        .join(JoinType::LeftJoin, talkgroup::Relation::Tag.def());
+
+    apply_filters(
+        query,
+        search,
+        Joined {
+            system: true,
+            talkgroup: true,
+            tag: true,
+        },
+    )
+    .distinct()
+    .order_by_asc(system::Column::Ref)
+    .order_by_asc(talkgroup::Column::Ref)
+    .into_model::<FacetRow>()
+    .all(db)
+    .await
+}
+
+/// The distinct Group names reachable under `search`.
+async fn group_facets<C: ConnectionTrait>(
+    db: &C,
+    search: &CallSearch,
+) -> Result<Vec<String>, DbErr> {
+    let query = call::Entity::find()
+        .select_only()
+        .column_as(group::Column::Name, "name")
+        .join(JoinType::InnerJoin, call::Relation::Talkgroup.def())
+        .join(
+            JoinType::InnerJoin,
+            talkgroup::Relation::TalkgroupGroup.def(),
+        )
+        .join(JoinType::InnerJoin, talkgroup_group::Relation::Group.def());
+
+    // The caller always clears `group_name` before asking for Group options, so
+    // `apply_filters` never adds a second copy of the two joins above.
+    apply_filters(
+        query,
+        search,
+        Joined {
+            talkgroup: true,
+            ..Default::default()
+        },
+    )
+    .distinct()
+    .order_by_asc(group::Column::Name)
+    .into_tuple::<String>()
+    .all(db)
+    .await
+}
+
+/// Oldest and newest Call time (unix ms) reachable under `search`, or
+/// `(None, None)` when nothing matches.
+async fn call_time_bounds<C: ConnectionTrait>(
+    db: &C,
+    search: &CallSearch,
+) -> Result<(Option<i64>, Option<i64>), DbErr> {
+    // MIN/MAX stay `BIGINT` on both dialects (unlike SUM, which Postgres widens
+    // to `numeric` — see `total_audio_bytes`), so one decode works for both.
+    Ok(filtered_calls(search)
+        .select_only()
+        .column_as(call::Column::CallAtMs.min(), "start")
+        .column_as(call::Column::CallAtMs.max(), "stop")
+        .into_tuple::<(Option<i64>, Option<i64>)>()
+        .one(db)
+        .await?
+        .unwrap_or((None, None)))
+}
+
+/// The values each filter can usefully take given the *others* already chosen
+/// (#13, spec US 24).
+///
+/// Every dimension is computed with its **own** filter cleared: picking System
+/// 100 narrows the Talkgroup list but leaves the System list complete, so a
+/// choice is always reversible. Only values backed by real Calls are offered —
+/// rdio-scanner populates the same dropdowns from its whole Talkgroup config and
+/// so offers options that search to nothing.
+pub async fn filter_options<C: ConnectionTrait>(
+    db: &C,
+    search: &CallSearch,
+) -> Result<FilterOptions, DbErr> {
+    let without = |mutate: fn(&mut CallSearch)| {
+        let mut cleared = search.clone();
+        mutate(&mut cleared);
+        cleared
+    };
+
+    // A facet row is one (System, Talkgroup, Tag) combination, so each dimension
+    // is that row set collapsed onto its own key. The rows arrive ordered by
+    // (System Ref, Talkgroup Ref), and `dedup_by_key` preserves that order.
+    let systems = dedup_by_key(
+        facet_rows(db, &without(|s| s.system_ref = None)).await?,
+        |row| row.system_ref,
+        |row| SystemOption {
+            r#ref: row.system_ref,
+            label: row.system_label,
+        },
+    );
+
+    let talkgroups = dedup_by_key(
+        facet_rows(db, &without(|s| s.talkgroup_ref = None)).await?,
+        |row| (row.system_ref, row.talkgroup_ref),
+        |row| TalkgroupOption {
+            system_ref: row.system_ref,
+            r#ref: row.talkgroup_ref,
+            label: row.talkgroup_label,
+            tag: row.tag_name,
+        },
+    );
+
+    let mut tags: Vec<String> = facet_rows(db, &without(|s| s.tag_name = None))
+        .await?
+        .into_iter()
+        .filter_map(|row| row.tag_name)
+        .collect();
+    tags.sort();
+    tags.dedup();
+
+    let groups = group_facets(db, &without(|s| s.group_name = None)).await?;
+
+    let (date_start_ms, date_stop_ms) = call_time_bounds(
+        db,
+        &without(|s| {
+            s.after_ms = None;
+            s.before_ms = None;
+        }),
+    )
+    .await?;
+
+    Ok(FilterOptions {
+        systems,
+        talkgroups,
+        groups,
+        tags,
+        date_start_ms,
+        date_stop_ms,
+    })
+}
+
+/// Keep the first row for each distinct `key`, in input order, mapped to the
+/// option it describes.
+fn dedup_by_key<Row, Key, Option_>(
+    rows: Vec<Row>,
+    key: impl Fn(&Row) -> Key,
+    build: impl Fn(Row) -> Option_,
+) -> Vec<Option_>
+where
+    Key: std::hash::Hash + Eq,
+{
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|row| seen.insert(key(row)))
+        .map(build)
+        .collect()
 }
 
 /// The group names a Talkgroup belongs to (assembled in Rust, not via DB-side
@@ -814,6 +1064,16 @@ pub async fn referenced_object_keys<C: ConnectionTrait>(
         .collect())
 }
 
+/// A stored Call's own row, without the denormalizing joins — for the paths
+/// that need a column the [`StoredCall`] view doesn't carry (the download's
+/// `audio_name`).
+pub async fn find_call<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<call::Model>, DbErr> {
+    call::Entity::find_by_id(id).one(db).await
+}
+
 /// The object key + mime for a call's audio (the serve path — lightweight).
 pub async fn get_call_audio<C: ConnectionTrait>(
     db: &C,
@@ -834,57 +1094,123 @@ pub async fn stored_call<C: ConnectionTrait>(
     let Some(call) = call::Entity::find_by_id(id).one(db).await? else {
         return Ok(None);
     };
+    Ok(stored_calls(db, std::slice::from_ref(&call)).await?.pop())
+}
 
-    let (system_ref, system_label) =
-        match system::Entity::find_by_id(call.system_id).one(db).await? {
-            Some(s) => (s.r#ref, s.label),
-            None => (0, None),
-        };
-    let (talkgroup_ref, talkgroup_label, tag_id) =
-        match talkgroup::Entity::find_by_id(call.talkgroup_id)
-            .one(db)
-            .await?
-        {
-            Some(t) => (t.r#ref, t.label, t.tag_id),
-            None => (0, None, None),
-        };
-    let talkgroup_tag = match tag_id {
-        Some(tid) => tag::Entity::find_by_id(tid).one(db).await?.map(|t| t.name),
-        None => None,
-    };
-    let talkgroup_group = groups_for_talkgroup(db, call.talkgroup_id)
-        .await?
-        .into_iter()
-        .next();
+/// Denormalize a whole page of Calls in a fixed number of queries — five, no
+/// matter how many Calls — rather than five *per Call*.
+///
+/// This is what lets `GET /api/calls` answer with ready-to-render, ready-to-play
+/// results. rdio-scanner instead returns bare ids and has the client re-request
+/// every Call it wants to display, which is an N+1 over its WebSocket and the
+/// single worst part of its archive UX on a Pi. Results come back in the order
+/// they were given.
+pub async fn stored_calls<C: ConnectionTrait>(
+    db: &C,
+    calls: &[call::Model],
+) -> Result<Vec<StoredCall>, DbErr> {
+    use std::collections::HashMap;
 
-    // Patched talkgroup Refs (rdio `patches[]`): carried on the wire and used for
-    // live-feed patch fanout (#9). Ordered for a stable payload.
-    let patches = call_patch::Entity::find()
-        .filter(call_patch::Column::CallId.eq(call.id))
-        .order_by_asc(call_patch::Column::TalkgroupRef)
+    if calls.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let system_ids = distinct(calls.iter().map(|c| c.system_id));
+    let systems: HashMap<i64, system::Model> = system::Entity::find()
+        .filter(system::Column::Id.is_in(system_ids))
         .all(db)
         .await?
         .into_iter()
-        .map(|p| p.talkgroup_ref)
+        .map(|s| (s.id, s))
         .collect();
 
-    Ok(Some(StoredCall {
-        id: call.id,
-        system_ref,
-        system_label,
-        talkgroup_ref,
-        talkgroup_label,
-        talkgroup_group,
-        talkgroup_tag,
-        patches,
-        frequency: call.frequency,
-        source: call.source_ref,
-        date_time: None,
-        timestamp: Some(call.call_at_ms),
-        audio_mime: call.audio_mime,
-        object_key: call.object_key,
-        audio_url: format!("/api/call/{}/audio", call.id),
-    }))
+    let talkgroup_ids = distinct(calls.iter().map(|c| c.talkgroup_id));
+    let talkgroups: HashMap<i64, talkgroup::Model> = talkgroup::Entity::find()
+        .filter(talkgroup::Column::Id.is_in(talkgroup_ids.clone()))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|t| (t.id, t))
+        .collect();
+
+    let tag_ids = distinct(talkgroups.values().filter_map(|t| t.tag_id));
+    let tags: HashMap<i64, String> = tag::Entity::find()
+        .filter(tag::Column::Id.is_in(tag_ids))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|t| (t.id, t.name))
+        .collect();
+
+    // A Talkgroup may be in several Groups; the view carries one, and the
+    // alphabetically-first is the stable pick. Ordering in SQL means "first
+    // wins" here.
+    let mut group_of: HashMap<i64, String> = HashMap::new();
+    for (talkgroup_id, name) in talkgroup_group::Entity::find()
+        .select_only()
+        .column(talkgroup_group::Column::TalkgroupId)
+        .column_as(group::Column::Name, "name")
+        .join(JoinType::InnerJoin, talkgroup_group::Relation::Group.def())
+        .filter(talkgroup_group::Column::TalkgroupId.is_in(talkgroup_ids))
+        .order_by_asc(group::Column::Name)
+        .into_tuple::<(i64, String)>()
+        .all(db)
+        .await?
+    {
+        group_of.entry(talkgroup_id).or_insert(name);
+    }
+
+    // Patched Talkgroup Refs (rdio `patches[]`): carried on the wire and used for
+    // live-feed patch fanout (#9). Ordered for a stable payload.
+    let mut patches_of: HashMap<CallId, Vec<i64>> = HashMap::new();
+    for patch in call_patch::Entity::find()
+        .filter(call_patch::Column::CallId.is_in(calls.iter().map(|c| c.id)))
+        .order_by_asc(call_patch::Column::TalkgroupRef)
+        .all(db)
+        .await?
+    {
+        patches_of
+            .entry(patch.call_id)
+            .or_default()
+            .push(patch.talkgroup_ref);
+    }
+
+    Ok(calls
+        .iter()
+        .map(|call| {
+            let system = systems.get(&call.system_id);
+            let talkgroup = talkgroups.get(&call.talkgroup_id);
+            StoredCall {
+                id: call.id,
+                // A Call always has a System and a Talkgroup (`RESTRICT` foreign
+                // keys), so these fallbacks are belt-and-braces, not a real case.
+                system_ref: system.map_or(0, |s| s.r#ref),
+                system_label: system.and_then(|s| s.label.clone()),
+                talkgroup_ref: talkgroup.map_or(0, |t| t.r#ref),
+                talkgroup_label: talkgroup.and_then(|t| t.label.clone()),
+                talkgroup_group: group_of.get(&call.talkgroup_id).cloned(),
+                talkgroup_tag: talkgroup
+                    .and_then(|t| t.tag_id)
+                    .and_then(|tag_id| tags.get(&tag_id).cloned()),
+                patches: patches_of.remove(&call.id).unwrap_or_default(),
+                frequency: call.frequency,
+                source: call.source_ref,
+                date_time: None,
+                timestamp: Some(call.call_at_ms),
+                audio_mime: call.audio_mime.clone(),
+                object_key: call.object_key.clone(),
+                audio_url: format!("/api/call/{}/audio", call.id),
+            }
+        })
+        .collect())
+}
+
+/// The distinct values of an iterator, order-insensitive — the `IN (…)` list for
+/// a batched lookup.
+fn distinct(ids: impl Iterator<Item = i64>) -> Vec<i64> {
+    ids.collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// The System Ref for a Trunk Recorder `short_name` (which carries no numeric

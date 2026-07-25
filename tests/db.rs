@@ -250,11 +250,22 @@ async fn seed_sized_call(
     .id
 }
 
-/// Seed a self-contained dataset and assert cascading filters + DISTINCT +
-/// newest-first ordering. Run identically on both dialects.
+/// Seed a self-contained dataset and assert the whole archive-search surface —
+/// cascading filters, DISTINCT, ordering, paging, the total count, the batched
+/// Call view, and the cascading filter options. Run identically on both
+/// dialects: every query here is one ADR-0003 flags as divergence-prone.
 async fn run_search_suite(db: &DatabaseConnection) {
-    // system 100 "Alpha": tg1 tag Fire {Emergency}, tg2 tag Law {Emergency,Public}
-    // system 200 "Beta":  tg1 tag Fire {Public}
+    let (a, b, c, d) = seed_search_dataset(db).await;
+    assert_search_filters(db, a, b, c, d).await;
+    assert_sort_and_count(db, a, b, c, d).await;
+    assert_batched_call_view(db).await;
+    assert_cascading_filter_options(db).await;
+}
+
+/// The dataset every search assertion below reads:
+/// - system 100 "Alpha": tg1 tag Fire {Emergency}, tg2 tag Law {Emergency,Public}
+/// - system 200 "Beta":  tg1 tag Fire {Public}
+async fn seed_search_dataset(db: &DatabaseConnection) -> (i64, i64, i64, i64) {
     let a = seed_call(db, 100, "Alpha", 1, "Fire", &["Emergency"], 1000, "a").await;
     let b = seed_call(
         db,
@@ -269,7 +280,10 @@ async fn run_search_suite(db: &DatabaseConnection) {
     .await;
     let c = seed_call(db, 200, "Beta", 1, "Fire", &["Public"], 3000, "c").await;
     let d = seed_call(db, 100, "Alpha", 1, "Fire", &["Emergency"], 4000, "d").await;
+    (a, b, c, d)
+}
 
+async fn assert_search_filters(db: &DatabaseConnection, a: i64, b: i64, c: i64, d: i64) {
     // No filter -> all, newest first.
     assert_eq!(ids(db, search_base()).await, vec![d, c, b, a]);
 
@@ -912,4 +926,292 @@ async fn audio_size_migration_converges_on_databases_that_predate_the_column() {
     .await
     .expect("insert a call carrying an audio size");
     assert_eq!(repo::total_audio_bytes(&db).await.unwrap(), 4096);
+}
+
+// ---------------------------------------------------------------------------
+// Archive search (#13): sort order, total count, the batched Call view, and
+// cascading filter options. These run under `run_search_suite` on both dialects.
+// ---------------------------------------------------------------------------
+
+/// Playback mode walks a filtered result set forwards in time, so oldest-first
+/// is a first-class sort — not just a reversed page. Alongside it, the result
+/// count a paginator needs: how many Calls match, independent of the page.
+async fn assert_sort_and_count(db: &DatabaseConnection, a: i64, b: i64, c: i64, d: i64) {
+    assert_eq!(
+        ids(
+            db,
+            repo::CallSearch {
+                sort: repo::CallSort::Oldest,
+                ..repo::CallSearch::default()
+            }
+        )
+        .await,
+        vec![a, b, c, d]
+    );
+    // Paging an oldest-first search keeps the same order.
+    assert_eq!(
+        ids(
+            db,
+            repo::CallSearch {
+                sort: repo::CallSort::Oldest,
+                limit: 2,
+                offset: 1,
+                ..repo::CallSearch::default()
+            }
+        )
+        .await,
+        vec![b, c]
+    );
+    // Newest-first stays the default.
+    assert_eq!(repo::CallSearch::default().sort, repo::CallSort::Newest);
+
+    let all = repo::CallSearch::default();
+    assert_eq!(repo::count_calls(db, &all).await.unwrap(), 4);
+
+    // A page window never changes the total.
+    let paged = repo::CallSearch {
+        limit: 2,
+        offset: 2,
+        ..repo::CallSearch::default()
+    };
+    assert_eq!(repo::count_calls(db, &paged).await.unwrap(), 4);
+
+    // Filters do.
+    let tagged = repo::CallSearch {
+        tag_name: Some("Fire".into()),
+        ..repo::CallSearch::default()
+    };
+    assert_eq!(repo::count_calls(db, &tagged).await.unwrap(), 3);
+
+    // A talkgroup in two groups is still counted once (DISTINCT).
+    let grouped = repo::CallSearch {
+        group_name: Some("Emergency".into()),
+        ..repo::CallSearch::default()
+    };
+    assert_eq!(repo::count_calls(db, &grouped).await.unwrap(), 3);
+
+    // No matches -> zero, not an error.
+    let none = repo::CallSearch {
+        system_ref: Some(999),
+        ..repo::CallSearch::default()
+    };
+    assert_eq!(repo::count_calls(db, &none).await.unwrap(), 0);
+
+    // An offset with no limit skips ahead and returns the rest — SQLite rejects
+    // OFFSET without LIMIT, so the query supplies an unbounded one.
+    assert_eq!(
+        ids(
+            db,
+            repo::CallSearch {
+                offset: 1,
+                ..repo::CallSearch::default()
+            }
+        )
+        .await,
+        vec![c, b, a]
+    );
+}
+
+/// A search page is denormalized in one batch rather than per Call. rdio-scanner
+/// returns bare ids and makes the client fetch each Call separately (N+1 over
+/// its WebSocket); a page here arrives ready to render and play.
+async fn assert_batched_call_view(db: &DatabaseConnection) {
+    let page = repo::search_calls(db, &repo::CallSearch::default())
+        .await
+        .unwrap();
+    let batched = repo::stored_calls(db, &page).await.unwrap();
+
+    // Same order as the page, and each entry equals the single-Call view.
+    assert_eq!(batched.len(), page.len());
+    for (row, view) in page.iter().zip(&batched) {
+        let single = repo::stored_call(db, row.id).await.unwrap().unwrap();
+        assert_eq!(view.id, row.id);
+        assert_eq!(view.system_ref, single.system_ref);
+        assert_eq!(view.system_label, single.system_label);
+        assert_eq!(view.talkgroup_ref, single.talkgroup_ref);
+        assert_eq!(view.talkgroup_label, single.talkgroup_label);
+        assert_eq!(view.talkgroup_tag, single.talkgroup_tag);
+        assert_eq!(view.talkgroup_group, single.talkgroup_group);
+        assert_eq!(view.patches, single.patches);
+        assert_eq!(view.audio_url, single.audio_url);
+        assert_eq!(view.timestamp, single.timestamp);
+    }
+
+    // Spot-check the join actually resolved (not just "both are empty").
+    let newest = &batched[0];
+    assert_eq!(newest.system_label.as_deref(), Some("Alpha"));
+    assert_eq!(newest.talkgroup_tag.as_deref(), Some("Fire"));
+    assert_eq!(newest.talkgroup_group.as_deref(), Some("Emergency"));
+
+    // An empty page needs no queries and yields nothing.
+    assert!(repo::stored_calls(db, &[]).await.unwrap().is_empty());
+
+    // A Call that isn't there has no view (the live feed's not-found path).
+    assert!(repo::stored_call(db, 999_999).await.unwrap().is_none());
+}
+
+/// Patches ride along on a batched page, keyed to the right Call.
+#[tokio::test]
+async fn stored_calls_attaches_patches_to_the_right_call() {
+    let (db, _dir) = sqlite().await;
+    let plain = seed_call(&db, 100, "Alpha", 1, "Fire", &["Emergency"], 1000, "a").await;
+    let patched = repo::insert_call(
+        &db,
+        &repo::NewCall {
+            system_ref: 100,
+            talkgroup_ref: 2,
+            call_at_ms: 2000,
+            object_key: "p.wav".into(),
+            patches: vec![9002, 9001],
+            ..Default::default()
+        },
+        true,
+        NOW,
+    )
+    .await
+    .unwrap()
+    .id;
+
+    let page = repo::search_calls(&db, &repo::CallSearch::default())
+        .await
+        .unwrap();
+    let views = repo::stored_calls(&db, &page).await.unwrap();
+
+    let by_id = |id: i64| views.iter().find(|v| v.id == id).unwrap();
+    assert_eq!(by_id(patched).patches, vec![9001, 9002]); // ordered
+    assert!(by_id(plain).patches.is_empty());
+}
+
+/// Cascading filters: each dimension's options are computed from the *other*
+/// active filters, so picking a System narrows the Talkgroup list while the
+/// System list stays switchable. Only values that actually have Calls are
+/// offered — rdio-scanner builds these lists from its whole config, so it
+/// happily offers Talkgroups with nothing to show.
+async fn assert_cascading_filter_options(db: &DatabaseConnection) {
+    // Unfiltered: everything with at least one Call.
+    let all = repo::filter_options(db, &repo::CallSearch::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        all.systems.iter().map(|s| s.r#ref).collect::<Vec<_>>(),
+        vec![100, 200]
+    );
+    assert_eq!(
+        all.talkgroups
+            .iter()
+            .map(|t| (t.system_ref, t.r#ref))
+            .collect::<Vec<_>>(),
+        vec![(100, 1), (100, 2), (200, 1)]
+    );
+    assert_eq!(all.groups, vec!["Emergency", "Public"]);
+    assert_eq!(all.tags, vec!["Fire", "Law"]);
+    assert_eq!(all.date_start_ms, Some(1000));
+    assert_eq!(all.date_stop_ms, Some(4000));
+
+    // Pick System 100: its Talkgroups only...
+    let by_system = repo::filter_options(
+        db,
+        &repo::CallSearch {
+            system_ref: Some(100),
+            ..repo::CallSearch::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        by_system
+            .talkgroups
+            .iter()
+            .map(|t| (t.system_ref, t.r#ref))
+            .collect::<Vec<_>>(),
+        vec![(100, 1), (100, 2)]
+    );
+    // ...but the System list itself stays complete, so the choice is reversible.
+    assert_eq!(
+        by_system
+            .systems
+            .iter()
+            .map(|s| s.r#ref)
+            .collect::<Vec<_>>(),
+        vec![100, 200]
+    );
+
+    // Pick Tag "Law": only the Talkgroup/Group that carry it, and the Tag list
+    // stays complete.
+    let by_tag = repo::filter_options(
+        db,
+        &repo::CallSearch {
+            tag_name: Some("Law".into()),
+            ..repo::CallSearch::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        by_tag
+            .talkgroups
+            .iter()
+            .map(|t| (t.system_ref, t.r#ref))
+            .collect::<Vec<_>>(),
+        vec![(100, 2)]
+    );
+    assert_eq!(by_tag.groups, vec!["Emergency", "Public"]); // tg2 is in both
+    assert_eq!(by_tag.tags, vec!["Fire", "Law"]);
+    assert_eq!(
+        by_tag.systems.iter().map(|s| s.r#ref).collect::<Vec<_>>(),
+        vec![100]
+    );
+
+    // Talkgroup labels/tags ride along so the client needs no second lookup.
+    let tg = by_tag.talkgroups.first().unwrap();
+    assert_eq!(tg.tag.as_deref(), Some("Law"));
+    assert_eq!(tg.label.as_deref(), Some("2"));
+
+    // The offered date range describes what the *other* filters can reach, so
+    // narrowing the range never collapses the picker's own bounds.
+    let narrowed = repo::filter_options(
+        db,
+        &repo::CallSearch {
+            after_ms: Some(2500),
+            before_ms: Some(3500),
+            ..repo::CallSearch::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(narrowed.date_start_ms, Some(1000));
+    assert_eq!(narrowed.date_stop_ms, Some(4000));
+
+    // A System filter *does* move the bounds (System 200 has one Call at 3000).
+    assert_eq!(by_system_bounds(db, 200).await, (Some(3000), Some(3000)));
+}
+
+async fn by_system_bounds(db: &DatabaseConnection, system_ref: i64) -> (Option<i64>, Option<i64>) {
+    let options = repo::filter_options(
+        db,
+        &repo::CallSearch {
+            system_ref: Some(system_ref),
+            ..repo::CallSearch::default()
+        },
+    )
+    .await
+    .unwrap();
+    (options.date_start_ms, options.date_stop_ms)
+}
+
+/// An empty archive answers with empty option lists and no date bounds rather
+/// than erroring — the Search screen must render on a fresh install.
+#[tokio::test]
+async fn filter_options_on_an_empty_archive_are_empty() {
+    let (db, _dir) = sqlite().await;
+    let options = repo::filter_options(&db, &repo::CallSearch::default())
+        .await
+        .unwrap();
+
+    assert!(options.systems.is_empty());
+    assert!(options.talkgroups.is_empty());
+    assert!(options.groups.is_empty());
+    assert!(options.tags.is_empty());
+    assert_eq!(options.date_start_ms, None);
+    assert_eq!(options.date_stop_ms, None);
 }

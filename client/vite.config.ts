@@ -38,14 +38,14 @@ export default defineConfig({
         'src/components/ui/**',
         'src/**/*.d.ts',
       ],
-      // Ratcheting project floor (ADR-0010): below the measured baseline
-      // (~94%), only ever raised. Per-file 100% on pure logic (store/lib) can be
-      // added once those modules stabilize.
+      // Ratcheting project floor (ADR-0010): below the measured baseline, only
+      // ever raised. Raised with #13 (archive search), which took the measured
+      // numbers to 100% lines/statements/functions and ~94% branches.
       thresholds: {
-        lines: 85,
-        functions: 85,
-        statements: 85,
-        branches: 80,
+        lines: 95,
+        functions: 95,
+        statements: 95,
+        branches: 88,
       },
     },
   },
