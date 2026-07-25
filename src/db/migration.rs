@@ -20,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0001_init::Migration),
             Box::new(m0002_api_keys::Migration),
             Box::new(m0003_call_audio_size::Migration),
+            Box::new(m0004_system_auto_populate::Migration),
         ]
     }
 }
@@ -251,6 +252,79 @@ mod m0003_call_audio_size {
                         .to_owned(),
                 )
                 .await
+        }
+    }
+}
+
+/// #8 added `auto_populate` and `blacklist` to the System *entity*, which gave
+/// every **new** database the columns (m0001 generates its DDL from the live
+/// entities) and every **existing** one nothing at all. On a real upgrade that
+/// surfaced as `no such column: systems.auto_populate` — an HTTP 500 on every
+/// ingest, with the recorder logging an upload error and dropping the Call.
+///
+/// The guard is the same one m0003 needed: probe before altering, because a
+/// fresh database already has the columns from m0001. This is the standing tax
+/// on entity-derived DDL, and any future column on an entity-derived table owes
+/// the same migration.
+mod m0004_system_auto_populate {
+    use super::*;
+
+    const TABLE: &str = "systems";
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0004_system_auto_populate"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column(TABLE, "auto_populate").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(system::Entity)
+                            .add_column(
+                                ColumnDef::new(system::Column::AutoPopulate)
+                                    .boolean()
+                                    .not_null()
+                                    // Per-system opt-in is off by default; the
+                                    // global toggle is what a zero-config
+                                    // install runs on (#8).
+                                    .default(false),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_column(TABLE, "blacklist").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(system::Entity)
+                            .add_column(ColumnDef::new(system::Column::Blacklist).string().null())
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            for column in [system::Column::AutoPopulate, system::Column::Blacklist] {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(system::Entity)
+                            .drop_column(column)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
         }
     }
 }

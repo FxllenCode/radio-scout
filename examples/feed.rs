@@ -30,6 +30,10 @@ use std::time::Duration;
 /// Sample rate. 8 kHz mono is what a trunked-radio recorder produces.
 const SAMPLE_RATE: u32 = 8_000;
 
+/// How far apart burst Calls are timestamped. Comfortably past the ±500 ms
+/// dedup window in `IngestConfig`, so a burst lands instead of being rejected.
+const DEDUP_CLEARANCE_MS: i64 = 2_000;
+
 struct Options {
     server: String,
     key: String,
@@ -123,9 +127,15 @@ async fn send_call(
 
     // Unix millis. `timestamp` is what rdio's parser reads; the recorder sends
     // seconds *or* millis and our ingest normalizes (see src/ingest.rs).
+    //
+    // Staggered by index: dedup rejects a second Call on the same
+    // System+Talkgroup within ±500 ms of the *supplied* time (ADR-0001), so a
+    // burst sent in one breath would be thrown away as duplicates. Spacing them
+    // like real transmissions is what makes `--burst` fill a queue.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis() as i64;
+        .as_millis() as i64
+        + index as i64 * DEDUP_CLEARANCE_MS;
 
     let mut form = reqwest::multipart::Form::new()
         .text("key", options.key.clone())

@@ -997,6 +997,67 @@ async fn audio_size_migration_converges_on_databases_that_predate_the_column() {
     assert_eq!(repo::total_audio_bytes(&db).await.unwrap(), 4096);
 }
 
+/// The same trap, one release earlier: #8 added `systems.auto_populate` and
+/// `systems.blacklist` to the *entity*, so a fresh database got them from
+/// `create_table_from_entity` while a database created before #8 did not — and
+/// nothing altered the existing table. The result on a real upgrade was
+/// **HTTP 500 on every ingest** (`no such column: systems.auto_populate`), with
+/// the recorder logging an upload error and dropping the Call.
+#[tokio::test]
+async fn auto_populate_migration_converges_on_databases_that_predate_the_columns() {
+    use radio_scout::db::migration::Migrator;
+    use sea_orm::{ConnectionTrait, Database};
+    use sea_orm_migration::MigratorTrait;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+    let db = Database::connect(&url).await.expect("connect");
+
+    Migrator::up(&db, Some(2)).await.expect("migrate to m0002");
+    for column in ["auto_populate", "blacklist"] {
+        db.execute_unprepared(&format!("ALTER TABLE systems DROP COLUMN {column}"))
+            .await
+            .expect("reproduce the pre-#8 schema");
+    }
+
+    Migrator::up(&db, None)
+        .await
+        .expect("migrate the rest of the way");
+
+    // Ingest works again: reading the policy is what blew up (it selects the
+    // whole System row), and a Call for an unknown System lands instead.
+    let disposition = repo::ingest_disposition(&db, 11, 54241, true)
+        .await
+        .expect("read the auto-populate policy");
+    assert!(matches!(disposition, repo::Disposition::Store { .. }));
+
+    let stored = repo::insert_call(
+        &db,
+        &repo::NewCall {
+            system_ref: 11,
+            talkgroup_ref: 54241,
+            call_at_ms: NOW,
+            object_key: "aa/1.wav".into(),
+            ..Default::default()
+        },
+        true,
+        NOW,
+    )
+    .await
+    .expect("insert a call into an upgraded database");
+    assert!(stored.id > 0);
+
+    // And the columns carry their documented defaults, not NULL.
+    let sys = system::Entity::find()
+        .filter(system::Column::Ref.eq(11))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("the auto-created System");
+    assert!(!sys.auto_populate, "per-system opt-in defaults off");
+    assert_eq!(sys.blacklist, None);
+}
+
 // ---------------------------------------------------------------------------
 // Archive search (#13): sort order, total count, the batched Call view, and
 // cascading filter options. These run under `run_search_suite` on both dialects.
