@@ -15,6 +15,8 @@ Audio is served through Radio-Scout's own `GET /api/call/:id/audio` endpoint **w
 
 **Write/delete ordering (consistency):** ingest writes the audio object **then** inserts the DB row (a row always has its audio); pruning deletes the DB row **then** the object (an archive row never points at missing audio). A periodic **orphan-GC** sweep removes any object with no row. This prevents both dangling rows (playback 404s) and orphaned blobs.
 
+**Orphan-GC needs a write grace period** (#10). The write ordering above means an object legitimately has no row for the span between the two writes, so an unconditional "no row → delete" sweep would race in-flight ingests and delete a live Call's audio. GC therefore only reclaims objects whose last write is older than a configurable grace period (default 1 h, comfortably longer than any ingest). Retention also records each Call's `audio_size` at ingest, so the optional total-size cap is one `SUM()` rather than a stat per object — which on a remote S3/Garage store would be a network round-trip each, every sweep.
+
 ## Consequences
 
 - The database stays small regardless of archive size, which is what makes SQLite viable as the default (see [ADR-0003](0003-database-sqlite-postgres.md)).

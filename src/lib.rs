@@ -10,6 +10,7 @@ pub mod call;
 pub mod db;
 pub mod ingest;
 pub mod live;
+pub mod retention;
 pub mod web;
 
 use std::sync::Arc;
@@ -239,6 +240,18 @@ fn parse_range_header(value: Option<&HeaderValue>, size: u64) -> RangeOutcome {
 /// `GET /healthz` — liveness probe.
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Wall-clock time in unix milliseconds — the crate's one clock reading.
+///
+/// Milliseconds since the epoch is how every timestamp is stored and compared
+/// (dialect-agnostic, see `db::entities::call`). A clock before 1970 reads as 0
+/// rather than panicking; nothing here is worth killing a scanner over.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since_epoch| since_epoch.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -144,6 +144,36 @@ async fn ingest_persists_the_full_field_set() {
     assert_eq!(call_patch::Entity::find().count(&db).await.unwrap(), 2);
 }
 
+/// The stored row carries the audio's byte length (#10). Retention's size cap
+/// sums this column instead of stat-ing every object on each sweep — an O(1)
+/// query on a Pi, and no per-object network round-trip on an S3 backend.
+#[tokio::test]
+async fn ingest_records_the_audio_byte_size() {
+    let (addr, db, _tmp) = spawn().await;
+    repo::create_api_key(&db, "k", None, None, 0).await.unwrap();
+
+    let audio = reqwest::multipart::Part::bytes(vec![7u8; 4096])
+        .file_name("call.wav")
+        .mime_str("audio/x-wav")
+        .unwrap();
+    let form = reqwest::multipart::Form::new()
+        .text("key", "k")
+        .text("system", "11")
+        .text("talkgroup", "54241")
+        .text("timestamp", "1000")
+        .part("audio", audio);
+
+    let (status, body) = post(&addr, form).await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let stored = call::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("call row");
+    assert_eq!(stored.audio_size, Some(4096));
+}
+
 async fn post_tr(addr: &str, meta_json: &str, audio: &[u8]) -> (u16, String) {
     let audio = reqwest::multipart::Part::bytes(audio.to_vec())
         .file_name("call.m4a")
@@ -190,6 +220,8 @@ async fn trunk_recorder_upload_persists_call_and_maps_meta() {
         stored.call_at_ms, 1669740338000,
         "start_time used, not now()"
     );
+    // The native TR endpoint records the audio size too (#10) — `b"audio-bytes"`.
+    assert_eq!(stored.audio_size, Some(11));
 
     // rdio field mapping: talkgroup_tag->label, description->name, group_tag->tag.
     let tg = talkgroup::Entity::find_by_id(stored.talkgroup_id)

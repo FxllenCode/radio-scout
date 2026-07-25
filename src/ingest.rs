@@ -16,7 +16,6 @@
 //! which likewise 200s and drops the call asynchronously.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
@@ -24,8 +23,8 @@ use axum::response::{IntoResponse, Response};
 use sea_orm::TransactionTrait;
 use serde::Deserialize;
 
-use crate::AppState;
 use crate::db::repo::{self, NewCall, NewCallFrequency, NewCallUnit};
+use crate::{AppState, now_ms};
 
 const CALL_IMPORTED: &str = "Call imported successfully.\n";
 const DUPLICATE_REJECTED: &str = "duplicate call rejected\n";
@@ -168,6 +167,8 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
         object_key: String::new(),
         audio_mime: upload.audio_mime,
         audio_name: upload.audio_name,
+        // Both filled in by `ingest_call` once the object is written.
+        audio_size: None,
         duration_ms: None,
         patches: parse_patches(upload.patches.as_deref()),
         units: parse_units(
@@ -244,6 +245,10 @@ async fn ingest_call(
         uuid,
         audio_extension(&new_call.audio_name)
     );
+
+    // The byte length rides along on the row so retention's size cap is a `SUM()`
+    // rather than a stat per object (#10).
+    new_call.audio_size = Some(audio.len() as i64);
 
     // Write the audio object first (ADR-0001); a failed DB insert afterward leaves
     // an orphan the GC sweep reclaims (#10).
@@ -486,6 +491,7 @@ fn build_tr_call(
         object_key: String::new(),
         audio_mime,
         audio_name,
+        audio_size: None,
         duration_ms: None,
         patches,
         units,
@@ -508,14 +514,6 @@ fn server_error(stage: &str, err: sea_orm::DbErr) -> Response {
         format!("ingest {stage} failed: {err}\n"),
     )
         .into_response()
-}
-
-/// Current unix time in milliseconds.
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// Parse a decimal integer field, tolerating surrounding whitespace.

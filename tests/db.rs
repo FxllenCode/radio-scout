@@ -158,21 +158,96 @@ async fn insert_call_persists_call_with_children() {
 }
 
 #[tokio::test]
-async fn search_calls_filters_on_sqlite() {
+async fn dialect_sensitive_queries_on_sqlite() {
     let (db, _dir) = sqlite().await;
     run_search_suite(&db).await;
+    run_retention_suite(&db).await;
 }
 
-/// The archive-search + Group aggregation on Postgres — the highest
-/// dialect-divergence risk. Runs only when CI provides a fresh Postgres.
+/// The archive-search + Group aggregation and retention's `SUM(audio_size)` on
+/// Postgres — the two highest dialect-divergence risks (ADR-0003). Both run in
+/// one test because they share the single CI-provisioned database. Runs only
+/// when CI provides a fresh Postgres.
 #[tokio::test]
-async fn search_calls_filters_on_postgres_when_available() {
+async fn dialect_sensitive_queries_on_postgres_when_available() {
     let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
         eprintln!("skipping Postgres dual-dialect test: TEST_POSTGRES_URL unset (needs Docker/CI)");
         return;
     };
     let db = db::connect(&url).await.expect("connect + migrate postgres");
     run_search_suite(&db).await;
+    run_retention_suite(&db).await;
+}
+
+/// Retention's queries (#10), run identically on both dialects. The size total
+/// is the divergence that matters: Postgres widens `SUM(bigint)` to `numeric`
+/// while SQLite keeps it an integer, so the query casts.
+///
+/// Runs *after* [`run_search_suite`] and builds on the calls it seeded — those
+/// have no recorded `audio_size`, which is exactly the NULL-tolerance case.
+async fn run_retention_suite(db: &DatabaseConnection) {
+    let seeded_without_sizes = repo::referenced_object_keys(db).await.unwrap().len();
+    assert_eq!(
+        repo::total_audio_bytes(db).await.unwrap(),
+        0,
+        "rows with no recorded size count as zero, not as an error"
+    );
+
+    let big = seed_sized_call(db, 900, 1, 1_000, 5_000, "big").await;
+    let small = seed_sized_call(db, 900, 2, 24, 6_000, "small").await;
+    assert_eq!(repo::total_audio_bytes(db).await.unwrap(), 1024);
+    assert_eq!(
+        repo::referenced_object_keys(db).await.unwrap().len(),
+        seeded_without_sizes + 2
+    );
+
+    // Oldest-first paging, both by age and unconditionally.
+    let aged = repo::calls_older_than(db, 5_500, 100).await.unwrap();
+    assert!(aged.iter().any(|c| c.id == big), "the 5000ms call aged out");
+    assert!(
+        !aged.iter().any(|c| c.id == small),
+        "the 6000ms call did not"
+    );
+    assert_eq!(
+        repo::oldest_calls(db, 1).await.unwrap().len(),
+        1,
+        "paging honours the limit"
+    );
+
+    // Deleting drops the rows and the keys they referenced, and the total with them.
+    assert_eq!(repo::delete_calls(db, &[big, small]).await.unwrap(), 2);
+    assert_eq!(repo::total_audio_bytes(db).await.unwrap(), 0);
+    assert_eq!(
+        repo::referenced_object_keys(db).await.unwrap().len(),
+        seeded_without_sizes
+    );
+}
+
+/// A call with a recorded audio size, for the retention suite.
+async fn seed_sized_call(
+    db: &DatabaseConnection,
+    system_ref: i64,
+    talkgroup_ref: i64,
+    audio_size: i64,
+    at_ms: i64,
+    key: &str,
+) -> i64 {
+    repo::insert_call(
+        db,
+        &repo::NewCall {
+            system_ref,
+            talkgroup_ref,
+            call_at_ms: at_ms,
+            object_key: format!("{key}.wav"),
+            audio_size: Some(audio_size),
+            ..Default::default()
+        },
+        true,
+        NOW,
+    )
+    .await
+    .unwrap()
+    .id
 }
 
 /// Seed a self-contained dataset and assert cascading filters + DISTINCT +
@@ -773,4 +848,68 @@ async fn recent_calls_since_is_bounded_newest_and_ascending() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Retention's batch delete is fed a page at a time, and an empty page must be a
+/// no-op rather than an `IN ()` the dialects disagree about (#10).
+#[tokio::test]
+async fn deleting_no_calls_is_a_no_op() {
+    let (db, _dir) = sqlite().await;
+    assert_eq!(repo::delete_calls(&db, &[]).await.unwrap(), 0);
+}
+
+/// `SUM` over no rows is NULL, not 0 — a fresh install must report an empty
+/// archive rather than failing the first sweep (#10). Sizes and NULL rows are
+/// covered dual-dialect in [`run_retention_suite`].
+#[tokio::test]
+async fn total_audio_bytes_of_an_empty_archive_is_zero() {
+    let (db, _dir) = sqlite().await;
+    assert_eq!(repo::total_audio_bytes(&db).await.unwrap(), 0);
+}
+
+/// `m0001_init` generates its DDL from the *live* entity definitions, so adding
+/// `audio_size` to `call::Model` retroactively put the column in m0001 too: a
+/// fresh database already has it by the time m0003 runs, while a database
+/// migrated before the field existed does not. Both must land on the same
+/// schema, which is why m0003 checks before it alters (#10).
+///
+/// Every other test covers the fresh-database branch. This one reproduces the
+/// older shape — migrate to m0002, then take the column away — and asserts the
+/// migration puts it back and that retention can use it.
+#[tokio::test]
+async fn audio_size_migration_converges_on_databases_that_predate_the_column() {
+    use radio_scout::db::migration::Migrator;
+    use sea_orm::{ConnectionTrait, Database};
+    use sea_orm_migration::MigratorTrait;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+    let db = Database::connect(&url).await.expect("connect");
+
+    Migrator::up(&db, Some(2)).await.expect("migrate to m0002");
+    db.execute_unprepared("ALTER TABLE calls DROP COLUMN audio_size")
+        .await
+        .expect("reproduce the pre-m0003 schema");
+
+    Migrator::up(&db, None)
+        .await
+        .expect("migrate the rest of the way");
+
+    // The column is back, and the size cap can read it.
+    repo::insert_call(
+        &db,
+        &repo::NewCall {
+            system_ref: 11,
+            talkgroup_ref: 54241,
+            call_at_ms: NOW,
+            object_key: "aa/1.wav".into(),
+            audio_size: Some(4096),
+            ..Default::default()
+        },
+        true,
+        NOW,
+    )
+    .await
+    .expect("insert a call carrying an audio size");
+    assert_eq!(repo::total_audio_bytes(&db).await.unwrap(), 4096);
 }

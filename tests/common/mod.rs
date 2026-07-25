@@ -51,6 +51,26 @@ pub async fn spawn_with_heartbeat(
     (addr, dbc, tmp)
 }
 
+/// Like [`spawn`] but also hands back the blob store the app writes audio to, so
+/// a test can drive retention (#10) over the same store ingest used and assert
+/// that objects — not just rows — went away.
+pub async fn spawn_with_store() -> (
+    String,
+    DatabaseConnection,
+    Arc<BlobStore>,
+    tempfile::TempDir,
+) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let audio = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob"));
+    let dbc = connect_db(tmp.path()).await;
+    let app = build_app(AppState::new(
+        audio.clone(),
+        dbc.clone(),
+        IngestConfig::default(),
+    ));
+    (serve(app).await, dbc, audio, tmp)
+}
+
 /// Bring up the app with a specific blob backend (e.g. an S3-backed store to
 /// exercise the presigned-redirect serve path); the SQLite DB lives under `dir`.
 /// The caller owns `dir` and must keep it alive for the app's lifetime.

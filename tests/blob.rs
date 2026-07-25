@@ -7,6 +7,19 @@ use std::collections::HashSet;
 
 use bytes::Bytes;
 use radio_scout::blob::{BlobStore, S3Config, orphan_gc};
+use radio_scout::now_ms;
+
+/// A cutoff an hour in the past: everything written by these tests is newer, so
+/// nothing has aged out of the grace period yet.
+fn within_grace() -> i64 {
+    now_ms() - 3_600_000
+}
+
+/// A cutoff an hour in the future: everything written by these tests is older,
+/// so the grace period no longer protects anything.
+fn past_grace() -> i64 {
+    now_ms() + 3_600_000
+}
 
 async fn fs_store() -> (BlobStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -70,9 +83,13 @@ async fn orphan_gc_deletes_only_unreferenced() {
     let referenced: HashSet<String> = ["aa/1.wav".to_string(), "cc/3.wav".to_string()]
         .into_iter()
         .collect();
-    let mut deleted = orphan_gc(&store, &referenced).await.unwrap();
-    deleted.sort();
-    assert_eq!(deleted, vec!["bb/2.wav".to_string()]);
+    let outcome = orphan_gc(&store, &referenced, past_grace()).await.unwrap();
+
+    let mut reclaimed: Vec<String> = outcome.reclaimed.iter().map(|o| o.key.clone()).collect();
+    reclaimed.sort();
+    assert_eq!(reclaimed, vec!["bb/2.wav".to_string()]);
+    assert_eq!(outcome.bytes(), 1);
+    assert_eq!(outcome.errors, 0);
 
     let mut remaining = store.list_keys().await.unwrap();
     remaining.sort();
@@ -80,6 +97,50 @@ async fn orphan_gc_deletes_only_unreferenced() {
         remaining,
         vec!["aa/1.wav".to_string(), "cc/3.wav".to_string()]
     );
+}
+
+/// The race orphan-GC has to survive: ingest writes the audio object *before*
+/// inserting its row (ADR-0002), so for that window the object legitimately has
+/// no row. Reclaiming it would delete a live Call's audio, so anything written
+/// inside the grace period is left alone.
+#[tokio::test]
+async fn orphan_gc_spares_objects_still_inside_the_write_grace_period() {
+    let (store, _dir) = fs_store().await;
+    store
+        .put("aa/mid-ingest.wav", Bytes::from_static(b"x"))
+        .await
+        .unwrap();
+
+    let outcome = orphan_gc(&store, &HashSet::new(), within_grace())
+        .await
+        .unwrap();
+
+    assert!(outcome.reclaimed.is_empty(), "{outcome:?}");
+    assert_eq!(store.list_keys().await.unwrap(), vec!["aa/mid-ingest.wav"]);
+
+    // Once it ages past the grace period it is reclaimed.
+    let outcome = orphan_gc(&store, &HashSet::new(), past_grace())
+        .await
+        .unwrap();
+    assert_eq!(outcome.reclaimed.len(), 1);
+    assert!(store.list_keys().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn list_objects_reports_size_and_write_time() {
+    let (store, _dir) = fs_store().await;
+    store
+        .put("aa/1.wav", Bytes::from_static(b"0123456789"))
+        .await
+        .unwrap();
+
+    let objects = store.list_objects().await.unwrap();
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].key, "aa/1.wav");
+    assert_eq!(objects[0].size, 10);
+    // Written during this test, so it sits between the two bounds.
+    assert!(objects[0].last_modified_ms > within_grace());
+    assert!(objects[0].last_modified_ms < past_grace());
 }
 
 #[tokio::test]

@@ -20,6 +20,11 @@ pub struct Model {
     pub object_key: String,
     pub audio_mime: Option<String>,
     pub audio_name: Option<String>,
+    /// Size of the stored audio object in bytes, recorded at ingest (#10).
+    /// Retention's size cap sums this instead of stat-ing the object store on
+    /// every sweep. `NULL` for rows written before the column existed; those
+    /// count as zero toward the cap.
+    pub audio_size: Option<i64>,
     pub duration_ms: Option<i64>,
     pub created_at_ms: i64,
 }

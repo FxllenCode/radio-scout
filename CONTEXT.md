@@ -83,3 +83,21 @@ _Avoid_: password, passcode.
 
 **API key**:
 A recorder-facing secret that authorizes ingesting calls into specific systems. Distinct from an **access code**.
+
+### Storage & retention
+
+**Retention**:
+The policy that bounds the archive: an age window (in days) plus an optional cap on total stored audio. Expressed as configuration; enforced by sweeps.
+_Avoid_: expiry, TTL, cleanup.
+
+**Sweep**:
+One pass of the retention policy over the archive — age out, then enforce the size cap, then reclaim orphans. Runs at startup and on an interval.
+_Avoid_: job, cron, scheduler run.
+
+**Prune**:
+Removing a call from the archive because retention says so: its metadata row first, then its audio object.
+_Avoid_: delete, purge, evict (reserve _delete_ for a single row or object).
+
+**Orphan**:
+A stored audio object no call row points at — the residue of an ingest that failed after writing its audio, or of a prune interrupted between the row and the object. Reclaimed by **orphan-GC**, which spares anything written inside the grace period so it can't race an in-flight ingest.
+_Avoid_: dangling blob, garbage.

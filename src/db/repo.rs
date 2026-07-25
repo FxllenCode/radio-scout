@@ -15,6 +15,7 @@
 //! (`GROUP_CONCAT`/`STRING_AGG` diverge by dialect, ADR-0003) — a call's groups
 //! are loaded separately and assembled in Rust.
 
+use sea_orm::sea_query::Alias;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, JoinType, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
@@ -190,6 +191,9 @@ pub struct NewCall {
     pub object_key: String,
     pub audio_mime: Option<String>,
     pub audio_name: Option<String>,
+    /// Byte length of the audio object, filled in by ingest when it writes the
+    /// object (#10 — retention's size cap sums it).
+    pub audio_size: Option<i64>,
     pub duration_ms: Option<i64>,
     pub patches: Vec<i64>,
     pub units: Vec<NewCallUnit>,
@@ -237,6 +241,7 @@ pub async fn insert_call<C: ConnectionTrait>(
         object_key: Set(new.object_key.clone()),
         audio_mime: Set(new.audio_mime.clone()),
         audio_name: Set(new.audio_name.clone()),
+        audio_size: Set(new.audio_size),
         duration_ms: Set(new.duration_ms),
         created_at_ms: Set(now_ms),
         ..Default::default()
@@ -684,6 +689,129 @@ pub async fn lowest_free_system_ref<C: ConnectionTrait>(db: &C) -> Result<i64, D
         next += 1;
     }
     Ok(next)
+}
+
+// ---------------------------------------------------------------------------
+// Retention (#10, ADR-0002 / spec US 41).
+// ---------------------------------------------------------------------------
+
+/// The minimum a Call needs for retention to prune it: which row to delete,
+/// which object to delete after it, and how many bytes that reclaims.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrunableCall {
+    pub id: CallId,
+    pub object_key: String,
+    /// Bytes the audio object occupies. Rows written before the `audio_size`
+    /// column existed report 0 rather than blocking the sweep.
+    pub audio_size: i64,
+}
+
+impl From<call::Model> for PrunableCall {
+    fn from(call: call::Model) -> Self {
+        PrunableCall {
+            id: call.id,
+            object_key: call.object_key,
+            audio_size: call.audio_size.unwrap_or(0).max(0),
+        }
+    }
+}
+
+/// Up to `limit` Calls that happened before `cutoff_ms`, oldest first — one page
+/// of the age-based prune. Paging (rather than one unbounded `DELETE`, as rdio
+/// does) keeps each SQLite write-lock window short so a sweep over a large
+/// archive never stalls ingest on a Pi.
+pub async fn calls_older_than<C: ConnectionTrait>(
+    db: &C,
+    cutoff_ms: i64,
+    limit: u64,
+) -> Result<Vec<PrunableCall>, DbErr> {
+    Ok(call::Entity::find()
+        .filter(call::Column::CallAtMs.lt(cutoff_ms))
+        .order_by_asc(call::Column::CallAtMs)
+        .order_by_asc(call::Column::Id)
+        .limit(limit)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(PrunableCall::from)
+        .collect())
+}
+
+/// Up to `limit` Calls, oldest first, regardless of age — one page of the
+/// size-cap prune, which drops the oldest until the archive fits.
+pub async fn oldest_calls<C: ConnectionTrait>(
+    db: &C,
+    limit: u64,
+) -> Result<Vec<PrunableCall>, DbErr> {
+    Ok(call::Entity::find()
+        .order_by_asc(call::Column::CallAtMs)
+        .order_by_asc(call::Column::Id)
+        .limit(limit)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(PrunableCall::from)
+        .collect())
+}
+
+/// Total bytes of stored audio across the archive — what the size cap is
+/// measured against.
+///
+/// The `SUM` is cast to `BIGINT` because Postgres widens `SUM(bigint)` to
+/// `numeric` while SQLite keeps it an integer; the cast makes one query decode
+/// on both dialects (ADR-0003). Rows with a `NULL` size contribute nothing.
+pub async fn total_audio_bytes<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
+    let total: Option<i64> = call::Entity::find()
+        .select_only()
+        .column_as(
+            call::Column::AudioSize.sum().cast_as(Alias::new("BIGINT")),
+            "total",
+        )
+        .into_tuple::<Option<i64>>()
+        .one(db)
+        .await?
+        .flatten();
+    Ok(total.unwrap_or(0).max(0) as u64)
+}
+
+/// Delete Calls and their child rows, returning how many Call rows went. Child
+/// rows go first — the schema's foreign keys are `RESTRICT`, and SQLite enforces
+/// them (`PRAGMA foreign_keys = ON`, see [`crate::db::connect`]).
+pub async fn delete_calls<C: ConnectionTrait>(db: &C, ids: &[CallId]) -> Result<u64, DbErr> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    call_frequency::Entity::delete_many()
+        .filter(call_frequency::Column::CallId.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?;
+    call_unit::Entity::delete_many()
+        .filter(call_unit::Column::CallId.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?;
+    call_patch::Entity::delete_many()
+        .filter(call_patch::Column::CallId.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?;
+    Ok(call::Entity::delete_many()
+        .filter(call::Column::Id.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// Every object key a Call row still points at — the "keep" set for orphan-GC.
+pub async fn referenced_object_keys<C: ConnectionTrait>(
+    db: &C,
+) -> Result<std::collections::HashSet<String>, DbErr> {
+    Ok(call::Entity::find()
+        .select_only()
+        .column(call::Column::ObjectKey)
+        .into_tuple::<String>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect())
 }
 
 /// The object key + mime for a call's audio (the serve path — lightweight).

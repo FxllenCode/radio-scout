@@ -19,6 +19,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m0001_init::Migration),
             Box::new(m0002_api_keys::Migration),
+            Box::new(m0003_call_audio_size::Migration),
         ]
     }
 }
@@ -189,6 +190,66 @@ mod m0002_api_keys {
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
                 .drop_table(Table::drop().table(api_key::Entity).to_owned())
+                .await
+        }
+    }
+}
+
+/// Retention's size cap (#10) needs each Call's audio size. Recording it at
+/// ingest turns "how many bytes is the archive?" into one `SUM()` instead of a
+/// stat per object — which on an S3/Garage backend would be a network round-trip
+/// each, every sweep. Nullable so existing rows migrate without a rewrite; a
+/// `NULL` counts as zero toward the cap.
+///
+/// **Idempotent by necessity.** `m0001_init` generates its DDL from the *live*
+/// entity definitions, so adding a field to `call::Model` retroactively puts the
+/// column in `m0001` too — a fresh database already has it by the time this runs,
+/// while a database migrated before the field existed does not. Both must
+/// converge on the same schema, so this checks before it alters. Every future
+/// `ALTER`-shaped migration on an entity-derived table needs the same guard.
+mod m0003_call_audio_size {
+    use super::*;
+
+    /// The physical names the guard probes. `has_column` takes strings, so these
+    /// can't come from the entity's `Iden`s.
+    const TABLE: &str = "calls";
+    const COLUMN: &str = "audio_size";
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0003_call_audio_size"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_column(TABLE, COLUMN).await? {
+                return Ok(());
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call::Entity)
+                        .add_column(ColumnDef::new(call::Column::AudioSize).big_integer().null())
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column(TABLE, COLUMN).await? {
+                return Ok(());
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call::Entity)
+                        .drop_column(call::Column::AudioSize)
+                        .to_owned(),
+                )
                 .await
         }
     }

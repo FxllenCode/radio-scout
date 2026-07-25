@@ -38,7 +38,7 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 
 **Tooling** — backend: `cargo-nextest` (runner), `cargo-llvm-cov` (coverage), `proptest`, `rstest`, `insta`, `tokio::time::pause`, `assert_cmd`/`trycmd`; `cargo-mutants` + `testcontainers` in CI. Frontend: `@vitest/coverage-v8`, `msw`, `vitest-axe`, `jsdom`; Vitest Browser Mode + Playwright when audio/PWA lands. **Skip:** tarpaulin, quickcheck, loom, Playwright component-testing (Browser Mode supersedes it).
 
-**Coverage exclusions (documented + auditable — never silent gaming):** generated SeaORM entities + migrations, `main()` bootstrap glue, `build.rs`, shadcn `client/src/components/ui/**`, `client/src/main.tsx`, `.d.ts`, test files.
+**Coverage exclusions (documented + auditable — never silent gaming):** generated SeaORM entities + migrations, `main()` bootstrap glue, `build.rs`, shadcn `client/src/components/ui/**`, `client/src/main.tsx`, `.d.ts`, test files. The same backend list is mirrored for mutation testing in [`.cargo/mutants.toml`](.cargo/mutants.toml), so `cargo mutants` reports only real gaps.
 
 **Enforcement** — the tooling above is stood up (and high-risk gaps in already-shipped code backfilled) by the **"Test hardening + coverage baseline"** ticket; CI (#22) is not built yet. Until #22, coverage + mutation join the local merge-gate ritual: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo nextest run` (+ `cargo test --doc`), `cargo llvm-cov` over the floor, and the client `tsc`/`oxlint`/`vitest --coverage` gates must pass before a commit lands. #22 wires it all into CI with a **100% patch-coverage** Codecov gate (separate backend/frontend flags).
 

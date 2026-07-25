@@ -43,6 +43,17 @@ pub enum StorageConfig {
     S3(S3Config),
 }
 
+/// A stored object as orphan-GC sees it: what it is, how much space it holds,
+/// and when it was last written (which is how the GC tells a genuine orphan from
+/// an object ingest wrote moments ago and hasn't inserted a row for yet).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredObject {
+    pub key: String,
+    pub size: u64,
+    /// Unix milliseconds of the object's last write.
+    pub last_modified_ms: i64,
+}
+
 /// A backend-agnostic blob store. Cheap to clone (shared handles).
 #[derive(Clone)]
 pub struct BlobStore {
@@ -140,8 +151,25 @@ impl BlobStore {
 
     /// List every object key in the store.
     pub async fn list_keys(&self) -> Result<Vec<String>, ObjectError> {
+        Ok(self
+            .list_objects()
+            .await?
+            .into_iter()
+            .map(|object| object.key)
+            .collect())
+    }
+
+    /// List every object with the metadata orphan-GC judges it by (#10).
+    pub async fn list_objects(&self) -> Result<Vec<StoredObject>, ObjectError> {
         let metas = self.store.list(None).try_collect::<Vec<_>>().await?;
-        Ok(metas.into_iter().map(|m| m.location.to_string()).collect())
+        Ok(metas
+            .into_iter()
+            .map(|meta| StoredObject {
+                key: meta.location.to_string(),
+                size: meta.size,
+                last_modified_ms: meta.last_modified.timestamp_millis(),
+            })
+            .collect())
     }
 
     /// A short-lived presigned GET URL for `key` — `None` on non-S3 backends.
@@ -158,19 +186,98 @@ impl BlobStore {
     }
 }
 
-/// Orphan-GC (ADR-0002): delete every stored object whose key isn't in
-/// `referenced_keys`. Returns the keys that were deleted. Ticket #10 sources the
-/// referenced set from the DB and runs this on a schedule.
+/// What one orphan-GC pass did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GcOutcome {
+    /// Objects reclaimed, in the order they were deleted.
+    pub reclaimed: Vec<StoredObject>,
+    /// Objects that were orphans but whose delete failed. Not fatal — they stay
+    /// orphans and the next pass retries them, so one unhappy object can't stop
+    /// the sweep from reclaiming the rest.
+    pub errors: u64,
+}
+
+impl GcOutcome {
+    /// Total bytes reclaimed.
+    pub fn bytes(&self) -> u64 {
+        self.reclaimed.iter().map(|object| object.size).sum()
+    }
+}
+
+/// Orphan-GC (ADR-0002): reclaim stored audio no Call row points at — the
+/// residue of an ingest that wrote its object and then failed to insert, or of a
+/// prune that deleted the row and crashed before the object.
+///
+/// **Only objects last written before `written_before_ms` are touched.** Ingest
+/// writes the object *before* the row, so an unconditional "no row → delete"
+/// sweep would race a Call that is mid-ingest and delete its audio out from
+/// under it. The caller derives the cutoff from
+/// [`RetentionConfig::orphan_grace`](crate::retention::RetentionConfig::orphan_grace).
 pub async fn orphan_gc(
     store: &BlobStore,
     referenced_keys: &HashSet<String>,
-) -> Result<Vec<String>, ObjectError> {
-    let mut deleted = Vec::new();
-    for key in store.list_keys().await? {
-        if !referenced_keys.contains(&key) {
-            store.delete(&key).await?;
-            deleted.push(key);
+    written_before_ms: i64,
+) -> Result<GcOutcome, ObjectError> {
+    let mut outcome = GcOutcome::default();
+    for object in store.list_objects().await? {
+        if !is_reclaimable(&object, referenced_keys, written_before_ms) {
+            continue;
+        }
+        match store.delete(&object.key).await {
+            Ok(()) => outcome.reclaimed.push(object),
+            Err(err) => {
+                // Say *why* rather than just counting: the object stays an orphan
+                // and the next pass retries it, but the operator needs the cause.
+                eprintln!("orphan-gc: could not delete {}: {err}", object.key);
+                outcome.errors += 1;
+            }
         }
     }
-    Ok(deleted)
+    Ok(outcome)
+}
+
+/// Whether orphan-GC may reclaim `object`: nothing references it *and* it is
+/// older than the write grace period.
+fn is_reclaimable(
+    object: &StoredObject,
+    referenced_keys: &HashSet<String>,
+    written_before_ms: i64,
+) -> bool {
+    !referenced_keys.contains(&object.key) && object.last_modified_ms < written_before_ms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn object(key: &str, last_modified_ms: i64) -> StoredObject {
+        StoredObject {
+            key: key.to_string(),
+            size: 1,
+            last_modified_ms,
+        }
+    }
+
+    #[rstest]
+    // Unreferenced and written well before the cutoff — a genuine orphan.
+    #[case("aa/1.wav", 500, true)]
+    // Referenced by a live Call row: never reclaimed, however old.
+    #[case("keep/1.wav", 0, false)]
+    // Unreferenced but written after the cutoff — this is exactly the object
+    // ingest just wrote and hasn't inserted a row for yet.
+    #[case("aa/1.wav", 1500, false)]
+    // Written *at* the cutoff still counts as inside the grace period.
+    #[case("aa/1.wav", 1000, false)]
+    fn orphan_reclaim_decision(
+        #[case] key: &str,
+        #[case] last_modified_ms: i64,
+        #[case] expected: bool,
+    ) {
+        let referenced: HashSet<String> = ["keep/1.wav".to_string()].into_iter().collect();
+        assert_eq!(
+            is_reclaimable(&object(key, last_modified_ms), &referenced, 1000),
+            expected
+        );
+    }
 }
