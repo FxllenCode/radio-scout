@@ -15,6 +15,12 @@ use radio_scout::{AppState, BlobStore, IngestConfig, build_app, now_ms};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `.env` alongside the binary's working directory, if there is one. A real
+    // environment variable always wins over the file. This is a development
+    // convenience (see `.env.example`) and the same pre-#17 stopgap as the env
+    // vars below — #17 replaces the lot with TOML + CLI flags.
+    let _ = dotenvy::dotenv();
+
     let base_dir: PathBuf = std::env::var_os("RADIO_SCOUT_BASE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("./radio-scout-data"));
@@ -31,14 +37,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let db = db::connect(&db_url).await?;
 
-    // First run: no keys yet -> generate a default one scoped to all Systems and
-    // print it so the operator can configure their recorder (ADR-0008).
-    if repo::count_api_keys(&db).await? == 0 {
-        let raw_key = uuid::Uuid::new_v4().simple().to_string();
-        let now = now_ms();
-        repo::create_api_key(&db, &raw_key, None, Some("default (first run)".into()), now).await?;
-        println!("Generated default ingest API key: {raw_key}");
-        println!("  Point your Trunk Recorder / SDRTrunk uploader at this server with that key.");
+    // The ingest key (ADR-0008). A configured one — `RADIO_SCOUT_API_KEY`, from
+    // the environment or `.env` — is registered on every boot, so a recorder's
+    // key keeps working across restarts and across a wiped database. With none
+    // configured, first run generates one and prints it.
+    match std::env::var("RADIO_SCOUT_API_KEY") {
+        Ok(configured) if !configured.trim().is_empty() => {
+            let added = repo::ensure_api_key(&db, configured.trim(), None, now_ms()).await?;
+            println!(
+                "Ingest API key from RADIO_SCOUT_API_KEY: {}",
+                if added { "registered" } else { "already known" }
+            );
+        }
+        _ if repo::count_api_keys(&db).await? == 0 => {
+            let raw_key = uuid::Uuid::new_v4().simple().to_string();
+            let now = now_ms();
+            repo::create_api_key(&db, &raw_key, None, Some("default (first run)".into()), now)
+                .await?;
+            println!("Generated default ingest API key: {raw_key}");
+            println!(
+                "  Point your Trunk Recorder / SDRTrunk uploader at this server with that key."
+            );
+            println!("  Set RADIO_SCOUT_API_KEY in .env to pin a key of your own instead.");
+        }
+        _ => {}
     }
 
     let audio = Arc::new(BlobStore::filesystem(base_dir.join("audio"))?);

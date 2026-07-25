@@ -73,6 +73,75 @@ async fn authorize_ingest_enforces_validity_scope_and_disabled() {
     assert!(!repo::authorize_ingest(&db, "revoked", 11).await.unwrap());
 }
 
+/// A key configured out-of-band (`RADIO_SCOUT_API_KEY`, typically from `.env`
+/// while #17's real config is pending) has to survive restarts *and* a database
+/// that already has keys — otherwise every boot either duplicates it or, worse,
+/// leaves the recorder's configured key unusable.
+#[tokio::test]
+async fn ensure_api_key_registers_once_and_stays_authorized() {
+    let (db, _dir) = sqlite().await;
+
+    assert!(
+        repo::ensure_api_key(&db, "from-dotenv", None, NOW)
+            .await
+            .unwrap(),
+        "first boot registers it"
+    );
+    assert!(
+        repo::authorize_ingest(&db, "from-dotenv", 11)
+            .await
+            .unwrap()
+    );
+
+    // Restarting must not add a second row for the same secret.
+    assert!(
+        !repo::ensure_api_key(&db, "from-dotenv", None, NOW + 1)
+            .await
+            .unwrap(),
+        "a later boot finds it already there"
+    );
+    assert_eq!(repo::count_api_keys(&db).await.unwrap(), 1);
+
+    // A different secret is a different key, not a replacement.
+    assert!(
+        repo::ensure_api_key(&db, "another", None, NOW)
+            .await
+            .unwrap()
+    );
+    assert_eq!(repo::count_api_keys(&db).await.unwrap(), 2);
+    assert!(
+        repo::authorize_ingest(&db, "from-dotenv", 11)
+            .await
+            .unwrap()
+    );
+}
+
+/// Re-registering a key an operator deliberately **disabled** must not quietly
+/// bring it back to life (ADR-0008: revocation is the load-bearing control).
+#[tokio::test]
+async fn ensure_api_key_does_not_revive_a_revoked_key() {
+    let (db, _dir) = sqlite().await;
+    api_key::ActiveModel {
+        key_hash: Set(repo::hash_key("revoked")),
+        disabled: Set(true),
+        created_at_ms: Set(NOW),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+    assert!(
+        !repo::ensure_api_key(&db, "revoked", None, NOW + 1)
+            .await
+            .unwrap(),
+        "the row exists; leave it disabled"
+    );
+
+    assert_eq!(repo::count_api_keys(&db).await.unwrap(), 1);
+    assert!(!repo::authorize_ingest(&db, "revoked", 11).await.unwrap());
+}
+
 #[tokio::test]
 async fn resolve_or_create_is_idempotent_and_scoped() {
     let (db, _dir) = sqlite().await;

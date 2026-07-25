@@ -791,6 +791,37 @@ pub async fn count_api_keys<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
     api_key::Entity::find().count(db).await
 }
 
+/// Register `raw_key` unless it is already known. Returns whether it was added.
+///
+/// This is how a key configured out-of-band — `RADIO_SCOUT_API_KEY`, typically
+/// from `.env` until #17 brings real config — survives restarts: the recorder's
+/// configured secret keeps working across boots without stacking up a row per
+/// boot. A key an operator **disabled** counts as known and stays disabled;
+/// re-registering must never quietly undo a revocation (ADR-0008).
+pub async fn ensure_api_key<C: ConnectionTrait>(
+    db: &C,
+    raw_key: &str,
+    system_ref: Option<i64>,
+    now_ms: i64,
+) -> Result<bool, DbErr> {
+    let existing = api_key::Entity::find()
+        .filter(api_key::Column::KeyHash.eq(hash_key(raw_key)))
+        .one(db)
+        .await?;
+    if existing.is_some() {
+        return Ok(false);
+    }
+    create_api_key(
+        db,
+        raw_key,
+        system_ref,
+        Some("configured (RADIO_SCOUT_API_KEY)".to_string()),
+        now_ms,
+    )
+    .await?;
+    Ok(true)
+}
+
 /// Whether `raw_key` is a valid, enabled key scoped to `system_ref`. Denied when
 /// the key is missing, disabled, or scoped to a different System (ADR-0008:
 /// recorders always require a valid per-system key).

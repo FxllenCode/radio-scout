@@ -20,10 +20,13 @@ none, run the standard pass.
    invalidates the whole test.
 2. **Start hermetic.** `rm -rf ./radio-scout-live-test`, then run the binary in
    the background with `RADIO_SCOUT_BASE_DIR=./radio-scout-live-test`, logging
-   to a file. Wait for the listening line; **parse the printed API key** (first
-   run generates one). Never point a live test at `./radio-scout-data` — that
-   is the durable instance.
-3. **Feed it.** `cargo run --example feed -- --key <KEY> …`. Pick flags for
+   to a file. Wait for the listening line. Never point a live test at
+   `./radio-scout-data` — that is the durable instance.
+   - The key comes from `.env` (`RADIO_SCOUT_API_KEY`), registered on every
+     boot, so a wiped directory costs nothing. If `.env` is missing, say so and
+     point at `.env.example` rather than inventing a key; if the binary printed
+     a generated one instead, use that.
+3. **Feed it.** `cargo run --example feed -- …`. Pick flags for
    what is being tested: `--burst N` for the queue, `--patches A:B` for patch
    fanout, `--seconds 8` to watch the waveform, `--interval` for a steady feed.
 4. **Drive the browser.** Load the Chrome tools in one `ToolSearch` call, then

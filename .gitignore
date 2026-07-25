@@ -9,6 +9,10 @@ client/coverage
 /sdrtrunk
 /radio-scout-data
 /radio-scout-live-test
+
+# Local development configuration (secrets). `.env.example` is the template and
+# IS committed; the real file never is.
+.env
 /trunk-recorder
 
 THEPROJECT.md

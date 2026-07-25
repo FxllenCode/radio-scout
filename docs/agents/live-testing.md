@@ -19,19 +19,30 @@ something: an empty archive, an empty queue and a known set of Talkgroups, so
 ## The loop, without RF
 
 ```bash
+# 0. Once: copy the template and pick a key (any high-entropy string).
+cp .env.example .env          # set RADIO_SCOUT_API_KEY; `openssl rand -hex 16`
+
 # 1. Build the SPA the binary embeds (rust-embed reads client/dist at compile
 #    time — skip this and you get the fallback page, not the app).
 cd client && npm run build && cd ..
 
-# 2. Start a hermetic instance. It prints an ingest API key on first run.
+# 2. Start a hermetic instance. It registers the key from .env on every boot.
 rm -rf ./radio-scout-live-test
 RADIO_SCOUT_BASE_DIR=./radio-scout-live-test cargo run
 
-# 3. In another shell, feed it Calls (see examples/feed.rs).
-cargo run --example feed -- --key <KEY FROM STEP 2> --interval 4s
+# 3. In another shell, feed it Calls — same .env, so no key to copy.
+cargo run --example feed -- --interval 4s
 
 # 4. Browse http://localhost:3000  (or http://<MAC-LAN-IP>:3000 from a phone)
 ```
+
+`.env` is a **stopgap until #17** brings real config, and it is gitignored;
+`.env.example` is the committed template. `RADIO_SCOUT_API_KEY` is registered on
+every boot rather than only on first run, which is what makes a wiped
+`./radio-scout-live-test` cost nothing: the key the recorder (or the feeder) is
+configured with keeps working. A key an operator *disabled* stays disabled —
+re-registering never undoes a revocation (ADR-0008). With no key configured,
+first run generates and prints one, as it always did.
 
 The feeder posts to `POST /api/call-upload` with rdio's field names and a real
 mono 16-bit WAV per Call, pitched by Talkgroup so two Talkgroups are told apart
@@ -107,7 +118,7 @@ is untouched.
     "systems": [
       {
         "shortName": "<the shortName from your systems config>",
-        "apiKey": "<key printed by radio-scout on first run>",
+        "apiKey": "<RADIO_SCOUT_API_KEY from the Mac's .env>",
         "systemId": 411,
         // Optional: keep a dev box from drinking the whole firehose.
         "talkgroupAllow": ["54241", "5424*"]
@@ -146,7 +157,7 @@ body Trunk Recorder got is one of our rdio-compatible strings:
 | `Call imported successfully.` | stored |
 | `duplicate call rejected` | inside the dedup window (#5) — expected on a re-send |
 | `Incomplete call data: no talkgroup` | the recorder sent no talkgroup |
-| `invalid api key` | key mismatch — check the entry's `apiKey` |
+| `invalid api key` | key mismatch — the entry's `apiKey` must equal `RADIO_SCOUT_API_KEY` |
 
 ## Troubleshooting
 

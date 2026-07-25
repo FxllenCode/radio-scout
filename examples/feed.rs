@@ -2,10 +2,14 @@
 //! would, so the live-feed loop can be exercised without waiting on real RF.
 //!
 //! ```text
-//! cargo run --example feed -- --key <API KEY>
-//! cargo run --example feed -- --key <K> --burst 5        # fill the queue
-//! cargo run --example feed -- --key <K> --patches 54241:54242
+//! cargo run --example feed                       # key from .env
+//! cargo run --example feed -- --burst 5          # fill the listening queue
+//! cargo run --example feed -- --patches 54241:54242
 //! ```
+//!
+//! The key comes from `RADIO_SCOUT_API_KEY` (environment or `.env`, the same
+//! one the binary registers on boot), so a live test needs nothing copy-pasted;
+//! `--key` overrides it.
 //!
 //! It posts to `POST /api/call-upload` — the same generic rdio endpoint Trunk
 //! Recorder's `rdioscanner_uploader` plugin actually uses (verified in
@@ -219,10 +223,10 @@ impl StringList for i64 {
 }
 
 const USAGE: &str = "\
-usage: cargo run --example feed -- --key <API KEY> [options]
+usage: cargo run --example feed -- [options]
 
-  --server <URL>        default http://127.0.0.1:3000
-  --key <KEY>           ingest API key (printed by the binary on first run)
+  --server <URL>        default http://127.0.0.1:3000 (honors RADIO_SCOUT_PORT)
+  --key <KEY>           ingest API key; defaults to RADIO_SCOUT_API_KEY / .env
   --system <REF>        system Ref, default 411
   --talkgroups <A,B,C>  default 54241,54242,1001
   --interval <SECONDS>  gap between Calls, default 4 (0 = as fast as possible)
@@ -232,7 +236,16 @@ usage: cargo run --example feed -- --key <API KEY> [options]
   --patches <A:B>       Calls on A are patched to B";
 
 fn parse_args() -> Result<Options, String> {
+    // Same `.env` the binary reads, so a live test needs no copy-pasted key.
+    let _ = dotenvy::dotenv();
+
     let mut options = Options::default();
+    if let Ok(key) = std::env::var("RADIO_SCOUT_API_KEY") {
+        options.key = key.trim().to_string();
+    }
+    if let Ok(port) = std::env::var("RADIO_SCOUT_PORT") {
+        options.server = format!("http://127.0.0.1:{}", port.trim());
+    }
     let mut args = std::env::args().skip(1);
 
     while let Some(flag) = args.next() {
@@ -275,7 +288,9 @@ fn parse_args() -> Result<Options, String> {
     }
 
     if options.key.is_empty() {
-        return Err("--key is required (the binary prints one on first run)".into());
+        return Err(
+            "no API key: set RADIO_SCOUT_API_KEY in .env (see .env.example) or pass --key".into(),
+        );
     }
     if options.talkgroups.is_empty() {
         return Err("--talkgroups needs at least one Ref".into());

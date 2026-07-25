@@ -118,14 +118,17 @@ The suites can't answer "does a Call actually arrive and make a sound". Full pro
 **Two instances, never mixed:** `./radio-scout-live-test` is hermetic and **wiped at the start of every scripted run** (empty archive, empty queue, fresh key — so what a test observes is a fact, not leftover history); `./radio-scout-data` is the durable one a real recorder uploads to. Both gitignored.
 
 ```bash
+cp .env.example .env                           # once: set RADIO_SCOUT_API_KEY to anything random
 cd client && npm run build && cd ..            # rust-embed reads client/dist AT COMPILE TIME
 rm -rf ./radio-scout-live-test
-RADIO_SCOUT_BASE_DIR=./radio-scout-live-test cargo run    # prints an ingest API key on first run
-cargo run --example feed -- --key <KEY> --interval 4s     # synthetic Calls, real WAV tones
+RADIO_SCOUT_BASE_DIR=./radio-scout-live-test cargo run    # registers the key from .env
+cargo run --example feed -- --interval 4s                 # synthetic Calls, real WAV tones
 # browse http://localhost:3000  (phone: http://<MAC-LAN-IP>:3000)
 ```
 
-`examples/feed.rs` posts rdio-format multipart with **real audio** — a mono 16-bit WAV pitched by Talkgroup, so a wrong-Call bug is audible before it's visible. `--burst N` fills the listening queue, `--patches A:B` exercises patch fanout, `--seconds 8` gives the waveform something to walk.
+**`.env` (stopgap until #17).** `RADIO_SCOUT_API_KEY` is registered on every boot, so a recorder's key survives restarts *and* a wiped database, and the feeder reads the same file — nothing gets copy-pasted. A real environment variable beats the file; with the key unset, first run generates and prints one, as before. `.env` is gitignored, `.env.example` is the committed template, and a **disabled** key is never revived by re-registering it (ADR-0008). Every other knob there (`RADIO_SCOUT_BASE_DIR`, `_PORT`, `_RETENTION_*`) is the same pre-#17 env-var stopgap — #17 replaces the lot with TOML + CLI flags.
+
+`examples/feed.rs` (key from `.env`) posts rdio-format multipart with **real audio** — a mono 16-bit WAV pitched by Talkgroup, so a wrong-Call bug is audible before it's visible. `--burst N` fills the listening queue, `--patches A:B` exercises patch fanout, `--seconds 8` gives the waveform something to walk.
 
 **Browser:** live tests hit the **embedded build on `:3000`** (one origin, exactly what ships and what a phone hits), not the Vite dev server. Driving it needs the Claude browser extension installed, signed into the same account, and granted permission for `localhost:3000`. Never trigger an `alert`/`confirm` — a dialog freezes the extension until a human clears it — and read the console before calling anything a pass.
 
