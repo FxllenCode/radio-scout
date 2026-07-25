@@ -78,6 +78,13 @@ pub fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// How long a client may keep a Call's audio. The bytes behind a Call id never
+/// change, so this is `immutable`; `private` keeps it out of shared proxies,
+/// since listening will become access-scoped (ADR-0008). A week is long enough
+/// for the client's next-Call prefetch (#14) and for re-listening within a
+/// session, without pinning audio that retention has since pruned.
+const AUDIO_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
+
 /// `GET /api/call/{id}/audio` — serve a stored call's audio (ADR-0002).
 ///
 /// The filesystem backend proxies with HTTP range support (iOS `<audio>` needs
@@ -134,6 +141,7 @@ async fn serve_audio(
                 [
                     (header::CONTENT_TYPE, mime),
                     (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (header::CACHE_CONTROL, AUDIO_CACHE_CONTROL.to_string()),
                 ],
                 bytes,
             )
@@ -153,6 +161,7 @@ async fn serve_audio(
                         (header::CONTENT_TYPE, mime),
                         (header::ACCEPT_RANGES, "bytes".to_string()),
                         (header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}")),
+                        (header::CACHE_CONTROL, AUDIO_CACHE_CONTROL.to_string()),
                     ],
                     bytes,
                 )

@@ -85,4 +85,14 @@ export const handlers = [
   http.get(`${ORIGIN}/api/calls/filters`, () =>
     HttpResponse.json(FILTER_OPTIONS),
   ),
+  /** A Call's audio. Nothing in jsdom decodes it — it is here because the
+   *  player prefetches the next Call's audio (#14), and an unhandled request
+   *  is a test failure. */
+  http.get(
+    `${ORIGIN}/api/call/:id/audio`,
+    () =>
+      new HttpResponse('audio-bytes', {
+        headers: { 'content-type': 'audio/mpeg' },
+      }),
+  ),
 ]

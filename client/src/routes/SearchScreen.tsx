@@ -1,4 +1,11 @@
-import { Download, Play, SkipBack, SkipForward, Square } from 'lucide-react'
+import {
+  Download,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  Square,
+} from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { Screen } from '@/components/layout/Screen'
@@ -18,13 +25,16 @@ import {
   enterLiveFeed,
   enterPlaybackMode,
   next,
+  pause,
   playResults,
   previous,
+  resume,
   selectCurrentCall,
   selectHasNext,
   selectHasPrevious,
   selectIsExhausted,
   selectIsInterrupting,
+  selectIsPaused,
   selectPlaybackMode,
   selectPlaybackPosition,
   stop,
@@ -62,6 +72,7 @@ export function SearchScreen() {
   const mode = useAppSelector(selectPlaybackMode)
   const current = useAppSelector(selectCurrentCall)
   const interrupting = useAppSelector(selectIsInterrupting)
+  const paused = useAppSelector(selectIsPaused)
   const exhausted = useAppSelector(selectIsExhausted)
   const position = useAppSelector(selectPlaybackPosition)
   const hasNext = useAppSelector(selectHasNext)
@@ -289,11 +300,13 @@ export function SearchScreen() {
         <NowPlaying
           call={current}
           interrupting={interrupting}
+          paused={paused}
           position={position}
           hasNext={hasNext}
           hasPrevious={hasPrevious}
           onPrevious={() => dispatch(previous())}
           onNext={() => dispatch(next())}
+          onTogglePause={() => dispatch(paused ? resume() : pause())}
           onStop={() => dispatch(stop())}
         />
       )}
@@ -457,20 +470,24 @@ function ResultRow({
 function NowPlaying({
   call,
   interrupting,
+  paused,
   position,
   hasNext,
   hasPrevious,
   onPrevious,
   onNext,
+  onTogglePause,
   onStop,
 }: {
   call: Call
   interrupting: boolean
+  paused: boolean
   position: { index: number; total: number }
   hasNext: boolean
   hasPrevious: boolean
   onPrevious: () => void
   onNext: () => void
+  onTogglePause: () => void
   onStop: () => void
 }) {
   return (
@@ -478,10 +495,11 @@ function NowPlaying({
       aria-label="Now playing"
       className="mt-4 flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
     >
+      {/* The LED pulses with the audio, so pausing stills it. */}
       <StatusLed
         color={ledForTalkgroup(call.systemRef, call.talkgroupRef)}
         size={12}
-        pulse
+        pulse={!paused}
       />
       <div className="min-w-0 flex-1">
         <p className="truncate font-mono text-sm">
@@ -501,6 +519,19 @@ function NowPlaying({
         onClick={onPrevious}
       >
         <SkipBack className="size-4" aria-hidden />
+      </Button>
+      {/* The same pause the lock-screen button applies (#14, spec US 15). */}
+      <Button
+        variant="outline"
+        size="icon"
+        aria-label={paused ? 'Resume' : 'Pause'}
+        onClick={onTogglePause}
+      >
+        {paused ? (
+          <Play className="size-4" aria-hidden />
+        ) : (
+          <Pause className="size-4" aria-hidden />
+        )}
       </Button>
       <Button
         variant="outline"

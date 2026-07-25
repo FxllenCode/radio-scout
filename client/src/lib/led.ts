@@ -16,6 +16,20 @@ export const LED_COLORS = {
 
 export type LedColor = keyof typeof LED_COLORS
 
+/** The same palette as literal hex, for the places a CSS variable can't reach —
+ *  today the lock-screen artwork PNG (#14), which is encoded, not styled.
+ *  `led.test.ts` pins these to the `--color-led-*` tokens in `index.css`. */
+export const LED_HEX: Record<LedColor, string> = {
+  blue: '#5b9bff',
+  cyan: '#3dd6e8',
+  green: '#3ddc84',
+  magenta: '#e05cff',
+  orange: '#ffb020',
+  red: '#ff5c5c',
+  white: '#fafafa',
+  yellow: '#eac54f',
+}
+
 /** Stable ordering, matching the palette carried over from rdio-scanner. */
 export const LED_ORDER: readonly LedColor[] = [
   'blue',

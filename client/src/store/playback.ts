@@ -27,6 +27,10 @@ export interface PlaybackState {
    *  load the next page and keep going, which is what makes playback mode
    *  sequential across the *whole* result set and not just one page (US 25). */
   exhausted: boolean
+  /** Paused rather than stopped: the current Call keeps its place and its
+   *  lock-screen metadata, and the `<audio>` element follows this flag (#14,
+   *  spec US 15). Only ever true while something is playing. */
+  paused: boolean
 }
 
 const initialState: PlaybackState = {
@@ -37,6 +41,7 @@ const initialState: PlaybackState = {
   total: 0,
   interrupting: false,
   exhausted: false,
+  paused: false,
 }
 
 /** Back to "nothing from the archive is playing". */
@@ -47,6 +52,7 @@ function idle(state: PlaybackState) {
   state.total = 0
   state.interrupting = false
   state.exhausted = false
+  state.paused = false
 }
 
 /**
@@ -97,6 +103,7 @@ const playbackSlice = createSlice({
       if (index < 0 || !chosen) return
 
       state.exhausted = false
+      state.paused = false
       if (state.mode === 'playback') {
         state.results = results
         state.index = index
@@ -121,6 +128,7 @@ const playbackSlice = createSlice({
         return
       }
       if (state.index < 0) return
+      state.paused = false
       if (state.index + 1 < state.results.length) {
         state.index += 1
         return
@@ -135,7 +143,20 @@ const playbackSlice = createSlice({
      *  interruption, so there it does nothing at all. */
     previous(state) {
       if (state.interrupting || state.index <= 0) return
+      state.paused = false
       state.index -= 1
+    },
+
+    /** Pause the current Call — the lock-screen button and the in-app one are
+     *  this one action (spec US 15). Nothing to pause while nothing plays. */
+    pause(state) {
+      if (state.index < 0) return
+      state.paused = true
+    },
+
+    /** Let it run again. */
+    resume(state) {
+      state.paused = false
     },
 
     /** Stop playing, keeping the loaded result set so the listener can resume. */
@@ -146,6 +167,7 @@ const playbackSlice = createSlice({
       }
       state.index = -1
       state.exhausted = false
+      state.paused = false
     },
   },
 })
@@ -154,8 +176,10 @@ export const {
   enterLiveFeed,
   enterPlaybackMode,
   next,
+  pause,
   playResults,
   previous,
+  resume,
   stop,
 } = playbackSlice.actions
 
@@ -178,6 +202,9 @@ export const selectIsInterrupting = (state: WithPlayback): boolean =>
 export const selectIsExhausted = (state: WithPlayback): boolean =>
   state.playback.exhausted
 
+export const selectIsPaused = (state: WithPlayback): boolean =>
+  state.playback.paused
+
 /** Whether a Call follows the current one *within the loaded page* — an
  *  interruption has none, because "next" there means back to the live feed. */
 export const selectHasNext = (state: WithPlayback): boolean =>
@@ -187,6 +214,11 @@ export const selectHasNext = (state: WithPlayback): boolean =>
 
 export const selectHasPrevious = (state: WithPlayback): boolean =>
   !state.playback.interrupting && state.playback.index > 0
+
+/** The Call queued behind the current one, which the player warms the HTTP
+ *  cache with so it starts without a network round trip (#14). */
+export const selectNextCall = (state: WithPlayback): Call | null =>
+  selectHasNext(state) ? state.playback.results[state.playback.index + 1] : null
 
 /** Where playback sits in the whole filtered set — the "3 of 421" readout.
  *  `index` counts from the start of the archive, not of the loaded page. */

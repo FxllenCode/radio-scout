@@ -1,0 +1,17 @@
+{
+  /* The tests are the one place Node APIs are legitimate — `node:zlib` to
+     verify the artwork PNG against a real inflater, `node:fs` to pin the LED
+     hexes to the stylesheet. Keeping them in their own project means app code
+     still can't reach for `Buffer`/`process` and typecheck clean. */
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "types": [
+      "vite/client",
+      "vitest/globals",
+      "@testing-library/jest-dom",
+      "node"
+    ]
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test", "src/**/*.d.ts"]
+}

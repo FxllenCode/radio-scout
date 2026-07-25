@@ -24,6 +24,10 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/test/setup.ts',
+    // Spies (`vi.spyOn(HTMLMediaElement.prototype, 'play')`) are per-test by
+    // construction: without this, one test's stubbed media element silently
+    // shapes the next one's.
+    restoreMocks: true,
     coverage: {
       // V8 with AST-aware remapping (Vitest 4) — Istanbul-grade accuracy.
       provider: 'v8',

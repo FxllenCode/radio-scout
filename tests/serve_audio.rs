@@ -79,6 +79,48 @@ async fn audio_without_a_stored_mime_defaults_to_octet_stream() {
     assert_eq!(resp.bytes().await.unwrap().as_ref(), b"RIFFxxxx");
 }
 
+/// A Call's audio never changes once stored, so it is cached hard — which is
+/// what makes the client's next-Call prefetch (#14) pay off: the prefetch warms
+/// the HTTP cache and the `<audio>` element then starts from disk instead of the
+/// network. A media element re-requests by range, so the ranged response has to
+/// carry the same headers or the cache is bypassed on the very request that
+/// matters.
+#[tokio::test]
+async fn audio_is_cacheable_so_a_prefetched_call_starts_instantly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let blob = BlobStore::filesystem(tmp.path().join("audio")).unwrap();
+    let (addr, db) = spawn_with_blob(blob.clone(), tmp.path()).await;
+
+    blob.put("ab/clip.m4a", Bytes::from_static(b"0123456789"))
+        .await
+        .unwrap();
+    let id = insert_call(&db, "ab/clip.m4a", Some("audio/mp4")).await;
+
+    let full = get(&addr, &format!("/api/call/{id}/audio")).await;
+    assert_eq!(full.status(), 200);
+    assert_eq!(
+        full.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("private, max-age=604800, immutable"),
+    );
+
+    let ranged = reqwest::Client::new()
+        .get(format!("http://{addr}/api/call/{id}/audio"))
+        .header("Range", "bytes=2-5")
+        .send()
+        .await
+        .expect("range get");
+    assert_eq!(ranged.status(), 206);
+    assert_eq!(
+        ranged
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("private, max-age=604800, immutable"),
+    );
+}
+
 #[tokio::test]
 async fn s3_backend_redirects_to_a_presigned_url() {
     // An S3-backed store presigns offline (no network), so this exercises the
@@ -116,5 +158,11 @@ async fn s3_backend_redirects_to_a_presigned_url() {
     assert!(
         location.contains("X-Amz-Signature="),
         "is a presigned URL: {location}"
+    );
+    // The bytes are immutable, but the *signature* on this Location expires —
+    // caching the redirect would outlive it and start handing out 403s.
+    assert!(
+        resp.headers().get("cache-control").is_none(),
+        "the presigned redirect itself must not be cached"
     );
 }

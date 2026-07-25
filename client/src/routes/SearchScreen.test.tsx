@@ -361,6 +361,32 @@ describe('SearchScreen', () => {
       expect(screen.getByText('2 of 3')).toBeInTheDocument()
     })
 
+    /** #14: pause is store state the `<audio>` element follows, so the lock
+     *  screen and this button are the same control seen twice (spec US 15). */
+    it('pauses the current call without losing it, then picks it up again', async () => {
+      const user = userEvent.setup()
+      renderApp('/search')
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+      await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
+
+      await user.click(screen.getByRole('button', { name: 'Pause' }))
+      // Still the current Call, still on the same source — paused, not dropped.
+      expect(screen.getByText('1 of 3')).toBeInTheDocument()
+      expect(screen.getByTestId('call-player')).toHaveAttribute(
+        'src',
+        '/api/call/3/audio',
+      )
+
+      await user.click(screen.getByRole('button', { name: 'Resume' }))
+      expect(
+        screen.getByRole('button', { name: 'Pause' }),
+      ).toBeInTheDocument()
+    })
+
     it('stops playing on demand', async () => {
       const user = userEvent.setup()
       renderApp('/search')
