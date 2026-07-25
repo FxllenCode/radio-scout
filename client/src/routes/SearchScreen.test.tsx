@@ -477,8 +477,10 @@ describe('SearchScreen', () => {
     renderApp('/search')
 
     const [row] = await resultRows()
-    expect(within(row).getByText('54241')).toBeInTheDocument()
-    expect(within(row).getByText('11')).toBeInTheDocument()
+    // Named the same way the scanner display names it (#11's lib/call), so a
+    // Talkgroup reads identically wherever it appears.
+    expect(within(row).getByText('Talkgroup 54241')).toBeInTheDocument()
+    expect(within(row).getByText('System 11')).toBeInTheDocument()
     expect(
       within(screen.getByLabelText('System')).getByRole('option', {
         name: '11',
@@ -495,7 +497,7 @@ describe('SearchScreen', () => {
     await user.click(within(row).getByRole('button', { name: /^Play / }))
     expect(
       within(screen.getByRole('region', { name: 'Now playing' })).getByText(
-        '54241',
+        'Talkgroup 54241',
       ),
     ).toBeInTheDocument()
   })

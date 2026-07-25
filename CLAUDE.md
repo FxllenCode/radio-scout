@@ -26,7 +26,7 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 
 **Coverage gates:**
 - **100% patch/diff coverage** on every PR — every new or changed line is tested. This is the hard gate; it makes "new code ships with tests" true by construction.
-- A **ratcheting project floor** (enforced in-repo: `cargo llvm-cov --fail-under-lines`, Vitest `thresholds`) — rises, never falls. Current baselines: **backend ~96% lines → floor 90**; **frontend 100% lines / ~94% branches → floor 95 lines / 88 branches** (`client/vite.config.ts`).
+- A **ratcheting project floor** (enforced in-repo: `cargo llvm-cov --fail-under-lines`, Vitest `thresholds`) — rises, never falls. Current baselines: **backend ~96% lines → floor 90**; **frontend 100% lines / ~96% branches → floor 95 lines / 90 branches** (`client/vite.config.ts`).
 - **No hard 100%-total gate** — it produces coverage theater. Quality is proven by mutation testing, not by chasing 100%.
 
 **Edge cases are required and operationalized.** "Multiple tests covering edge cases" means `proptest` (property-based — parsers, dedup window, range headers, protocol framing), `rstest` parametrized case tables (multiple named cases per behavior), and `cargo-mutants` mutation testing to prove the assertions actually catch regressions. A test that runs a line without asserting behavior does not count.

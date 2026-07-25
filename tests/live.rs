@@ -116,6 +116,51 @@ async fn all_true_receives_any_call() {
     assert_eq!(call["call"]["talkgroupRef"], 4242);
 }
 
+/// **Hold System** over the wire (#11, spec US 11): the client can't enumerate a
+/// System's Talkgroups, so it holds one with a `"*"` key and the server keeps
+/// filtering out everything else — the point of server-side filtering is that a
+/// phone stops *receiving* what it isn't listening to.
+#[tokio::test]
+async fn a_system_wildcard_holds_the_whole_system() {
+    let (addr, db, _tmp) = spawn().await;
+    seed(&db).await;
+    let mut ws = connect(&addr).await;
+
+    subscribe(&mut ws, r#"{"t":"sub","sel":{"11":{"*":true}}}"#).await;
+
+    post_call(&addr, 22, 4242).await; // another system: filtered
+    post_call(&addr, 11, 909).await; // never named individually: delivered
+    let call = received(&mut ws).await.expect("held system delivers");
+    assert_eq!(call["call"]["systemRef"], 11);
+    assert_eq!(call["call"]["talkgroupRef"], 909);
+    assert!(received(&mut ws).await.is_none(), "nothing else follows");
+}
+
+/// **Avoid** over the wire (#11, spec US 14): a listener starts all-on, so an
+/// avoided Talkgroup is an explicit exception to `all` — and the Calls it would
+/// have carried never reach the device at all.
+#[tokio::test]
+async fn an_explicit_exception_avoids_one_talkgroup_of_an_all_on_selection() {
+    let (addr, db, _tmp) = spawn().await;
+    seed(&db).await;
+    let mut ws = connect(&addr).await;
+
+    subscribe(
+        &mut ws,
+        r#"{"t":"sub","all":true,"sel":{"11":{"54241":false}}}"#,
+    )
+    .await;
+
+    post_call(&addr, 11, 54241).await; // avoided
+    post_call(&addr, 11, 999).await; // everything else still plays
+    let call = received(&mut ws).await.expect("unavoided call delivers");
+    assert_eq!(call["call"]["talkgroupRef"], 999);
+    assert!(
+        received(&mut ws).await.is_none(),
+        "the avoided one never came"
+    );
+}
+
 /// Two clients with different filters are served independently: a call reaches
 /// only the client that subscribed to it.
 #[tokio::test]

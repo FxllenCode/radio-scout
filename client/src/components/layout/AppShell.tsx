@@ -1,6 +1,7 @@
 import { Outlet } from 'react-router-dom'
 
 import { CallPlayer } from '@/components/CallPlayer'
+import { LiveFeedLink } from '@/components/LiveFeedLink'
 
 import { BottomTabBar } from './BottomTabBar'
 
@@ -8,8 +9,9 @@ import { BottomTabBar } from './BottomTabBar'
  *  On wider screens it centers to a comfortable column; the full desktop
  *  sidebar layout (brief item 29) is a later ticket.
  *
- *  The audio element lives here, outside the router outlet, so playback keeps
- *  going while the listener moves between tabs (ADR-0005: one reused element). */
+ *  The audio element and the live-feed socket live here, outside the router
+ *  outlet, so playback and the listening queue survive moving between tabs
+ *  (ADR-0005: one reused element; ADR-0004: the queue is client state). */
 export function AppShell() {
   return (
     <div className="mx-auto flex min-h-[100dvh] w-full max-w-2xl flex-col">
@@ -18,6 +20,7 @@ export function AppShell() {
       </main>
       <BottomTabBar />
       <CallPlayer />
+      <LiveFeedLink />
     </div>
   )
 }

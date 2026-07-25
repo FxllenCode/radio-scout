@@ -22,8 +22,9 @@ export function renderWithProviders(
   }
 }
 
-/** Render the whole app at `route` — the shell, the router, and the shared
- *  audio element, which is where the archive queue actually reaches a speaker. */
-export function renderApp(route: string) {
-  return renderWithProviders(<App />, { route })
+/** Render the whole app at `route` — the shell, the router, the shared audio
+ *  element (where a queue actually reaches a speaker), and the live-feed
+ *  socket. Pass a `store` to drive the feed from a test. */
+export function renderApp(route: string, store?: AppStore) {
+  return renderWithProviders(<App />, { route, store })
 }

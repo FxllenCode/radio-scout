@@ -152,23 +152,34 @@ struct Subscription {
     all: bool,
 }
 
+/// The Talkgroup key meaning "every Talkgroup in this System" (#11). A client
+/// holding a System can't enumerate its Talkgroups — it only knows the ones it
+/// has heard — and rdio only avoids the problem by shipping its whole config to
+/// the client, so the matrix gets a wildcard instead.
+const TALKGROUP_WILDCARD: &str = "*";
+
 impl Subscription {
-    /// Is `(system_ref, talkgroup_ref)` selected? Global-all wins; otherwise it's
-    /// an explicit `true` in the matrix.
+    /// Is `(system_ref, talkgroup_ref)` selected?
+    ///
+    /// Most specific wins: an explicit entry for the Talkgroup, then the
+    /// System's wildcard, then global-all. That ordering is what lets a listener
+    /// **avoid** one Talkgroup out of an all-on selection (spec US 14) or out of
+    /// a held System (US 11) — an exception to a default, rather than something
+    /// the default overrules.
     fn selects(&self, system_ref: i64, talkgroup_ref: i64) -> bool {
-        if self.all {
-            return true;
+        let system = self.selection.get(&system_ref.to_string());
+        if let Some(explicit) = system.and_then(|tgs| tgs.get(&talkgroup_ref.to_string())) {
+            return *explicit;
         }
-        self.selection
-            .get(&system_ref.to_string())
-            .and_then(|talkgroups| talkgroups.get(&talkgroup_ref.to_string()))
-            .copied()
-            .unwrap_or(false)
+        if let Some(wildcard) = system.and_then(|tgs| tgs.get(TALKGROUP_WILDCARD)) {
+            return *wildcard;
+        }
+        self.all
     }
 
     /// Nothing is selected at all (rdio's `IsAllOff`): no global-all and no
-    /// enabled entry. Lets [`ConnState::wants`] skip patch resolution for an idle
-    /// connection.
+    /// enabled entry — exclusions alone select nothing. Lets [`ConnState::wants`]
+    /// skip patch resolution for an idle connection.
     fn is_all_off(&self) -> bool {
         !self.all
             && self
@@ -559,6 +570,74 @@ mod tests {
     #[test]
     fn empty_subscription_wants_nothing() {
         assert!(!conn(&[]).wants(&call(11, 54241)));
+    }
+
+    /// **Hold System** (#11, spec US 11): the listener narrows to the System
+    /// that's talking. There is no way to enumerate its Talkgroups — the client
+    /// only knows the ones it has heard — so the matrix takes a `"*"` key
+    /// meaning "every Talkgroup in this System".
+    #[test]
+    fn system_wildcard_wants_every_talkgroup_in_that_system() {
+        let held = conn(&[("11", "*")]);
+
+        assert!(held.wants(&call(11, 54241)));
+        assert!(held.wants(&call(11, 1)), "any talkgroup of the held system");
+        assert!(!held.wants(&call(22, 54241)), "other systems stay filtered");
+    }
+
+    /// **Avoid** (#11, spec US 14) has to work against the all-on selection a
+    /// listener starts with, so an explicit entry is an exception to `all`
+    /// rather than something `all` overrules.
+    #[test]
+    fn explicit_entry_overrides_global_all() {
+        let mut avoiding = ConnState {
+            sub: subscription(&[], true),
+            scope: AccessScope::All,
+            heartbeat: Heartbeat::new(),
+        };
+        avoiding
+            .sub
+            .selection
+            .entry("11".to_string())
+            .or_default()
+            .insert("54241".to_string(), false);
+
+        assert!(!avoiding.wants(&call(11, 54241)), "avoided talkgroup");
+        assert!(
+            avoiding.wants(&call(11, 999)),
+            "everything else still plays"
+        );
+        assert!(avoiding.wants(&call(22, 54241)), "same ref, other system");
+    }
+
+    /// A wildcard is the System's default, not its law: an avoided Talkgroup
+    /// inside a held System stays avoided.
+    #[test]
+    fn explicit_entry_overrides_the_system_wildcard() {
+        let mut held = conn(&[("11", "*")]);
+        held.sub
+            .selection
+            .entry("11".to_string())
+            .or_default()
+            .insert("54241".to_string(), false);
+
+        assert!(!held.wants(&call(11, 54241)), "avoided inside the hold");
+        assert!(held.wants(&call(11, 999)), "the rest of the system plays");
+    }
+
+    /// A selection of nothing but exclusions is still "all off" — there is no
+    /// point resolving patches for it.
+    #[test]
+    fn a_selection_of_only_exclusions_is_all_off() {
+        let mut nothing = conn(&[]);
+        nothing
+            .sub
+            .selection
+            .entry("11".to_string())
+            .or_default()
+            .insert("54241".to_string(), false);
+
+        assert!(!nothing.wants(&call(11, 999)));
     }
 
     /// Patch fanout: a Call on a Talkgroup the listener didn't select still

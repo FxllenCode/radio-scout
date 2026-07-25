@@ -6,17 +6,14 @@ import {
   enterLiveFeed,
   enterPlaybackMode,
   next,
-  pause,
   playbackReducer,
   playResults,
   previous,
-  resume,
   selectCurrentCall,
   selectHasNext,
   selectHasPrevious,
   selectIsExhausted,
   selectIsInterrupting,
-  selectIsPaused,
   selectNextCall,
   selectPlaybackMode,
   selectPlaybackPosition,
@@ -236,53 +233,6 @@ describe('playback slice', () => {
       const interrupting = reduce(playResults({ results, index: 0 }))
 
       expect(playbackReducer(interrupting, previous())).toEqual(interrupting)
-    })
-  })
-
-  /** #14: the lock screen can pause, and it can skip — so "paused" is store
-   *  state (the element follows it), not something the `<audio>` element owns
-   *  privately. */
-  describe('pause (lock screen and in-app)', () => {
-    it('keeps the current call rather than dropping it', () => {
-      let state = reduce(
-        enterPlaybackMode(),
-        playResults({ results, index: 1 }),
-        pause(),
-      )
-
-      expect(selectIsPaused(rootState(state))).toBe(true)
-      expect(selectCurrentCall(rootState(state))).toEqual(call(2))
-
-      state = playbackReducer(state, resume())
-      expect(selectIsPaused(rootState(state))).toBe(false)
-      expect(selectCurrentCall(rootState(state))).toEqual(call(2))
-    })
-
-    it('ignores pause while nothing is playing', () => {
-      const idle = reduce(enterPlaybackMode())
-
-      expect(playbackReducer(idle, pause())).toEqual(idle)
-      expect(selectIsPaused(rootState(idle))).toBe(false)
-    })
-
-    // The element auto-plays whatever `src` it is given, so a pause that
-    // outlived the call it applied to would leave the store claiming "paused"
-    // over audible audio — and the lock-screen button showing the wrong icon.
-    it.each([
-      ['skipping forward', next()],
-      ['stepping back', previous()],
-      ['stopping', stop()],
-      ['playing another result', playResults({ results, index: 0 })],
-    ])('clears the pause when the queue moves on: %s', (_label, action) => {
-      const paused = reduce(
-        enterPlaybackMode(),
-        playResults({ results, index: 1 }),
-        pause(),
-      )
-
-      expect(selectIsPaused(rootState(playbackReducer(paused, action)))).toBe(
-        false,
-      )
     })
   })
 

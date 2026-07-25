@@ -25,7 +25,14 @@ The concrete wire protocol (all `{t, …}` JSON; audio never rides the socket). 
 - `{"t":"lagged","skipped":N}` — a slow client fell behind the fanout; it's told how many Calls it missed so it can refetch from the archive (#13). rdio silently drops them.
 
 **Client → server**
-- `{"t":"sub","sel":{sysRef:{tgRef:bool}},"all":bool,"since":callId?}` — replace the subscription matrix, optionally with a reconnect catch-up cursor.
+- `{"t":"sub","sel":{sysRef:{tgRef|"*":bool}},"all":bool,"since":callId?}` — replace the subscription matrix, optionally with a reconnect catch-up cursor. See **the matrix** below for how `sel`, `"*"`, and `all` resolve.
+
+**The matrix (#11 refinement).** `sel` resolves most-specific-first: an explicit `sel[system][talkgroup]` wins, then the System's wildcard `sel[system]["*"]`, then `all`. Two client behaviors need that ordering, and rdio only sidesteps both by shipping its entire Talkgroup config to the client and enumerating every id:
+
+- **Hold System** (spec US 11) narrows to the System that's talking, but the client only knows the Talkgroups it has *heard* — so it sends `sel[system]["*"] = true` rather than a list it can't complete.
+- **Avoid** (spec US 14) mutes one Talkgroup out of a selection that starts all-on, so `sel[system][talkgroup] = false` has to be an *exception* to `all` (or to a hold), not something they overrule.
+
+Exclusions alone still count as "all off" — a matrix of nothing but `false` selects nothing, and the fanout skips patch resolution for it. Both refinements are backward compatible: a client that sends neither wildcards nor `false` entries behaves exactly as before.
 
 **Matching** mirrors rdio's `IsEnabled` (a Call reaches a subscriber of its own **or** any patched Talkgroup, same-System), and adds an **access-scope** gate: delivery requires *both* the subscription matrix and the connection's access scope to admit the (System, Talkgroup). v1 listening is open, so every connection's scope is `All`; the restricted scope (`[{system, talkgroups}]`) is the v2 access-code seam ([ADR-0008](0008-security-posture.md)), built and unit-tested now.
 

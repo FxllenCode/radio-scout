@@ -22,6 +22,11 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // One test origin for everything: the relative-URL shim in src/test/setup.ts
+    // resolves fetches against `http://localhost`, and the live-feed socket
+    // derives its URL from `location` — they have to agree for MSW to match
+    // both.
+    environmentOptions: { jsdom: { url: 'http://localhost/' } },
     globals: true,
     setupFiles: './src/test/setup.ts',
     // Spies (`vi.spyOn(HTMLMediaElement.prototype, 'play')`) are per-test by
@@ -43,13 +48,13 @@ export default defineConfig({
         'src/**/*.d.ts',
       ],
       // Ratcheting project floor (ADR-0010): below the measured baseline, only
-      // ever raised. Raised with #13 (archive search), which took the measured
-      // numbers to 100% lines/statements/functions and ~94% branches.
+      // ever raised. Raised with #11 (live feed + scanner display), which took
+      // the measured numbers to 100% lines and ~96% branches.
       thresholds: {
         lines: 95,
         functions: 95,
         statements: 95,
-        branches: 88,
+        branches: 90,
       },
     },
   },

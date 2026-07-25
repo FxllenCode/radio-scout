@@ -3,19 +3,19 @@ import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ARTWORK_SIZES } from '@/lib/artwork'
-import {
-  enterPlaybackMode,
-  next,
-  pause,
-  playResults,
-  selectIsPaused,
-  stop,
-} from '@/store/playback'
+import { enterPlaybackMode, next, playResults, stop } from '@/store/playback'
 import { makeStore, type AppStore } from '@/store/store'
 import { ARCHIVE, ORIGIN } from '@/test/handlers'
 import { audioSessionType, installMediaSession } from '@/test/mediaSession'
 import { server } from '@/test/setup'
 import { renderWithProviders } from '@/test/utils'
+import { received, replay } from '@/store/live'
+import {
+  pause,
+  resume,
+  selectIsPaused,
+  selectProgress,
+} from '@/store/transport'
 
 import { CallPlayer } from './CallPlayer'
 
@@ -106,6 +106,24 @@ describe('CallPlayer', () => {
       act(() => session.fire('play'))
       expect(play).toHaveBeenCalled()
       expect(session.playbackState).toBe('playing')
+    })
+
+    it('follows the playhead, which is what the display draws', () => {
+      const store = playFrom(0)
+
+      Object.defineProperty(player(), 'duration', {
+        value: 10,
+        configurable: true,
+      })
+      Object.defineProperty(player(), 'currentTime', {
+        value: 4,
+        configurable: true,
+      })
+      act(() => {
+        player().dispatchEvent(new Event('timeupdate'))
+      })
+
+      expect(selectProgress(store.getState())).toBeCloseTo(0.4)
     })
 
     it('publishes the duration once the audio reports one', () => {
@@ -204,6 +222,47 @@ describe('CallPlayer', () => {
 
       expect(selectIsPaused(store.getState())).toBe(false)
       expect(player()).toHaveAttribute('src', '/api/call/2/audio')
+    })
+
+    /** Spec US 15: pause "suspends playback without losing the queue" — and
+     *  without losing the listener's place in the Call, either. */
+    it('picks a paused Call up where it left off', () => {
+      const store = playFrom(0)
+      const audio = player()
+      Object.defineProperty(audio, 'currentTime', {
+        value: 6,
+        writable: true,
+        configurable: true,
+      })
+
+      act(() => {
+        store.dispatch(pause())
+      })
+      act(() => {
+        store.dispatch(resume())
+      })
+
+      expect(audio.currentTime).toBe(6)
+    })
+
+    it('starts a replayed Call over, though its source never changed', () => {
+      const store = makeStore()
+      renderWithProviders(<CallPlayer />, { store })
+      act(() => {
+        store.dispatch(received({ call: ARCHIVE[0] }))
+      })
+      const audio = player()
+      Object.defineProperty(audio, 'currentTime', {
+        value: 6,
+        writable: true,
+        configurable: true,
+      })
+
+      act(() => {
+        store.dispatch(replay(ARCHIVE[0].id))
+      })
+
+      expect(audio.currentTime).toBe(0)
     })
 
     it('leaves a paused element paused across a re-render', () => {

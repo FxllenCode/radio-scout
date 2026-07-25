@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
+import { callCategory, systemName, talkgroupName } from '@/lib/call'
 import { ledForTalkgroup } from '@/lib/led'
 import {
   dateTimeLocalToMs,
@@ -25,20 +26,18 @@ import {
   enterLiveFeed,
   enterPlaybackMode,
   next,
-  pause,
   playResults,
   previous,
-  resume,
   selectCurrentCall,
   selectHasNext,
   selectHasPrevious,
   selectIsExhausted,
   selectIsInterrupting,
-  selectIsPaused,
   selectPlaybackMode,
   selectPlaybackPosition,
   stop,
 } from '@/store/playback'
+import { selectIsPaused, togglePause } from '@/store/transport'
 import type { Call, SearchQuery } from '@/types'
 
 /** Results per page. Small enough to stay snappy on a Pi over a phone
@@ -306,7 +305,7 @@ export function SearchScreen() {
           hasPrevious={hasPrevious}
           onPrevious={() => dispatch(previous())}
           onNext={() => dispatch(next())}
-          onTogglePause={() => dispatch(paused ? resume() : pause())}
+          onTogglePause={() => dispatch(togglePause())}
           onStop={() => dispatch(stop())}
         />
       )}
@@ -418,8 +417,8 @@ function ResultRow({
   isCurrent: boolean
   onPlay: () => void
 }) {
-  const name = call.talkgroupLabel ?? String(call.talkgroupRef)
-  const system = call.systemLabel ?? String(call.systemRef)
+  const name = talkgroupName(call)
+  const system = systemName(call)
   const description = `${name} on ${system} at ${formatCallTime(call.timestamp)}`
 
   return (
@@ -436,9 +435,7 @@ function ResultRow({
       <div className="min-w-0 flex-1">
         <p className="truncate font-mono text-sm">{name}</p>
         <p className="truncate font-mono text-[11px] text-muted-foreground">
-          {[system, call.talkgroupTag, call.talkgroupGroup]
-            .filter(Boolean)
-            .join(' · ')}
+          {[system, callCategory(call)].filter(Boolean).join(' · ')}
         </p>
       </div>
       <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
@@ -495,16 +492,15 @@ function NowPlaying({
       aria-label="Now playing"
       className="mt-4 flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
     >
-      {/* The LED pulses with the audio, so pausing stills it. */}
+      {/* docs/design/brief.md state 6: a paused Call blinks, a playing one is
+          steady. */}
       <StatusLed
         color={ledForTalkgroup(call.systemRef, call.talkgroupRef)}
         size={12}
-        pulse={!paused}
+        pulse={paused}
       />
       <div className="min-w-0 flex-1">
-        <p className="truncate font-mono text-sm">
-          {call.talkgroupLabel ?? call.talkgroupRef}
-        </p>
+        <p className="truncate font-mono text-sm">{talkgroupName(call)}</p>
         <p className="font-mono text-[11px] text-muted-foreground">
           {interrupting
             ? 'Interrupting live feed'

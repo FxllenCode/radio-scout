@@ -1,4 +1,4 @@
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse, ws } from 'msw'
 
 import type { Call, FilterOptions } from '@/types'
 
@@ -75,9 +75,18 @@ export function archivePage(url: URL) {
   }
 }
 
+/** The live-feed socket, same origin as the API (ADR-0004). Tests that care
+ *  what the feed sends override this link through `server.use(...)`. */
+export const liveFeed = ws.link(`${ORIGIN.replace('http', 'ws')}/api/live`)
+
 /** Shared MSW request handlers (ADR-0010: mock at the network boundary, never
  *  `fetch`/module mocks). Per-test overrides go through `server.use(...)`. */
 export const handlers = [
+  // A quiet feed: connects, greets, and pushes nothing. Every screen mounts the
+  // shell, so every test opens this socket.
+  liveFeed.addEventListener('connection', ({ client }) =>
+    client.send(JSON.stringify({ t: 'hello', protocol: 1, heartbeatMs: 30_000 })),
+  ),
   http.get(`${ORIGIN}/healthz`, () => new HttpResponse('ok', { status: 200 })),
   http.get(`${ORIGIN}/api/calls`, ({ request }) =>
     HttpResponse.json(archivePage(new URL(request.url))),
