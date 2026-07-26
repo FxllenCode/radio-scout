@@ -10,6 +10,7 @@
 //! library (`startup`, `observability`, `retention`), and this file wires them
 //! together in the order a boot needs them.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -92,6 +93,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         base_dir = %base_dir.display(),
         "radio-scout listening"
     );
-    axum::serve(listener, app).await?;
+    // With connect info: the request log (#28) names the host an ingest came
+    // from, which is the diagnostic that matters when a recorder says it is
+    // uploading and the archive disagrees.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

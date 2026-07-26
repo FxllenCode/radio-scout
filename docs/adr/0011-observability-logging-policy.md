@@ -43,7 +43,17 @@ These are **hard rules**, not preferences. The first is enforced by the compiler
 
 ### The request log
 
-One line per HTTP request at INFO — method, path, status, duration — with the chatty classes demoted to DEBUG: embedded SPA assets, and `/api/call/{id}/audio` range requests, since a media element issues several per Call. A malformed, 404ing or rejected request still appears, which is exactly what was missing.
+One line per HTTP request at INFO — method, path, status, duration — with the chatty classes demoted to DEBUG: embedded SPA assets, `/api/call/{id}/audio` range requests (a media element issues several per Call), and the `/healthz` liveness probe, which a packaged deployment (#23) hits every few seconds and which at INFO is thousands of lines a day saying nothing happened. A malformed, 404ing or rejected request still appears, which is exactly what was missing.
+
+The level is the **louder of the route's class and its outcome**: a 4xx escalates to WARN and a 5xx to ERROR whatever the class, so a probe that fails or a range request that 416s is never quiet. `/healthz`'s demotion is the one place this deviates from #28 as written (which put everything outside the two named classes at INFO); it is the same reasoning the ticket gives for the other two, applied to the chattiest route we ship, and rule 8 asks for it.
+
+Three details that are policy, not formatting:
+
+- **The path, never the whole URI.** Access codes are a query parameter in rdio-scanner's world and ADR-0008 keeps that shape, so logging the query string would make rule 2 conditional on which routes happen to exist today.
+- **The client address is the TCP peer's**, never `X-Forwarded-For` (see below). A recorder's address rides an ingest line at any level; a listener's rides only a line that is already DEBUG, which in practice means the audio and asset requests it makes, and only when someone turned the verbosity up to look. Note this lands *stricter* than #28 asked for: the archive and live-feed routes rest at INFO, so a listener's address on those is unrecorded at **every** verbosity rather than merely hidden at the default. Nothing needs it there, and the alternative — emitting a second, DEBUG-only line per request just to carry an address — is the hot-loop rule 8 forbids.
+- **Every line carries a 16-hex-character request id**, generated per request — never taken from an inbound header — and carried as a span field, so the lines a handler emits while serving the request carry it too. The response echoes it in `x-request-id`, so an operator holding a client's failure can grep the server. #29 hangs the 5xx correlation ref off the same id.
+
+The live feed is a socket, not a request: it logs its upgrade (the 101), then one line when a listener arrives and one when it leaves, carrying the connection's lifetime and the upgrade's request id. Never one per frame (rule 8).
 
 ### The operator log surface (later)
 
@@ -55,6 +65,8 @@ A `Layer` writing to a `logs` table, retention in days, and a searchable Setting
 - **A rotating file sink** (`tracing-appender`) — duplicates what journald and Docker already do for every deployment we ship, and adds a second disk-space policy to a device where retention is already rationing the disk.
 - **JSON output now** — trivial to add later (tracing-subscriber ships the formatter); nobody is shipping logs to an aggregator yet.
 - **rdio's DB-first logging** — putting a database write in the path of every log line on a Pi, and losing the console as the primary surface. Inverted here: console first, DB as an additional sink.
+- **Trusting `X-Forwarded-For` for the client address** — rdio-scanner does, unconditionally (`main.go:265`), and it is what makes the address useful behind nginx or Docker's bridge, where the peer is the proxy. But the header is attacker-controlled: on a public instance anyone could forge a recorder's address into the operator's log, which corrupts the one field the request log exists to make trustworthy. Honouring it needs an explicit list of proxies that may be believed, which belongs with the real configuration (#17), not with an implicit "looks like a private address" heuristic. Until then a reverse-proxied deployment reads every client as its proxy — a known, visible limitation rather than a quiet lie.
+- **Reusing an inbound `X-Request-Id`** — nice for tracing through a proxy, and the same problem: a value a client chooses, landing in every line about the request.
 - **Keeping error detail in the response body** — convenient for an operator who only reads their recorder's log, but it means internals travel to clients by design, and the correlation ref recovers the convenience without the leak.
 - **Keeping the first-run key banner** behind a narrow allow (or logging the generated key once at INFO) — it reads as harmless, but it makes rule 2 conditional on the day, and startup output is exactly what gets pasted into an issue and, once the log surface lands, written to a database. A file the operator can `cat` is both safer and more recoverable.
 - **Writing the generated key to its own file** under the base dir rather than into `.env` — no rewriting of a file we don't own, but it invents a second place a credential can live when `.env` is already *the* documented one, and the next boot would not pin it. (`base_dir/.env` is only the fallback for a boot that found no env file at all.)

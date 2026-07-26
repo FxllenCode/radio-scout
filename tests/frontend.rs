@@ -3,6 +3,7 @@
 //! whether `client/dist` has been built — so they pass in CI both before and
 //! after the frontend build step.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use radio_scout::db;
@@ -20,7 +21,14 @@ async fn spawn_app() -> (String, tempfile::TempDir) {
         .expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
+        // With connect info, as the binary and `tests/common` serve it — the
+        // request log (#28) reads the peer address from there.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("serve");
     });
     (format!("127.0.0.1:{}", addr.port()), tmp)
 }

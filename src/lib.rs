@@ -9,6 +9,7 @@ pub mod archive;
 pub mod blob;
 pub mod call;
 pub mod db;
+pub mod http_log;
 pub mod import;
 pub mod ingest;
 pub mod live;
@@ -90,6 +91,9 @@ pub fn build_app(state: AppState) -> Router {
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.
         .fallback(web::spa_handler)
+        // One line per request (#28), outermost so it sees every outcome —
+        // including the 404s and 405s the router answers on its own.
+        .layer(axum::middleware::from_fn(http_log::log_requests))
         .with_state(state)
 }
 

@@ -35,6 +35,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
+use tracing::{Instrument, Span, info};
 
 use crate::AppState;
 use crate::call::{CallId, StoredCall};
@@ -345,10 +346,33 @@ fn lagged_frame(skipped: u64) -> String {
 
 /// `GET /api/live` — upgrade to a WebSocket and run the per-connection loop.
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    // `on_upgrade` runs the connection in a task of its own, which would
+    // otherwise lose the request span the upgrade was logged under (#28).
+    // Carrying it means everything this socket says stays attributable to the
+    // request that opened it.
+    let span = Span::current();
+    ws.on_upgrade(move |socket| handle_socket(socket, state).instrument(span))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
+/// A connection's lifetime, bracketed by the two lines that are the socket's
+/// answer to the request log (#28): one when a listener arrives and one when it
+/// leaves — never one per frame, however much crosses it (ADR-0011 rule 8).
+///
+/// No address on either line: a listener's IP never appears above DEBUG (rule
+/// 5), and rdio-scanner's habit of logging every listener's IP and access-code
+/// ident at info (`client.go:152`) is the thing we are deliberately not doing.
+async fn handle_socket(socket: WebSocket, state: AppState) {
+    info!("live-feed listener connected");
+    let connected_at = Instant::now();
+    run_connection(socket, state).await;
+    // `connected_ms`, not `duration_ms`: a Call already has a `duration_ms` (its
+    // audio length) and the request line has a `duration_us`. One grep, one
+    // meaning.
+    let connected_ms = connected_at.elapsed().as_millis() as u64;
+    info!(connected_ms, "live-feed listener disconnected");
+}
+
+async fn run_connection(mut socket: WebSocket, state: AppState) {
     let mut receiver = state.live.subscribe();
     let heartbeat_period = state.live.heartbeat();
     let mut conn = ConnState::new();

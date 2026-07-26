@@ -4,7 +4,7 @@
 //! Driven over the real HTTP boundary via the integration harness (ADR-0009).
 
 mod common;
-use common::{spawn, spawn_with_blob, spawn_with_store};
+use common::{get, spawn, spawn_with_blob, spawn_with_store};
 
 use bytes::Bytes;
 use radio_scout::db::repo::{self, NewCall};
@@ -51,12 +51,6 @@ async fn seed_call(
     .await
     .expect("seed call")
     .id
-}
-
-async fn get(addr: &str, path: &str) -> reqwest::Response {
-    reqwest::get(format!("http://{addr}{path}"))
-        .await
-        .expect("request")
 }
 
 /// GET `path`, expecting 200 + JSON.

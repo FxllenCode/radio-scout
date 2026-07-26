@@ -60,6 +60,8 @@ Output goes to **stdout only** (journald/Docker/terminal own persistence and rot
 
 Applying a migration logs its name at INFO (`db::migrate`, one migration at a time so the line lands after the migration it reports); an already-current schema says so at DEBUG.
 
+**Every HTTP request leaves one line** (`src/http_log.rs`, #28): `method`, `path`, `status`, `duration_us`, under a span carrying a 16-hex `request_id` that the response echoes as `x-request-id` — so a handler's own lines correlate, and #29's 5xx ref is the same id. The level is the **louder of the route's class and its outcome**: SPA assets, `/api/call/{id}/audio` and `/healthz` rest at DEBUG (chatty — a Pi must not write a line per range request or per probe), everything else at INFO, and a 4xx/5xx escalates to WARN/ERROR whatever the class. The **path only, never the query string** (rule 2 — access codes are a query parameter in ADR-0008's shape). The client address is the **TCP peer's, never `X-Forwarded-For`** (spoofable; #17's config owns trusted proxies), and rule 5 decides whether it rides: ingest lines always, everything else only on a line that is already DEBUG. The live feed logs its upgrade + connect/disconnect, never a frame.
+
 ## Improve, don't clone rdio
 
 **Every feature is a chance to be better than rdio — take it.** rdio-scanner is the reference for *what* to build and the compatibility contract, never the ceiling for *how well*. The workflow for any ticket that touches an rdio-equivalent feature is:

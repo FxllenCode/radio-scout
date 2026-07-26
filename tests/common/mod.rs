@@ -4,6 +4,9 @@
 //! doesn't use).
 #![allow(dead_code)]
 
+pub mod logs;
+
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,15 +101,32 @@ async fn connect_db(dir: &Path) -> DatabaseConnection {
 }
 
 /// Serve `app` on an ephemeral loopback port, returning its `host:port`.
+///
+/// With connect info, exactly as the binary serves it: the request log (#28)
+/// reads the peer address from there, so a harness without it would make the
+/// address field untestable.
 async fn serve(app: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("serve");
     });
     format!("127.0.0.1:{}", addr.port())
+}
+
+/// `GET http://<addr><path>`, following redirects. A test that needs to observe
+/// a redirect itself (the S3 presign path) builds its own client.
+pub async fn get(addr: &str, path: &str) -> reqwest::Response {
+    reqwest::get(format!("http://{addr}{path}"))
+        .await
+        .expect("request")
 }
 
 /// A connected live-feed WebSocket client.
