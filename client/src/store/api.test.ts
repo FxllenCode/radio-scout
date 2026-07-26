@@ -3,7 +3,7 @@ import { setupListeners } from '@reduxjs/toolkit/query'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 
-import { ORIGIN } from '@/test/handlers'
+import { CATALOG, ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
 
 import { api } from './api'
@@ -46,5 +46,15 @@ describe('api slice', () => {
 
     expect(result.isError).toBe(true)
     expect((result.error as { status?: string }).status).toBe('FETCH_ERROR')
+  })
+})
+
+describe('getCatalog', () => {
+  it('fetches what a listener can select from (#12)', async () => {
+    const store = makeStore()
+
+    const result = await store.dispatch(api.endpoints.getCatalog.initiate())
+
+    expect(result.data).toEqual(CATALOG)
   })
 })

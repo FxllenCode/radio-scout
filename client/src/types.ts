@@ -51,6 +51,33 @@ export interface SearchPage {
   hasMore: boolean
 }
 
+/** One Talkgroup a listener can select, as `GET /api/catalog` serves it (#12).
+ *  Nested under its System, whose Ref completes the key the selection uses. */
+export interface CatalogTalkgroup {
+  ref: number
+  label?: string
+  name?: string
+  /** The Talkgroup's single Tag (CONTEXT.md) — one half of the category rows. */
+  tag?: string
+  /** Every Group it belongs to, sorted — the other half. */
+  groups: string[]
+  /** The curated LED color (#18), when an operator has set one. */
+  led?: string
+}
+
+export interface CatalogSystem {
+  ref: number
+  label?: string
+  talkgroups: CatalogTalkgroup[]
+}
+
+/** `GET /api/catalog` — everything the Talkgroups panel offers. Unlike
+ *  [`FilterOptions`], this is the *configured* world rather than the archived
+ *  one: a Talkgroup whose Calls have aged out is still selectable. */
+export interface Catalog {
+  systems: CatalogSystem[]
+}
+
 export interface SystemOption {
   ref: number
   label?: string

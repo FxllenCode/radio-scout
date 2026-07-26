@@ -8,6 +8,7 @@
 pub mod archive;
 pub mod blob;
 pub mod call;
+pub mod catalog;
 pub mod db;
 pub mod failure;
 pub mod http_log;
@@ -78,6 +79,9 @@ pub fn build_app(state: AppState) -> Router {
         // per-Call download.
         .route("/api/calls", get(archive::search))
         .route("/api/calls/filters", get(archive::filters))
+        // What a listener can select from (#12) — Systems + Talkgroups, whether
+        // or not any of their Calls are still in the archive.
+        .route("/api/catalog", get(catalog::catalog))
         .route("/api/call/{id}/audio", get(serve_audio))
         .route("/api/call/{id}/download", get(archive::download))
         // Admin surface. Everything under `/api/admin/` mutates configuration

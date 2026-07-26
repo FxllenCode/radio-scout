@@ -1,17 +1,37 @@
 import { configureStore } from '@reduxjs/toolkit'
 import { setupListeners } from '@reduxjs/toolkit/query'
 
+import { loadSelection, namespaceOf, saveSelection } from '@/lib/persist'
+
 import { api } from './api'
-import { liveReducer } from './live'
+import { initialLiveState, liveReducer } from './live'
 import { playbackReducer } from './playback'
 import { transportReducer } from './transport'
 
+/** How a store is told where to remember the selection. Tests pass their own;
+ *  the app takes the browser's local storage and the `?id=` in its URL.
+ *
+ *  `storage` is optional in the type as well as the call because a browser can
+ *  genuinely be without one — site data blocked, or a sandboxed context — and
+ *  a scanner that runs unremembered is better than one that won't start. */
+export interface StoreOptions {
+  storage?: Storage
+  namespace?: string
+}
+
 /** The root store: the RTK Query API slice plus the client-only listening state
- *  ADR-0004 keeps off the server — `live` (queue, hold, avoid, history, #11),
- *  `playback` (archive results + playback mode, #13), and `transport` (what the
- *  one shared `<audio>` element is doing, #11/#14). The Talkgroup selection
- *  joins them in #12. */
-export function makeStore() {
+ *  ADR-0004 keeps off the server — `live` (the **Selection**, queue, hold,
+ *  avoid, history; #11/#12), `playback` (archive results + playback mode, #13),
+ *  and `transport` (what the one shared `<audio>` element is doing, #11/#14).
+ *
+ *  The selection is hydrated from local storage on the way in and written back
+ *  whenever it changes (spec US 22) — and only then, so a Call arriving every
+ *  few seconds costs nothing. */
+export function makeStore({
+  storage = globalThis.localStorage,
+  namespace = namespaceOf(),
+}: StoreOptions = {}) {
+  const remembered = storage && loadSelection(storage, namespace)
   const store = configureStore({
     reducer: {
       [api.reducerPath]: api.reducer,
@@ -21,9 +41,22 @@ export function makeStore() {
     },
     middleware: (getDefaultMiddleware) =>
       getDefaultMiddleware().concat(api.middleware),
+    preloadedState: remembered
+      ? { live: { ...initialLiveState, selection: remembered } }
+      : undefined,
   })
   // Enables refetchOnFocus / refetchOnReconnect behavior.
   setupListeners(store.dispatch)
+
+  if (storage) {
+    let last = store.getState().live.selection
+    store.subscribe(() => {
+      const selection = store.getState().live.selection
+      if (selection === last) return
+      last = selection
+      saveSelection(storage, namespace, selection)
+    })
+  }
   return store
 }
 

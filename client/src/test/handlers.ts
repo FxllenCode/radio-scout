@@ -1,6 +1,6 @@
 import { http, HttpResponse, ws } from 'msw'
 
-import type { Call, FilterOptions } from '@/types'
+import type { Call, Catalog, FilterOptions } from '@/types'
 
 /** Same-origin base our relative RTK Query calls resolve to under jsdom (the
  *  Request shim in setup.ts rewrites `/foo` → `http://localhost/foo`). Handlers
@@ -61,6 +61,30 @@ export const FILTER_OPTIONS: FilterOptions = {
   dateStopMs: Date.parse('2026-07-25T14:32:05'),
 }
 
+/** What `GET /api/catalog` serves (#12): the same two Systems the archive
+ *  above has Calls for, plus a Talkgroup that has none — the catalog is the
+ *  configured world, not the archived one. */
+export const CATALOG: Catalog = {
+  systems: [
+    {
+      ref: 100,
+      label: 'Alpha',
+      talkgroups: [
+        { ref: 1, label: 'Alpha Fire', tag: 'Fire', groups: ['Emergency'], led: 'red' },
+        { ref: 2, label: 'Alpha Law', tag: 'Law', groups: ['Emergency', 'Public'] },
+        { ref: 3, label: 'Alpha Quiet', tag: 'Ops', groups: ['Public'] },
+      ],
+    },
+    {
+      ref: 200,
+      label: 'Beta',
+      talkgroups: [
+        { ref: 1, label: 'Beta Dispatch', tag: 'Fire', groups: ['Public'] },
+      ],
+    },
+  ],
+}
+
 /** One page of `ARCHIVE`, honoring `limit`/`offset` so pagination is real. */
 export function archivePage(url: URL) {
   const limit = Number(url.searchParams.get('limit') ?? 100)
@@ -94,6 +118,7 @@ export const handlers = [
   http.get(`${ORIGIN}/api/calls/filters`, () =>
     HttpResponse.json(FILTER_OPTIONS),
   ),
+  http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(CATALOG)),
   /** A Call's audio. Nothing in jsdom decodes it — it is here because the
    *  player prefetches the next Call's audio (#14), and an unhandled request
    *  is a test failure. */

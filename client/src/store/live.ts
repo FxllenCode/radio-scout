@@ -1,6 +1,17 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
 
 import type { LiveStatus, Subscription } from '@/lib/liveFeed'
+import {
+  EVERYTHING,
+  isSelected,
+  restrictToSystem,
+  restrictToTalkgroup,
+  setEverything,
+  setSystem,
+  setTalkgroups,
+  type Selection,
+  type TalkgroupKey,
+} from '@/lib/selection'
 import type { Call } from '@/types'
 
 import { enterPlaybackMode } from './playback'
@@ -37,9 +48,6 @@ export const QUEUE_LIMIT = 100
  *  out of id order, and a watermark would drop the late one. */
 const SEEN_LIMIT = 256
 
-/** The Talkgroup key the server reads as "every Talkgroup in this System". */
-const WILDCARD = '*'
-
 export interface LiveState {
   status: LiveStatus
   /** Calls waiting to play, oldest first (CONTEXT.md **Listening queue**). */
@@ -56,6 +64,10 @@ export interface LiveState {
   /** Recently seen Call ids, oldest first — what makes at-least-once delivery
    *  idempotent for the listener. */
   seen: number[]
+  /** What the listener has chosen to hear (CONTEXT.md **Selection**, #12).
+   *  Held here rather than in a slice of its own because it is the base every
+   *  arriving Call is judged against, alongside the hold and the avoids. */
+  selection: Selection
   hold: Hold | null
   /** `systemRef:talkgroupRef` → the moment the avoid lapses, `0` for never
    *  (spec US 14's timed 30/60/120 min cycle). */
@@ -65,13 +77,16 @@ export interface LiveState {
   missed: number
 }
 
-const initialState: LiveState = {
+/** The state a listener who has never touched anything starts from. Exported
+ *  so the store can hydrate the persisted selection into it (#12). */
+export const initialLiveState: LiveState = {
   status: 'offline',
   queue: [],
   current: null,
   history: [],
   playId: 0,
   seen: [],
+  selection: EVERYTHING,
   hold: null,
   avoided: {},
   missed: 0,
@@ -80,17 +95,33 @@ const initialState: LiveState = {
 const avoidKey = (systemRef: number, talkgroupRef: number) =>
   `${systemRef}:${talkgroupRef}`
 
-/** Does the listener still want this Call, given the hold and the avoid list?
- *  The server filters too — this is what keeps the queue honest in the window
- *  before a new matrix lands, and what purges Calls already waiting. */
+/** The `systemRef:talkgroupRef` key read back as the pair it encodes. */
+function parseAvoidKey(key: string): TalkgroupKey {
+  const [systemRef, talkgroupRef] = key.split(':')
+  return { systemRef: Number(systemRef), talkgroupRef: Number(talkgroupRef) }
+}
+
+/**
+ * Does the listener still want this Call?
+ *
+ * Judged against the very matrix the server was sent, so the client can't
+ * disagree with the server about what "selected" means. That matters in the
+ * window before a new matrix lands, for purging Calls already waiting, and for
+ * **patched** Calls (spec US 18): the server delivers a Call that reaches any
+ * selected Talkgroup in its patch, and the client must not then throw it away.
+ *
+ * The matrix is passed in rather than rebuilt per Call — purging walks a queue
+ * of up to [`QUEUE_LIMIT`] on a Pi-class phone.
+ */
+function wants(matrix: Subscription, call: Call): boolean {
+  return [call.talkgroupRef, ...(call.patches ?? [])].some((talkgroupRef) =>
+    isSelected(matrix, call.systemRef, talkgroupRef),
+  )
+}
+
+/** [`wants`] against this state's current matrix — the single-Call case. */
 function wanted(state: LiveState, call: Call): boolean {
-  if (state.avoided[avoidKey(call.systemRef, call.talkgroupRef)] !== undefined) {
-    return false
-  }
-  const { hold } = state
-  if (!hold) return true
-  if (hold.systemRef !== call.systemRef) return false
-  return hold.talkgroupRef === null || hold.talkgroupRef === call.talkgroupRef
+  return wants(matrixOf(state), call)
 }
 
 /** Start `call`, filing whatever was playing under history. */
@@ -108,10 +139,37 @@ function next(state: LiveState) {
   play(state, state.queue.shift() ?? null)
 }
 
-/** Drop whatever the listener no longer wants — after a hold or an avoid. */
+/** Drop whatever the listener no longer wants — after a selection change, a
+ *  hold, or an avoid. */
 function purge(state: LiveState) {
-  state.queue = state.queue.filter((call) => wanted(state, call))
-  if (state.current && !wanted(state, state.current)) next(state)
+  const matrix = matrixOf(state)
+  state.queue = state.queue.filter((call) => wants(matrix, call))
+  if (state.current && !wants(matrix, state.current)) next(state)
+}
+
+/**
+ * The subscription matrix this state asks the server for (ADR-0004).
+ *
+ * Three layers, each an exception to the one under it: the **Selection** is the
+ * base (#12); a **Hold** narrows it to one System or Talkgroup (spec US 11);
+ * and each **Avoid** is a Talkgroup silenced on top (US 14). The server resolves
+ * the most specific entry first, so the layers survive as a single flat matrix.
+ */
+function matrixOf(state: LiveState): Subscription {
+  const { hold, selection } = state
+  const held =
+    hold === null
+      ? selection
+      : hold.talkgroupRef === null
+        ? restrictToSystem(selection, hold.systemRef)
+        : restrictToTalkgroup(hold.systemRef, hold.talkgroupRef)
+
+  return silenced(held, state)
+}
+
+/** `base` with every avoided Talkgroup turned off on top of it. */
+function silenced(base: Selection, state: LiveState): Selection {
+  return setTalkgroups(base, Object.keys(state.avoided).map(parseAvoidKey), false)
 }
 
 /**
@@ -126,8 +184,46 @@ function purge(state: LiveState) {
  */
 const liveSlice = createSlice({
   name: 'live',
-  initialState,
+  initialState: initialLiveState,
   reducers: {
+    /** Turn Talkgroups on or off — one row in the panel, or every Talkgroup
+     *  behind a Group/Tag category chip (spec US 19–20). Selecting one lifts
+     *  any avoid on it: the panel would otherwise show it on while the avoid
+     *  kept it silent. */
+    chooseTalkgroups(
+      state,
+      action: PayloadAction<{ keys: TalkgroupKey[]; on: boolean }>,
+    ) {
+      const { keys, on } = action.payload
+      state.selection = setTalkgroups(state.selection, keys, on)
+      if (on) {
+        for (const key of keys) {
+          delete state.avoided[avoidKey(key.systemRef, key.talkgroupRef)]
+        }
+      }
+      purge(state)
+    },
+
+    /** A System's all-on / all-off (spec US 21). "All on" means all on, so it
+     *  lifts that System's avoids too. */
+    chooseSystem(state, action: PayloadAction<{ systemRef: number; on: boolean }>) {
+      const { systemRef, on } = action.payload
+      state.selection = setSystem(state.selection, systemRef, on)
+      if (on) {
+        for (const key of Object.keys(state.avoided)) {
+          if (parseAvoidKey(key).systemRef === systemRef) delete state.avoided[key]
+        }
+      }
+      purge(state)
+    },
+
+    /** The global all-on / all-off (spec US 21), avoids with it. */
+    chooseEverything(state, action: PayloadAction<boolean>) {
+      state.selection = setEverything(action.payload)
+      if (action.payload) state.avoided = {}
+      purge(state)
+    },
+
     connecting(state) {
       state.status = 'connecting'
     },
@@ -270,6 +366,9 @@ const liveSlice = createSlice({
 export const {
   advance,
   avoid,
+  chooseEverything,
+  chooseSystem,
+  chooseTalkgroups,
   clearAvoids,
   connected,
   connecting,
@@ -317,28 +416,34 @@ export const selectIsAvoided = (
   state: WithLive,
   systemRef: number,
   talkgroupRef: number,
-): boolean => state.live.avoided[avoidKey(systemRef, talkgroupRef)] !== undefined
+): boolean => selectAvoidUntil(state, systemRef, talkgroupRef) !== undefined
+
+/** When a Talkgroup's avoid lapses — `0` for "until the listener says
+ *  otherwise", `undefined` for one that isn't avoided. The Talkgroups panel
+ *  shows the difference: a timed avoid is coming back on its own (#12). */
+export const selectAvoidUntil = (
+  state: WithLive,
+  systemRef: number,
+  talkgroupRef: number,
+): number | undefined => state.live.avoided[avoidKey(systemRef, talkgroupRef)]
+
+/** What the listener has chosen to hear, before a hold or an avoid narrows it
+ *  (#12) — what the Talkgroups panel draws and what is persisted. */
+export const selectSelection = (state: WithLive): Selection => state.live.selection
 
 /**
- * The subscription matrix this state asks the server for (ADR-0004).
+ * The selection as the Talkgroups panel draws it: what the listener will
+ * actually hear, so an avoided Talkgroup reads off there and the panel's counts
+ * agree with its rows.
  *
- * A listener starts on everything; a hold narrows to one System (`"*"`, since
- * the client can only name the Talkgroups it has heard) or one Talkgroup; and
- * each avoid is an explicit exception layered on top — which is why the server
- * resolves the most specific entry first.
+ * A **hold** is deliberately not folded in. It is a temporary narrowing the
+ * Live screen owns (spec US 11) — showing it here would make the panel claim
+ * the listener had deselected every other System.
  */
-export const selectLiveMatrix = (state: WithLive): Subscription => {
-  const { hold, avoided } = state.live
-  const sel: Record<string, Record<string, boolean>> = {}
+export const selectAudibleSelection = (state: WithLive): Selection =>
+  silenced(state.live.selection, state.live)
 
-  if (hold) {
-    sel[hold.systemRef] = {
-      [hold.talkgroupRef ?? WILDCARD]: true,
-    }
-  }
-  for (const key of Object.keys(avoided)) {
-    const [systemRef, talkgroupRef] = key.split(':')
-    sel[systemRef] = { ...sel[systemRef], [talkgroupRef]: false }
-  }
-  return { all: hold === null, sel }
-}
+/** The subscription matrix this state asks the server for (ADR-0004) —
+ *  selection, hold and avoids flattened into one, per [`matrixOf`]. */
+export const selectLiveMatrix = (state: WithLive): Subscription =>
+  matrixOf(state.live)

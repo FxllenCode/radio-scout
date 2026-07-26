@@ -22,11 +22,16 @@ import {
   selectHold,
   selectIsAvoided,
   selectLiveCall,
+  chooseEverything,
+  chooseSystem,
+  chooseTalkgroups,
+  selectAudibleSelection,
   selectLiveMatrix,
   selectLiveStatus,
   selectMissed,
   selectPlayId,
   selectQueueDepth,
+  selectSelection,
   selectSince,
   toggleHoldSystem,
   toggleHoldTalkgroup,
@@ -443,5 +448,191 @@ describe('live slice', () => {
     // The catch-up cursor survives, so returning to the feed doesn't refetch
     // the world.
     expect(selectSince(rootState(state))).toBe(2)
+  })
+})
+
+describe('selection (spec US 19–22)', () => {
+  const tg = (systemRef: number, talkgroupRef: number) => ({
+    systemRef,
+    talkgroupRef,
+  })
+
+  it('starts on everything, so a zero-config listener hears the first Call', () => {
+    const state = reduce({ type: '@@INIT' })
+
+    expect(selectSelection(rootState(state))).toEqual({ all: true, sel: {} })
+    expect(selectLiveMatrix(rootState(state))).toEqual({ all: true, sel: {} })
+  })
+
+  it('asks the server to stop sending a deselected Talkgroup', () => {
+    const state = reduce(chooseTalkgroups({ keys: [tg(11, 100)], on: false }))
+
+    expect(selectLiveMatrix(rootState(state))).toEqual({
+      all: true,
+      sel: { '11': { '100': false } },
+    })
+  })
+
+  /** The server stops sending, but Calls already queued would still play — so
+   *  the same rule that shapes the matrix shapes the queue. */
+  it('drops what is playing and what is queued for a deselected Talkgroup', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100), call(2, 11, 100), call(3, 11, 200)),
+      chooseTalkgroups({ keys: [tg(11, 100)], on: false }),
+    )
+
+    expect(selectLiveCall(rootState(state))).toEqual(call(3, 11, 200))
+    expect(selectQueueDepth(rootState(state))).toBe(0)
+  })
+
+  it('refuses a Call for a deselected Talkgroup that arrives anyway', () => {
+    const state = reduce(
+      chooseTalkgroups({ keys: [tg(11, 100)], on: false }),
+      ...arrive(call(1, 11, 100)),
+    )
+
+    expect(selectLiveCall(rootState(state))).toBeNull()
+    expect(selectSince(rootState(state))).toBe(1)
+  })
+
+  it('turns a whole System off and on (spec US 21)', () => {
+    const off = reduce(chooseSystem({ systemRef: 11, on: false }), ...arrive(call(1, 11, 100)))
+    expect(selectLiveCall(rootState(off))).toBeNull()
+    expect(selectLiveMatrix(rootState(off))).toEqual({
+      all: true,
+      sel: { '11': { '*': false } },
+    })
+
+    const on = liveReducer(off, chooseSystem({ systemRef: 11, on: true }))
+    expect(selectLiveMatrix(rootState(on))).toEqual({ all: true, sel: {} })
+  })
+
+  it('turns everything off and on (spec US 21)', () => {
+    const off = reduce(
+      ...arrive(call(1, 11, 100)),
+      chooseEverything(false),
+    )
+    expect(selectLiveCall(rootState(off))).toBeNull()
+    expect(selectLiveMatrix(rootState(off))).toEqual({ all: false, sel: {} })
+
+    expect(selectLiveMatrix(rootState(liveReducer(off, chooseEverything(true))))).toEqual({
+      all: true,
+      sel: {},
+    })
+  })
+
+  /** Selecting a Talkgroup that is being avoided has to mean something, or the
+   *  panel would show it on while the avoid kept it silent. rdio has no such
+   *  contradiction to resolve — its avoid *is* its selection. */
+  it('lifts an avoid on a Talkgroup that is selected again', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100)),
+      avoid({ until: 0 }),
+      chooseTalkgroups({ keys: [tg(11, 100)], on: true }),
+    )
+
+    expect(selectIsAvoided(rootState(state), 11, 100)).toBe(false)
+    expect(selectLiveMatrix(rootState(state))).toEqual({ all: true, sel: {} })
+  })
+
+  it('leaves avoids alone when a Talkgroup is deselected', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100)),
+      avoid({ until: 5_000 }),
+      chooseTalkgroups({ keys: [tg(11, 200)], on: false }),
+    )
+
+    expect(selectIsAvoided(rootState(state), 11, 100)).toBe(true)
+  })
+
+  it('narrows a hold to what is selected inside it', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100)),
+      chooseTalkgroups({ keys: [tg(11, 200)], on: false }),
+      toggleHoldSystem(),
+    )
+
+    expect(selectLiveMatrix(rootState(state))).toEqual({
+      all: false,
+      sel: { '11': { '*': true, '200': false } },
+    })
+  })
+
+  /** Spec US 18: a patched Call reaches a listener subscribed to any Talkgroup
+   *  in the patch, and the client must not throw away what the server
+   *  deliberately sent. */
+  it('keeps a patched Call the listener selected through the patch', () => {
+    const patched: Call = { ...call(1, 11, 900), patches: [100] }
+    const state = reduce(
+      chooseEverything(false),
+      chooseTalkgroups({ keys: [tg(11, 100)], on: true }),
+      received({ call: patched }),
+    )
+
+    expect(selectLiveCall(rootState(state))).toEqual(patched)
+  })
+})
+
+describe('the selection as the panel draws it', () => {
+  /** The Talkgroups panel shows what the listener will actually hear, so an
+   *  avoided Talkgroup reads off there — but a **hold** is a temporary
+   *  narrowing shown on the Live screen, and must not make the panel claim the
+   *  listener deselected three-quarters of their systems. */
+  it('layers avoids onto the selection but not the hold', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100)),
+      avoid({ until: 0 }),
+      ...arrive(call(2, 11, 200)),
+      toggleHoldSystem(),
+    )
+
+    expect(selectAudibleSelection(rootState(state))).toEqual({
+      all: true,
+      sel: { '11': { '100': false } },
+    })
+  })
+
+  it('lets a System’s avoided Talkgroups back in when it is turned all on', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100)),
+      avoid({ until: 0 }),
+      chooseSystem({ systemRef: 11, on: true }),
+    )
+
+    expect(selectIsAvoided(rootState(state), 11, 100)).toBe(false)
+    expect(selectAudibleSelection(rootState(state))).toEqual({ all: true, sel: {} })
+  })
+
+  it('leaves another System’s avoids alone', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100)),
+      avoid({ until: 0 }),
+      chooseSystem({ systemRef: 12, on: true }),
+    )
+
+    expect(selectIsAvoided(rootState(state), 11, 100)).toBe(true)
+  })
+
+  it('lets every avoided Talkgroup back in when everything is turned on', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100)),
+      avoid({ until: 0 }),
+      chooseEverything(true),
+    )
+
+    expect(selectAvoidedCount(rootState(state))).toBe(0)
+  })
+
+  /** Turning things *off* is not a reason to forget an avoid: the timed one
+   *  would come back on its own and the listener never said to. */
+  it('keeps avoids when a System or everything is turned off', () => {
+    const state = reduce(
+      ...arrive(call(1, 11, 100)),
+      avoid({ until: 5_000 }),
+      chooseSystem({ systemRef: 11, on: false }),
+      chooseEverything(false),
+    )
+
+    expect(selectIsAvoided(rootState(state), 11, 100)).toBe(true)
   })
 })

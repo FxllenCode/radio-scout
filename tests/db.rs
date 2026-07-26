@@ -230,13 +230,14 @@ async fn insert_call_persists_call_with_children() {
 async fn dialect_sensitive_queries_on_sqlite() {
     let (db, _dir) = sqlite().await;
     run_search_suite(&db).await;
+    run_catalog_suite(&db).await;
     run_retention_suite(&db).await;
 }
 
-/// The archive-search + Group aggregation and retention's `SUM(audio_size)` on
-/// Postgres — the two highest dialect-divergence risks (ADR-0003). Both run in
-/// one test because they share the single CI-provisioned database. Runs only
-/// when CI provides a fresh Postgres.
+/// The archive-search + Group aggregation, the selection catalog, and
+/// retention's `SUM(audio_size)` on Postgres — the highest dialect-divergence
+/// risks (ADR-0003). They run in one test because they share the single
+/// CI-provisioned database. Runs only when CI provides a fresh Postgres.
 #[tokio::test]
 async fn dialect_sensitive_queries_on_postgres_when_available() {
     let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
@@ -252,7 +253,58 @@ async fn dialect_sensitive_queries_on_postgres_when_available() {
     };
     let db = db::connect(&url).await.expect("connect + migrate postgres");
     run_search_suite(&db).await;
+    run_catalog_suite(&db).await;
     run_retention_suite(&db).await;
+}
+
+/// The selection catalog (#12), run identically on both dialects. Two divergence
+/// risks meet here: the Talkgroup→Group link join that assembles a list without
+/// DB-side aggregation, and the **ordering**, which the query deliberately does
+/// in Rust because SQLite and Postgres collate text differently — so a panel
+/// that reads one way on a Pi's SQLite must read the same way on a hosted
+/// Postgres.
+///
+/// Reads the dataset [`run_search_suite`] seeded, before retention adds its own.
+async fn run_catalog_suite(db: &DatabaseConnection) {
+    let catalog = repo::catalog(db).await.unwrap();
+
+    let systems: Vec<_> = catalog
+        .systems
+        .iter()
+        .map(|s| (s.r#ref, s.label.as_deref()))
+        .collect();
+    assert_eq!(
+        systems,
+        vec![(100, Some("Alpha")), (200, Some("Beta"))],
+        "systems ordered by label on both dialects"
+    );
+
+    let alpha: Vec<_> = catalog.systems[0]
+        .talkgroups
+        .iter()
+        .map(|t| (t.r#ref, t.tag.as_deref(), t.groups.clone()))
+        .collect();
+    assert_eq!(
+        alpha,
+        vec![
+            (1, Some("Fire"), vec!["Emergency".to_string()]),
+            (
+                2,
+                Some("Law"),
+                vec!["Emergency".to_string(), "Public".to_string()]
+            ),
+        ],
+        "each Talkgroup's Tag and its sorted Groups, assembled in Rust"
+    );
+    assert_eq!(
+        catalog.systems[1]
+            .talkgroups
+            .iter()
+            .map(|t| (t.r#ref, t.groups.clone()))
+            .collect::<Vec<_>>(),
+        vec![(1, vec!["Public".to_string()])],
+        "a Talkgroup Ref repeated in another System stays under its own"
+    );
 }
 
 /// Retention's queries (#10), run identically on both dialects. The size total

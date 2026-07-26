@@ -1,7 +1,7 @@
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
 
 import { searchParams } from '@/lib/archive'
-import type { FilterOptions, SearchPage, SearchQuery } from '@/types'
+import type { Catalog, FilterOptions, SearchPage, SearchQuery } from '@/types'
 
 /** The single RTK Query API slice. Everything is same-origin: in dev the Vite
  *  proxy forwards to the Rust backend, and in production the SPA is served by
@@ -33,11 +33,22 @@ export const api = createApi({
       query: (search) => ({ url: `api/calls/filters?${searchParams(search)}` }),
       providesTags: ['Call'],
     }),
+
+    /** Everything a listener can select from (#12, spec US 19). Unlike the
+     *  filter options above this is the *configured* world, not the archived
+     *  one — a Talkgroup whose Calls have aged out is still selectable. It is
+     *  tagged `Call` because ingesting a Call for an unknown Talkgroup is what
+     *  auto-populate (#8) grows the catalog by. */
+    getCatalog: builder.query<Catalog, void>({
+      query: () => ({ url: 'api/catalog' }),
+      providesTags: ['Call'],
+    }),
     // Live-feed hydration etc. are added by later tickets.
   }),
 })
 
 export const {
+  useGetCatalogQuery,
   useGetFilterOptionsQuery,
   useGetHealthQuery,
   useSearchCallsQuery,
