@@ -69,6 +69,47 @@ async fn api_namespace_is_not_shadowed_by_spa_fallback() {
     assert_eq!(app.get("/api/call/999999/audio").await.status(), 404);
 }
 
+/// The PWA's two entry points have to survive the trip through `rust-embed`
+/// (#15): a manifest the browser will parse only with the right content type,
+/// and a worker that must be served as JavaScript from the app root — that path
+/// is its scope.
+#[tokio::test]
+async fn serves_the_pwa_manifest_and_service_worker() {
+    if !web::spa_is_embedded() {
+        return; // nothing to serve until the SPA is built
+    }
+    let app = TestApp::spawn().await;
+
+    let manifest = app.get("/manifest.webmanifest").await;
+    assert_eq!(manifest.status(), 200);
+    assert_eq!(
+        header_of(&manifest, "content-type"),
+        Some("application/manifest+json"),
+        "a manifest served as anything else is ignored by the browser"
+    );
+    let body = manifest.text().await.expect("manifest body");
+    assert!(
+        body.contains("\"display\":\"standalone\""),
+        "standalone is what iOS requires for Web Push and background audio"
+    );
+
+    let worker = app.get("/sw.js").await;
+    assert_eq!(worker.status(), 200);
+    let content_type = header_of(&worker, "content-type").unwrap_or_default();
+    assert!(
+        content_type.starts_with("text/javascript"),
+        "a worker served as anything else won't register; got {content_type:?}"
+    );
+    // A worker cached for a year is a deploy that never lands: it is the one
+    // file the browser has to be able to re-fetch. Its own precache manifest
+    // is what carries the hashes.
+    let cache = header_of(&worker, "cache-control").unwrap_or_default();
+    assert!(
+        !cache.contains("immutable"),
+        "the worker must stay refetchable; got {cache:?}"
+    );
+}
+
 /// Content-hashed assets are served with a long-lived immutable cache header.
 #[tokio::test]
 async fn serves_hashed_asset_with_immutable_cache() {

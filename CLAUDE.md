@@ -27,7 +27,7 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 
 **Coverage gates:**
 - **100% patch/diff coverage** on every PR — every new or changed line is tested. This is the hard gate; it makes "new code ships with tests" true by construction.
-- A **ratcheting project floor** (enforced in-repo: `cargo llvm-cov --fail-under-lines`, Vitest `thresholds`) — rises, never falls. Current baselines: **backend ~96% lines → floor 90**; **frontend 100% lines / ~96% branches → floor 95 lines / 90 branches** (`client/vite.config.ts`).
+- A **ratcheting project floor** (enforced in-repo: `cargo llvm-cov --fail-under-lines`, Vitest `thresholds`) — rises, never falls. Current baselines: **backend ~96% lines → floor 90**; **frontend 100% lines / ~97% branches → floor 97 lines / 92 branches** (`client/vite.config.ts`, raised with #15).
 - **No hard 100%-total gate** — it produces coverage theater. Quality is proven by mutation testing, not by chasing 100%.
 
 **Edge cases are required and operationalized.** "Multiple tests covering edge cases" means `proptest` (property-based — parsers, dedup window, range headers, protocol framing), `rstest` parametrized case tables (multiple named cases per behavior), and `cargo-mutants` mutation testing to prove the assertions actually catch regressions. A test that runs a line without asserting behavior does not count.
@@ -36,10 +36,10 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 - **Backend** — unit (`#[cfg(test)] mod tests`, incl. edge-branch tables) for pure logic; **integration** (`tests/`, real HTTP/WS via the harness in `tests/common/`) for behavior + contracts. Dual-dialect Postgres + real-S3 (MinIO/Garage) via **testcontainers** in CI. rdio-scanner wire responses pinned with **insta** snapshots.
   - **The harness is `common::TestApp` (#21).** `TestApp::spawn()` / `TestApp::with_key("k")` brings up the real router on an ephemeral port over a temp SQLite DB + temp filesystem store **whose temp dir it owns** (no `_tmp` binding to keep alive), and carries the drive + assert helpers: `get`/`get_json`/`get_range`/`post_bytes`/`header_of`, `upload(CallUpload::new()…)` / `upload_tr(CallUpload::tr(meta))` for synthetic Calls in either recorder dialect, `count::<E>()`/`calls()`/`the_call()`/`seed_call`/`seed_system` for rows, `stored`/`object_keys`/`put_object` for stored audio, and `connect_ws()` + `subscribe`/`next_json`/`no_frame_within` for live-feed pushes. Non-default wiring is `TestApp::builder()`: `.ingest()`, `.heartbeat()`, `.store()` (S3), `.database_url()`. Its own tests are `tests/harness.rs` — read those first; they are the harness by example. **Build the plumbing into the harness, not into a test file:** a file-local shorthand that names the file's own domain (`recorder_app()`, a `form(…) -> CallUpload`) is fine and expected; a second hand-rolled `spawn`/multipart-builder/`reqwest::Client::new()` is the thing #21 deleted thirteen copies of.
   - **Dual-dialect is not done.** ADR-0009 wants the suite run against Postgres too; `.database_url()` is only the per-call-site seam. #22 still has to supply the container URL on the *default* path and give each test its own database or schema — the isolation `tests/harness.rs` asserts is something a SQLite-file-per-test gets for free.
-- **Frontend** — Vitest + RTL **integration is the workhorse** (network mocked with **MSW** at the boundary — never fetch/module mocking); unit for pure logic (`store/`, `lib/`, `utils/` at per-file 100%); **Vitest Browser Mode** (real browser) for audio-player + Media-Session component wiring; **narrow Playwright E2E** (PWA install/offline/service-worker), added when those features land.
+- **Frontend** — Vitest + RTL **integration is the workhorse** (network mocked with **MSW** at the boundary — never fetch/module mocking); unit for pure logic (`store/`, `lib/`, `utils/` at per-file 100%); **Vitest Browser Mode** (real browser) for audio-player + Media-Session component wiring — *still owed*; **narrow Playwright E2E** (PWA install/offline/service-worker) — **wired up in #15**, `client/e2e/`, `npm run test:e2e`.
 - **iOS background audio, lock-screen/Control-Center controls, and Add-to-Home-Screen install are a real-device MANUAL release gate.** Playwright's WebKit is not iOS Safari and cannot validate them ([ADR-0005](docs/adr/0005-client-audio-media-session-background.md)).
 
-**Tooling** — backend: `cargo-nextest` (runner), `cargo-llvm-cov` (coverage), `proptest`, `rstest`, `insta`, `tokio::time::pause`, `assert_cmd`/`trycmd`; `cargo-mutants` + `testcontainers` in CI. Frontend: `@vitest/coverage-v8`, `msw`, `vitest-axe`, `jsdom`; Vitest Browser Mode + Playwright when audio/PWA lands. **Skip:** tarpaulin, quickcheck, loom, Playwright component-testing (Browser Mode supersedes it).
+**Tooling** — backend: `cargo-nextest` (runner), `cargo-llvm-cov` (coverage), `proptest`, `rstest`, `insta`, `tokio::time::pause`, `assert_cmd`/`trycmd`; `cargo-mutants` + `testcontainers` in CI. Frontend: `@vitest/coverage-v8`, `msw`, `vitest-axe`, `jsdom`, `@playwright/test` (#15); Vitest Browser Mode when the audio-player component gets its real-browser layer. **Skip:** tarpaulin, quickcheck, loom, Playwright component-testing (Browser Mode supersedes it).
 
 **Coverage exclusions (documented + auditable — never silent gaming):** generated SeaORM entities + migrations, `main()` bootstrap glue, `build.rs`, the `#[cfg(test)]`-only helpers in `src/testing.rs`, shadcn `client/src/components/ui/**`, `client/src/main.tsx`, `.d.ts`, test files. The same backend list is mirrored for mutation testing in [`.cargo/mutants.toml`](.cargo/mutants.toml), so `cargo mutants` reports only real gaps.
 
@@ -122,16 +122,19 @@ npm run typecheck           # tsc -b
 npm run test                # Vitest + React Testing Library (single run)
 npm run test:watch          # Vitest watch mode
 npm run test:coverage       # Vitest with @vitest/coverage-v8 + thresholds (MSW at the network boundary)
+npm run test:e2e            # Playwright: the PWA/service-worker/offline layer, over a real build
 npm run lint                # oxlint
 ```
 
 **Embedded UI:** the Rust binary serves `client/dist/` via `rust-embed` (`src/web.rs`), so **`npm run build` (in `client/`) must run before `cargo build`/`cargo test`** for the real UI to be served; without it the backend serves a minimal fallback page and the frontend-serving tests assert that fallback instead. `client/dist/` is gitignored; `build.rs` creates the (empty) folder so `rust-embed` compiles on a fresh checkout even before the frontend is built. CI (#22) runs the client build before the Rust build.
 
-**End-to-end (Playwright) — NOT wired up yet** (contrary to earlier notes, it is not installed). It is added when the browser-only flows exist (#11/#14/#15), as a `@playwright/test` `client/` devDependency run via `npx playwright test` next to the unit suite and in CI (sharded). Layering, per [Testing & coverage policy](#testing--coverage-policy):
+**End-to-end (Playwright) — wired up in #15.** `client/e2e/` + `client/playwright.config.ts`, run with `npm run test:e2e`. It is deliberately four specs, Chromium only, over a **production build served by `vite preview`** (the config builds first): jsdom has no service worker, no cache storage and no manifest processing, and the worker only exists in a build — so this is the only layer that can prove "installable + works offline". CI (#22) will shard it. Layering, per [Testing & coverage policy](#testing--coverage-policy):
 
-- **Vitest Browser Mode** is the middle layer — real-browser component tests for the audio player + Media-Session *wiring*. Prefer it over Playwright component-testing.
-- **Narrow Playwright E2E** covers PWA install/offline/service-worker + a Media-Session smoke test.
-- **iOS background audio + lock-screen/Control-Center controls are a real-device manual gate** — Playwright's bundled WebKit is not iOS Safari and cannot validate them. There is no CI substitute.
+- **Vitest Browser Mode** is the middle layer — real-browser component tests for the audio player + Media-Session *wiring*. Prefer it over Playwright component-testing. **Still owed** (#15 brought the browser tooling in but left this out: it re-tests #14's component wiring, not #15's features).
+- **Narrow Playwright E2E** covers PWA install criteria, service-worker registration/scope, offline app-shell serving, and that the worker never answers `/api/*` from cache.
+- **iOS background audio + lock-screen/Control-Center controls are a real-device manual gate** — Playwright's bundled WebKit is not iOS Safari and cannot validate them. There is no CI substitute. The executable checklist is **§14 of [`docs/research/ios-gap-bridging-mechanism.md`](docs/research/ios-gap-bridging-mechanism.md)**.
+
+**PWA app icons** are rasterized from `client/icons/icon.svg` by `client/scripts/build-icons.sh` (macOS `sips`) into `client/public/`. The PNGs are committed, so neither the build nor CI runs it — re-run it by hand only when the mark changes.
 
 ## Live testing (real binary, real browser, real recorder)
 

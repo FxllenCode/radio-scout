@@ -23,6 +23,34 @@ import type { Selection } from './selection'
 /** Prefix for every key this app owns in local storage. */
 const KEY_PREFIX = 'radio-scout:selection'
 
+/** Read a key, treating a browser that denies storage — or has none at all —
+ *  as one holding nothing. The guarded pair every module here reaches for; see
+ *  the module note on storage being a supported *absence*, not an error. */
+export function readStored(
+  storage: Storage | undefined,
+  key: string,
+): string | undefined {
+  try {
+    return storage?.getItem(key) ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Write a key, ignoring a browser that refuses to remember it. */
+export function writeStored(
+  storage: Storage | undefined,
+  key: string,
+  value: string,
+): void {
+  try {
+    storage?.setItem(key, value)
+  } catch {
+    // Storage denied (private mode, blocked site data). Nothing here is worth
+    // interrupting a listener over.
+  }
+}
+
 /** The default scanner, when the URL names none. */
 const DEFAULT_NAMESPACE = 'default'
 
@@ -42,7 +70,7 @@ export function loadSelection(
   storage: Storage,
   namespace: string,
 ): Selection | undefined {
-  const stored = read(storage, selectionKey(namespace))
+  const stored = readStored(storage, selectionKey(namespace))
   if (stored === undefined) return undefined
 
   try {
@@ -59,20 +87,7 @@ export function saveSelection(
   namespace: string,
   selection: Selection,
 ): void {
-  try {
-    storage.setItem(selectionKey(namespace), JSON.stringify(selection))
-  } catch {
-    // Storage denied (private mode, blocked site data). The scanner works; it
-    // just won't remember. Nothing here is worth interrupting a listener over.
-  }
-}
-
-function read(storage: Storage, key: string): string | undefined {
-  try {
-    return storage.getItem(key) ?? undefined
-  } catch {
-    return undefined
-  }
+  writeStored(storage, selectionKey(namespace), JSON.stringify(selection))
 }
 
 /** Is this the matrix shape (ADR-0004) rather than whatever else was under our

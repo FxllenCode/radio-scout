@@ -1,0 +1,25 @@
+<!--
+  Source art for the PWA app icons (#15). Not served — `scripts/build-icons.sh`
+  rasterizes it into `public/`, and those PNGs are what ship.
+
+  The mark is `public/favicon.svg`'s, recomposed for an icon canvas: the 32px
+  favicon is drawn to survive a browser tab, which puts it low and small in a
+  512px frame. Two rules shape this one:
+
+  - **Full bleed, square, no rounded corners and no transparency.** iOS applies
+    its own squircle to the home-screen icon and Android applies its own shape
+    to a maskable one; a pre-rounded icon underneath either of them shows the
+    seam.
+  - **Everything inside the maskable safe zone** — the centred circle of 80%
+    diameter (r = 205 here). The mark's furthest point from centre is ~180, so
+    one drawing serves as both `any` and `maskable` and there is no second file
+    to keep in step.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Radio-Scout">
+  <rect width="512" height="512" fill="#09090b" />
+  <g fill="none" stroke="#fafafa" stroke-width="34" stroke-linecap="round">
+    <path d="M176 280a110 110 0 0 1 160 0" />
+    <path d="M128 220a180 180 0 0 1 256 0" opacity="0.5" />
+  </g>
+  <circle cx="256" cy="324" r="40" fill="#3ddc84" />
+</svg>

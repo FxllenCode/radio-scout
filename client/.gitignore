@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright (ADR-0010's browser-only layer): reports and per-run artifacts.
+/test-results
+/playwright-report
+/blob-report
+/playwright/.cache

@@ -12,6 +12,8 @@ import {
   previousCall,
   progressed,
   resume,
+  keepAliveExpired,
+  selectIsBridging,
   selectIsPaused,
   selectNowPlaying,
   selectProgress,
@@ -195,6 +197,76 @@ describe('transport', () => {
 
       expect(store.getState().live).toEqual(before.live)
       expect(store.getState().playback).toEqual(before.playback)
+    })
+  })
+
+  /** Bridging the quiet between Calls, so iOS doesn't suspend the page and
+   *  strand the queue (spec US 31; docs/research/ios-gap-bridging-mechanism.md).
+   *  The rule is deliberately narrow: it costs the OS's power savings, so it
+   *  runs only when someone is demonstrably listening. */
+  describe('bridging the gap', () => {
+    /** The feed played a Call and has nothing left — the gap the keep-alive
+     *  exists for. */
+    function inTheGap(): AppStore {
+      const store = listening(call(1))
+      store.dispatch(advance())
+      return store
+    }
+
+    it('bridges once the feed has played something and run dry', () => {
+      expect(selectIsBridging(inTheGap().getState())).toBe(true)
+    })
+
+    // Before the first Call there is no audio session to hold open, and no
+    // gesture to have opened it — playing here would be refused, and would
+    // leave the transport claiming to be paused before anything ever played.
+    it('does not bridge before the feed has ever played a Call', () => {
+      expect(selectIsBridging(makeStore().getState())).toBe(false)
+    })
+
+    it('does not bridge while a Call is actually playing', () => {
+      expect(selectIsBridging(listening(call(1)).getState())).toBe(false)
+    })
+
+    // A listener who paused is not listening; holding the session open would
+    // cost them battery for nothing.
+    it('does not bridge while paused', () => {
+      const store = inTheGap()
+
+      store.dispatch(pause())
+
+      expect(selectIsBridging(store.getState())).toBe(false)
+    })
+
+    // Playback mode is a finite list the listener is walking, not a feed that
+    // might speak again. Running out of it is an ending, not a gap.
+    it('does not bridge in playback mode', () => {
+      const store = inTheGap()
+
+      store.dispatch(enterPlaybackMode())
+
+      expect(selectIsBridging(store.getState())).toBe(false)
+    })
+
+    // Holding the session open forever is the one thing that would make us
+    // worse than rdio on a phone. After a long enough lull we stop fighting
+    // the OS and let it suspend us; Web Push (#16) covers what follows.
+    it('stops bridging once the lull has gone on too long', () => {
+      const store = inTheGap()
+
+      store.dispatch(keepAliveExpired())
+
+      expect(selectIsBridging(store.getState())).toBe(false)
+    })
+
+    it('bridges again as soon as the feed speaks after a timeout', () => {
+      const store = inTheGap()
+      store.dispatch(keepAliveExpired())
+
+      store.dispatch(received({ call: call(2) }))
+      store.dispatch(advance())
+
+      expect(selectIsBridging(store.getState())).toBe(true)
     })
   })
 

@@ -1,19 +1,24 @@
 import { act, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 
 import { ARTWORK_SIZES } from '@/lib/artwork'
+import { keepAliveLoopUrl } from '@/lib/silence'
 import { enterPlaybackMode, next, playResults, stop } from '@/store/playback'
 import { makeStore, type AppStore } from '@/store/store'
 import { ARCHIVE, ORIGIN } from '@/test/handlers'
 import { audioSessionType, installMediaSession } from '@/test/mediaSession'
 import { server } from '@/test/setup'
 import { renderWithProviders } from '@/test/utils'
-import { received, replay } from '@/store/live'
+import { advance, received, replay } from '@/store/live'
 import {
+  KEEP_ALIVE_LIMIT_MS,
   pause,
+  progressed,
   resume,
+  selectIsBridging,
   selectIsPaused,
+  selectNowPlaying,
   selectProgress,
 } from '@/store/transport'
 
@@ -33,6 +38,36 @@ beforeEach(() => {
 })
 
 const player = () => screen.getByTestId('call-player') as HTMLAudioElement
+
+/** Put the element's playhead somewhere and let it say so, the way a browser
+ *  does a few times a second. */
+function playhead({
+  currentTime,
+  duration,
+}: {
+  currentTime: number
+  duration: number
+}) {
+  for (const [name, value] of Object.entries({ currentTime, duration })) {
+    // Writable, as a browser's `currentTime` is: the player rewinds a newly
+    // loaded Call, and a read-only stand-in would make that throw.
+    Object.defineProperty(player(), name, {
+      value,
+      configurable: true,
+      writable: true,
+    })
+  }
+  act(() => {
+    player().dispatchEvent(new Event('timeupdate'))
+  })
+}
+
+/** Say whether the element is stopped — which is how a page that iOS suspended
+ *  looks when it comes back. jsdom has no playback, so both answers have to be
+ *  said out loud. */
+function elementPaused(paused: boolean) {
+  Object.defineProperty(player(), 'paused', { value: paused, configurable: true })
+}
 
 /** Mount the player over a store, and start the archive queue at `index`. */
 function playFrom(index: number, store: AppStore = makeStore()) {
@@ -302,6 +337,214 @@ describe('CallPlayer', () => {
 
       await waitFor(() => expect(fetched).toEqual(['/api/call/1/audio']))
       expect(fetched).not.toContain('/api/call/2/audio')
+    })
+  })
+
+  /** Keeping the page — and therefore the queue — alive across the quiet
+   *  between Calls (spec US 31; docs/research/ios-gap-bridging-mechanism.md). */
+  describe('bridging the gap', () => {
+    /** The live feed plays one Call and then has nothing left. */
+    function afterTheLastCall(store = makeStore()) {
+      renderWithProviders(<CallPlayer />, { store })
+      act(() => {
+        store.dispatch(received({ call: ARCHIVE[0] }))
+      })
+      act(() => {
+        store.dispatch(advance())
+      })
+      return store
+    }
+
+    it('holds the element on an inaudible loop instead of letting it stop', () => {
+      afterTheLastCall()
+
+      // Never `paused`, never `ended` — the two states iOS takes as permission
+      // to suspend the page.
+      expect(player().src).toBe(keepAliveLoopUrl())
+      expect(player().loop).toBe(true)
+      expect(player().muted).toBe(false)
+      expect(player().volume).toBe(1)
+    })
+
+    it('drops the loop the moment a Call arrives', () => {
+      const store = afterTheLastCall()
+
+      act(() => {
+        store.dispatch(received({ call: ARCHIVE[1] }))
+      })
+
+      expect(player().src).toContain(ARCHIVE[1].audioUrl)
+      expect(player().loop).toBe(false)
+    })
+
+    // The element reaching `ended` with nothing to follow is the exact moment
+    // WebKit bug 261858 bites, so the last Call hands over just before it.
+    it('hands over just before the last Call ends, rather than on it', () => {
+      const store = makeStore()
+      renderWithProviders(<CallPlayer />, { store })
+      act(() => {
+        store.dispatch(received({ call: ARCHIVE[0] }))
+      })
+
+      playhead({ currentTime: 7.9, duration: 8 })
+
+      expect(selectNowPlaying(store.getState())).toBeNull()
+      expect(player().src).toBe(keepAliveLoopUrl())
+    })
+
+    it('lets a Call with another behind it play all the way out', () => {
+      const store = makeStore()
+      renderWithProviders(<CallPlayer />, { store })
+      act(() => {
+        store.dispatch(received({ call: ARCHIVE[0] }))
+        store.dispatch(received({ call: ARCHIVE[1] }))
+      })
+
+      playhead({ currentTime: 7.9, duration: 8 })
+
+      expect(selectNowPlaying(store.getState())).toEqual(ARCHIVE[0])
+    })
+
+    // The archive is a finite list the listener is walking, and running out of
+    // it is an ending, not a gap — so there is no keep-alive to hand over to,
+    // and clipping the last result's tail would buy nothing at all.
+    it('never clips the tail of an archived Call', () => {
+      const store = playFrom(ARCHIVE.length - 1)
+
+      playhead({ currentTime: 7.9, duration: 8 })
+
+      expect(selectNowPlaying(store.getState())).toEqual(ARCHIVE.at(-1))
+    })
+
+    // The loop has its own clock and its own length; drawing them would put a
+    // waveform of nothing over the last Call's readout.
+    it('does not let the loop drive the display', () => {
+      const store = afterTheLastCall()
+      act(() => {
+        store.dispatch(progressed({ position: 2, duration: 8 }))
+      })
+
+      playhead({ currentTime: 0.5, duration: 1 })
+
+      expect(selectProgress(store.getState())).toBeCloseTo(0.25)
+    })
+    // Holding the audio session open forever is the one thing that would make
+    // us worse than rdio on a phone: it blocks the suspension that exists to
+    // save power. After a long enough lull we stop, and Web Push (#16) takes
+    // over the job of saying something happened.
+    it('gives up the session after a long enough lull', () => {
+      vi.useFakeTimers()
+      onTestFinished(() => vi.useRealTimers())
+      const store = afterTheLastCall()
+      expect(player().src).toBe(keepAliveLoopUrl())
+
+      act(() => vi.advanceTimersByTime(KEEP_ALIVE_LIMIT_MS))
+
+      expect(selectIsBridging(store.getState())).toBe(false)
+      expect(player()).not.toHaveAttribute('src')
+    })
+
+    // iOS forgets an app's Media Session handlers across a backgrounding, and
+    // an app that doesn't put them back has dead lock-screen buttons.
+    it('re-binds the lock-screen buttons on coming back to the foreground', () => {
+      const session = installMediaSession()
+      renderWithProviders(<CallPlayer />)
+      session.handlers.clear()
+
+      act(() => document.dispatchEvent(new Event('visibilitychange')))
+
+      expect([...session.handlers.keys()]).toEqual([
+        'play',
+        'pause',
+        'nexttrack',
+        'previoustrack',
+      ])
+    })
+
+    // The keep-alive is a workaround for an unfixed WebKit bug, not a
+    // guarantee — iOS can still suspend us. Coming back to find the element
+    // stopped means it did, and the honest answer is a play button, not a UI
+    // insisting it is playing.
+    it('admits a suspension instead of claiming to play silence', () => {
+      const store = afterTheLastCall()
+      elementPaused(true)
+
+      act(() => document.dispatchEvent(new Event('visibilitychange')))
+
+      expect(selectIsPaused(store.getState())).toBe(true)
+    })
+
+    it('says nothing when it comes back still playing', () => {
+      const store = afterTheLastCall()
+      elementPaused(false)
+
+      act(() => document.dispatchEvent(new Event('visibilitychange')))
+
+      expect(selectIsPaused(store.getState())).toBe(false)
+    })
+
+    // Going *away* is not coming back: the app is being backgrounded, which is
+    // the thing the keep-alive exists to survive, not a moment to declare it
+    // failed.
+    it('reads nothing into being backgrounded', () => {
+      const store = afterTheLastCall()
+      elementPaused(true)
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'hidden',
+        configurable: true,
+      })
+      onTestFinished(() =>
+        Reflect.deleteProperty(Document.prototype, 'visibilityState'),
+      )
+
+      act(() => document.dispatchEvent(new Event('visibilitychange')))
+
+      expect(selectIsPaused(store.getState())).toBe(false)
+    })
+
+    // The lock screen keeps drawing a scrubber from the last position state it
+    // was given, advancing it on its own clock — so a stale one runs off the
+    // end of a Call that finished. Clearing it leaves the metadata (which is
+    // still true) without a progress bar that is not.
+    it('clears the lock screen scrubber rather than letting it run on', () => {
+      const session = installMediaSession()
+      const store = makeStore()
+      renderWithProviders(<CallPlayer />, { store })
+      act(() => {
+        store.dispatch(received({ call: ARCHIVE[0] }))
+      })
+      Object.defineProperty(player(), 'duration', {
+        value: 8,
+        configurable: true,
+      })
+      act(() => {
+        player().dispatchEvent(new Event('loadedmetadata'))
+      })
+      expect(session.positions.at(-1)).toEqual({
+        duration: 8,
+        position: 0,
+        playbackRate: 1,
+      })
+
+      act(() => {
+        store.dispatch(advance())
+      })
+
+      expect(session.positions.at(-1)).toBeUndefined()
+    })
+
+    // The loop is a second long and restarts forever; publishing *its* clock
+    // would be the same lie in the other direction.
+    it('never publishes the loop as a position', () => {
+      const session = installMediaSession()
+      afterTheLastCall()
+      const published = session.positions.length
+
+      act(() => {
+        player().dispatchEvent(new Event('loadedmetadata'))
+      })
+
+      expect(session.positions).toHaveLength(published)
     })
   })
 })

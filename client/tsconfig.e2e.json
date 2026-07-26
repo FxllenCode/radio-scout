@@ -1,0 +1,13 @@
+{
+  /* The Playwright suite: Node-side config plus specs whose `page.evaluate`
+     bodies run in a browser, so it needs both sets of types. Its own project so
+     the app never inherits Node's, and Vitest never inherits Playwright's. */
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.e2e.tsbuildinfo",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "moduleResolution": "bundler"
+  },
+  "include": ["playwright.config.ts", "e2e"]
+}
