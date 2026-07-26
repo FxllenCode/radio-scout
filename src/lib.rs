@@ -12,8 +12,13 @@ pub mod db;
 pub mod import;
 pub mod ingest;
 pub mod live;
+pub mod observability;
 pub mod retention;
+pub mod startup;
 pub mod web;
+
+#[cfg(test)]
+mod testing;
 
 use std::sync::Arc;
 

@@ -25,6 +25,12 @@
 //! See `docs/agents/live-testing.md`. This is a development tool, not shipped
 //! code — its correctness is proven by the loop it enables, in a browser.
 
+// ADR-0011 denies the print macros for the library and the binary: application
+// output goes through `tracing`, always. This is the one deliberate exception —
+// a hand-run CLI whose stdout *is* its product, read by a person watching a live
+// test, with no subscriber, no levels and nothing to filter.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use std::time::Duration;
 
 /// Sample rate. 8 kHz mono is what a trunked-radio recorder produces.

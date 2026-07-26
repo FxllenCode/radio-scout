@@ -20,4 +20,8 @@ exclude_globs = [
     # `tests/db.rs::audio_size_migration_converges_on_databases_that_predate_the_column`,
     # which fails if the guard stops adding the column.
     "src/db/migration.rs",
+    # Test scaffolding, not shipped code: `#[cfg(test)]`-only helpers for
+    # capturing `tracing` output. It exists to make assertions possible; a
+    # mutant here breaks the tests that use it, which proves nothing.
+    "src/testing.rs",
 ]

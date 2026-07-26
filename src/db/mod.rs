@@ -8,6 +8,7 @@ pub mod repo;
 
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
 use sea_orm_migration::MigratorTrait;
+use tracing::{debug, info};
 
 pub use sea_orm::DbBackend;
 
@@ -25,6 +26,116 @@ pub async fn connect(url: &str) -> Result<DatabaseConnection, DbErr> {
                 .await?;
         }
     }
-    migration::Migrator::up(&db, None).await?;
+    migrate(&db).await?;
     Ok(db)
+}
+
+/// Bring the schema up to date, **saying what it did** (ADR-0011).
+///
+/// This used to be a bare `Migrator::up`, which is silent: when a database
+/// created before #8 was missing `systems.auto_populate`, the migration that
+/// fixed it ran with no output at all, and an operator had no way to tell an
+/// upgraded schema from an unchanged one. Migrations are applied one at a time
+/// so each line lands *after* the migration it reports — a failure names the
+/// last one that actually succeeded.
+async fn migrate(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let pending = migration::Migrator::get_pending_migrations(db).await?;
+    if pending.is_empty() {
+        debug!("schema already up to date");
+        return Ok(());
+    }
+
+    info!(pending = pending.len(), "applying schema migrations");
+    for migration in &pending {
+        migration::Migrator::up(db, Some(1)).await?;
+        info!(migration = migration.name(), "migration applied");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{LogCapture, sqlite_url};
+
+    /// A fresh database says which migrations it applied, by name. Before this,
+    /// a first run built the entire schema in silence.
+    #[tokio::test]
+    async fn a_fresh_database_names_every_migration_it_applies() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let capture = LogCapture::start();
+
+        connect(&sqlite_url(&tmp)).await.expect("connect");
+
+        let logged = capture.text();
+        for name in [
+            "m0001_init",
+            "m0002_api_keys",
+            "m0003_call_audio_size",
+            "m0004_system_auto_populate",
+        ] {
+            assert!(
+                logged.contains(&format!("migration=\"{name}\"")),
+                "{name} missing from:\n{logged}"
+            );
+        }
+        assert!(logged.contains("INFO"), "{logged}");
+        assert!(logged.contains("applying schema migrations"), "{logged}");
+    }
+
+    /// An upgraded database names *only* what it applied — the m0004 case that
+    /// cost an hour on 2026-07-25, where every ingest 500'd because a column was
+    /// missing and nothing said whether the fix had run.
+    ///
+    /// The database is left deliberately behind (the first two migrations only)
+    /// and then opened normally, which is exactly the shape of that upgrade.
+    #[tokio::test]
+    async fn an_upgraded_database_names_only_what_it_applied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = sqlite_url(&tmp);
+        let old = sea_orm::Database::connect(&url).await.expect("connect");
+        migration::Migrator::up(&old, Some(2))
+            .await
+            .expect("an out-of-date schema");
+        old.close().await.expect("close");
+
+        let capture = LogCapture::start();
+        connect(&url).await.expect("upgrade");
+
+        let logged = capture.text();
+        for applied in ["m0003_call_audio_size", "m0004_system_auto_populate"] {
+            assert!(
+                logged.contains(&format!("migration=\"{applied}\"")),
+                "{applied} missing from:\n{logged}"
+            );
+        }
+        for already_there in ["m0001_init", "m0002_api_keys"] {
+            assert!(
+                !logged.contains(&format!("migration=\"{already_there}\"")),
+                "{already_there} was already applied; re-reporting it is a lie:\n{logged}"
+            );
+        }
+        assert!(logged.contains("pending=2"), "{logged}");
+    }
+
+    /// A database already at the current schema says so — quietly, at DEBUG, so
+    /// a restart doesn't narrate four migrations that didn't happen.
+    #[tokio::test]
+    async fn an_up_to_date_database_says_so_without_claiming_work() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = sqlite_url(&tmp);
+        connect(&url).await.expect("first connect");
+
+        let capture = LogCapture::start();
+        connect(&url).await.expect("second connect");
+
+        let logged = capture.text();
+        assert!(
+            !logged.contains("migration applied"),
+            "an up-to-date schema must not claim to have applied anything:\n{logged}"
+        );
+        assert!(logged.contains("schema already up to date"), "{logged}");
+        // ...and it stays out of an operator's way at the default level.
+        assert!(logged.contains("DEBUG"), "{logged}");
+    }
 }

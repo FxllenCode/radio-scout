@@ -37,6 +37,22 @@ sea-orm-migration = { version = "1", features = [
 ] }
 dotenvy = "0.15.7"
 csv = "1.4.0"
+# Observability (ADR-0011). `env-filter` is what makes RUST_LOG a real control
+# surface (per-target directives, not just a level); the default features bring
+# the fmt subscriber and the `log` bridge that carries sqlx/sea-orm's own events.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Nothing is un-instrumented (ADR-0011): application output goes through
+# `tracing`, so the print macros are a compile error rather than a habit. Cargo
+# applies these to every target in the package, so the places whose stdout
+# genuinely *is* their product — `examples/feed.rs` (a hand-run CLI) and the one
+# test that reports being skipped — carry a narrow `#![allow]` saying why.
+# (`build.rs` needs no exemption: cargo doesn't run clippy over build scripts.)
+[lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "json"] }
@@ -48,4 +64,7 @@ tempfile = "3"
 # cargo-llvm-cov / cargo-mutants are external binaries, not deps.
 proptest = "1"
 rstest = "0.26"
+# Only for `callsite::rebuild_interest_cache` in the log-capture test harness —
+# see the note in `src/testing.rs`.
+tracing-core = "0.1"
 insta = { version = "1", features = ["json"] }

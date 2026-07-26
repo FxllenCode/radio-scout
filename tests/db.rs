@@ -240,7 +240,14 @@ async fn dialect_sensitive_queries_on_sqlite() {
 #[tokio::test]
 async fn dialect_sensitive_queries_on_postgres_when_available() {
     let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
-        eprintln!("skipping Postgres dual-dialect test: TEST_POSTGRES_URL unset (needs Docker/CI)");
+        // Test-runner output, not application output: a skipped test has to say
+        // so to whoever is reading the run, and no subscriber is installed here.
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!(
+                "skipping Postgres dual-dialect test: TEST_POSTGRES_URL unset (needs Docker/CI)"
+            );
+        }
         return;
     };
     let db = db::connect(&url).await.expect("connect + migrate postgres");

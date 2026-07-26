@@ -31,6 +31,7 @@ use std::time::Duration;
 use object_store::Error as ObjectError;
 use sea_orm::{DatabaseConnection, DbErr, TransactionTrait};
 use tokio::time::MissedTickBehavior;
+use tracing::{debug, error, info, warn};
 
 use crate::blob::{self, BlobStore};
 use crate::call::CallId;
@@ -104,19 +105,21 @@ impl RetentionConfig {
         }
     }
 
-    /// A one-line description of the policy for the startup banner, so an
-    /// operator can see at a glance what will be deleted and how often.
-    pub fn describe(&self) -> String {
-        let policy = match (self.days, self.max_size_bytes) {
-            (0, None) => "disabled, calls kept forever".to_string(),
-            (0, Some(cap)) => format!("size cap {cap} bytes, no age limit"),
-            (days, None) => format!("{days} days"),
-            (days, Some(cap)) => format!("{days} days or {cap} bytes, whichever bites first"),
-        };
-        format!(
-            "{policy}; sweeping every {}s",
-            self.effective_interval().as_secs()
-        )
+    /// Log the policy at startup, so an operator can see at a glance what will
+    /// be deleted and how often — the one question a scanner that silently eats
+    /// old Calls can't answer.
+    ///
+    /// Structured fields rather than a sentence (ADR-0011 rule 6): `days=0` is
+    /// rdio's "keep forever", and `max_size_bytes` absent is "no cap".
+    pub fn log(&self) {
+        let interval_secs = self.effective_interval().as_secs();
+        info!(
+            days = self.days,
+            max_size_bytes = ?self.max_size_bytes,
+            interval_secs,
+            batch_size = self.batch_size,
+            "retention policy"
+        );
     }
 
     /// Set the size cap from `retention.max_size_gb` (binary GiB). A
@@ -185,23 +188,6 @@ impl SweepReport {
     /// Total Calls pruned, by either policy.
     pub fn calls_pruned(&self) -> u64 {
         self.aged_out + self.over_cap
-    }
-
-    /// The one-line summary [`spawn`] logs after a sweep that did something.
-    pub fn summary(&self) -> String {
-        format!(
-            "retention: pruned {} calls ({} aged out, {} over size cap), \
-             reclaimed {} orphaned objects, freed {} bytes{}",
-            self.calls_pruned(),
-            self.aged_out,
-            self.over_cap,
-            self.orphans,
-            self.bytes_freed,
-            match self.object_errors {
-                0 => String::new(),
-                n => format!(" ({n} objects could not be deleted; a later sweep retries them)"),
-            }
-        )
     }
 }
 
@@ -318,35 +304,39 @@ pub fn spawn(
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             ticker.tick().await; // the first tick completes immediately
-            match sweep_log(&sweep(&db, &store, &config, now_ms()).await) {
-                SweepLog::Quiet => {}
-                SweepLog::Progress(line) => println!("{line}"),
-                SweepLog::Failure(line) => eprintln!("{line}"),
-            }
+            log_sweep(&sweep(&db, &store, &config, now_ms()).await);
         }
     })
 }
 
-/// What the scheduler tells the operator about one sweep.
-#[derive(Debug, PartialEq, Eq)]
-enum SweepLog {
-    /// Say nothing. An archive already within policy is the steady state, and it
-    /// should not print an hourly line forever.
-    Quiet,
-    /// A sweep that changed something (stdout).
-    Progress(String),
-    /// A sweep that failed (stderr). Never fatal — the next tick retries.
-    Failure(String),
-}
-
-/// Decide what to log for a sweep outcome. Split from [`spawn`]'s printing so
-/// every branch is assertable, the way `live.rs` factors its decision logic out
-/// of the socket I/O.
-fn sweep_log(outcome: &Result<SweepReport, SweepError>) -> SweepLog {
+/// Say what one sweep did, at the level it deserves (ADR-0011 rule 7).
+///
+/// An archive already inside its policy is the steady state — the common case,
+/// every hour, forever — so it is DEBUG; an hourly INFO line about nothing is
+/// how a log stops being read. A sweep that pruned is a notable normal event. A
+/// sweep that *failed* is an ERROR: until it succeeds the archive is unbounded,
+/// which on a Pi ends with a full SD card.
+///
+/// Split from [`spawn`]'s loop so every branch is assertable, the way `live.rs`
+/// factors its decision logic out of the socket I/O.
+fn log_sweep(outcome: &Result<SweepReport, SweepError>) {
     match outcome {
-        Ok(report) if report.is_noop() => SweepLog::Quiet,
-        Ok(report) => SweepLog::Progress(report.summary()),
-        Err(err) => SweepLog::Failure(format!("retention sweep failed: {err}")),
+        Ok(report) if report.is_noop() => debug!("retention sweep found nothing to prune"),
+        Ok(report) => {
+            let calls_pruned = report.calls_pruned();
+            info!(
+                calls_pruned,
+                aged_out = report.aged_out,
+                over_cap = report.over_cap,
+                orphans = report.orphans,
+                bytes_freed = report.bytes_freed,
+                // Not zero means audio is still on disk that nothing points at;
+                // a later sweep retries it, but an operator should know.
+                object_errors = report.object_errors,
+                "retention sweep pruned calls"
+            );
+        }
+        Err(error) => error!(%error, "retention sweep failed"),
     }
 }
 
@@ -367,12 +357,13 @@ async fn prune_batch(
     for call in batch {
         match store.delete(&call.object_key).await {
             Ok(()) => report.bytes_freed += call.audio_size as u64,
-            Err(err) => {
+            Err(error) => {
                 // Say *why*, or the operator gets a count and no lead. The row is
                 // already gone, so the object is an orphan the GC pass retries.
-                eprintln!(
-                    "retention: could not delete audio object {}: {err}",
-                    call.object_key
+                warn!(
+                    object_key = %call.object_key,
+                    %error,
+                    "could not delete pruned audio object"
                 );
                 report.object_errors += 1;
             }
@@ -386,6 +377,7 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::db::entities::call;
+    use crate::testing::LogCapture;
     use proptest::prelude::*;
     use rstest::rstest;
     use sea_orm::{EntityTrait, PaginatorTrait};
@@ -396,8 +388,9 @@ mod tests {
     /// A DB + blob store in a temp dir, with nothing stored yet.
     async fn empty_archive() -> (DatabaseConnection, Arc<BlobStore>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
-        let db = db::connect(&url).await.expect("db");
+        let db = db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
         let store = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob"));
         (db, store, tmp)
     }
@@ -586,43 +579,105 @@ mod tests {
         assert_eq!(report.is_noop(), expected);
     }
 
-    /// A sweep that did nothing stays silent; anything else — including a
-    /// failure — reaches the operator.
+    /// An archive already within policy is the steady state — every hour, for
+    /// the life of the process. It says so at DEBUG, or a Pi's log fills with
+    /// hourly notices that nothing happened.
     #[test]
-    fn sweep_log_speaks_up_only_when_there_is_something_to_say() {
-        assert_eq!(sweep_log(&Ok(SweepReport::default())), SweepLog::Quiet);
+    fn a_sweep_that_pruned_nothing_stays_out_of_the_way() {
+        let capture = LogCapture::start();
+        log_sweep(&Ok(SweepReport::default()));
 
-        let did_something = SweepReport {
-            aged_out: 1,
-            bytes_freed: 8,
-            ..SweepReport::default()
-        };
-        assert_eq!(
-            sweep_log(&Ok(did_something)),
-            SweepLog::Progress(did_something.summary())
-        );
-
-        assert_eq!(
-            sweep_log(&Err(DbErr::Custom("boom".into()).into())),
-            SweepLog::Failure("retention sweep failed: database: Custom Error: boom".to_string())
-        );
+        let logged = capture.text();
+        assert!(logged.contains("DEBUG"), "{logged}");
+        assert!(!logged.contains("INFO"), "{logged}");
     }
 
-    #[rstest]
-    #[case(
-        SweepReport { aged_out: 2, over_cap: 1, orphans: 3, bytes_freed: 40, object_errors: 0 },
-        "retention: pruned 3 calls (2 aged out, 1 over size cap), \
-         reclaimed 3 orphaned objects, freed 40 bytes"
-    )]
-    // Objects that couldn't be deleted are surfaced, not swallowed.
-    #[case(
-        SweepReport { aged_out: 1, over_cap: 0, orphans: 0, bytes_freed: 8, object_errors: 2 },
-        "retention: pruned 1 calls (1 aged out, 0 over size cap), \
-         reclaimed 0 orphaned objects, freed 8 bytes \
-         (2 objects could not be deleted; a later sweep retries them)"
-    )]
-    fn sweep_summary_line(#[case] report: SweepReport, #[case] expected: &str) {
-        assert_eq!(report.summary(), expected);
+    /// A sweep that pruned reports what it did as fields, not a sentence — every
+    /// number an operator wondering where their disk went would ask for.
+    #[test]
+    fn a_sweep_that_pruned_reports_every_number_at_info() {
+        let capture = LogCapture::start();
+        log_sweep(&Ok(SweepReport {
+            aged_out: 2,
+            over_cap: 1,
+            orphans: 3,
+            bytes_freed: 40,
+            object_errors: 2,
+        }));
+
+        let logged = capture.text();
+        assert!(logged.contains("INFO"), "{logged}");
+        for field in [
+            "calls_pruned=3",
+            "aged_out=2",
+            "over_cap=1",
+            "orphans=3",
+            "bytes_freed=40",
+            "object_errors=2",
+        ] {
+            assert!(logged.contains(field), "{field} missing from:\n{logged}");
+        }
+    }
+
+    /// A failed sweep is an ERROR — until it succeeds the archive is unbounded —
+    /// and it names which half of the system was unhappy.
+    #[test]
+    fn a_failed_sweep_is_an_error_naming_the_cause() {
+        let capture = LogCapture::start();
+        log_sweep(&Err(DbErr::Custom("boom".into()).into()));
+
+        let logged = capture.text();
+        assert!(logged.contains("ERROR"), "{logged}");
+        assert!(logged.contains("database: Custom Error: boom"), "{logged}");
+    }
+
+    /// An object that won't delete leaves audio on a disk retention is supposed
+    /// to be reclaiming. A count alone gives an operator no lead, so both the
+    /// prune and the GC pass name the key and the cause.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_undeletable_object_names_the_key_and_the_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (db, store, tmp) = archive_with_one_stale_call().await;
+        let shard = tmp.path().join("audio").join("aa");
+        let restore = std::fs::metadata(&shard).expect("metadata").permissions();
+        let mut readonly = restore.clone();
+        readonly.set_mode(0o555);
+        std::fs::set_permissions(&shard, readonly).expect("chmod");
+        // Root bypasses directory permissions, so there'd be nothing to observe.
+        if std::fs::write(shard.join("probe"), b"x").is_ok() {
+            std::fs::set_permissions(&shard, restore).expect("restore");
+            return;
+        }
+
+        let config = RetentionConfig {
+            days: 7,
+            orphan_grace: Duration::ZERO,
+            ..Default::default()
+        };
+        let capture = LogCapture::start();
+        let report = sweep(&db, &store, &config, now_ms() + 60_000).await;
+        std::fs::set_permissions(&shard, restore).expect("restore");
+
+        assert!(
+            report
+                .expect("a stuck object must not fail the sweep")
+                .object_errors
+                > 0
+        );
+        let logged = capture.text();
+        assert!(logged.contains("WARN"), "{logged}");
+        // The prune's own delete, then the GC pass finding the same object.
+        assert!(
+            logged.contains("could not delete pruned audio object"),
+            "{logged}"
+        );
+        assert!(
+            logged.contains("orphan-gc could not delete object"),
+            "{logged}"
+        );
+        assert!(logged.contains("aa/1.wav"), "{logged}");
     }
 
     /// The env stopgap has to be forgiving: a typo'd value falls back to the
@@ -668,31 +723,22 @@ mod tests {
         assert_eq!(config.orphan_grace, RetentionConfig::default().orphan_grace);
     }
 
-    /// The startup banner has to make "what will be deleted" unambiguous — an
-    /// operator reading `disabled` should never find calls missing, and one
-    /// reading `7 days` should never be surprised that they are.
+    /// The startup line has to make "what will be deleted" unambiguous — an
+    /// operator who reads `days=0` should never find Calls missing, and one who
+    /// reads `days=7` should never be surprised that they are.
     #[rstest]
-    #[case(7, None, 3600, "7 days; sweeping every 3600s")]
-    #[case(0, None, 3600, "disabled, calls kept forever; sweeping every 3600s")]
-    #[case(
-        0,
-        Some(1024),
-        60,
-        "size cap 1024 bytes, no age limit; sweeping every 60s"
-    )]
-    #[case(
-        30,
-        Some(1024),
-        60,
-        "30 days or 1024 bytes, whichever bites first; sweeping every 60s"
-    )]
+    #[case(7, None, 3600, &["days=7", "max_size_bytes=None", "interval_secs=3600"])]
+    // `days=0` is rdio's "keep forever", not "drop everything".
+    #[case(0, None, 3600, &["days=0", "max_size_bytes=None"])]
+    #[case(0, Some(1024), 60, &["days=0", "max_size_bytes=Some(1024)", "interval_secs=60"])]
+    #[case(30, Some(1024), 60, &["days=30", "max_size_bytes=Some(1024)"])]
     // A zero interval reports the cadence that will actually be used.
-    #[case(7, None, 0, "7 days; sweeping every 3600s")]
-    fn policy_description(
+    #[case(7, None, 0, &["days=7", "interval_secs=3600"])]
+    fn policy_is_logged_at_startup(
         #[case] days: u32,
         #[case] max_size_bytes: Option<u64>,
         #[case] interval_secs: u64,
-        #[case] expected: &str,
+        #[case] expected: &[&str],
     ) {
         let config = RetentionConfig {
             days,
@@ -700,7 +746,15 @@ mod tests {
             interval: Duration::from_secs(interval_secs),
             ..Default::default()
         };
-        assert_eq!(config.describe(), expected);
+
+        let capture = LogCapture::start();
+        config.log();
+
+        let logged = capture.text();
+        assert!(logged.contains("INFO"), "{logged}");
+        for field in expected {
+            assert!(logged.contains(field), "{field} missing from:\n{logged}");
+        }
     }
 
     /// The operator reading a failed-sweep line needs to know which half of the

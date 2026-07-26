@@ -19,6 +19,7 @@ use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
 use object_store::{Error as ObjectError, ObjectStore, ObjectStoreExt, PutPayload};
+use tracing::warn;
 
 /// How long a presigned URL stays valid.
 const PRESIGN_TTL: Duration = Duration::from_secs(300);
@@ -225,10 +226,10 @@ pub async fn orphan_gc(
         }
         match store.delete(&object.key).await {
             Ok(()) => outcome.reclaimed.push(object),
-            Err(err) => {
+            Err(error) => {
                 // Say *why* rather than just counting: the object stays an orphan
                 // and the next pass retries it, but the operator needs the cause.
-                eprintln!("orphan-gc: could not delete {}: {err}", object.key);
+                warn!(object_key = %object.key, %error, "orphan-gc could not delete object");
                 outcome.errors += 1;
             }
         }

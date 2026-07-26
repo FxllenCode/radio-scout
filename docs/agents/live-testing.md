@@ -42,7 +42,9 @@ every boot rather than only on first run, which is what makes a wiped
 `./radio-scout-live-test` cost nothing: the key the recorder (or the feeder) is
 configured with keeps working. A key an operator *disabled* stays disabled —
 re-registering never undoes a revocation (ADR-0008). With no key configured,
-first run generates and prints one, as it always did.
+first run generates one and **writes it into `.env`** — it is never printed or
+logged (ADR-0011 rule 2), so read it back with `cat .env` and point the feeder
+or the recorder at it.
 
 The feeder posts to `POST /api/call-upload` with rdio's field names and a real
 mono 16-bit WAV per Call, pitched by Talkgroup so two Talkgroups are told apart
