@@ -9,6 +9,10 @@ export interface Call {
   talkgroupLabel?: string
   talkgroupGroup?: string
   talkgroupTag?: string
+  /** The talkgroup's curated LED color, set by CSV import (#18). Absent until
+   *  an operator curates it; `ledForCall` then falls back to the deterministic
+   *  per-talkgroup color. */
+  led?: string
   /** Talkgroup Refs this Call is patched to (rdio `patches[]`). */
   patches?: number[]
   frequency?: number

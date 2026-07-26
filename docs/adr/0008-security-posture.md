@@ -20,4 +20,16 @@ v1 must secure the admin/config surface and authenticate recorders while keeping
 
 - Exposing a v1 instance directly to the internet without a fronting auth layer means open listening — this must be clearly documented.
 - The admin/config surface is always password-gated; recorders always require a valid per-system key.
+
+  **Open deviation (#18 → #19).** The first admin endpoint —
+  `POST /api/admin/talkgroups/import` (Talkgroup CSV import) — shipped **before**
+  the cookie session that gates it, so it is currently **unauthenticated**.
+  Anyone who can reach the server can, through it: rewrite Talkgroup labels,
+  names, Tags, Groups, and LED colors; **create** Talkgroups, Tags, Groups, and
+  — for an unknown numeric `system` value — **Systems**, unbounded and one per
+  distinct value. It cannot read, download, or delete Calls, cannot delete any
+  entity row, and cannot touch API keys. Every admin route is parked under the `/api/admin/`
+  prefix so **#19 closes this with a single `route_layer`** rather than a hunt
+  through handlers. Until #19 lands, an instance reachable beyond a trusted LAN
+  should keep `/api/admin/` blocked at the reverse proxy.
 - Adding v2 access codes reuses the same scope model as API keys ([server analysis](../research/) — scope = `"*"` or `[{id, talkgroups}]`).

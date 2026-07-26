@@ -47,9 +47,30 @@ export function ledVar(color: LedColor): string {
   return LED_COLORS[color]
 }
 
-/** Placeholder assignment until real per-system/talkgroup LED colors arrive via
- *  CSV import (#18) / curation. Deterministic so a talkgroup keeps its color. */
+/** The color a talkgroup gets when nobody has curated one. Deterministic, so a
+ *  talkgroup keeps the same color across sessions and devices, and an archive
+ *  that has never been curated still reads at a glance. */
 export function ledForTalkgroup(systemRef: number, talkgroupRef: number): LedColor {
   const index = Math.abs(systemRef * 31 + talkgroupRef) % LED_ORDER.length
   return LED_ORDER[index]
+}
+
+/** The color to paint a Call's LED: the operator's curated choice (set by
+ *  Talkgroup CSV import, #18) when there is one, else the deterministic
+ *  fallback above.
+ *
+ *  The server validates `led` against this same palette on import, so an
+ *  off-palette value here means a hand-edited or pre-#18 database row — fall
+ *  back rather than emit `var(--color-led-purple)`, which resolves to nothing
+ *  and renders an invisible LED. */
+export function ledForCall(call: {
+  systemRef: number
+  talkgroupRef: number
+  led?: string
+}): LedColor {
+  const curated = call.led?.trim().toLowerCase()
+  if (curated && curated in LED_COLORS) {
+    return curated as LedColor
+  }
+  return ledForTalkgroup(call.systemRef, call.talkgroupRef)
 }

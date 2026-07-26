@@ -32,6 +32,13 @@ pub struct StoredCall {
     pub talkgroup_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub talkgroup_tag: Option<String>,
+    /// The Talkgroup's curated LED color, set by CSV import (#18) and drawn
+    /// from the client palette. Absent until an operator curates it, and the
+    /// client then falls back to its deterministic per-Talkgroup color — so an
+    /// uncurated archive still reads at a glance, and a curated one reads the
+    /// way its operator meant it to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub led: Option<String>,
     /// Talkgroup Refs this Call is patched to (rdio `patches[]`). Carried on the
     /// wire so the client can display cross-patched traffic; also drives live-feed
     /// patch fanout (a subscriber of any patched Talkgroup receives the Call).
@@ -118,6 +125,7 @@ mod tests {
             talkgroup_label: Some("TDB A1".into()),
             talkgroup_group: Some("Fire".into()),
             talkgroup_tag: Some("Fire Dispatch".into()),
+            led: Some("red".into()),
             patches: vec![54001, 54002],
             frequency: Some(774_031_250),
             source: Some(1_610_092),
@@ -169,6 +177,7 @@ mod tests {
             talkgroup_label: None,
             talkgroup_group: None,
             talkgroup_tag: None,
+            led: None,
             patches: vec![],
             frequency: None,
             source: None,

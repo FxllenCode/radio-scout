@@ -29,10 +29,10 @@ use crate::db::entities::{
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
 /// (rdio-scanner `controller.go`).
-const DEFAULT_TAG: &str = "Untagged";
+pub const DEFAULT_TAG: &str = "Untagged";
 /// Default Group label for an auto-populated Talkgroup the recorder sent no group
 /// for (rdio-scanner `controller.go`).
-const DEFAULT_GROUP: &str = "Unknown";
+pub const DEFAULT_GROUP: &str = "Unknown";
 
 /// Find a System by its Ref, creating it if absent.
 pub async fn resolve_or_create_system<C: ConnectionTrait>(
@@ -1223,6 +1223,7 @@ pub async fn stored_calls<C: ConnectionTrait>(
                 talkgroup_tag: talkgroup
                     .and_then(|t| t.tag_id)
                     .and_then(|tag_id| tags.get(&tag_id).cloned()),
+                led: talkgroup.and_then(|t| t.led.clone()),
                 patches: patches_of.remove(&call.id).unwrap_or_default(),
                 frequency: call.frequency,
                 source: call.source_ref,

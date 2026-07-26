@@ -2,7 +2,17 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { LED_HEX, LED_ORDER, ledForTalkgroup, ledVar } from './led'
+import type { Call } from '@/types'
+
+import { LED_HEX, LED_ORDER, ledForCall, ledForTalkgroup, ledVar } from './led'
+
+const call = (over: Partial<Call> = {}): Call => ({
+  id: 1,
+  systemRef: 11,
+  talkgroupRef: 54241,
+  audioUrl: '/api/call/1/audio',
+  ...over,
+})
 
 describe('led palette', () => {
   it('assigns a deterministic, in-palette color per talkgroup', () => {
@@ -35,5 +45,52 @@ describe('led palette', () => {
       Array.from({ length: 40 }, (_, i) => ledForTalkgroup(1, i)),
     )
     expect(seen.size).toBeGreaterThan(1)
+  })
+})
+
+/** The operator's curated color (set by CSV import, #18) is the whole point of
+ *  US 37's `led` column — but an uncurated archive still has to read at a
+ *  glance, so the deterministic color remains the floor. */
+describe('ledForCall', () => {
+  it('prefers the curated color the operator imported', () => {
+    // Deliberately a color the fallback would not have picked, so this can't
+    // pass by coincidence.
+    const fallback = ledForTalkgroup(11, 54241)
+    const curated = LED_ORDER.find((c) => c !== fallback)!
+
+    expect(ledForCall(call({ led: curated }))).toBe(curated)
+  })
+
+  it('falls back to the deterministic color when nothing is curated', () => {
+    expect(ledForCall(call())).toBe(ledForTalkgroup(11, 54241))
+  })
+
+  it('accepts every palette color', () => {
+    for (const color of LED_ORDER) {
+      expect(ledForCall(call({ led: color }))).toBe(color)
+    }
+  })
+
+  it.each(['purple', '#ff0000', '', '   ', 'led-red'])(
+    'falls back rather than trusting an off-palette %o',
+    (led) => {
+      // The server validates on import, so this is a hand-edited or
+      // pre-validation database row — it must not paint an undefined color.
+      expect(ledForCall(call({ led }))).toBe(ledForTalkgroup(11, 54241))
+    },
+  )
+
+  it.each(['RED', 'Red', '  red  '])(
+    'is forgiving about the casing and spacing of a stored %o',
+    (led) => {
+      expect(ledForCall(call({ led }))).toBe('red')
+    },
+  )
+
+  it('colors two talkgroups differently when curation says so', () => {
+    const a = call({ talkgroupRef: 1, led: 'red' })
+    const b = call({ talkgroupRef: 2, led: 'blue' })
+    expect(ledForCall(a)).toBe('red')
+    expect(ledForCall(b)).toBe('blue')
   })
 })

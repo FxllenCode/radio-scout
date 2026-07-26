@@ -9,6 +9,7 @@ pub mod archive;
 pub mod blob;
 pub mod call;
 pub mod db;
+pub mod import;
 pub mod ingest;
 pub mod live;
 pub mod retention;
@@ -71,6 +72,15 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/calls/filters", get(archive::filters))
         .route("/api/call/{id}/audio", get(serve_audio))
         .route("/api/call/{id}/download", get(archive::download))
+        // Admin surface. Everything under `/api/admin/` mutates configuration
+        // and must sit behind the cookie session ADR-0008 requires — that is
+        // #19, and until it lands this prefix is UNAUTHENTICATED. Grouping the
+        // routes here means #19 gates them with one `route_layer`, with no risk
+        // of missing a handler.
+        .route(
+            "/api/admin/talkgroups/import",
+            post(import::import_talkgroups),
+        )
         .route("/healthz", get(healthz))
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.

@@ -12,7 +12,7 @@ import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
 import { callCategory, systemName, talkgroupName } from '@/lib/call'
-import { ledForTalkgroup } from '@/lib/led'
+import { ledForCall } from '@/lib/led'
 import {
   dateTimeLocalToMs,
   downloadUrl,
@@ -429,7 +429,7 @@ function ResultRow({
       )}
     >
       <StatusLed
-        color={ledForTalkgroup(call.systemRef, call.talkgroupRef)}
+        color={ledForCall(call)}
         size={10}
       />
       <div className="min-w-0 flex-1">
@@ -495,7 +495,7 @@ function NowPlaying({
       {/* docs/design/brief.md state 6: a paused Call blinks, a playing one is
           steady. */}
       <StatusLed
-        color={ledForTalkgroup(call.systemRef, call.talkgroupRef)}
+        color={ledForCall(call)}
         size={12}
         pulse={paused}
       />

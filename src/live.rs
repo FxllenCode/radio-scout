@@ -496,6 +496,7 @@ mod tests {
             talkgroup_label: None,
             talkgroup_group: None,
             talkgroup_tag: None,
+            led: None,
             patches,
             frequency: None,
             source: None,

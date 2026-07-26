@@ -522,6 +522,7 @@ mod tests {
             talkgroup_label: Some("TDB A1".into()),
             talkgroup_group: None,
             talkgroup_tag: None,
+            led: None,
             patches: vec![],
             frequency: None,
             source: None,

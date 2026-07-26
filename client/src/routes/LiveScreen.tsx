@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Waveform } from '@/components/Waveform'
 import { callCategory, formatFrequency, systemName, talkgroupName } from '@/lib/call'
 import { formatCallTime } from '@/lib/archive'
-import { ledForTalkgroup } from '@/lib/led'
+import { ledForCall } from '@/lib/led'
 import { cn } from '@/lib/utils'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
@@ -214,7 +214,7 @@ function Display({
   paused: boolean
   missed: number
 }) {
-  const color = ledForTalkgroup(call.systemRef, call.talkgroupRef)
+  const color = ledForCall(call)
 
   return (
     <section
@@ -384,7 +384,7 @@ function History({
               className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/40"
             >
               <StatusLed
-                color={ledForTalkgroup(call.systemRef, call.talkgroupRef)}
+                color={ledForCall(call)}
                 size={10}
               />
               <span className="min-w-0 flex-1 truncate font-mono text-sm">

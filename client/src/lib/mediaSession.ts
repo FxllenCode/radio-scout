@@ -15,7 +15,7 @@
 import type { Call } from '@/types'
 
 import { ARTWORK_SIZES, ledArtworkUrl } from './artwork'
-import { ledForTalkgroup } from './led'
+import { ledForCall } from './led'
 
 /** The lock-screen buttons we answer — the four a queue needs. iOS also renders
  *  the seek actions (research §4), but a Call is seconds long, so scrubbing it
@@ -65,7 +65,7 @@ export function setNowPlaying(call: Call | null): void {
     // Several sizes, all small: iOS picks one, and small is what it has
     // historically rendered without pixelating (research §4).
     artwork: ARTWORK_SIZES.map((size) => ({
-      src: ledArtworkUrl(ledForTalkgroup(call.systemRef, call.talkgroupRef), size),
+      src: ledArtworkUrl(ledForCall(call), size),
       sizes: `${size}x${size}`,
       type: 'image/png',
     })),
