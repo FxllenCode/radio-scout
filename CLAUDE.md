@@ -164,6 +164,8 @@ cargo run --example feed -- --interval 4s                 # synthetic Calls, rea
 
 Issues are tracked in this repo's GitHub Issues via the `gh` CLI. External PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
 
+**Definition of done: committed, pushed, and closed** — all three, in the session that did the work. Finishing a ticket means `git push`, then `gh issue comment <n>` with what shipped (commit SHA, criteria met, anything left to a later ticket), then `gh issue close <n>`. A built-but-open ticket silently blocks every ticket behind it, because the frontier query treats open blockers as live gates. Conversely, **before starting a ticket, check whether it already landed** (`git log --oneline --grep '#<n>'`) — its open state is not proof it's unbuilt.
+
 ### Triage labels
 
 Canonical label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.

@@ -13,6 +13,18 @@ Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all op
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+## Finishing a ticket
+
+**A ticket is not finished until it is committed, pushed, *and* closed.** All three, in that order, in the session that did the work — never left for "next time". An issue left open after its code shipped is worse than no tracker at all: the frontier query reads open blockers as live gates, so a built-but-open ticket silently blocks everything behind it (#28 sat blocked on an already-finished #27 for exactly this reason), and the next session can't tell "built" from "not started" without reading the diff.
+
+1. `git commit` on the working branch, then `git push` — the ticket number goes in the commit subject (`feat(x): … (#27)`).
+2. `gh issue comment <n>` with what actually shipped: the commit SHA, which acceptance criteria are met, any decision taken along the way, and anything deliberately left to a later ticket.
+3. `gh issue close <n>`.
+
+If the work is genuinely partial, say so in the comment and leave it open — but then say *what* is missing, so the next session doesn't have to re-derive it. "Built but unverified" is not a reason to leave it open; verify it, or write down what verification is outstanding.
+
+**Check before starting, too.** A ticket can already be built and still be open (it has happened more than once here). Before picking one up, look for a commit naming it — `git log --oneline --grep '#<n>'` — rather than trusting its state.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
