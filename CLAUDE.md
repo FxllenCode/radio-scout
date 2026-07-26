@@ -18,6 +18,7 @@ The philosophy is a simple setup: a one-program install from the command line th
 - **Simple install.** A one-command install that just works.
 - **rdio-scanner compatibility — as a floor, not a ceiling.** Figure out what features exist in rdio-scanner — all of them need to work in Radio-Scout. Upstream and downstream must exist and should be backwards compatible with rdio-scanner if at all possible. **But Radio-Scout must _improve_ on rdio, not clone it.** For every feature, first research how rdio does it, then research how to do it *better* — the goal is a superset that fixes rdio's weaknesses (see [Improve, don't clone](#improve-dont-clone-rdio)). Compatibility is preserved at the wire/contract boundaries (ingest response strings, recorder payloads, `/rdio-scanner` legacy surface); everything behind those boundaries is free to be better.
 - **Recorder integrations.** Create an integration or plugin (per their docs) for both SDRTrunk and Trunk Recorder. The maintainer runs Trunk Recorder on their scanner, so have a plugin/integration ready for that testing phase.
+- **Nothing is un-instrumented.** All application output goes through `tracing` — `println!`/`eprintln!`/`dbg!` are **denied by lint** in library and binary code ([ADR-0011](docs/adr/0011-observability-logging-policy.md)). Secrets are never logged at any level in any form; every rejected ingest logs *why*; every 5xx logs its cause against a correlation ref and returns only that ref. See [Logging policy](#logging-policy).
 - **PWA / mobile support is extremely important.** You must be able to add the website to your phone and have scanner audio actually work correctly within the OS — e.g. functioning pause/next/previous buttons — and work correctly in the background, especially on iOS. This is lacking in rdio-scanner and is a big problem with it.
 
 ## Testing & coverage policy
@@ -41,6 +42,21 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 **Coverage exclusions (documented + auditable — never silent gaming):** generated SeaORM entities + migrations, `main()` bootstrap glue, `build.rs`, shadcn `client/src/components/ui/**`, `client/src/main.tsx`, `.d.ts`, test files. The same backend list is mirrored for mutation testing in [`.cargo/mutants.toml`](.cargo/mutants.toml), so `cargo mutants` reports only real gaps.
 
 **Enforcement** — the tooling above is stood up (and high-risk gaps in already-shipped code backfilled) by the **"Test hardening + coverage baseline"** ticket; CI (#22) is not built yet. Until #22, coverage + mutation join the local merge-gate ritual: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo nextest run` (+ `cargo test --doc`), `cargo llvm-cov` over the floor, and the client `tsc`/`oxlint`/`vitest --coverage` gates must pass before a commit lands. #22 wires it all into CI with a **100% patch-coverage** Codecov gate (separate backend/frontend flags).
+
+## Logging policy
+
+Full rationale + the incident that bought these rules: [ADR-0011](docs/adr/0011-observability-logging-policy.md). The rules that bind day-to-day work — these are **hard rules**, not style preferences:
+
+1. **`println!` / `eprintln!` / `dbg!` are denied by lint** in `src/`. Output goes through `tracing`, always. `examples/` is the one exception (a CLI whose stdout is its product) and carries an explicit `#![allow]` with a comment.
+2. **Never log a secret** — API keys, access codes, admin passwords or hashes — at any level, in any form, not even truncated. Identify a key by its database id or label, resolved after lookup.
+3. **Every rejected ingest logs at WARN with a machine-readable `reason`** (`invalid-api-key`, `duplicate`, `blacklisted`, `no-talkgroup`, `not-populated`). A Call that doesn't become a row leaves a line saying why.
+4. **Every 5xx logs at ERROR with the cause and a correlation ref**; the response body carries only the ref. The rdio-compatible strings for *known* outcomes stay byte-identical — they're a wire contract.
+5. **Listener IPs never appear above DEBUG.** Recorder IPs may appear at INFO on ingest routes. A public instance must not accumulate a record of who listened and when.
+6. **Static messages, structured fields** — `warn!(reason = "blacklisted", %system_ref, "ingest dropped")`, never a formatted sentence.
+7. **Levels mean something:** ERROR = an operator must act · WARN = something was rejected or dropped · INFO = notable normal events (startup, ingest outcome, one line per request) · DEBUG = per-asset/per-range requests, listener IPs, protocol detail · TRACE = wire dumps.
+8. **Nothing logs unguarded in a hot loop.** Per-Call fine; per-range-request is DEBUG; per-sample never.
+
+Output goes to **stdout only** (journald/Docker/terminal own persistence and rotation — never a file sink); level via `RUST_LOG`, default `info`, until #17 adds a `[log]` section.
 
 ## Improve, don't clone rdio
 
