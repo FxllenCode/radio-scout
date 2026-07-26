@@ -9,6 +9,7 @@ pub mod archive;
 pub mod blob;
 pub mod call;
 pub mod db;
+pub mod failure;
 pub mod http_log;
 pub mod import;
 pub mod ingest;
@@ -32,6 +33,7 @@ use sea_orm::DatabaseConnection;
 
 use crate::call::CallId;
 use crate::db::repo;
+use crate::failure::ServerError;
 use crate::live::LiveFeed;
 
 // Re-exported so the binary and the integration harness can wire the app up
@@ -117,25 +119,13 @@ async fn serve_audio(
     let (object_key, audio_mime) = match repo::get_call_audio(&state.db, id).await {
         Ok(Some(audio)) => audio,
         Ok(None) => return (StatusCode::NOT_FOUND, "call not found\n").into_response(),
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not look up call: {err}\n"),
-            )
-                .into_response();
-        }
+        Err(err) => return ServerError::new("look-up-call", err).into_response(),
     };
 
     if state.audio.is_presigning() {
         match state.audio.presigned_get_url(&object_key).await {
             Some(Ok(url)) => return Redirect::temporary(&url).into_response(),
-            Some(Err(err)) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("could not sign audio url: {err}\n"),
-                )
-                    .into_response();
-            }
+            Some(Err(err)) => return ServerError::new("sign-audio-url", err).into_response(),
             None => {}
         }
     }
@@ -143,13 +133,7 @@ async fn serve_audio(
     let size = match state.audio.size(&object_key).await {
         Ok(Some(size)) => size,
         Ok(None) => return (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not stat audio: {err}\n"),
-            )
-                .into_response();
-        }
+        Err(err) => return ServerError::new("stat-audio", err).into_response(),
     };
     let mime = audio_mime.unwrap_or_else(|| "application/octet-stream".to_string());
 
@@ -166,11 +150,7 @@ async fn serve_audio(
             )
                 .into_response(),
             Ok(None) => (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
-            Err(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not read audio: {err}\n"),
-            )
-                .into_response(),
+            Err(err) => ServerError::new("read-audio", err).into_response(),
         },
         RangeOutcome::Range { start, end } => {
             match state.audio.get_range(&object_key, start, end + 1).await {
@@ -185,11 +165,7 @@ async fn serve_audio(
                     bytes,
                 )
                     .into_response(),
-                Err(err) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("could not read audio: {err}\n"),
-                )
-                    .into_response(),
+                Err(err) => ServerError::new("read-audio-range", err).into_response(),
             }
         }
         RangeOutcome::Unsatisfiable => (

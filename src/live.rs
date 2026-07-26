@@ -35,7 +35,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
-use tracing::{Instrument, Span, info};
+use tracing::{Instrument, Span, debug, info, warn};
 
 use crate::AppState;
 use crate::call::{CallId, StoredCall};
@@ -285,8 +285,11 @@ fn on_broadcast(
         Ok(_) => BroadcastAction::Skip,
         // A slow client fell behind the fanout: tell it how many Calls it missed
         // so it can refetch from the archive (#13) rather than silently losing
-        // them (rdio just drops them).
+        // them (rdio just drops them). The operator is told too — a listener
+        // that cannot keep up is a real symptom, and the count is the measure of
+        // it (#29). Rare by construction: the channel holds 1024 Calls.
         Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            warn!(skipped, "live-feed listener lagged behind the fanout");
             BroadcastAction::Send(lagged_frame(skipped))
         }
         Err(broadcast::error::RecvError::Closed) => BroadcastAction::Close,
@@ -432,7 +435,18 @@ async fn run_connection(mut socket: WebSocket, state: AppState) {
                             break;
                         }
                     }
-                    Beat::Dead => break,
+                    // A half-open connection is a listener who stopped hearing
+                    // anything and doesn't know it — worth saying out loud, and
+                    // the thing rdio leaves lingering in silence. Bounded by
+                    // connections, not frames (rule 8).
+                    Beat::Dead => {
+                        let heartbeat_ms = heartbeat_period.as_millis() as u64;
+                        warn!(
+                            heartbeat_ms,
+                            "live-feed listener reaped after an unanswered heartbeat"
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -457,6 +471,12 @@ async fn handle_text(
     };
     conn.sub.selection = sel;
     conn.sub.all = all;
+    // Protocol detail, so DEBUG (rule 7): a listener re-subscribes every time
+    // they toggle a Talkgroup. The shape of the selection, never its contents —
+    // what someone listens to is theirs (rule 5's spirit).
+    let systems = conn.sub.selection.len();
+    let catchup = since.is_some();
+    debug!(systems, all, catchup, "live-feed subscription updated");
     // Ack so the client knows the subscription is live before it relies on
     // receiving matching Calls.
     socket
@@ -486,9 +506,20 @@ async fn send_catchup(
     conn: &ConnState,
     since: CallId,
 ) -> Result<(), Disconnected> {
-    let Ok(models) = repo::recent_calls_since(db, since, CATCHUP_MAX_CALLS).await else {
-        return Ok(());
+    let models = match repo::recent_calls_since(db, since, CATCHUP_MAX_CALLS).await {
+        Ok(models) => models,
+        Err(error) => {
+            // Swallowed for the connection's sake, never for the operator's: a
+            // catch-up that quietly returns nothing is indistinguishable from a
+            // client that missed nothing (#29).
+            warn!(%error, since, "live-feed catch-up query failed");
+            return Ok(());
+        }
     };
+    // Hitting the bound means the client's history has a gap only archive search
+    // (#13) can fill — the one fact about a backfill worth reading.
+    let truncated = models.len() as u64 == CATCHUP_MAX_CALLS;
+    let mut sent = 0u64;
     for model in models {
         if let Ok(Some(view)) = repo::stored_call(db, model.id).await
             && conn.wants(&view)
@@ -497,14 +528,18 @@ async fn send_catchup(
                 .send(Message::Text(catchup_frame(&view).into()))
                 .await
                 .map_err(|_| Disconnected)?;
+            sent += 1;
         }
     }
+    // One line per reconnect, never one per Call (rule 8).
+    debug!(since, sent, truncated, "live-feed catch-up sent");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::LogCapture;
     use rstest::rstest;
 
     fn call(system_ref: i64, talkgroup_ref: i64) -> StoredCall {
@@ -822,11 +857,33 @@ mod tests {
         );
     }
 
+    /// A lagging listener is told (so it can refetch from the archive) *and*
+    /// written down: a client that cannot keep up is a symptom the operator owns,
+    /// and the count is the measure of it (#29).
     #[test]
-    fn broadcast_lag_becomes_a_lagged_notice() {
+    fn broadcast_lag_becomes_a_lagged_notice_and_a_warning() {
+        let capture = LogCapture::start();
         let c = conn(&[("11", "54241")]);
+
         let action = on_broadcast(Err(broadcast::error::RecvError::Lagged(7)), &c);
+
         assert_eq!(action, BroadcastAction::Send(lagged_frame(7)));
+        let logged = capture.text();
+        assert!(logged.contains(" WARN "), "{logged}");
+        assert!(logged.contains("skipped=7"), "{logged}");
+    }
+
+    /// Delivering a Call the listener wanted is not news — the ordinary case
+    /// runs per Call per connection and must stay silent (ADR-0011 rule 8).
+    #[test]
+    fn an_ordinary_delivery_logs_nothing() {
+        let capture = LogCapture::start();
+        let c = conn(&[("11", "54241")]);
+
+        on_broadcast(Ok(Arc::new(call(11, 54241))), &c);
+        on_broadcast(Ok(Arc::new(call(11, 99999))), &c);
+
+        assert_eq!(capture.text(), "", "one line per frame is a hot loop");
     }
 
     #[test]

@@ -672,10 +672,12 @@ async fn rows_with_no_system_are_rejected() {
     assert_eq!(talkgroup_count(&db).await, 0);
 }
 
-/// A dead database is a 500 that names what failed — not a 200 with a report
-/// claiming an import that never happened.
+/// A dead database is a 500 — not a 200 with a report claiming an import that
+/// never happened. What failed is written down here, not handed to the client
+/// (ADR-0011 rule 4).
 #[tokio::test]
 async fn a_broken_database_is_a_server_error_not_a_false_report() {
+    let capture = common::logs::LogCapture::start();
     let (addr, db, _tmp) = spawn().await;
     db.clone().close().await.expect("close the pool");
 
@@ -688,9 +690,13 @@ async fn a_broken_database_is_a_server_error_not_a_false_report() {
         .await
         .expect("request");
     assert_eq!(resp.status(), 500);
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("internal error (ref: "), "{body:?}");
+
+    let line = capture.only_line_containing("stage=import-talkgroups");
     assert!(
-        resp.text().await.unwrap().contains("import talkgroups"),
-        "a 500 should say what failed"
+        line.contains(" ERROR "),
+        "a 500 should say what failed: {line}"
     );
 }
 

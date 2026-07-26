@@ -129,6 +129,18 @@ pub async fn get(addr: &str, path: &str) -> reqwest::Response {
         .expect("request")
 }
 
+/// The correlation id a response carries (#28's `x-request-id`, which is also
+/// #29's 5xx ref). Every response has one, so its absence is a failure, not a
+/// `None` for the caller to handle.
+pub fn request_id_of(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get(radio_scout::http_log::REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .expect("every response carries an x-request-id")
+        .to_owned()
+}
+
 /// A connected live-feed WebSocket client.
 pub type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -156,9 +168,24 @@ pub async fn connect(addr: &str) -> Ws {
     connect_and_hello(addr).await.0
 }
 
+/// How long to wait for a frame the test expects to arrive. Nothing here waits
+/// on wall-clock time, so this is pure slack: a frame that hasn't arrived in five
+/// seconds isn't coming, and a server that never answers is a failure to report
+/// rather than a suite to hang on.
+const FRAME_BUDGET: Duration = Duration::from_secs(5);
+
 /// Read the next text frame, skipping control frames; panics if the socket
-/// closes first.
+/// closes, errors, or goes quiet first.
+///
+/// A caller testing that a frame is *not* delivered wraps this in its own,
+/// shorter timeout — the outer one fires first and cancels this future.
 pub async fn next_text(ws: &mut Ws) -> String {
+    tokio::time::timeout(FRAME_BUDGET, next_text_unbounded(ws))
+        .await
+        .expect("no frame arrived within the budget")
+}
+
+async fn next_text_unbounded(ws: &mut Ws) -> String {
     loop {
         match ws.next().await {
             Some(Ok(WsMessage::Text(t))) => return t.as_str().to_owned(),

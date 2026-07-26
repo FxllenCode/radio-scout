@@ -363,11 +363,23 @@ async fn the_live_feed_logs_upgrade_connect_and_disconnect_but_never_a_frame() {
     assert!(disconnected.contains(" INFO "), "{disconnected}");
     assert!(disconnected.contains("connected_ms="), "{disconnected}");
 
-    // Three lines for the whole connection, whatever crossed it.
+    // Three lines for the whole connection at INFO and above, whatever crossed
+    // it: the upgrade, the arrival, the departure. #29 adds exactly one DEBUG
+    // line for the subscribe — protocol detail, invisible at the default
+    // verbosity — and still nothing per Call frame.
     let lines = capture.lines_containing(&format!("request_id={id}"));
+    let notable: Vec<&String> = lines
+        .iter()
+        .filter(|line| !line.contains(" DEBUG "))
+        .collect();
     assert_eq!(
-        lines.len(),
+        notable.len(),
         3,
         "one line per frame is a hot loop: {lines:#?}"
+    );
+    assert_eq!(
+        lines.len(),
+        4,
+        "one line per subscribe, no more: {lines:#?}"
     );
 }

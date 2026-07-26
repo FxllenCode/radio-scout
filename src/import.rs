@@ -923,11 +923,9 @@ pub async fn import_talkgroups(
             })),
         )
             .into_response(),
-        Err(ImportError::Db(err)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not import talkgroups: {err}\n"),
-        )
-            .into_response(),
+        Err(ImportError::Db(err)) => {
+            crate::failure::ServerError::new("import-talkgroups", err).into_response()
+        }
     }
 }
 

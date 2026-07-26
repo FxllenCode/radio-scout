@@ -4,7 +4,8 @@
 //! Driven over the real HTTP boundary via the integration harness (ADR-0009).
 
 mod common;
-use common::{get, spawn, spawn_with_blob, spawn_with_store};
+use common::logs::LogCapture;
+use common::{get, request_id_of, spawn, spawn_with_blob, spawn_with_store};
 
 use bytes::Bytes;
 use radio_scout::db::repo::{self, NewCall};
@@ -375,25 +376,35 @@ async fn download_of_a_call_whose_audio_is_gone_is_404() {
 // Failure paths
 // ---------------------------------------------------------------------------
 
-/// A dead database must surface as a 500 naming what failed — not as an empty
-/// archive, which would look to a listener like retention ate their calls.
+/// A dead database must surface as a 500 — not as an empty archive, which would
+/// look to a listener like retention ate their calls. What failed goes to the
+/// server's log against the request's ref, never into the response (ADR-0011
+/// rule 4).
 #[tokio::test]
 async fn a_broken_database_is_a_server_error_not_an_empty_archive() {
+    let capture = LogCapture::start();
     let (addr, db, _tmp) = spawn().await;
     seed(&db).await;
     db.clone().close().await.expect("close the pool");
 
-    for (path, doing) in [
-        ("/api/calls", "search calls"),
-        ("/api/calls/filters", "load filter options"),
-        ("/api/call/1/download", "look up call"),
+    for (path, stage) in [
+        ("/api/calls", "search-calls"),
+        ("/api/calls/filters", "load-filter-options"),
+        ("/api/call/1/download", "look-up-call"),
     ] {
         let resp = get(&addr, path).await;
         assert_eq!(resp.status(), 500, "GET {path}");
-        assert!(
-            resp.text().await.unwrap().contains(doing),
-            "GET {path} should say what failed"
+        let request_id = request_id_of(&resp);
+        assert_eq!(
+            resp.text().await.unwrap(),
+            format!("internal error (ref: {request_id})\n"),
+            "GET {path} tells the client the ref and nothing else"
         );
+
+        let line = capture.only_line_containing(&format!("stage={stage}"));
+        assert!(line.contains(" ERROR "), "GET {path}: {line}");
+        assert!(line.contains(&format!("request_id={request_id}")), "{line}");
+        assert!(line.contains("cause="), "GET {path} should say what failed");
     }
 }
 
@@ -433,13 +444,15 @@ async fn download_falls_back_when_the_stored_mime_is_not_header_safe() {
 
 /// An object store that can't be reached is a 500, distinct from the 404 an
 /// object that simply isn't there gets — an operator needs to tell "gone" from
-/// "broken". Download always proxies (never a presigned redirect), so the store
-/// being down is the download being down.
+/// "broken", and the log is where that distinction lives now (rule 4).
+/// Download always proxies (never a presigned redirect), so the store being down
+/// is the download being down.
 ///
 /// Slow by design: `object_store` retries a refused connection with backoff, so
 /// this is the one test in the suite that takes seconds rather than milliseconds.
 #[tokio::test]
 async fn download_reports_an_unreachable_object_store() {
+    let capture = LogCapture::start();
     let tmp = tempfile::tempdir().unwrap();
     // A Garage/MinIO endpoint with nothing listening on it.
     let s3 = BlobStore::s3(&S3Config {
@@ -456,5 +469,10 @@ async fn download_reports_an_unreachable_object_store() {
 
     let resp = get(&addr, &format!("/api/call/{id}/download")).await;
     assert_eq!(resp.status(), 500);
-    assert!(resp.text().await.unwrap().contains("could not read audio"));
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("internal error (ref: "), "{body:?}");
+
+    let line = capture.only_line_containing("stage=read-audio");
+    assert!(line.contains(" ERROR "), "{line}");
+    assert!(line.contains("cause="), "the store's own words: {line}");
 }

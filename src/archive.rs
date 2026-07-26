@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::AppState;
 use crate::call::{CallId, StoredCall};
 use crate::db::repo::{self, CallSearch, CallSort};
+use crate::failure::ServerError;
 
 // The cascading filter-option view types live in `crate::call` beside
 // `StoredCall`, so the data layer can build them without depending on this one.
@@ -151,7 +152,7 @@ pub async fn search(
 
     match load_page(&state.db, &search).await {
         Ok(page) => axum::Json(page).into_response(),
-        Err(err) => db_error("search calls", err),
+        Err(err) => ServerError::new("search-calls", err).into_response(),
     }
 }
 
@@ -187,7 +188,7 @@ pub async fn filters(
     };
     match repo::filter_options(&state.db, &search).await {
         Ok(options) => axum::Json(options).into_response(),
-        Err(err) => db_error("load filter options", err),
+        Err(err) => ServerError::new("load-filter-options", err).into_response(),
     }
 }
 
@@ -203,19 +204,13 @@ pub async fn download(State(state): State<AppState>, Path(id): Path<CallId>) -> 
     let (view, audio_name) = match load_call(&state.db, id).await {
         Ok(Some(found)) => found,
         Ok(None) => return (StatusCode::NOT_FOUND, "call not found\n").into_response(),
-        Err(err) => return db_error("look up call", err),
+        Err(err) => return ServerError::new("look-up-call", err).into_response(),
     };
 
     let bytes = match state.audio.get(&view.object_key).await {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not read audio: {err}\n"),
-            )
-                .into_response();
-        }
+        Err(err) => return ServerError::new("read-audio", err).into_response(),
     };
 
     let filename = download_filename(&view, audio_name.as_deref());
@@ -269,14 +264,6 @@ fn header_value(raw: &str, fallback: &'static str) -> HeaderValue {
 
 fn bad_request(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, format!("{message}\n")).into_response()
-}
-
-fn db_error(doing: &str, err: sea_orm::DbErr) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("could not {doing}: {err}\n"),
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------

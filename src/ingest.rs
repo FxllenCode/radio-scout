@@ -14,6 +14,13 @@
 //! unknown System/Talkgroup with auto-populate off) still returns HTTP 200
 //! `Call imported successfully.` so the recorder never retries — matching rdio,
 //! which likewise 200s and drops the call asynchronously.
+//!
+//! Which is exactly why every outcome is written down (ADR-0011 rule 3, #29):
+//! two of the five rejections tell the recorder "imported successfully", so the
+//! server's own log is the only place the truth exists. Every path that declines
+//! to store a Call goes through [`rejected`] and leaves a WARN line carrying a
+//! machine-readable `reason`, inside a span naming the System and Talkgroup it
+//! was about — and the Call id too, once there is one.
 
 use std::sync::Arc;
 
@@ -22,8 +29,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use sea_orm::TransactionTrait;
 use serde::Deserialize;
+use tracing::{Instrument, Level, Span, field, info, span, warn};
 
 use crate::db::repo::{self, NewCall, NewCallFrequency, NewCallUnit};
+use crate::failure::ServerError;
 use crate::{AppState, now_ms};
 
 const CALL_IMPORTED: &str = "Call imported successfully.\n";
@@ -81,28 +90,28 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
     let mut upload = RawUpload::default();
 
     loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
+        let part = match multipart.next_field().await {
+            Ok(Some(part)) => part,
             Ok(None) => break,
-            Err(_) => return incomplete("malformed multipart body"),
+            Err(_) => return incomplete("malformed-multipart-body"),
         };
 
         // Borrow-then-consume: capture metadata off the field before its body is
         // read (which consumes it).
-        let name = field.name().unwrap_or("").to_string();
+        let name = part.name().unwrap_or("").to_string();
         if name == "audio" {
-            upload.audio_name = field.file_name().map(str::to_string);
-            upload.audio_mime = field.content_type().map(str::to_string);
-            match field.bytes().await {
+            upload.audio_name = part.file_name().map(str::to_string);
+            upload.audio_mime = part.content_type().map(str::to_string);
+            match part.bytes().await {
                 Ok(bytes) => upload.audio = Some(bytes.to_vec()),
-                Err(_) => return incomplete("could not read audio"),
+                Err(_) => return incomplete("could-not-read-audio"),
             }
             continue;
         }
 
-        let value = match field.text().await {
+        let value = match part.text().await {
             Ok(value) => value,
-            Err(_) => return incomplete("could not read field"),
+            Err(_) => return incomplete("could-not-read-field"),
         };
         match name.as_str() {
             "key" => upload.key = Some(value),
@@ -132,11 +141,11 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
 
     // A talkgroup is mandatory (the load-bearing health-check string).
     let Some(talkgroup_ref) = upload.talkgroup.as_deref().and_then(parse_i64) else {
-        return incomplete("no talkgroup");
+        return incomplete("no-talkgroup");
     };
     let audio = match upload.audio.take() {
         Some(audio) if !audio.is_empty() => audio,
-        _ => return incomplete("no audio"),
+        _ => return incomplete("no-audio"),
     };
     // A recorder normally sends a numeric `system`; if it doesn't (or sends a
     // non-positive value), give the new System the lowest-free Ref (#8).
@@ -144,7 +153,7 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
         Some(system_ref) if system_ref > 0 => system_ref,
         _ => match repo::lowest_free_system_ref(&state.db).await {
             Ok(system_ref) => system_ref,
-            Err(err) => return server_error("assign system ref", err),
+            Err(err) => return ServerError::new("assign-system-ref", err).into_response(),
         },
     };
     let key = upload.key.take().unwrap_or_default();
@@ -185,7 +194,33 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
 /// The shared ingest pipeline used by both upload endpoints (ADR-0001):
 /// authorize -> dedup -> write audio object -> insert row (+children) in a
 /// transaction -> emit to the live feed. `new_call.object_key` is filled here.
-async fn ingest_call(
+///
+/// Everything one upload says shares a span naming the System and Talkgroup it
+/// was about, so no line has to repeat them and every line can be read together
+/// (#29). The span exists at ERROR level — the level at which it *exists*, not a
+/// level it is reported at — because the lines that need it most are the WARN
+/// rejections, which an operator may well be watching with everything else
+/// turned down (the same reasoning as the request span in [`crate::http_log`]).
+///
+/// The span starts *here* rather than at the handler because this is where an
+/// upload first has an identity: a body too malformed to yield a System and a
+/// Talkgroup is rejected before it, and those lines carry the request id alone —
+/// which is the whole of what is known about them.
+async fn ingest_call(state: &AppState, key: &str, new_call: NewCall, audio: Vec<u8>) -> Response {
+    let span = span!(
+        Level::ERROR,
+        "ingest",
+        system_ref = new_call.system_ref,
+        talkgroup_ref = new_call.talkgroup_ref,
+        // Recorded once the row exists; absent, not `None`, until then.
+        call_id = field::Empty,
+    );
+    run_pipeline(state, key, new_call, audio)
+        .instrument(span)
+        .await
+}
+
+async fn run_pipeline(
     state: &AppState,
     key: &str,
     mut new_call: NewCall,
@@ -194,21 +229,27 @@ async fn ingest_call(
     // Auth (ADR-0008): recorders always require a valid, in-scope API key.
     match repo::authorize_ingest(&state.db, key, new_call.system_ref).await {
         Ok(true) => {}
+        // The key itself is never logged, at any level, in any form (rule 2) —
+        // and an unknown key has no row to name it by anyway.
         Ok(false) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                format!(
-                    "Invalid API key for system {} talkgroup {}.\n",
-                    new_call.system_ref, new_call.talkgroup_ref
-                ),
-            )
-                .into_response();
+            return rejected(
+                "invalid-api-key",
+                (
+                    StatusCode::UNAUTHORIZED,
+                    format!(
+                        "Invalid API key for system {} talkgroup {}.\n",
+                        new_call.system_ref, new_call.talkgroup_ref
+                    ),
+                )
+                    .into_response(),
+            );
         }
-        Err(err) => return server_error("auth", err),
+        Err(err) => return ServerError::new("auth", err).into_response(),
     }
 
     // Auto-populate + blacklist policy (#8): decide before any audio is written.
-    // A dropped Call still returns success so the recorder doesn't retry.
+    // A dropped Call still returns success so the recorder doesn't retry — which
+    // makes the WARN line the only record that it was dropped at all.
     let auto_populate = match repo::ingest_disposition(
         &state.db,
         new_call.system_ref,
@@ -218,8 +259,13 @@ async fn ingest_call(
     .await
     {
         Ok(repo::Disposition::Store { auto_populate }) => auto_populate,
-        Ok(repo::Disposition::Drop(_)) => return (StatusCode::OK, CALL_IMPORTED).into_response(),
-        Err(err) => return server_error("auto-populate policy", err),
+        Ok(repo::Disposition::Drop(reason)) => {
+            return rejected(
+                drop_reason(reason),
+                (StatusCode::OK, CALL_IMPORTED).into_response(),
+            );
+        }
+        Err(err) => return ServerError::new("auto-populate-policy", err).into_response(),
     };
 
     // Dedup (ADR-0001): same System + Talkgroup within the window.
@@ -232,9 +278,14 @@ async fn ingest_call(
     )
     .await
     {
-        Ok(true) => return (StatusCode::OK, DUPLICATE_REJECTED).into_response(),
+        Ok(true) => {
+            return rejected(
+                "duplicate",
+                (StatusCode::OK, DUPLICATE_REJECTED).into_response(),
+            );
+        }
         Ok(false) => {}
-        Err(err) => return server_error("dedup", err),
+        Err(err) => return ServerError::new("dedup", err).into_response(),
     }
 
     // Key is sharded by a two-char prefix so no directory grows unbounded.
@@ -248,7 +299,8 @@ async fn ingest_call(
 
     // The byte length rides along on the row so retention's size cap is a `SUM()`
     // rather than a stat per object (#10).
-    new_call.audio_size = Some(audio.len() as i64);
+    let audio_bytes = audio.len() as i64;
+    new_call.audio_size = Some(audio_bytes);
 
     // Write the audio object first (ADR-0001); a failed DB insert afterward leaves
     // an orphan the GC sweep reclaims (#10).
@@ -257,26 +309,28 @@ async fn ingest_call(
         .put(&new_call.object_key, bytes::Bytes::from(audio))
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not store audio: {err}\n"),
-        )
-            .into_response();
+        return ServerError::new("store-audio", err).into_response();
     }
 
     // Insert the row (+ children) atomically.
     let call = match insert_in_txn(&state.db, &new_call, auto_populate, now_ms()).await {
         Ok(call) => call,
-        Err(err) => return server_error("store call", err),
+        Err(err) => return ServerError::new("store-call", err).into_response(),
     };
+    // Everything this upload says from here on names the row it became.
+    Span::current().record("call_id", call.id);
 
     // Emit to the live feed.
     match repo::stored_call(&state.db, call.id).await {
         Ok(Some(view)) => state.live.publish(Arc::new(view)),
         Ok(None) => {}
-        Err(err) => return server_error("build call view", err),
+        Err(err) => return ServerError::new("build-call-view", err).into_response(),
     }
 
+    // The other half of rule 3: an ingest that *did* become a row is a notable
+    // normal event, so "nothing is arriving" is answerable without waiting for
+    // something to go wrong. Per-Call, never per-anything-smaller (rule 8).
+    info!(audio_bytes, "call stored");
     (StatusCode::OK, CALL_IMPORTED).into_response()
 }
 
@@ -306,41 +360,48 @@ pub async fn trunk_recorder_call_upload(
     let mut audio_mime = None;
 
     loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
+        let part = match multipart.next_field().await {
+            Ok(Some(part)) => part,
             Ok(None) => break,
-            Err(_) => return incomplete("malformed multipart body"),
+            Err(_) => return incomplete("malformed-multipart-body"),
         };
-        let name = field.name().unwrap_or("").to_string();
+        let name = part.name().unwrap_or("").to_string();
         match name.as_str() {
             "audio" => {
-                audio_name = field.file_name().map(str::to_string);
-                audio_mime = field.content_type().map(str::to_string);
-                match field.bytes().await {
+                audio_name = part.file_name().map(str::to_string);
+                audio_mime = part.content_type().map(str::to_string);
+                match part.bytes().await {
                     Ok(bytes) => audio = Some(bytes.to_vec()),
-                    Err(_) => return incomplete("could not read audio"),
+                    Err(_) => return incomplete("could-not-read-audio"),
                 }
             }
-            "key" => key = field.text().await.unwrap_or_default(),
-            "meta" => meta_json = field.text().await.ok(),
+            "key" => key = part.text().await.unwrap_or_default(),
+            "meta" => meta_json = part.text().await.ok(),
             _ => {}
         }
     }
 
     let Some(meta_json) = meta_json else {
-        return incomplete("no meta");
+        return incomplete("no-meta");
     };
     let meta: TrMeta = match serde_json::from_str(&meta_json) {
         Ok(meta) => meta,
-        Err(_) => return (StatusCode::EXPECTATION_FAILED, "Invalid call data\n").into_response(),
+        // TR's own dialect has its own string; unlike the `incomplete` family it
+        // is not "Incomplete call data: …", so it is spelled out here.
+        Err(_) => {
+            return rejected(
+                "invalid-meta",
+                (StatusCode::EXPECTATION_FAILED, "Invalid call data\n").into_response(),
+            );
+        }
     };
 
     let Some(talkgroup_ref) = meta.talkgroup.filter(|tg| *tg > 0) else {
-        return incomplete("no talkgroup");
+        return incomplete("no-talkgroup");
     };
     let audio = match audio {
         Some(audio) if !audio.is_empty() => audio,
-        _ => return incomplete("no audio"),
+        _ => return incomplete("no-audio"),
     };
 
     // TR has no numeric system ref — resolve one from `short_name`.
@@ -348,7 +409,7 @@ pub async fn trunk_recorder_call_upload(
     let system_ref = match &short_name {
         Some(name) => match repo::system_ref_for_short_name(&state.db, name).await {
             Ok(system_ref) => system_ref,
-            Err(err) => return server_error("resolve system", err),
+            Err(err) => return ServerError::new("resolve-system", err).into_response(),
         },
         None => 0,
     };
@@ -499,21 +560,50 @@ fn build_tr_call(
     }
 }
 
-/// The rdio-scanner incomplete-data response: HTTP 417 + `Incomplete call data: <reason>\n`.
-fn incomplete(reason: &str) -> Response {
-    (
-        StatusCode::EXPECTATION_FAILED,
-        format!("Incomplete call data: {reason}\n"),
-    )
-        .into_response()
+/// Record that a Call did not become a row, and hand back what the recorder is
+/// told (ADR-0011 rule 3).
+///
+/// One funnel, so the rule is structural rather than remembered: a rejection
+/// that forgets to log is a rejection that didn't call this. `reason` is a
+/// machine-readable slug an operator greps (`reason=blacklisted`), never a
+/// sentence (rule 6); the System, Talkgroup and request id ride the surrounding
+/// spans. WARN because something was dropped — including on the two paths that
+/// answer HTTP 200 so the recorder never retries.
+fn rejected(reason: &'static str, response: Response) -> Response {
+    // `%reason` rather than the default: `reason=duplicate` greps, and
+    // `reason="duplicate"` does not — the same reason the request log renders
+    // its path bare.
+    warn!(reason = %reason, "ingest rejected");
+    response
 }
 
-fn server_error(stage: &str, err: sea_orm::DbErr) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("ingest {stage} failed: {err}\n"),
+/// The rdio-scanner incomplete-data response: HTTP 417 + `Incomplete call data:
+/// <detail>\n`.
+///
+/// The wire detail *is* the machine-readable reason with its dashes spelled as
+/// spaces — one string rather than two, so the line an operator greps
+/// (`reason=no-talkgroup`) and the string a recorder branches on (`Incomplete
+/// call data: no talkgroup`) can never drift apart. The consequence is that a
+/// renamed slug rewrites a recorder-facing string, so every one of these bodies
+/// is pinned verbatim in `tests/instrumentation.rs`.
+fn incomplete(reason: &'static str) -> Response {
+    let detail = reason.replace('-', " ");
+    rejected(
+        reason,
+        (
+            StatusCode::EXPECTATION_FAILED,
+            format!("Incomplete call data: {detail}\n"),
+        )
+            .into_response(),
     )
-        .into_response()
+}
+
+/// The `reason` slug for a Call the auto-populate/blacklist policy dropped (#8).
+fn drop_reason(reason: repo::DropReason) -> &'static str {
+    match reason {
+        repo::DropReason::Blacklisted => "blacklisted",
+        repo::DropReason::NotPopulated => "not-populated",
+    }
 }
 
 /// Parse a decimal integer field, tolerating surrounding whitespace.

@@ -28,9 +28,11 @@
 //!   is stricter than rule 5 requires and deliberately so — rdio-scanner logs
 //!   every listener's IP and access-code ident at info (`client.go:152`).
 //! - **Every line carries a request id**, as a span field, so the lines a
-//!   handler emits while serving the request carry it too. #29 hangs the 5xx
-//!   correlation ref off the same id, and the response echoes it in
-//!   `x-request-id` so the operator watching a client can grep the server.
+//!   handler emits while serving the request carry it too. It is also the 5xx
+//!   correlation ref (#29): a failing response's cause is logged against it here
+//!   and the body replaced with the ref alone ([`crate::failure`]), and the
+//!   response echoes it in `x-request-id` so the operator watching a client can
+//!   grep the server.
 //!
 //! The address is the TCP peer's, never `X-Forwarded-For`: the header is
 //! attacker-controlled, and trusting it would let anyone forge a recorder's IP
@@ -66,7 +68,7 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub struct RequestId(String);
 
 impl RequestId {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         // The low 64 bits of a v4 UUID: random but for the two variant bits.
         RequestId(format!("{:016x}", Uuid::new_v4().as_u128() as u64))
     }
@@ -177,13 +179,19 @@ pub async fn log_requests(mut request: Request, next: Next) -> Response {
     let span = span!(Level::ERROR, "http", request_id = %request_id);
 
     let started = Instant::now();
-    let mut response = next.run(request).instrument(span.clone()).await;
+    let response = next.run(request).instrument(span.clone()).await;
     let elapsed = started.elapsed();
 
     let status = response.status();
     let level = level_for(class, status);
     let client_addr = peer.filter(|_| logs_client_addr(class, level));
-    span.in_scope(|| request_line(level, &method, &path, status, elapsed, client_addr));
+    // Inside the span, so the failure's ERROR line carries the same id the
+    // client is handed (#29) — the cause first, then the request it belonged to.
+    let mut response = span.in_scope(|| {
+        let response = crate::failure::redact(response, &request_id);
+        request_line(level, &method, &path, status, elapsed, client_addr);
+        response
+    });
 
     response.headers_mut().insert(
         HeaderName::from_static(REQUEST_ID_HEADER),
