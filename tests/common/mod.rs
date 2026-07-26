@@ -57,6 +57,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use radio_scout::config::TrustedProxies;
 use radio_scout::db::entities::{call, system, tag, talkgroup};
 use radio_scout::db::repo::{self, NewCall};
 use radio_scout::db::{self};
@@ -193,6 +194,21 @@ impl TestApp {
 
     // -- Synthetic Calls ----------------------------------------------------
 
+    /// POST a synthetic Call as a reverse proxy would relay it, claiming in
+    /// `X-Forwarded-For` to be speaking for `client`. Whether that claim is
+    /// believed is `trusted_proxies`' answer (#17).
+    pub async fn upload_via_proxy(&self, call: CallUpload, client: &str) -> (u16, String) {
+        let resp = self
+            .client
+            .post(self.url("/api/call-upload"))
+            .header("x-forwarded-for", client)
+            .multipart(call.into_form())
+            .send()
+            .await
+            .expect("multipart POST");
+        read(resp).await
+    }
+
     /// POST a synthetic Call to the generic rdio endpoint, returning the status
     /// and body a recorder would see.
     pub async fn upload(&self, call: CallUpload) -> (u16, String) {
@@ -319,8 +335,8 @@ impl TestApp {
     }
 
     /// Insert a System row with an explicit ingest policy. No admin surface sets
-    /// `auto_populate` or `blacklist` yet — that is config #17 — so tests that
-    /// exercise them seed the row.
+    /// `auto_populate` or `blacklist` yet — per-System policy is a database row,
+    /// so that is #19 — so tests that exercise them seed the row.
     pub async fn seed_system(&self, system_ref: i64, auto_populate: bool, blacklist: Option<&str>) {
         system::ActiveModel {
             r#ref: Set(system_ref),
@@ -402,6 +418,7 @@ pub struct TestAppBuilder {
     heartbeat: Option<Duration>,
     store: Option<BlobStore>,
     database_url: Option<String>,
+    trusted_proxies: Option<String>,
 }
 
 impl TestAppBuilder {
@@ -425,6 +442,14 @@ impl TestAppBuilder {
     /// locally).
     pub fn store(mut self, store: BlobStore) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Believe `X-Forwarded-For` from these proxies — a comma-separated list of
+    /// addresses or CIDR blocks, exactly as `[server] trusted_proxies` takes
+    /// them. The default trusts nobody, which is what ships.
+    pub fn trusted_proxies(mut self, proxies: &str) -> Self {
+        self.trusted_proxies = Some(proxies.to_string());
         self
     }
 
@@ -461,6 +486,9 @@ impl TestAppBuilder {
         if let Some(heartbeat) = self.heartbeat {
             state.live = LiveFeed::with_heartbeat(heartbeat);
         }
+        if let Some(proxies) = self.trusted_proxies {
+            state.trusted_proxies = trusted_proxies(&proxies);
+        }
 
         TestApp {
             addr: serve(build_app(state)).await,
@@ -470,6 +498,14 @@ impl TestAppBuilder {
             tmp,
         }
     }
+}
+
+/// The trust list `[server] trusted_proxies = [...]` would have produced.
+fn trusted_proxies(entries: &str) -> TrustedProxies {
+    entries
+        .split(',')
+        .map(|entry| entry.trim().parse().expect("an address or CIDR block"))
+        .collect()
 }
 
 /// Serve `app` on an ephemeral loopback port, returning its `host:port`.

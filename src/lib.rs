@@ -9,6 +9,7 @@ pub mod archive;
 pub mod blob;
 pub mod call;
 pub mod catalog;
+pub mod config;
 pub mod db;
 pub mod failure;
 pub mod http_log;
@@ -33,6 +34,7 @@ use axum::routing::{any, get, post};
 use sea_orm::DatabaseConnection;
 
 use crate::call::CallId;
+use crate::config::TrustedProxies;
 use crate::db::repo;
 use crate::failure::ServerError;
 use crate::live::LiveFeed;
@@ -50,17 +52,21 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub live: LiveFeed,
     pub ingest: IngestConfig,
+    /// Whose `X-Forwarded-For` the request log may believe (#17). Empty — the
+    /// shipped default — means nobody's.
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl AppState {
     /// Assemble state from a blob store, a database connection, and ingest
-    /// config, with a fresh live-feed hub.
+    /// config, with a fresh live-feed hub and no trusted proxies.
     pub fn new(audio: Arc<BlobStore>, db: DatabaseConnection, ingest: IngestConfig) -> Self {
         AppState {
             audio,
             db,
             live: LiveFeed::new(),
             ingest,
+            trusted_proxies: TrustedProxies::default(),
         }
     }
 }
@@ -98,8 +104,14 @@ pub fn build_app(state: AppState) -> Router {
         // routing (ADR-0007). The API/WS/health routes above take precedence.
         .fallback(web::spa_handler)
         // One line per request (#28), outermost so it sees every outcome —
-        // including the 404s and 405s the router answers on its own.
-        .layer(axum::middleware::from_fn(http_log::log_requests))
+        // including the 404s and 405s the router answers on its own. It carries
+        // its own slice of state (the trust list, #17) rather than the whole of
+        // it, because the layer is added before `with_state` and needs nothing
+        // else.
+        .layer(axum::middleware::from_fn_with_state(
+            state.trusted_proxies.clone(),
+            http_log::log_requests,
+        ))
         .with_state(state)
 }
 
@@ -298,6 +310,7 @@ mod tests {
     #[case("bytes=a-9", 10, RangeOutcome::Unsatisfiable)] // non-numeric start
     #[case("bytes=4-b", 10, RangeOutcome::Unsatisfiable)] // non-numeric end
     #[case("bytes=x-", 10, RangeOutcome::Unsatisfiable)] // non-numeric open-ended
+    #[case("bytes=-x", 10, RangeOutcome::Unsatisfiable)] // non-numeric suffix
     #[case("bytes=5", 10, RangeOutcome::Unsatisfiable)] // missing '-'
     #[case("bytes=", 10, RangeOutcome::Unsatisfiable)] // empty spec
     #[case("bytes=-", 10, RangeOutcome::Unsatisfiable)] // both empty

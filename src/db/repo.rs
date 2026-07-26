@@ -862,7 +862,8 @@ pub async fn count_api_keys<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
 /// Register `raw_key` unless it is already known. Returns whether it was added.
 ///
 /// This is how a key configured out-of-band — `RADIO_SCOUT_API_KEY`, typically
-/// from `.env` until #17 brings real config — survives restarts: the recorder's
+/// from `.env` (ADR-0012 keeps it there, since first run *writes* it) —
+/// survives restarts: the recorder's
 /// configured secret keeps working across boots without stacking up a row per
 /// boot. A key an operator **disabled** counts as known and stays disabled;
 /// re-registering must never quietly undo a revocation (ADR-0008).
@@ -940,9 +941,9 @@ pub async fn is_duplicate_call<C: ConnectionTrait>(
 // ---------------------------------------------------------------------------
 
 /// Why an incoming Call was dropped by [`ingest_disposition`]. The two paths are
-/// distinct behaviours worth telling apart (in tests today, in operator logs once
-/// #17 lands), though the recorder gets the same HTTP 200 either way so it never
-/// retries.
+/// distinct behaviours worth telling apart — each is logged with its own
+/// `reason` (ADR-0011 rule 3) — though the recorder gets the same HTTP 200
+/// either way so it never retries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropReason {
     /// The Talkgroup Ref is on the System's blacklist.

@@ -326,3 +326,41 @@ async fn the_live_feed_logs_upgrade_connect_and_disconnect_but_never_a_frame() {
         "one line per subscribe, no more: {lines:#?}"
     );
 }
+
+/// Behind a reverse proxy or Docker's bridge (#23), every request arrives from
+/// the proxy — so the address the log names is the proxy's, and the one field
+/// the request log exists to make trustworthy says nothing. #17's
+/// `trusted_proxies` is the fix: name the hop, and `X-Forwarded-For` is
+/// believed *from that hop only*.
+#[tokio::test]
+async fn a_trusted_proxy_s_forwarded_address_is_logged_instead_of_its_own() {
+    let capture = LogCapture::start();
+    let app = TestApp::builder()
+        .trusted_proxies("127.0.0.1")
+        .spawn()
+        .await;
+    app.create_api_key("recorder-key").await;
+
+    app.upload_via_proxy(CallUpload::new().key("recorder-key"), "198.51.100.7")
+        .await;
+
+    let line = line_for(&capture, "/api/call-upload");
+    assert!(line.contains("client_addr=198.51.100.7"), "{line}");
+}
+
+/// ...and an untrusted peer's claim is worth nothing. rdio-scanner takes the
+/// header unconditionally (`server/main.go:265`), so on a public instance
+/// anyone can forge a recorder's address into the operator's log; the shipped
+/// posture here trusts nobody.
+#[tokio::test]
+async fn an_untrusted_peer_cannot_forge_its_address() {
+    let capture = LogCapture::start();
+    let app = TestApp::with_key("recorder-key").await;
+
+    app.upload_via_proxy(CallUpload::new().key("recorder-key"), "198.51.100.7")
+        .await;
+
+    let line = line_for(&capture, "/api/call-upload");
+    assert!(line.contains("client_addr=127.0.0.1"), "{line}");
+    assert!(!line.contains("198.51.100.7"), "{line}");
+}

@@ -74,7 +74,7 @@ async fn authorize_ingest_enforces_validity_scope_and_disabled() {
 }
 
 /// A key configured out-of-band (`RADIO_SCOUT_API_KEY`, typically from `.env`
-/// while #17's real config is pending) has to survive restarts *and* a database
+/// while there is no admin surface to manage keys — #19) has to survive restarts *and* a database
 /// that already has keys — otherwise every boot either duplicates it or, worse,
 /// leaves the recorder's configured key unusable.
 #[tokio::test]
@@ -579,7 +579,7 @@ async fn seed_call(
 // ---------------------------------------------------------------------------
 
 /// Insert a System row directly with an explicit per-system auto-populate flag
-/// and blacklist (the ingest pipeline can't set these yet — that's config #17).
+/// and blacklist (per-System policy has no surface that sets it yet — #19).
 async fn seed_system(
     db: &DatabaseConnection,
     ext_ref: i64,

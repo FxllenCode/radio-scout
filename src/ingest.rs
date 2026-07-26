@@ -38,7 +38,8 @@ use crate::{AppState, now_ms};
 const CALL_IMPORTED: &str = "Call imported successfully.\n";
 const DUPLICATE_REJECTED: &str = "duplicate call rejected\n";
 
-/// Ingest tuning. Ticket #17 populates this from TOML/CLI.
+/// Ingest tuning. Built from `[ingest]` by
+/// [`crate::config::Config::ingest`] (#17).
 #[derive(Debug, Clone)]
 pub struct IngestConfig {
     /// Duplicate-detection window in milliseconds (rdio's default is ~500ms).

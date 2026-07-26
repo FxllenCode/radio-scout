@@ -3,7 +3,8 @@ import { StatusLed } from '@/components/StatusLed'
 import { useGetHealthQuery } from '@/store/api'
 
 /** Settings — connection/server status, audio enhancement, notifications, theme,
- *  admin (#17/#19). The server-status row is live now (RTK Query → /healthz),
+ *  admin (#19). Server settings are a TOML file + flags, not a UI (ADR-0012);
+ *  the server-status row is live now (RTK Query → /healthz),
  *  proving the store + one-origin wiring end to end. */
 export function SettingsScreen() {
   const { data, isSuccess, isError, isLoading } = useGetHealthQuery()

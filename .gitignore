@@ -13,6 +13,16 @@ client/coverage
 # Local development configuration (secrets). `.env.example` is the template and
 # IS committed; the real file never is.
 .env
+
+# The configuration file `radio-scout --write-config` writes here (#17). It is
+# one operator's local settings — committing one would silently override every
+# other developer's defaults. The template lives in the binary (`config::TEMPLATE`),
+# so there is nothing to keep a copy of.
+/radio-scout.toml
+
+# A root-level npm install (the frontend's own is client/node_modules, which
+# client/.gitignore covers).
+/node_modules
 /trunk-recorder
 
 THEPROJECT.md

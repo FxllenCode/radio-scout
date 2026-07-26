@@ -34,22 +34,31 @@
 //!   response echoes it in `x-request-id` so the operator watching a client can
 //!   grep the server.
 //!
-//! The address is the TCP peer's, never `X-Forwarded-For`: the header is
-//! attacker-controlled, and trusting it would let anyone forge a recorder's IP
-//! into the operator's log. Behind a reverse proxy every client therefore reads
-//! as the proxy until #17's config can name the proxies that may be believed.
+//! The address is the TCP peer's unless the operator named that peer in
+//! `[server] trusted_proxies` (#17). `X-Forwarded-For` is attacker-controlled,
+//! and believing it unconditionally — as rdio-scanner does (`main.go:265`) —
+//! would let anyone forge a recorder's IP into the operator's log. With the
+//! list empty, which is what ships, the header is never read at all; behind a
+//! reverse proxy or Docker's bridge (#23), naming the hop makes the forwarded
+//! address the one that gets logged. Which entry of the chain that is, and why,
+//! is [`TrustedProxies::client_ip`].
 
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use axum::extract::ConnectInfo;
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use tracing::{Instrument, Level, span};
 use uuid::Uuid;
+
+use crate::config::TrustedProxies;
+
+/// The header a reverse proxy names the original client in.
+const FORWARDED_FOR: &str = "x-forwarded-for";
 
 /// The response header carrying the request's correlation id. An operator
 /// reading a client's failure can grep the server's log for the same value.
@@ -160,14 +169,30 @@ fn logs_client_addr(class: RouteClass, level: Level) -> bool {
 
 /// Middleware: log one line per request, and hang a [`RequestId`] on the request
 /// (extensions), the response (`x-request-id`) and the span its handler runs in.
-pub async fn log_requests(mut request: Request, next: Next) -> Response {
+pub async fn log_requests(
+    State(trusted_proxies): State<TrustedProxies>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let class = RouteClass::of(&path);
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip());
+        .map(|ConnectInfo(addr)| addr.ip())
+        .map(|peer| {
+            // Behind a reverse proxy or Docker's bridge the peer is the proxy,
+            // and the address worth logging is the one it forwarded for — but
+            // only if the operator said that hop may be believed (#17).
+            trusted_proxies.client_ip(
+                peer,
+                request
+                    .headers()
+                    .get(FORWARDED_FOR)
+                    .and_then(|value| value.to_str().ok()),
+            )
+        });
 
     let request_id = RequestId::new();
     request.extensions_mut().insert(request_id.clone());

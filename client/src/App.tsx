@@ -7,8 +7,8 @@ import { SearchScreen } from '@/routes/SearchScreen'
 import { SettingsScreen } from '@/routes/SettingsScreen'
 
 /** The app shell + the four bottom-tab destinations (docs/design/brief.md).
- *  Live (#11) and Search (#13) are built; Talkgroups (#12) and Settings
- *  (#17/#19) are still placeholders their tickets fill in. */
+ *  Live (#11), Search (#13) and Talkgroups (#12) are built; Settings (#19) is
+ *  still a placeholder its ticket fills in. */
 export default function App() {
   return (
     <Routes>

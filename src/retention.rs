@@ -47,7 +47,8 @@ const BYTES_PER_GB: f64 = 1_073_741_824.0;
 /// Default sweep cadence, matching rdio-scanner's hourly prune ticker.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
 
-/// Retention policy. Ticket #17 populates this from TOML/CLI (`[retention]`).
+/// Retention policy, as the sweeper works in it. The operator-facing units —
+/// days and gigabytes — are [`crate::config::Retention`]'s (#17).
 #[derive(Debug, Clone)]
 pub struct RetentionConfig {
     /// Prune Calls older than this many days. `0` disables age-based pruning
@@ -127,35 +128,6 @@ impl RetentionConfig {
     pub fn with_max_size_gb(mut self, gb: f64) -> Self {
         self.max_size_bytes = (gb.is_finite() && gb > 0.0).then_some((gb * BYTES_PER_GB) as u64);
         self
-    }
-
-    /// Read the policy from a name → value lookup (the binary passes
-    /// `std::env::var`), falling back to the defaults for anything absent.
-    ///
-    /// A stopgap until #17's TOML/CLI config, following the same pattern
-    /// `main.rs` already uses for `base_dir`/`port`. The names mirror the
-    /// eventual `[retention]` section, so `retention.days` reads
-    /// `RADIO_SCOUT_RETENTION_DAYS` and `retention.max_size_gb` reads
-    /// `RADIO_SCOUT_RETENTION_MAX_SIZE_GB`. An unparseable value falls back to
-    /// the default rather than refusing to boot a scanner; #17 adds strict
-    /// validation with a real error message.
-    ///
-    /// Taking the lookup as an argument keeps the parsing testable without
-    /// mutating the process environment — and keeps `std::env` in the bootstrap,
-    /// where it belongs.
-    pub fn from_env_vars(var: impl Fn(&str) -> Option<String>) -> Self {
-        let default = Self::default();
-        let config = RetentionConfig {
-            days: var("RADIO_SCOUT_RETENTION_DAYS")
-                .and_then(|days| days.trim().parse().ok())
-                .unwrap_or(default.days),
-            ..default
-        };
-        match var("RADIO_SCOUT_RETENTION_MAX_SIZE_GB").and_then(|gb| gb.trim().parse::<f64>().ok())
-        {
-            Some(gb) => config.with_max_size_gb(gb),
-            None => config,
-        }
     }
 }
 
@@ -678,49 +650,6 @@ mod tests {
             "{logged}"
         );
         assert!(logged.contains("aa/1.wav"), "{logged}");
-    }
-
-    /// The env stopgap has to be forgiving: a typo'd value falls back to the
-    /// default rather than refusing to boot a scanner.
-    #[rstest]
-    // Nothing set -> the defaults.
-    #[case(&[], 7, None)]
-    #[case(&[("RADIO_SCOUT_RETENTION_DAYS", "30")], 30, None)]
-    // Zero is meaningful ("keep forever"), not a missing value.
-    #[case(&[("RADIO_SCOUT_RETENTION_DAYS", "0")], 0, None)]
-    // Surrounding whitespace is tolerated (env files love a trailing space).
-    #[case(&[("RADIO_SCOUT_RETENTION_DAYS", " 14 ")], 14, None)]
-    // Junk and out-of-range fall back rather than failing to start.
-    #[case(&[("RADIO_SCOUT_RETENTION_DAYS", "soon")], 7, None)]
-    #[case(&[("RADIO_SCOUT_RETENTION_DAYS", "-5")], 7, None)]
-    // The cap is read in binary GiB.
-    #[case(&[("RADIO_SCOUT_RETENTION_MAX_SIZE_GB", "2")], 7, Some(2_147_483_648))]
-    #[case(&[("RADIO_SCOUT_RETENTION_MAX_SIZE_GB", "0.5")], 7, Some(536_870_912))]
-    // A nonsense or non-positive cap means "no cap", never a zero-byte archive.
-    #[case(&[("RADIO_SCOUT_RETENTION_MAX_SIZE_GB", "lots")], 7, None)]
-    #[case(&[("RADIO_SCOUT_RETENTION_MAX_SIZE_GB", "0")], 7, None)]
-    // Both together.
-    #[case(
-        &[("RADIO_SCOUT_RETENTION_DAYS", "3"), ("RADIO_SCOUT_RETENTION_MAX_SIZE_GB", "1")],
-        3,
-        Some(1_073_741_824)
-    )]
-    fn policy_from_environment(
-        #[case] vars: &[(&str, &str)],
-        #[case] expected_days: u32,
-        #[case] expected_cap: Option<u64>,
-    ) {
-        let config = RetentionConfig::from_env_vars(|key| {
-            vars.iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, value)| (*value).to_string())
-        });
-        assert_eq!(config.days, expected_days);
-        assert_eq!(config.max_size_bytes, expected_cap);
-        // Everything not sourced from the environment keeps its default.
-        assert_eq!(config.interval, RetentionConfig::default().interval);
-        assert_eq!(config.batch_size, RetentionConfig::default().batch_size);
-        assert_eq!(config.orphan_grace, RetentionConfig::default().orphan_grace);
     }
 
     /// The startup line has to make "what will be deleted" unambiguous — an

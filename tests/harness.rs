@@ -266,7 +266,8 @@ async fn a_call_row_can_be_seeded_without_an_upload() {
 }
 
 /// A System with a blacklist (or with auto-populate forced on) has no admin
-/// surface yet — #17 is where an operator sets one — so tests seed it directly.
+/// surface yet — per-System policy is a database row, so #19's admin surface is
+/// where an operator sets one — so tests seed it directly.
 #[tokio::test]
 async fn a_system_can_be_seeded_with_its_ingest_policy() {
     let app = TestApp::with_key("k").await;

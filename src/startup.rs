@@ -1,10 +1,11 @@
 //! First-boot provisioning of the ingest key, and what boot says about it.
 //!
 //! Zero-config install means a scanner that has never been configured still
-//! comes up with a working ingest credential (ADR-0008). Until #17 lands real
-//! config, that credential is `RADIO_SCOUT_API_KEY` — from the environment or
-//! the `.env` beside the binary — and it is registered on every boot, so a
-//! recorder's key survives both a restart and a wiped database.
+//! comes up with a working ingest credential (ADR-0008). That credential is
+//! `RADIO_SCOUT_API_KEY` — from the environment or the `.env` beside the binary
+//! — and it is registered on every boot, so a recorder's key survives both a
+//! restart and a wiped database. It is the one setting that stays out of
+//! `radio-scout.toml` (#17, ADR-0012), because first run *writes* it.
 //!
 //! The interesting case is the *first* boot with nothing configured. It used to
 //! generate a key and print it to stdout, which ADR-0011 rule 2 now forbids: a

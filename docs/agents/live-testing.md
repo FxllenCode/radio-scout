@@ -36,7 +36,7 @@ cargo run --example feed -- --interval 4s
 # 4. Browse http://localhost:3000  (or http://<MAC-LAN-IP>:3000 from a phone)
 ```
 
-`.env` is a **stopgap until #17** brings real config, and it is gitignored;
+`.env` is the environment layer of the configuration (ADR-0012) and the ingest key's home; it is gitignored,
 `.env.example` is the committed template. `RADIO_SCOUT_API_KEY` is registered on
 every boot rather than only on first run, which is what makes a wiped
 `./radio-scout-live-test` cost nothing: the key the recorder (or the feeder) is

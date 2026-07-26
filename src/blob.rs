@@ -37,7 +37,8 @@ pub struct S3Config {
     pub allow_http: bool,
 }
 
-/// Which storage backend to use. Ticket #17 populates this from TOML/CLI.
+/// Which storage backend to use. Built from `[storage]` by
+/// [`crate::config::Config::storage`] (#17).
 #[derive(Debug, Clone)]
 pub enum StorageConfig {
     Filesystem { root: PathBuf },
