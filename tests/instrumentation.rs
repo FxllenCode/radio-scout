@@ -8,125 +8,55 @@
 
 mod common;
 use common::logs::LogCapture;
-use common::{
-    connect, connect_and_hello, next_text, request_id_of, spawn, spawn_with_blob,
-    spawn_with_heartbeat, spawn_with_ingest,
-};
+use common::{CallUpload, TestApp, next_json, next_text, request_id_of};
 
 use std::time::Duration;
 
 use futures_util::SinkExt;
-use radio_scout::db::entities::{call, system};
-use radio_scout::db::repo::{self, NewCall};
-use radio_scout::{BlobStore, IngestConfig};
+use radio_scout::IngestConfig;
+use radio_scout::db::entities::call;
+use radio_scout::db::repo::NewCall;
 use rstest::rstest;
-use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, Set,
-};
+use sea_orm::ConnectionTrait;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-/// An audio part as a recorder sends one. `bytes` empty is a recorder that
-/// produced no samples — a case of its own.
-fn audio_part(bytes: &[u8]) -> reqwest::multipart::Part {
-    reqwest::multipart::Part::bytes(bytes.to_vec())
-        .file_name("a.wav")
-        .mime_str("audio/x-wav")
-        .expect("mime")
+/// The recorder every test here authenticates as.
+const RECORDER_KEY: &str = "recorder-key";
+
+/// An app with the recorder's key registered.
+async fn recorder_app() -> TestApp {
+    TestApp::with_key(RECORDER_KEY).await
 }
 
-/// A recorder-shaped upload.
-fn form(key: &str, system: i64, talkgroup: i64, timestamp_ms: i64) -> reqwest::multipart::Form {
+/// A recorder-shaped upload for `system`/`talkgroup`.
+fn form(key: &str, system: i64, talkgroup: i64, timestamp_ms: i64) -> CallUpload {
     upload_parts(key, timestamp_ms)
-        .text("system", system.to_string())
-        .text("talkgroup", talkgroup.to_string())
+        .system(system)
+        .talkgroup(talkgroup)
 }
 
-/// The parts every upload carries, whether or not it names a Talkgroup.
-fn upload_parts(key: &str, timestamp_ms: i64) -> reqwest::multipart::Form {
-    reqwest::multipart::Form::new()
-        .text("key", key.to_string())
-        .text("timestamp", timestamp_ms.to_string())
-        .part("audio", audio_part(b"audio-bytes"))
+/// The parts every upload carries, whether or not it names a System or a
+/// Talkgroup.
+fn upload_parts(key: &str, timestamp_ms: i64) -> CallUpload {
+    CallUpload::new()
+        .key(key)
+        .at(timestamp_ms)
+        .remove("system")
+        .remove("talkgroup")
 }
 
-async fn post(addr: &str, form: reqwest::multipart::Form) -> (u16, String) {
-    let resp = post_response(addr, form).await;
-    let status = resp.status().as_u16();
-    (status, resp.text().await.unwrap_or_default())
-}
-
-async fn post_response(addr: &str, form: reqwest::multipart::Form) -> reqwest::Response {
-    reqwest::Client::new()
-        .post(format!("http://{addr}/api/call-upload"))
-        .multipart(form)
-        .send()
-        .await
-        .expect("upload")
-}
-
-/// POST a raw body with a multipart content-type, the way a recorder that is
-/// misconfigured (or mid-crash) does — past the extractor, into our own reader.
-async fn post_raw(addr: &str, path: &str, body: Vec<u8>) -> (u16, String) {
-    let resp = reqwest::Client::new()
-        .post(format!("http://{addr}{path}"))
-        .header("content-type", "multipart/form-data; boundary=BOUNDARY")
-        .body(body)
-        .send()
-        .await
-        .expect("raw upload");
-    let status = resp.status().as_u16();
-    (status, resp.text().await.unwrap_or_default())
-}
-
-/// A Trunk-Recorder-dialect upload: the metadata as one JSON `meta` part.
-fn tr_form(meta: Option<&str>, audio: Option<&[u8]>) -> reqwest::multipart::Form {
-    let mut form = reqwest::multipart::Form::new().text("key", "recorder-key");
-    if let Some(meta) = meta {
-        form = form.text("meta", meta.to_string());
+/// A Trunk-Recorder-dialect upload, either half of which a dying recorder can
+/// omit.
+fn tr_form(meta: Option<&str>, audio: Option<&[u8]>) -> CallUpload {
+    let upload = CallUpload::tr(meta.unwrap_or_default()).key(RECORDER_KEY);
+    let upload = match meta {
+        Some(_) => upload,
+        None => upload.remove("meta"),
+    };
+    match audio {
+        Some(audio) => upload.audio_named(audio, "a.wav", "audio/x-wav"),
+        None => upload.no_audio(),
     }
-    if let Some(audio) = audio {
-        form = form.part("audio", audio_part(audio));
-    }
-    form
-}
-
-async fn post_tr(addr: &str, form: reqwest::multipart::Form) -> (u16, String) {
-    let resp = reqwest::Client::new()
-        .post(format!("http://{addr}/api/trunk-recorder-call-upload"))
-        .multipart(form)
-        .send()
-        .await
-        .expect("upload");
-    let status = resp.status().as_u16();
-    (status, resp.text().await.unwrap_or_default())
-}
-
-/// Seed a System row with an explicit blacklist (no admin surface sets one yet —
-/// that is config #17).
-async fn seed_blacklisted_system(db: &DatabaseConnection, ext_ref: i64, blacklist: &str) {
-    system::ActiveModel {
-        r#ref: Set(ext_ref),
-        label: Set(Some(format!("sys{ext_ref}"))),
-        auto_populate: Set(false),
-        blacklist: Set(Some(blacklist.to_string())),
-        created_at_ms: Set(0),
-        ..Default::default()
-    }
-    .insert(db)
-    .await
-    .expect("seed system");
-}
-
-/// Wait for `needle` to appear in the capture. A line a *connection* emits lands
-/// when the server's task next runs, not when the client's call returns.
-async fn wait_for(capture: &LogCapture, needle: &str) -> String {
-    for _ in 0..2_000 {
-        if let Some(line) = capture.lines_containing(needle).into_iter().next() {
-            return line;
-        }
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    panic!("{needle:?} never appeared in:\n{}", capture.text());
 }
 
 // ---------------------------------------------------------------------------
@@ -146,36 +76,34 @@ enum Rejected {
 
 /// Bring up a fresh app, provoke `case`, and hand back what the recorder got.
 async fn provoke(case: Rejected) -> (u16, String) {
-    let ingest = IngestConfig {
-        auto_populate: !matches!(case, Rejected::NotPopulated),
-        ..Default::default()
-    };
-    let (addr, db, _tmp) = spawn_with_ingest(ingest).await;
-    repo::create_api_key(&db, "recorder-key", None, None, 0)
-        .await
-        .expect("api key");
+    let app = TestApp::builder()
+        .ingest(IngestConfig {
+            auto_populate: !matches!(case, Rejected::NotPopulated),
+            ..Default::default()
+        })
+        .spawn()
+        .await;
+    app.create_api_key(RECORDER_KEY).await;
+    let upload = || form(RECORDER_KEY, 11, 54241, 1000);
 
     match case {
         // A key that was never registered: unknown, and so out of scope for
         // every System (ADR-0008).
-        Rejected::InvalidApiKey => post(&addr, form("nope", 11, 54241, 1000)).await,
+        Rejected::InvalidApiKey => app.upload(form("nope", 11, 54241, 1000)).await,
         Rejected::Duplicate => {
-            let (status, body) = post(&addr, form("recorder-key", 11, 54241, 1000)).await;
+            let (status, body) = app.upload(upload()).await;
             assert_eq!(status, 200, "the first upload stores: {body:?}");
-            post(&addr, form("recorder-key", 11, 54241, 1000)).await
+            app.upload(upload()).await
         }
         Rejected::Blacklisted => {
-            seed_blacklisted_system(&db, 11, "54241").await;
-            post(&addr, form("recorder-key", 11, 54241, 1000)).await
+            app.seed_system(11, false, Some("54241")).await;
+            app.upload(upload()).await
         }
         // Auto-populate off + an unknown System: nothing to attach the Call to.
-        Rejected::NotPopulated => post(&addr, form("recorder-key", 11, 54241, 1000)).await,
+        Rejected::NotPopulated => app.upload(upload()).await,
         Rejected::NoTalkgroup => {
-            post(
-                &addr,
-                upload_parts("recorder-key", 1000).text("system", "11"),
-            )
-            .await
+            app.upload(upload_parts(RECORDER_KEY, 1000).system(11))
+                .await
         }
     }
 }
@@ -244,13 +172,10 @@ async fn no_line_ever_carries_the_key_it_was_sent() {
     const BAD: &str = "hunter2-is-not-the-key";
 
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    repo::create_api_key(&db, GOOD, None, None, 0)
-        .await
-        .expect("api key");
+    let app = TestApp::with_key(GOOD).await;
 
-    assert_eq!(post(&addr, form(GOOD, 11, 54241, 1000)).await.0, 200);
-    assert_eq!(post(&addr, form(BAD, 11, 54241, 2000)).await.0, 401);
+    assert_eq!(app.upload(form(GOOD, 11, 54241, 1000)).await.0, 200);
+    assert_eq!(app.upload(form(BAD, 11, 54241, 2000)).await.0, 401);
 
     let line = capture.only_line_containing("reason=invalid-api-key");
     assert!(line.contains(" WARN "), "{line}");
@@ -309,9 +234,15 @@ async fn a_body_our_reader_cannot_parse_says_which_part_it_choked_on(
     #[case] expected_body: &str,
 ) {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    let (status, body) = post_raw(&addr, path, raw_body.to_vec()).await;
+    let (status, body) = app
+        .post_bytes(
+            path,
+            "multipart/form-data; boundary=BOUNDARY",
+            raw_body.to_vec(),
+        )
+        .await;
 
     assert_eq!(status, 417, "{body:?}");
     assert_eq!(body, expected_body, "the recorder's wire contract");
@@ -368,9 +299,9 @@ async fn the_trunk_recorder_dialect_reports_its_own_rejections(
     #[case] expected_body: &str,
 ) {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    let (status, body) = post_tr(&addr, tr_form(meta, audio)).await;
+    let (status, body) = app.upload_tr(tr_form(meta, audio)).await;
 
     assert_eq!(status, 417, "{body:?}");
     assert_eq!(body, expected_body, "the recorder's wire contract");
@@ -388,15 +319,9 @@ async fn the_trunk_recorder_dialect_reports_its_own_rejections(
 #[tokio::test]
 async fn one_upload_is_one_span_carrying_system_talkgroup_and_call_id() {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    repo::create_api_key(&db, "recorder-key", None, None, 0)
-        .await
-        .expect("api key");
+    let app = recorder_app().await;
 
-    assert_eq!(
-        post(&addr, form("recorder-key", 11, 54241, 1000)).await.0,
-        200
-    );
+    assert_eq!(app.upload(form(RECORDER_KEY, 11, 54241, 1000)).await.0, 200);
 
     let stored = capture.only_line_containing("call stored");
     assert!(stored.contains(" INFO "), "{stored}");
@@ -410,10 +335,7 @@ async fn one_upload_is_one_span_carrying_system_talkgroup_and_call_id() {
 
     // A Call that never became a row has no id — and still names its System and
     // Talkgroup, which is what makes a rejection actionable.
-    assert_eq!(
-        post(&addr, form("recorder-key", 11, 54241, 1000)).await.0,
-        200
-    );
+    assert_eq!(app.upload(form(RECORDER_KEY, 11, 54241, 1000)).await.0, 200);
     let rejected = capture.only_line_containing("ingest rejected");
     assert!(rejected.contains("system_ref=11"), "{rejected}");
     assert!(rejected.contains("talkgroup_ref=54241"), "{rejected}");
@@ -428,14 +350,15 @@ async fn one_upload_is_one_span_carrying_system_talkgroup_and_call_id() {
 #[tokio::test]
 async fn a_rejection_before_an_upload_has_an_identity_is_attributable_by_request_id() {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    let (status, _) = post_raw(
-        &addr,
-        "/api/call-upload",
-        b"--BOUNDARY\r\nContent-Disposition: form-data; name=\"key\"\r\n".to_vec(),
-    )
-    .await;
+    let (status, _) = app
+        .post_bytes(
+            "/api/call-upload",
+            "multipart/form-data; boundary=BOUNDARY",
+            b"--BOUNDARY\r\nContent-Disposition: form-data; name=\"key\"\r\n".to_vec(),
+        )
+        .await;
     assert_eq!(status, 417);
 
     let rejected = capture.only_line_containing("ingest rejected");
@@ -468,17 +391,17 @@ async fn a_rejection_before_an_upload_has_an_identity_is_attributable_by_request
 #[tokio::test]
 async fn a_5xx_gives_the_client_a_ref_and_the_operator_the_cause() {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    repo::create_api_key(&db, "recorder-key", None, None, 0)
-        .await
-        .expect("api key");
+    let app = recorder_app().await;
 
     // Break the schema under the handler's feet, the way a missing column did.
-    db.execute_unprepared("DROP TABLE calls")
+    app.db
+        .execute_unprepared("DROP TABLE calls")
         .await
         .expect("drop calls");
 
-    let resp = post_response(&addr, form("recorder-key", 11, 54241, 1000)).await;
+    let resp = app
+        .upload_response(form(RECORDER_KEY, 11, 54241, 1000))
+        .await;
     assert_eq!(resp.status(), 500);
     let request_id = request_id_of(&resp);
     let body = resp.text().await.expect("body");
@@ -523,21 +446,19 @@ async fn a_failure_names_the_stage_of_the_pipeline_it_happened_in(
     #[case] stage: &str,
 ) {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    repo::create_api_key(&db, "recorder-key", None, None, 0)
-        .await
-        .expect("api key");
-    db.execute_unprepared(&format!("DROP TABLE {drop_table}"))
+    let app = recorder_app().await;
+    app.db
+        .execute_unprepared(&format!("DROP TABLE {drop_table}"))
         .await
         .unwrap_or_else(|err| panic!("drop {drop_table}: {err}"));
 
-    let mut upload = upload_parts("recorder-key", 1000)
-        .text("talkgroup", "54241")
-        .text("frequencies", r#"[{"freq":774031250,"pos":0.0,"len":1.5}]"#);
+    let mut upload = upload_parts(RECORDER_KEY, 1000)
+        .talkgroup(54241)
+        .set("frequencies", r#"[{"freq":774031250,"pos":0.0,"len":1.5}]"#);
     if with_system {
-        upload = upload.text("system", "11");
+        upload = upload.system(11);
     }
-    let (status, body) = post(&addr, upload).await;
+    let (status, body) = app.upload(upload).await;
 
     assert_eq!(status, 500, "{body:?}");
     let line = capture.only_line_containing("server error");
@@ -545,7 +466,7 @@ async fn a_failure_names_the_stage_of_the_pipeline_it_happened_in(
     assert!(line.contains(&format!("stage={stage}")), "{line}");
     // Rule 2 holds even when the failing query is the one that binds the key:
     // whatever the driver puts in its error, the key is not in the log.
-    capture.assert_never_logged("recorder-key");
+    capture.assert_never_logged(RECORDER_KEY);
 }
 
 /// The TR dialect resolves its System by name before anything else can run, so a
@@ -553,19 +474,18 @@ async fn a_failure_names_the_stage_of_the_pipeline_it_happened_in(
 #[tokio::test]
 async fn the_trunk_recorder_dialect_names_its_own_failing_stage() {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    db.execute_unprepared("DROP TABLE systems")
+    let app = TestApp::spawn().await;
+    app.db
+        .execute_unprepared("DROP TABLE systems")
         .await
         .expect("drop systems");
 
-    let (status, _) = post_tr(
-        &addr,
-        tr_form(
+    let (status, _) = app
+        .upload_tr(tr_form(
             Some(r#"{"short_name":"butco","talkgroup":54241}"#),
             Some(b"audio-bytes"),
-        ),
-    )
-    .await;
+        ))
+        .await;
 
     assert_eq!(status, 500);
     let line = capture.only_line_containing("server error");
@@ -578,27 +498,22 @@ async fn the_trunk_recorder_dialect_names_its_own_failing_stage() {
 #[tokio::test]
 async fn an_unwritable_audio_store_is_a_server_error_not_a_row() {
     let capture = LogCapture::start();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let audio_root = tmp.path().join("audio");
-    let blob = BlobStore::filesystem(&audio_root).expect("blob");
-    let (addr, db) = spawn_with_blob(blob, tmp.path()).await;
-    repo::create_api_key(&db, "recorder-key", None, None, 0)
-        .await
-        .expect("api key");
+    let app = recorder_app().await;
+    let audio_root = app.path().join("audio");
 
     // Replace the store's root with a regular file: every write beneath it now
     // fails, deterministically and without waiting for a network timeout.
     std::fs::remove_dir_all(&audio_root).expect("remove audio root");
     std::fs::write(&audio_root, b"not a directory").expect("write audio root");
 
-    let (status, body) = post(&addr, form("recorder-key", 11, 54241, 1000)).await;
+    let (status, body) = app.upload(form(RECORDER_KEY, 11, 54241, 1000)).await;
 
     assert_eq!(status, 500, "{body:?}");
     assert!(body.starts_with("internal error (ref: "), "{body:?}");
     let line = capture.only_line_containing("server error");
     assert!(line.contains("stage=store-audio"), "{line}");
     assert_eq!(
-        call::Entity::find().count(&db).await.expect("count"),
+        app.count::<call::Entity>().await,
         0,
         "no row for audio that was never stored"
     );
@@ -610,34 +525,24 @@ async fn an_unwritable_audio_store_is_a_server_error_not_a_row() {
 #[tokio::test]
 async fn an_unreadable_audio_store_is_a_server_error_not_a_missing_call() {
     let capture = LogCapture::start();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let audio_root = tmp.path().join("audio");
-    let blob = BlobStore::filesystem(&audio_root).expect("blob");
-    let (addr, db) = spawn_with_blob(blob.clone(), tmp.path()).await;
-    blob.put("ab/clip.wav", bytes::Bytes::from_static(b"0123456789"))
-        .await
-        .expect("put audio");
-    let id = repo::insert_call(
-        &db,
-        &NewCall {
+    let app = TestApp::spawn().await;
+    let audio_root = app.path().join("audio");
+    app.put_object("ab/clip.wav", b"0123456789").await;
+    let id = app
+        .seed_call(NewCall {
             system_ref: 11,
             talkgroup_ref: 54241,
             call_at_ms: 1000,
             object_key: "ab/clip.wav".into(),
             audio_mime: Some("audio/x-wav".into()),
             ..Default::default()
-        },
-        false,
-        0,
-    )
-    .await
-    .expect("insert call")
-    .id;
+        })
+        .await;
 
     std::fs::remove_dir_all(&audio_root).expect("remove audio root");
     std::fs::write(&audio_root, b"not a directory").expect("write audio root");
 
-    let resp = common::get(&addr, &format!("/api/call/{id}/audio")).await;
+    let resp = app.get(&format!("/api/call/{id}/audio")).await;
     assert_eq!(resp.status(), 500);
     assert!(
         resp.text()
@@ -655,10 +560,10 @@ async fn an_unreadable_audio_store_is_a_server_error_not_a_missing_call() {
 #[tokio::test]
 async fn a_read_path_5xx_carries_only_a_ref_as_well() {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    db.clone().close().await.expect("close the pool");
+    let app = TestApp::spawn().await;
+    app.db.clone().close().await.expect("close the pool");
 
-    let resp = common::get(&addr, "/api/calls").await;
+    let resp = app.get("/api/calls").await;
     assert_eq!(resp.status(), 500);
     let request_id = request_id_of(&resp);
     assert_eq!(
@@ -681,20 +586,11 @@ async fn a_read_path_5xx_carries_only_a_ref_as_well() {
 #[tokio::test]
 async fn a_subscription_and_its_catch_up_each_log_once() {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    repo::create_api_key(&db, "recorder-key", None, None, 0)
-        .await
-        .expect("api key");
-    assert_eq!(
-        post(&addr, form("recorder-key", 11, 100, 1000)).await.0,
-        200
-    );
-    assert_eq!(
-        post(&addr, form("recorder-key", 11, 300, 2000)).await.0,
-        200
-    );
+    let app = recorder_app().await;
+    app.upload_ok(form(RECORDER_KEY, 11, 100, 1000)).await;
+    app.upload_ok(form(RECORDER_KEY, 11, 300, 2000)).await;
 
-    let mut ws = connect(&addr).await;
+    let mut ws = app.connect_ws().await;
     ws.send(WsMessage::Text(
         r#"{"t":"sub","sel":{"11":{"100":true,"300":true}},"since":0}"#.into(),
     ))
@@ -705,14 +601,14 @@ async fn a_subscription_and_its_catch_up_each_log_once() {
         next_text(&mut ws).await;
     }
 
-    let subscribed = wait_for(&capture, "live-feed subscription").await;
+    let subscribed = capture.wait_for("live-feed subscription").await;
     assert!(
         subscribed.contains(" DEBUG "),
         "protocol detail: {subscribed}"
     );
     assert!(subscribed.contains("systems=1"), "{subscribed}");
 
-    let catch_up = wait_for(&capture, "live-feed catch-up").await;
+    let catch_up = capture.wait_for("live-feed catch-up").await;
     assert!(catch_up.contains(" DEBUG "), "{catch_up}");
     assert!(catch_up.contains("sent=2"), "the backfill size: {catch_up}");
     assert!(catch_up.contains("truncated=false"), "{catch_up}");
@@ -729,12 +625,13 @@ async fn a_subscription_and_its_catch_up_each_log_once() {
 #[tokio::test]
 async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    db.execute_unprepared("DROP TABLE calls")
+    let app = TestApp::spawn().await;
+    app.db
+        .execute_unprepared("DROP TABLE calls")
         .await
         .expect("drop calls");
 
-    let mut ws = connect(&addr).await;
+    let mut ws = app.connect_ws().await;
     ws.send(WsMessage::Text(
         r#"{"t":"sub","sel":{"11":{"100":true}},"since":0}"#.into(),
     ))
@@ -742,10 +639,9 @@ async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() 
     .expect("send sub");
     // The ack still arrives: the subscription is live even though the backfill
     // failed, which is the whole point of swallowing it.
-    let ack: serde_json::Value = serde_json::from_str(&next_text(&mut ws).await).expect("ack");
-    assert_eq!(ack["t"], "subscribed");
+    assert_eq!(next_json(&mut ws).await["t"], "subscribed");
 
-    let line = wait_for(&capture, "live-feed catch-up query failed").await;
+    let line = capture.wait_for("live-feed catch-up query failed").await;
     assert!(line.contains(" WARN "), "{line}");
     assert!(line.contains("since=0"), "{line}");
     assert!(line.contains("no such table"), "why it failed: {line}");
@@ -758,12 +654,12 @@ async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() 
 async fn a_reaped_connection_says_so() {
     let capture = LogCapture::start();
     let heartbeat = Duration::from_millis(100);
-    let (addr, _db, _tmp) = spawn_with_heartbeat(heartbeat).await;
-    let (_ws, _hello) = connect_and_hello(&addr).await;
+    let app = TestApp::builder().heartbeat(heartbeat).spawn().await;
+    let (_ws, _hello) = app.connect_ws_with_hello().await;
 
     // Go silent: never read, so no auto-pong is ever sent.
     tokio::time::sleep(heartbeat * 4).await;
 
-    let line = wait_for(&capture, "live-feed listener reaped").await;
+    let line = capture.wait_for("live-feed listener reaped").await;
     assert!(line.contains(" WARN "), "{line}");
 }

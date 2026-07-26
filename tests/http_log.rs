@@ -8,40 +8,27 @@
 
 mod common;
 use common::logs::LogCapture;
-use common::{connect, get, next_text, spawn, spawn_with_blob};
+use common::{CallUpload, TestApp, next_json};
 
-use std::time::Duration;
-
-use bytes::Bytes;
 use futures_util::SinkExt;
-use radio_scout::BlobStore;
-use radio_scout::db::repo::{self, NewCall};
+use radio_scout::db::repo::NewCall;
 use radio_scout::http_log::REQUEST_ID_HEADER;
-use sea_orm::{ConnectionTrait, DatabaseConnection};
+use sea_orm::ConnectionTrait;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// A Call whose audio really is in the store, so `/api/call/{id}/audio` answers
 /// 200 (and 206 for a range) rather than 404.
-async fn seed_playable_call(db: &DatabaseConnection, blob: &BlobStore) -> i64 {
-    blob.put("ab/clip.wav", Bytes::from_static(b"0123456789"))
-        .await
-        .expect("put audio");
-    repo::insert_call(
-        db,
-        &NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: 1000,
-            object_key: "ab/clip.wav".into(),
-            audio_mime: Some("audio/x-wav".into()),
-            ..Default::default()
-        },
-        false,
-        0,
-    )
+async fn seed_playable_call(app: &TestApp) -> i64 {
+    app.put_object("ab/clip.wav", b"0123456789").await;
+    app.seed_call(NewCall {
+        system_ref: 11,
+        talkgroup_ref: 54241,
+        call_at_ms: 1000,
+        object_key: "ab/clip.wav".into(),
+        audio_mime: Some("audio/x-wav".into()),
+        ..Default::default()
+    })
     .await
-    .expect("insert call")
-    .id
 }
 
 /// The request line for `path`, of which there must be exactly one.
@@ -49,26 +36,13 @@ fn line_for(capture: &LogCapture, path: &str) -> String {
     capture.only_line_containing(&format!("path={path} "))
 }
 
-/// Wait for `needle` to appear in the capture. Lines a *connection* emits — the
-/// live feed's connect/disconnect — land when the server's task next runs, not
-/// when the client's call returns.
-async fn wait_for(capture: &LogCapture, needle: &str) -> String {
-    for _ in 0..2_000 {
-        if let Some(line) = capture.lines_containing(needle).into_iter().next() {
-            return line;
-        }
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    panic!("{needle:?} never appeared in:\n{}", capture.text());
-}
-
 /// Every request leaves one line naming what was asked for and how it went.
 #[tokio::test]
 async fn a_request_logs_one_line_with_method_path_status_and_duration() {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    let resp = get(&addr, "/api/calls").await;
+    let resp = app.get("/api/calls").await;
     assert_eq!(resp.status(), 200);
 
     let line = line_for(&capture, "/api/calls");
@@ -85,22 +59,14 @@ async fn a_request_logs_one_line_with_method_path_status_and_duration() {
 #[tokio::test]
 async fn asset_audio_and_probe_requests_log_at_debug() {
     let capture = LogCapture::start();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let blob = BlobStore::filesystem(tmp.path().join("audio")).expect("blob");
-    let (addr, db) = spawn_with_blob(blob.clone(), tmp.path()).await;
-    let id = seed_playable_call(&db, &blob).await;
+    let app = TestApp::spawn().await;
+    let id = seed_playable_call(&app).await;
     let audio = format!("/api/call/{id}/audio");
 
-    assert_eq!(get(&addr, "/healthz").await.status(), 200);
-    assert_eq!(get(&addr, "/favicon.svg").await.status(), 200);
-    assert_eq!(get(&addr, &audio).await.status(), 200);
-    let ranged = reqwest::Client::new()
-        .get(format!("http://{addr}{audio}"))
-        .header("Range", "bytes=2-5")
-        .send()
-        .await
-        .expect("range request");
-    assert_eq!(ranged.status(), 206);
+    assert_eq!(app.get("/healthz").await.status(), 200);
+    assert_eq!(app.get("/favicon.svg").await.status(), 200);
+    assert_eq!(app.get(&audio).await.status(), 200);
+    assert_eq!(app.get_range(&audio, "bytes=2-5").await.status(), 206);
 
     for path in ["/healthz", "/favicon.svg"] {
         let line = line_for(&capture, path);
@@ -124,9 +90,11 @@ async fn asset_audio_and_probe_requests_log_at_debug() {
 #[tokio::test]
 async fn a_query_string_never_reaches_the_log() {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    let resp = get(&addr, "/api/calls?limit=5&pretend_access_code=hunter2").await;
+    let resp = app
+        .get("/api/calls?limit=5&pretend_access_code=hunter2")
+        .await;
     assert_eq!(resp.status(), 200);
 
     let line = line_for(&capture, "/api/calls");
@@ -140,9 +108,9 @@ async fn a_query_string_never_reaches_the_log() {
 #[tokio::test]
 async fn spa_navigation_stays_at_info() {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    assert_eq!(get(&addr, "/archive").await.status(), 200);
+    assert_eq!(app.get("/archive").await.status(), 200);
 
     let line = line_for(&capture, "/archive");
     assert!(line.contains(" INFO "), "{line}");
@@ -154,12 +122,12 @@ async fn spa_navigation_stays_at_info() {
 #[tokio::test]
 async fn a_4xx_logs_at_warn_whatever_the_route_class() {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
     // An unrouted API path (404 from the SPA fallback) and a chatty-class audio
     // request for a Call that does not exist.
-    assert_eq!(get(&addr, "/api/nope").await.status(), 404);
-    assert_eq!(get(&addr, "/api/call/999999/audio").await.status(), 404);
+    assert_eq!(app.get("/api/nope").await.status(), 404);
+    assert_eq!(app.get("/api/call/999999/audio").await.status(), 404);
 
     for path in ["/api/nope", "/api/call/999999/audio"] {
         let line = line_for(&capture, path);
@@ -174,18 +142,17 @@ async fn a_4xx_logs_at_warn_whatever_the_route_class() {
 #[tokio::test]
 async fn a_5xx_logs_at_error_without_a_listener_address() {
     let capture = LogCapture::start();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let blob = BlobStore::filesystem(tmp.path().join("audio")).expect("blob");
-    let (addr, db) = spawn_with_blob(blob.clone(), tmp.path()).await;
-    let id = seed_playable_call(&db, &blob).await;
+    let app = TestApp::spawn().await;
+    let id = seed_playable_call(&app).await;
 
     // Break the lookup under the handler's feet, the way a missing column did.
-    db.execute_unprepared("DROP TABLE calls")
+    app.db
+        .execute_unprepared("DROP TABLE calls")
         .await
         .expect("drop calls");
 
     let audio = format!("/api/call/{id}/audio");
-    assert_eq!(get(&addr, &audio).await.status(), 500);
+    assert_eq!(app.get(&audio).await.status(), 500);
 
     let line = line_for(&capture, &audio);
     assert!(line.contains(" ERROR "), "{line}");
@@ -201,30 +168,9 @@ async fn a_5xx_logs_at_error_without_a_listener_address() {
 #[tokio::test]
 async fn an_ingest_line_carries_the_recorder_address_at_info() {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    repo::create_api_key(&db, "recorder-key", None, None, 0)
-        .await
-        .expect("api key");
+    let app = TestApp::with_key("recorder-key").await;
 
-    let form = reqwest::multipart::Form::new()
-        .text("key", "recorder-key")
-        .text("system", "11")
-        .text("talkgroup", "54241")
-        .text("timestamp", "1000")
-        .part(
-            "audio",
-            reqwest::multipart::Part::bytes(b"audio-bytes".to_vec())
-                .file_name("a.wav")
-                .mime_str("audio/x-wav")
-                .expect("mime"),
-        );
-    let resp = reqwest::Client::new()
-        .post(format!("http://{addr}/api/call-upload"))
-        .multipart(form)
-        .send()
-        .await
-        .expect("upload");
-    assert_eq!(resp.status(), 200);
+    app.upload_ok(CallUpload::new().key("recorder-key")).await;
 
     let line = line_for(&capture, "/api/call-upload");
     assert!(line.contains(" INFO "), "{line}");
@@ -239,16 +185,16 @@ async fn an_ingest_line_carries_the_recorder_address_at_info() {
 #[tokio::test]
 async fn a_malformed_upload_still_names_the_recorder_that_sent_it() {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    let resp = reqwest::Client::new()
-        .post(format!("http://{addr}/api/call-upload"))
-        .header("content-type", "text/plain")
-        .body("not a multipart body")
-        .send()
-        .await
-        .expect("upload");
-    assert_eq!(resp.status(), 400);
+    let (status, _) = app
+        .post_bytes(
+            "/api/call-upload",
+            "text/plain",
+            b"not a multipart body".to_vec(),
+        )
+        .await;
+    assert_eq!(status, 400);
 
     let line = line_for(&capture, "/api/call-upload");
     assert!(line.contains(" WARN "), "{line}");
@@ -262,17 +208,15 @@ async fn a_malformed_upload_still_names_the_recorder_that_sent_it() {
 #[tokio::test]
 async fn a_listener_address_rides_only_a_debug_line() {
     let capture = LogCapture::start();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let blob = BlobStore::filesystem(tmp.path().join("audio")).expect("blob");
-    let (addr, db) = spawn_with_blob(blob.clone(), tmp.path()).await;
-    let id = seed_playable_call(&db, &blob).await;
+    let app = TestApp::spawn().await;
+    let id = seed_playable_call(&app).await;
 
     let audio = format!("/api/call/{id}/audio");
-    assert_eq!(get(&addr, &audio).await.status(), 200);
-    assert_eq!(get(&addr, "/api/calls").await.status(), 200);
-    assert_eq!(get(&addr, "/archive").await.status(), 200);
-    let ws = connect(&addr).await;
-    let upgrade = wait_for(&capture, "path=/api/live ").await;
+    assert_eq!(app.get(&audio).await.status(), 200);
+    assert_eq!(app.get("/api/calls").await.status(), 200);
+    assert_eq!(app.get("/archive").await.status(), 200);
+    let ws = app.connect_ws().await;
+    let upgrade = capture.wait_for("path=/api/live ").await;
 
     // Present, on the DEBUG line.
     let audio_line = line_for(&capture, &audio);
@@ -300,9 +244,9 @@ async fn a_listener_address_rides_only_a_debug_line() {
 #[tokio::test]
 async fn every_request_carries_a_correlation_id_the_client_can_see() {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    let first = get(&addr, "/api/calls").await;
+    let first = app.get("/api/calls").await;
     let id = first
         .headers()
         .get(REQUEST_ID_HEADER)
@@ -318,7 +262,7 @@ async fn every_request_carries_a_correlation_id_the_client_can_see() {
         "the line and the header name the same request: {line}"
     );
 
-    let second = get(&addr, "/healthz").await;
+    let second = app.get("/healthz").await;
     let other = second
         .headers()
         .get(REQUEST_ID_HEADER)
@@ -333,13 +277,13 @@ async fn every_request_carries_a_correlation_id_the_client_can_see() {
 #[tokio::test]
 async fn the_live_feed_logs_upgrade_connect_and_disconnect_but_never_a_frame() {
     let capture = LogCapture::start();
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
-    let mut ws = connect(&addr).await;
-    let upgrade = wait_for(&capture, "path=/api/live ").await;
+    let mut ws = app.connect_ws().await;
+    let upgrade = capture.wait_for("path=/api/live ").await;
     assert!(upgrade.contains(" INFO "), "{upgrade}");
     assert!(upgrade.contains("status=101"), "{upgrade}");
-    let connected = wait_for(&capture, "live-feed listener connected").await;
+    let connected = capture.wait_for("live-feed listener connected").await;
 
     // The upgrade and the connection it became share one id, so everything the
     // socket says is attributable to the request that opened it.
@@ -355,11 +299,10 @@ async fn the_live_feed_logs_upgrade_connect_and_disconnect_but_never_a_frame() {
     ws.send(WsMessage::Text(r#"{"t":"sub","all":true}"#.into()))
         .await
         .expect("send sub");
-    let ack: serde_json::Value = serde_json::from_str(&next_text(&mut ws).await).expect("ack");
-    assert_eq!(ack["t"], "subscribed");
+    assert_eq!(next_json(&mut ws).await["t"], "subscribed");
 
     ws.close(None).await.expect("close");
-    let disconnected = wait_for(&capture, "live-feed listener disconnected").await;
+    let disconnected = capture.wait_for("live-feed listener disconnected").await;
     assert!(disconnected.contains(" INFO "), "{disconnected}");
     assert!(disconnected.contains("connected_ms="), "{disconnected}");
 

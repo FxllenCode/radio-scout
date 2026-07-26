@@ -5,76 +5,64 @@
 //! — the whole S3 serving mode that had no end-to-end test.
 
 mod common;
-use common::{spawn, spawn_with_blob};
+use common::{TestApp, header_of};
 
-use bytes::Bytes;
-use radio_scout::db::repo::{self, NewCall};
+use radio_scout::db::repo::NewCall;
 use radio_scout::{BlobStore, S3Config};
-use sea_orm::DatabaseConnection;
 
-/// Insert a Call row pointing at `object_key` (no audio object is written).
-async fn insert_call(db: &DatabaseConnection, object_key: &str, mime: Option<&str>) -> i64 {
-    let new = NewCall {
+/// A Call row pointing at `object_key`. No audio object is written unless the
+/// test writes one.
+async fn insert_call(app: &TestApp, object_key: &str, mime: Option<&str>) -> i64 {
+    app.seed_call(NewCall {
         system_ref: 11,
         talkgroup_ref: 54241,
         call_at_ms: 1000,
         object_key: object_key.to_string(),
         audio_mime: mime.map(str::to_string),
         ..Default::default()
-    };
-    repo::insert_call(db, &new, false, 0)
-        .await
-        .expect("insert call")
-        .id
+    })
+    .await
 }
 
-async fn get(addr: &str, path: &str) -> reqwest::Response {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none()) // observe the 307 itself
-        .build()
-        .unwrap()
-        .get(format!("http://{addr}{path}"))
-        .send()
-        .await
-        .expect("get audio")
+/// The audio endpoint for a Call.
+fn audio(id: i64) -> String {
+    format!("/api/call/{id}/audio")
 }
 
 #[tokio::test]
 async fn unknown_call_id_is_404() {
-    let (addr, _db, _tmp) = spawn().await;
-    let resp = get(&addr, "/api/call/999999/audio").await;
+    let app = TestApp::spawn().await;
+
+    let resp = app.get(&audio(999999)).await;
+
     assert_eq!(resp.status(), 404);
     assert_eq!(resp.text().await.unwrap(), "call not found\n");
 }
 
 #[tokio::test]
 async fn call_with_missing_audio_object_is_404() {
-    let (addr, db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
     // Row exists, but nothing was ever written to the object store.
-    let id = insert_call(&db, "ab/never-stored.wav", Some("audio/x-wav")).await;
-    let resp = get(&addr, &format!("/api/call/{id}/audio")).await;
+    let id = insert_call(&app, "ab/never-stored.wav", Some("audio/x-wav")).await;
+
+    let resp = app.get(&audio(id)).await;
+
     assert_eq!(resp.status(), 404);
     assert_eq!(resp.text().await.unwrap(), "audio not found\n");
 }
 
 #[tokio::test]
 async fn audio_without_a_stored_mime_defaults_to_octet_stream() {
-    let tmp = tempfile::tempdir().unwrap();
-    let blob = BlobStore::filesystem(tmp.path().join("audio")).unwrap();
-    let (addr, db) = spawn_with_blob(blob.clone(), tmp.path()).await;
+    let app = TestApp::spawn().await;
+    app.put_object("ab/clip.bin", b"RIFFxxxx").await;
+    let id = insert_call(&app, "ab/clip.bin", None).await; // no MIME recorded
 
-    blob.put("ab/clip.bin", Bytes::from_static(b"RIFFxxxx"))
-        .await
-        .unwrap();
-    let id = insert_call(&db, "ab/clip.bin", None).await; // no MIME recorded
+    let resp = app.get(&audio(id)).await;
 
-    let resp = get(&addr, &format!("/api/call/{id}/audio")).await;
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
-        Some("application/octet-stream"),
+        header_of(&resp, "content-type"),
+        Some("application/octet-stream")
     );
     assert_eq!(resp.bytes().await.unwrap().as_ref(), b"RIFFxxxx");
 }
@@ -87,45 +75,24 @@ async fn audio_without_a_stored_mime_defaults_to_octet_stream() {
 /// matters.
 #[tokio::test]
 async fn audio_is_cacheable_so_a_prefetched_call_starts_instantly() {
-    let tmp = tempfile::tempdir().unwrap();
-    let blob = BlobStore::filesystem(tmp.path().join("audio")).unwrap();
-    let (addr, db) = spawn_with_blob(blob.clone(), tmp.path()).await;
+    const CACHE: &str = "private, max-age=604800, immutable";
+    let app = TestApp::spawn().await;
+    app.put_object("ab/clip.m4a", b"0123456789").await;
+    let id = insert_call(&app, "ab/clip.m4a", Some("audio/mp4")).await;
 
-    blob.put("ab/clip.m4a", Bytes::from_static(b"0123456789"))
-        .await
-        .unwrap();
-    let id = insert_call(&db, "ab/clip.m4a", Some("audio/mp4")).await;
-
-    let full = get(&addr, &format!("/api/call/{id}/audio")).await;
+    let full = app.get(&audio(id)).await;
     assert_eq!(full.status(), 200);
-    assert_eq!(
-        full.headers()
-            .get("cache-control")
-            .and_then(|v| v.to_str().ok()),
-        Some("private, max-age=604800, immutable"),
-    );
+    assert_eq!(header_of(&full, "cache-control"), Some(CACHE));
 
-    let ranged = reqwest::Client::new()
-        .get(format!("http://{addr}/api/call/{id}/audio"))
-        .header("Range", "bytes=2-5")
-        .send()
-        .await
-        .expect("range get");
+    let ranged = app.get_range(&audio(id), "bytes=2-5").await;
     assert_eq!(ranged.status(), 206);
-    assert_eq!(
-        ranged
-            .headers()
-            .get("cache-control")
-            .and_then(|v| v.to_str().ok()),
-        Some("private, max-age=604800, immutable"),
-    );
+    assert_eq!(header_of(&ranged, "cache-control"), Some(CACHE));
 }
 
 #[tokio::test]
 async fn s3_backend_redirects_to_a_presigned_url() {
     // An S3-backed store presigns offline (no network), so this exercises the
     // whole redirect path without a live bucket.
-    let tmp = tempfile::tempdir().unwrap();
     let s3 = BlobStore::s3(&S3Config {
         bucket: "radio-scout".into(),
         region: "us-east-1".into(),
@@ -136,21 +103,17 @@ async fn s3_backend_redirects_to_a_presigned_url() {
     })
     .expect("s3 store");
     assert!(s3.is_presigning());
-    let (addr, db) = spawn_with_blob(s3, tmp.path()).await;
+    let app = TestApp::builder().store(s3).spawn().await;
+    let id = insert_call(&app, "ab/deadbeef.m4a", Some("audio/mp4")).await;
 
-    let id = insert_call(&db, "ab/deadbeef.m4a", Some("audio/mp4")).await;
-    let resp = get(&addr, &format!("/api/call/{id}/audio")).await;
+    let resp = app.get_without_redirects(&audio(id)).await;
 
     assert_eq!(
         resp.status(),
         307,
         "temporary redirect to the presigned URL"
     );
-    let location = resp
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .expect("Location header");
+    let location = header_of(&resp, "location").expect("Location header");
     assert!(
         location.contains("radio-scout/ab/deadbeef.m4a"),
         "points at the object: {location}"
@@ -162,7 +125,7 @@ async fn s3_backend_redirects_to_a_presigned_url() {
     // The bytes are immutable, but the *signature* on this Location expires —
     // caching the redirect would outlive it and start handing out 403s.
     assert!(
-        resp.headers().get("cache-control").is_none(),
+        header_of(&resp, "cache-control").is_none(),
         "the presigned redirect itself must not be cached"
     );
 }

@@ -3,54 +3,20 @@
 //! whether `client/dist` has been built — so they pass in CI both before and
 //! after the frontend build step.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+mod common;
+use common::{TestApp, header_of};
 
-use radio_scout::db;
-use radio_scout::{AppState, BlobStore, IngestConfig, build_app, web};
-
-async fn spawn_app() -> (String, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let audio = Arc::new(BlobStore::filesystem(tmp.path().join("audio")).expect("blob store"));
-    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
-    let dbc = db::connect(&url).await.expect("db connect");
-    let app = build_app(AppState::new(audio, dbc, IngestConfig::default()));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-    tokio::spawn(async move {
-        // With connect info, as the binary and `tests/common` serve it — the
-        // request log (#28) reads the peer address from there.
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .expect("serve");
-    });
-    (format!("127.0.0.1:{}", addr.port()), tmp)
-}
+use radio_scout::web;
 
 /// `/` returns HTML — the built SPA shell when embedded, else the backend page.
 #[tokio::test]
 async fn serves_frontend_at_root() {
-    let (addr, _tmp) = spawn_app().await;
+    let app = TestApp::spawn().await;
 
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/"))
-        .send()
-        .await
-        .expect("get /");
+    let resp = app.get("/").await;
 
-    assert_eq!(resp.status().as_u16(), 200);
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
+    assert_eq!(resp.status(), 200);
+    let content_type = header_of(&resp, "content-type").unwrap_or_default();
     assert!(
         content_type.starts_with("text/html"),
         "got {content_type:?}"
@@ -68,23 +34,14 @@ async fn serves_frontend_at_root() {
 /// take over — a hard refresh on `/talkgroups` must not 404.
 #[tokio::test]
 async fn spa_fallback_serves_shell_for_client_routes() {
-    let (addr, _tmp) = spawn_app().await;
+    let app = TestApp::spawn().await;
 
-    let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/talkgroups"))
-        .send()
-        .await
-        .expect("get client route");
+    let resp = app.get("/talkgroups").await;
 
-    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.status(), 200);
     // Always serves an HTML document (built shell or the backend fallback), so
     // the router can take over — asserted even before the SPA is built.
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
+    let content_type = header_of(&resp, "content-type").unwrap_or_default();
     assert!(
         content_type.starts_with("text/html"),
         "got {content_type:?}"
@@ -99,31 +56,17 @@ async fn spa_fallback_serves_shell_for_client_routes() {
 /// stays a clean 404 rather than returning the HTML shell.
 #[tokio::test]
 async fn api_namespace_is_not_shadowed_by_spa_fallback() {
-    let (addr, _tmp) = spawn_app().await;
-    let client = reqwest::Client::new();
+    let app = TestApp::spawn().await;
 
-    let unknown = client
-        .get(format!("http://{addr}/api/does-not-exist"))
-        .send()
-        .await
-        .expect("get unknown api");
-    assert_eq!(
-        unknown.status().as_u16(),
-        404,
-        "unknown /api route must 404"
-    );
+    let unknown = app.get("/api/does-not-exist").await;
+    assert_eq!(unknown.status(), 404, "unknown /api route must 404");
     let body = unknown.text().await.unwrap_or_default();
     assert!(
         !body.contains("id=\"root\""),
         "must not serve the SPA for /api/*"
     );
 
-    let audio = client
-        .get(format!("http://{addr}/api/call/999999/audio"))
-        .send()
-        .await
-        .expect("get missing audio");
-    assert_eq!(audio.status().as_u16(), 404);
+    assert_eq!(app.get("/api/call/999999/audio").await.status(), 404);
 }
 
 /// Content-hashed assets are served with a long-lived immutable cache header.
@@ -132,35 +75,18 @@ async fn serves_hashed_asset_with_immutable_cache() {
     if !web::spa_is_embedded() {
         return; // nothing to serve until the SPA is built
     }
-    let (addr, _tmp) = spawn_app().await;
-    let client = reqwest::Client::new();
+    let app = TestApp::spawn().await;
 
-    let index = client
-        .get(format!("http://{addr}/"))
-        .send()
-        .await
-        .expect("get index")
-        .text()
-        .await
-        .expect("index body");
-
+    let index = app.get("/").await.text().await.expect("index body");
     let asset = index
         .split('"')
         .find(|token| token.starts_with("/assets/"))
         .expect("an /assets/ reference in index.html");
 
-    let resp = client
-        .get(format!("http://{addr}{asset}"))
-        .send()
-        .await
-        .expect("get asset");
-    assert_eq!(resp.status().as_u16(), 200, "asset {asset} served");
+    let resp = app.get(asset).await;
+    assert_eq!(resp.status(), 200, "asset {asset} served");
 
-    let cache = resp
-        .headers()
-        .get("cache-control")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
+    let cache = header_of(&resp, "cache-control").unwrap_or_default();
     assert!(
         cache.contains("immutable"),
         "hashed asset cached; got {cache:?}"

@@ -5,27 +5,26 @@
 
 mod common;
 use common::logs::LogCapture;
-use common::{get, request_id_of, spawn, spawn_with_blob, spawn_with_store};
+use common::{TestApp, header_of, request_id_of};
 
 use bytes::Bytes;
-use radio_scout::db::repo::{self, NewCall};
+use radio_scout::db::repo::NewCall;
 use radio_scout::{BlobStore, S3Config};
-use sea_orm::DatabaseConnection;
 use serde_json::Value;
 
 /// The dataset every search assertion below reads:
 /// - system 100 "Alpha": tg1 tag Fire {Emergency}, tg2 tag Law {Emergency,Public}
 /// - system 200 "Beta":  tg1 tag Fire {Public}
-async fn seed(db: &DatabaseConnection) -> (i64, i64, i64, i64) {
-    let a = seed_call(db, 100, "Alpha", 1, "Fire", &["Emergency"], 1000).await;
-    let b = seed_call(db, 100, "Alpha", 2, "Law", &["Emergency", "Public"], 2000).await;
-    let c = seed_call(db, 200, "Beta", 1, "Fire", &["Public"], 3000).await;
-    let d = seed_call(db, 100, "Alpha", 1, "Fire", &["Emergency"], 4000).await;
+async fn seed(app: &TestApp) -> (i64, i64, i64, i64) {
+    let a = seed_searchable_call(app, 100, "Alpha", 1, "Fire", &["Emergency"], 1000).await;
+    let b = seed_searchable_call(app, 100, "Alpha", 2, "Law", &["Emergency", "Public"], 2000).await;
+    let c = seed_searchable_call(app, 200, "Beta", 1, "Fire", &["Public"], 3000).await;
+    let d = seed_searchable_call(app, 100, "Alpha", 1, "Fire", &["Emergency"], 4000).await;
     (a, b, c, d)
 }
 
-async fn seed_call(
-    db: &DatabaseConnection,
+async fn seed_searchable_call(
+    app: &TestApp,
     system_ref: i64,
     system_label: &str,
     talkgroup_ref: i64,
@@ -33,32 +32,18 @@ async fn seed_call(
     groups: &[&str],
     at_ms: i64,
 ) -> i64 {
-    repo::insert_call(
-        db,
-        &NewCall {
-            system_ref,
-            system_label: Some(system_label.into()),
-            talkgroup_ref,
-            talkgroup_tag: Some(tag.into()),
-            talkgroup_groups: groups.iter().map(|g| (*g).to_string()).collect(),
-            call_at_ms: at_ms,
-            object_key: format!("k/{system_ref}-{talkgroup_ref}-{at_ms}.wav"),
-            audio_mime: Some("audio/x-wav".into()),
-            ..Default::default()
-        },
-        true,
-        0,
-    )
+    app.seed_call(NewCall {
+        system_ref,
+        system_label: Some(system_label.into()),
+        talkgroup_ref,
+        talkgroup_tag: Some(tag.into()),
+        talkgroup_groups: groups.iter().map(|g| (*g).to_string()).collect(),
+        call_at_ms: at_ms,
+        object_key: format!("k/{system_ref}-{talkgroup_ref}-{at_ms}.wav"),
+        audio_mime: Some("audio/x-wav".into()),
+        ..Default::default()
+    })
     .await
-    .expect("seed call")
-    .id
-}
-
-/// GET `path`, expecting 200 + JSON.
-async fn get_json(addr: &str, path: &str) -> Value {
-    let resp = get(addr, path).await;
-    assert_eq!(resp.status(), 200, "GET {path}");
-    resp.json().await.expect("json body")
 }
 
 /// The result ids on a page, in response order.
@@ -72,8 +57,8 @@ fn ids_of(page: &Value) -> Vec<i64> {
 }
 
 /// The result ids of a search, in response order.
-async fn search_ids(addr: &str, query: &str) -> Vec<i64> {
-    ids_of(&get_json(addr, &format!("/api/calls{query}")).await)
+async fn search_ids(app: &TestApp, query: &str) -> Vec<i64> {
+    ids_of(&app.get_json(&format!("/api/calls{query}")).await)
 }
 
 // ---------------------------------------------------------------------------
@@ -85,10 +70,10 @@ async fn search_ids(addr: &str, query: &str) -> Vec<i64> {
 /// that force the client to re-fetch every result one at a time.
 #[tokio::test]
 async fn search_returns_denormalized_calls_newest_first() {
-    let (addr, db, _tmp) = spawn().await;
-    let (a, b, c, d) = seed(&db).await;
+    let app = TestApp::spawn().await;
+    let (a, b, c, d) = seed(&app).await;
 
-    let page = get_json(&addr, "/api/calls").await;
+    let page = app.get_json("/api/calls").await;
     assert_eq!(ids_of(&page), vec![d, c, b, a]);
     assert_eq!(page["count"], 4);
     assert_eq!(page["offset"], 0);
@@ -108,25 +93,25 @@ async fn search_returns_denormalized_calls_newest_first() {
 
 #[tokio::test]
 async fn search_filters_by_every_dimension() {
-    let (addr, db, _tmp) = spawn().await;
-    let (a, b, c, d) = seed(&db).await;
+    let app = TestApp::spawn().await;
+    let (a, b, c, d) = seed(&app).await;
 
-    assert_eq!(search_ids(&addr, "?system=100").await, vec![d, b, a]);
+    assert_eq!(search_ids(&app, "?system=100").await, vec![d, b, a]);
     assert_eq!(
-        search_ids(&addr, "?system=100&talkgroup=1").await,
+        search_ids(&app, "?system=100&talkgroup=1").await,
         vec![d, a]
     );
-    assert_eq!(search_ids(&addr, "?group=Public").await, vec![c, b]);
-    assert_eq!(search_ids(&addr, "?tag=Law").await, vec![b]);
+    assert_eq!(search_ids(&app, "?group=Public").await, vec![c, b]);
+    assert_eq!(search_ids(&app, "?tag=Law").await, vec![b]);
     assert_eq!(
-        search_ids(&addr, "?after=2000&before=3000").await,
+        search_ids(&app, "?after=2000&before=3000").await,
         vec![c, b]
     );
     // Filters combine with AND.
-    assert_eq!(search_ids(&addr, "?tag=Fire&system=200").await, vec![c]);
+    assert_eq!(search_ids(&app, "?tag=Fire&system=200").await, vec![c]);
     // A group name with a space survives URL encoding.
     assert!(
-        search_ids(&addr, "?group=No%20Such%20Group")
+        search_ids(&app, "?group=No%20Such%20Group")
             .await
             .is_empty()
     );
@@ -137,13 +122,14 @@ async fn search_filters_by_every_dimension() {
 /// silently searches the surrounding 24 h.
 #[tokio::test]
 async fn search_accepts_rfc3339_dates() {
-    let (addr, db, _tmp) = spawn().await;
-    let epoch_plus_2s = seed_call(&db, 100, "Alpha", 1, "Fire", &["Emergency"], 2000).await;
-    seed_call(&db, 100, "Alpha", 1, "Fire", &["Emergency"], 10_000).await;
+    let app = TestApp::spawn().await;
+    let epoch_plus_2s =
+        seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &["Emergency"], 2000).await;
+    seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &["Emergency"], 10_000).await;
 
     assert_eq!(
         search_ids(
-            &addr,
+            &app,
             "?after=1970-01-01T00:00:01Z&before=1970-01-01T00:00:05Z"
         )
         .await,
@@ -153,22 +139,22 @@ async fn search_accepts_rfc3339_dates() {
 
 #[tokio::test]
 async fn search_paginates_and_reports_whether_more_remains() {
-    let (addr, db, _tmp) = spawn().await;
-    let (a, b, c, d) = seed(&db).await;
+    let app = TestApp::spawn().await;
+    let (a, b, c, d) = seed(&app).await;
 
-    let first = get_json(&addr, "/api/calls?limit=2").await;
+    let first = app.get_json("/api/calls?limit=2").await;
     assert_eq!(ids_of(&first), vec![d, c]);
     assert_eq!(first["count"], 4);
     assert_eq!(first["limit"], 2);
     assert_eq!(first["hasMore"], true);
 
-    let last = get_json(&addr, "/api/calls?limit=2&offset=2").await;
+    let last = app.get_json("/api/calls?limit=2&offset=2").await;
     assert_eq!(ids_of(&last), vec![b, a]);
     assert_eq!(last["offset"], 2);
     assert_eq!(last["hasMore"], false);
 
     // Past the end: an empty page, still reporting the true total.
-    let past = get_json(&addr, "/api/calls?limit=2&offset=99").await;
+    let past = app.get_json("/api/calls?limit=2&offset=99").await;
     assert!(ids_of(&past).is_empty());
     assert_eq!(past["count"], 4);
     assert_eq!(past["hasMore"], false);
@@ -178,13 +164,13 @@ async fn search_paginates_and_reports_whether_more_remains() {
 /// forwards in time.
 #[tokio::test]
 async fn search_sorts_oldest_first_for_playback_mode() {
-    let (addr, db, _tmp) = spawn().await;
-    let (a, b, c, d) = seed(&db).await;
+    let app = TestApp::spawn().await;
+    let (a, b, c, d) = seed(&app).await;
 
-    assert_eq!(search_ids(&addr, "?sort=oldest").await, vec![a, b, c, d]);
-    assert_eq!(search_ids(&addr, "?sort=asc").await, vec![a, b, c, d]);
-    assert_eq!(search_ids(&addr, "?sort=newest").await, vec![d, c, b, a]);
-    assert_eq!(search_ids(&addr, "?sort=desc").await, vec![d, c, b, a]);
+    assert_eq!(search_ids(&app, "?sort=oldest").await, vec![a, b, c, d]);
+    assert_eq!(search_ids(&app, "?sort=asc").await, vec![a, b, c, d]);
+    assert_eq!(search_ids(&app, "?sort=newest").await, vec![d, c, b, a]);
+    assert_eq!(search_ids(&app, "?sort=desc").await, vec![d, c, b, a]);
 }
 
 /// A client builds this query string from form state, where "no filter" is an
@@ -192,12 +178,12 @@ async fn search_sorts_oldest_first_for_playback_mode() {
 /// nothing.
 #[tokio::test]
 async fn blank_filter_values_mean_no_filter() {
-    let (addr, db, _tmp) = spawn().await;
-    let (a, b, c, d) = seed(&db).await;
+    let app = TestApp::spawn().await;
+    let (a, b, c, d) = seed(&app).await;
 
     assert_eq!(
         search_ids(
-            &addr,
+            &app,
             "?system=&talkgroup=&group=&tag=&after=&before=&sort=&limit=&offset="
         )
         .await,
@@ -209,10 +195,10 @@ async fn blank_filter_values_mean_no_filter() {
 /// reports the limit actually applied so the client's paging stays correct.
 #[tokio::test]
 async fn limit_is_clamped_to_the_ceiling() {
-    let (addr, db, _tmp) = spawn().await;
-    seed(&db).await;
+    let app = TestApp::spawn().await;
+    seed(&app).await;
 
-    let page = get_json(&addr, "/api/calls?limit=10000").await;
+    let page = app.get_json("/api/calls?limit=10000").await;
     assert_eq!(page["limit"], 500);
     assert_eq!(page["count"], 4);
 }
@@ -222,7 +208,7 @@ async fn limit_is_clamped_to_the_ceiling() {
 /// results.
 #[tokio::test]
 async fn malformed_parameters_are_rejected_with_a_reason() {
-    let (addr, _db, _tmp) = spawn().await;
+    let app = TestApp::spawn().await;
 
     for (query, expect) in [
         ("?system=abc", "system"),
@@ -233,7 +219,7 @@ async fn malformed_parameters_are_rejected_with_a_reason() {
         ("?limit=-1", "limit"),
         ("?offset=x", "offset"),
     ] {
-        let resp = get(&addr, &format!("/api/calls{query}")).await;
+        let resp = app.get(&format!("/api/calls{query}")).await;
         assert_eq!(resp.status(), 400, "GET /api/calls{query}");
         let body = resp.text().await.unwrap();
         assert!(
@@ -245,8 +231,8 @@ async fn malformed_parameters_are_rejected_with_a_reason() {
 
 #[tokio::test]
 async fn search_on_an_empty_archive_is_an_empty_page() {
-    let (addr, _db, _tmp) = spawn().await;
-    let page = get_json(&addr, "/api/calls").await;
+    let app = TestApp::spawn().await;
+    let page = app.get_json("/api/calls").await;
 
     assert!(page["results"].as_array().unwrap().is_empty());
     assert_eq!(page["count"], 0);
@@ -259,10 +245,10 @@ async fn search_on_an_empty_archive_is_an_empty_page() {
 
 #[tokio::test]
 async fn filters_endpoint_offers_only_reachable_values_and_cascades() {
-    let (addr, db, _tmp) = spawn().await;
-    seed(&db).await;
+    let app = TestApp::spawn().await;
+    seed(&app).await;
 
-    let all = get_json(&addr, "/api/calls/filters").await;
+    let all = app.get_json("/api/calls/filters").await;
     assert_eq!(
         all["systems"],
         serde_json::json!([
@@ -281,7 +267,7 @@ async fn filters_endpoint_offers_only_reachable_values_and_cascades() {
     );
 
     // Picking a System narrows the Talkgroups but leaves the System list whole.
-    let scoped = get_json(&addr, "/api/calls/filters?system=200").await;
+    let scoped = app.get_json("/api/calls/filters?system=200").await;
     assert_eq!(
         scoped["talkgroups"],
         serde_json::json!([{"systemRef": 200, "ref": 1, "label": "1", "tag": "Fire"}])
@@ -292,8 +278,8 @@ async fn filters_endpoint_offers_only_reachable_values_and_cascades() {
 
 #[tokio::test]
 async fn filters_endpoint_rejects_malformed_parameters() {
-    let (addr, _db, _tmp) = spawn().await;
-    let resp = get(&addr, "/api/calls/filters?system=abc").await;
+    let app = TestApp::spawn().await;
+    let resp = app.get("/api/calls/filters?system=abc").await;
     assert_eq!(resp.status(), 400);
     assert!(resp.text().await.unwrap().contains("system"));
 }
@@ -301,8 +287,8 @@ async fn filters_endpoint_rejects_malformed_parameters() {
 /// A fresh install has no Calls; the Search screen must still render.
 #[tokio::test]
 async fn filters_endpoint_on_an_empty_archive_is_empty() {
-    let (addr, _db, _tmp) = spawn().await;
-    let options = get_json(&addr, "/api/calls/filters").await;
+    let app = TestApp::spawn().await;
+    let options = app.get_json("/api/calls/filters").await;
 
     assert_eq!(options["systems"], serde_json::json!([]));
     assert_eq!(options["talkgroups"], serde_json::json!([]));
@@ -318,29 +304,14 @@ async fn filters_endpoint_on_an_empty_archive_is_empty() {
 
 #[tokio::test]
 async fn download_serves_the_audio_as_a_named_attachment() {
-    let (addr, db, store, _tmp) = spawn_with_store().await;
-    let id = seed_call(&db, 100, "Alpha", 54241, "Fire", &["Emergency"], 1000).await;
-    store
-        .put("k/100-54241-1000.wav", Bytes::from_static(b"RIFFDATA"))
-        .await
-        .unwrap();
+    let app = TestApp::spawn().await;
+    let id = seed_searchable_call(&app, 100, "Alpha", 54241, "Fire", &["Emergency"], 1000).await;
+    app.put_object("k/100-54241-1000.wav", b"RIFFDATA").await;
 
-    let resp = get(&addr, &format!("/api/call/{id}/download")).await;
+    let resp = app.get(&format!("/api/call/{id}/download")).await;
     assert_eq!(resp.status(), 200);
-    let disposition = resp
-        .headers()
-        .get("content-disposition")
-        .expect("content-disposition")
-        .to_str()
-        .unwrap()
-        .to_owned();
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_owned();
+    let disposition = header_of(&resp, "content-disposition").expect("content-disposition");
+    let content_type = header_of(&resp, "content-type").expect("content-type");
 
     assert!(
         disposition.starts_with("attachment; filename=\""),
@@ -357,17 +328,17 @@ async fn download_serves_the_audio_as_a_named_attachment() {
 
 #[tokio::test]
 async fn download_of_an_unknown_call_is_404() {
-    let (addr, _db, _tmp) = spawn().await;
-    let resp = get(&addr, "/api/call/999999/download").await;
+    let app = TestApp::spawn().await;
+    let resp = app.get("/api/call/999999/download").await;
     assert_eq!(resp.status(), 404);
     assert_eq!(resp.text().await.unwrap(), "call not found\n");
 }
 
 #[tokio::test]
 async fn download_of_a_call_whose_audio_is_gone_is_404() {
-    let (addr, db, _tmp) = spawn().await;
-    let id = seed_call(&db, 100, "Alpha", 1, "Fire", &["Emergency"], 1000).await;
-    let resp = get(&addr, &format!("/api/call/{id}/download")).await;
+    let app = TestApp::spawn().await;
+    let id = seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &["Emergency"], 1000).await;
+    let resp = app.get(&format!("/api/call/{id}/download")).await;
     assert_eq!(resp.status(), 404);
     assert_eq!(resp.text().await.unwrap(), "audio not found\n");
 }
@@ -383,16 +354,16 @@ async fn download_of_a_call_whose_audio_is_gone_is_404() {
 #[tokio::test]
 async fn a_broken_database_is_a_server_error_not_an_empty_archive() {
     let capture = LogCapture::start();
-    let (addr, db, _tmp) = spawn().await;
-    seed(&db).await;
-    db.clone().close().await.expect("close the pool");
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+    app.db.clone().close().await.expect("close the pool");
 
     for (path, stage) in [
         ("/api/calls", "search-calls"),
         ("/api/calls/filters", "load-filter-options"),
         ("/api/call/1/download", "look-up-call"),
     ] {
-        let resp = get(&addr, path).await;
+        let resp = app.get(path).await;
         assert_eq!(resp.status(), 500, "GET {path}");
         let request_id = request_id_of(&resp);
         assert_eq!(
@@ -412,33 +383,24 @@ async fn a_broken_database_is_a_server_error_not_an_empty_archive() {
 /// so a value that can't be a header must not take the download down with it.
 #[tokio::test]
 async fn download_falls_back_when_the_stored_mime_is_not_header_safe() {
-    let (addr, db, store, _tmp) = spawn_with_store().await;
-    let id = repo::insert_call(
-        &db,
-        &NewCall {
+    let app = TestApp::spawn().await;
+    let id = app
+        .seed_call(NewCall {
             system_ref: 100,
             talkgroup_ref: 1,
             call_at_ms: 1000,
             object_key: "k/junk-mime.wav".into(),
             audio_mime: Some("audio/\u{7f}broken".into()),
             ..Default::default()
-        },
-        true,
-        0,
-    )
-    .await
-    .expect("seed call")
-    .id;
-    store
-        .put("k/junk-mime.wav", Bytes::from_static(b"RIFF"))
-        .await
-        .unwrap();
+        })
+        .await;
+    app.put_object("k/junk-mime.wav", b"RIFF").await;
 
-    let resp = get(&addr, &format!("/api/call/{id}/download")).await;
+    let resp = app.get(&format!("/api/call/{id}/download")).await;
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers().get("content-type").unwrap(),
-        "application/octet-stream"
+        header_of(&resp, "content-type"),
+        Some("application/octet-stream")
     );
 }
 
@@ -453,7 +415,6 @@ async fn download_falls_back_when_the_stored_mime_is_not_header_safe() {
 #[tokio::test]
 async fn download_reports_an_unreachable_object_store() {
     let capture = LogCapture::start();
-    let tmp = tempfile::tempdir().unwrap();
     // A Garage/MinIO endpoint with nothing listening on it.
     let s3 = BlobStore::s3(&S3Config {
         bucket: "radio-scout".into(),
@@ -464,10 +425,10 @@ async fn download_reports_an_unreachable_object_store() {
         allow_http: true,
     })
     .expect("s3 store");
-    let (addr, db) = spawn_with_blob(s3, tmp.path()).await;
-    let id = seed_call(&db, 100, "Alpha", 1, "Fire", &["Emergency"], 1000).await;
+    let app = TestApp::builder().store(s3).spawn().await;
+    let id = seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &["Emergency"], 1000).await;
 
-    let resp = get(&addr, &format!("/api/call/{id}/download")).await;
+    let resp = app.get(&format!("/api/call/{id}/download")).await;
     assert_eq!(resp.status(), 500);
     let body = resp.text().await.unwrap();
     assert!(body.starts_with("internal error (ref: "), "{body:?}");

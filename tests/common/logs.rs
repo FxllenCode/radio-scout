@@ -28,6 +28,7 @@
 
 use std::io;
 use std::sync::{Arc, Mutex, Once};
+use std::time::Duration;
 
 use tracing::level_filters::LevelFilter;
 use tracing::subscriber::{DefaultGuard, Interest};
@@ -106,6 +107,12 @@ impl<'a> MakeWriter<'a> for CaptureWriter {
     }
 }
 
+/// How long [`LogCapture::wait_for`] keeps looking, and how often. Two seconds
+/// is slack, not a timing assumption: the line it waits for is already written
+/// or about to be, and the budget only bounds a failure.
+const LINE_POLLS: u32 = 2_000;
+const LINE_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
 /// Captures everything logged on this thread — at **every** level, so a test can
 /// assert a field appears at no level rather than just not at INFO — for as long
 /// as it is alive.
@@ -167,6 +174,22 @@ impl LogCapture {
             self.text()
         );
         matched.into_iter().next().expect("one match")
+    }
+
+    /// Wait for a line containing `needle`, returning the first one.
+    ///
+    /// A line a *connection* emits — the live feed's connect/disconnect — lands
+    /// when the server's task next runs, not when the client's call returns, so
+    /// reading the capture straight after the call is a race. Polling is the
+    /// honest fix: there is no completion to await from the client's side.
+    pub async fn wait_for(&self, needle: &str) -> String {
+        for _ in 0..LINE_POLLS {
+            if let Some(line) = self.lines_containing(needle).into_iter().next() {
+                return line;
+            }
+            tokio::time::sleep(LINE_POLL_INTERVAL).await;
+        }
+        panic!("{needle:?} never appeared in:\n{}", self.text());
     }
 
     /// Assert `needle` appears nowhere in what was logged.
