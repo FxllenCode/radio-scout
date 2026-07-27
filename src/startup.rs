@@ -1,11 +1,23 @@
-//! First-boot provisioning of the ingest key, and what boot says about it.
+//! First-boot provisioning of the two credentials, and what boot says about
+//! them.
 //!
 //! Zero-config install means a scanner that has never been configured still
-//! comes up with a working ingest credential (ADR-0008). That credential is
-//! `RADIO_SCOUT_API_KEY` — from the environment or the `.env` beside the binary
-//! — and it is registered on every boot, so a recorder's key survives both a
-//! restart and a wiped database. It is the one setting that stays out of
-//! `radio-scout.toml` (#17, ADR-0012), because first run *writes* it.
+//! comes up with a working ingest credential *and* a gated admin surface
+//! (ADR-0008). Both live in the same place and for the same reason — they are
+//! the only two settings that stay out of `radio-scout.toml` (#17, ADR-0012),
+//! because first run **writes** them:
+//!
+//! - **`RADIO_SCOUT_API_KEY`** ([`provision_ingest_key`]) is registered on every
+//!   boot, so a recorder's key survives both a restart and a wiped database.
+//! - **`RADIO_SCOUT_ADMIN_PASSWORD`** ([`provision_admin_password`], #19) is
+//!   read on every boot; there is nothing in the database to check it against,
+//!   because the environment *is* where it lives. rdio-scanner instead ships a
+//!   known default password and nags until it is changed, so a fresh instance is
+//!   open to anyone who has read its source.
+//!
+//! Both go through the same [`persist`] splice, so writing the second never eats
+//! the first — nor any other setting, comment or line ending in a file we do not
+//! own.
 //!
 //! The interesting case is the *first* boot with nothing configured. It used to
 //! generate a key and print it to stdout, which ADR-0011 rule 2 now forbids: a
@@ -17,8 +29,11 @@
 //! scrollback.
 //!
 //! This lives in the library rather than `main.rs` because it is the one part of
-//! bootstrap with rules worth testing: a key must never leak into a log line,
-//! and a key the operator can't read must never be registered.
+//! bootstrap with rules worth testing: a credential must never leak into a log
+//! line, and a credential the operator can't read must never be put into
+//! service — an unreadable ingest key leaves the database untouched so the next
+//! boot tries again, and an unreadable admin password leaves the admin surface
+//! shut rather than open on something only the server ever saw.
 
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind, Write};
@@ -84,7 +99,7 @@ pub async fn provision_ingest_key<C: ConnectionTrait>(
     // Persist *before* registering: if the write fails, the row must not exist,
     // or the next boot would see a provisioned database and never generate the
     // key the operator can actually use.
-    match persist_ingest_key(&env_file, &key) {
+    match persist(&env_file, INGEST_KEY_VAR, &key) {
         Ok(()) => {
             repo::create_api_key(db, &key, None, Some(GENERATED_LABEL.to_string()), now_ms).await?;
             Ok(IngestKey::Generated { env_file })
@@ -123,17 +138,119 @@ pub fn log_ingest_key(outcome: &IngestKey) {
     }
 }
 
+/// The environment variable — and `.env` key — that gates the admin surface
+/// (ADR-0008, spec US 38).
+pub const ADMIN_PASSWORD_VAR: &str = "RADIO_SCOUT_ADMIN_PASSWORD";
+
+/// What booting did about the admin password, and the password it settled on.
+///
+/// The secret rides in the variant, so `Debug` is written by hand rather than
+/// derived: this type is exactly the kind of thing that ends up in a `?` chain
+/// on an ERROR line, and ADR-0011 rule 2 has no exception for that.
+pub enum AdminPassword {
+    /// The operator's own password, from the environment or `.env`.
+    Configured(String),
+    /// First run with nothing configured: one was generated and written to
+    /// `env_file`.
+    Generated { password: String, env_file: PathBuf },
+    /// First run, but `env_file` could not be written — so **no password is
+    /// set** and the admin surface stays closed. A credential only the server
+    /// ever saw would lock the operator out of their own configuration while
+    /// leaving them convinced they had one.
+    NotPersisted { env_file: PathBuf, error: io::Error },
+}
+
+impl std::fmt::Debug for AdminPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdminPassword::Configured(_) => f.write_str("Configured(<redacted>)"),
+            AdminPassword::Generated { env_file, .. } => f
+                .debug_struct("Generated")
+                .field("password", &"<redacted>")
+                .field("env_file", env_file)
+                .finish(),
+            AdminPassword::NotPersisted { env_file, error } => f
+                .debug_struct("NotPersisted")
+                .field("env_file", env_file)
+                .field("error", error)
+                .finish(),
+        }
+    }
+}
+
+impl AdminPassword {
+    /// The password to gate the admin surface with, or `None` to leave it shut.
+    pub fn password(&self) -> Option<&str> {
+        match self {
+            AdminPassword::Configured(password) => Some(password),
+            AdminPassword::Generated { password, .. } => Some(password),
+            AdminPassword::NotPersisted { .. } => None,
+        }
+    }
+}
+
+/// Make sure the admin surface has a password, and report what that took.
+///
+/// The shape is the ingest key's, for the same reasons: `configured` is the raw
+/// `RADIO_SCOUT_ADMIN_PASSWORD` (blank counts as unset), and with nothing
+/// configured a random one is generated and written to `env_file` — never
+/// logged. Unlike the ingest key there is nothing in the database to check
+/// against, because this credential is only ever read from the environment; the
+/// file *is* where it lives.
+///
+/// rdio-scanner instead ships a known default (`rdio-scanner`) and sets a
+/// `passwordNeedChange` flag, so a fresh instance is open to anyone who has read
+/// its source until somebody notices the prompt.
+pub fn provision_admin_password(configured: Option<&str>, env_file: &Path) -> AdminPassword {
+    if let Some(password) = configured.map(str::trim).filter(|value| !value.is_empty()) {
+        return AdminPassword::Configured(password.to_string());
+    }
+
+    let password = uuid::Uuid::new_v4().simple().to_string();
+    let env_file = env_file.to_path_buf();
+    match persist(&env_file, ADMIN_PASSWORD_VAR, &password) {
+        Ok(()) => AdminPassword::Generated { password, env_file },
+        Err(error) => AdminPassword::NotPersisted { env_file, error },
+    }
+}
+
+/// Say what boot did about the admin password — never what it is.
+pub fn log_admin_password(outcome: &AdminPassword) {
+    match outcome {
+        AdminPassword::Configured(_) => {
+            info!(source = ADMIN_PASSWORD_VAR, "admin password configured");
+        }
+        AdminPassword::Generated { env_file, .. } => {
+            let env_file = env_file.display();
+            info!(
+                %env_file,
+                var = ADMIN_PASSWORD_VAR,
+                "no admin password configured; generated one and wrote it to the env file"
+            );
+        }
+        AdminPassword::NotPersisted { env_file, error } => {
+            let env_file = env_file.display();
+            error!(
+                %env_file,
+                var = ADMIN_PASSWORD_VAR,
+                %error,
+                "could not save a generated admin password; the admin surface is closed — set one yourself and restart"
+            );
+        }
+    }
+}
+
 /// Write `key` into the env file at `path`, creating it if absent.
 ///
 /// A file we create is created `0600` — it holds a credential, and the mode is
 /// set at creation rather than after, so the secret is never briefly readable by
 /// anyone else. A file that already exists keeps whatever mode the operator gave
 /// it; tightening someone else's file is not ours to do.
-fn persist_ingest_key(path: &Path, key: &str) -> io::Result<()> {
+fn persist(path: &Path, var: &str, value: &str) -> io::Result<()> {
     match std::fs::read_to_string(path) {
-        Ok(existing) => std::fs::write(path, env_text_with_ingest_key(&existing, key)),
+        Ok(existing) => std::fs::write(path, env_text_with(&existing, var, value)),
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            create_private_file(path)?.write_all(env_text_with_ingest_key("", key).as_bytes())
+            create_private_file(path)?.write_all(env_text_with("", var, value).as_bytes())
         }
         Err(err) => Err(err),
     }
@@ -151,20 +268,20 @@ fn create_private_file(path: &Path) -> io::Result<std::fs::File> {
     options.open(path)
 }
 
-/// Splice `RADIO_SCOUT_API_KEY=<key>` into the text of an env file: replace the
-/// existing assignment if there is one, otherwise append.
+/// Splice `<var>=<value>` into the text of an env file: replace the existing
+/// assignment if there is one, otherwise append.
 ///
 /// Everything else in the file is preserved byte for byte — an operator's other
-/// settings, their comments and their line endings — because this rewrites a
-/// file we don't own. A commented-out `# RADIO_SCOUT_API_KEY=` line is a comment,
-/// not an assignment, and is left where it is.
-fn env_text_with_ingest_key(text: &str, key: &str) -> String {
-    let assignment = format!("{INGEST_KEY_VAR}={key}");
+/// settings, their comments and their line endings, *and the other credential*
+/// — because this rewrites a file we don't own. A commented-out `# <var>=` line
+/// is a comment, not an assignment, and is left where it is.
+fn env_text_with(text: &str, var: &str, value: &str) -> String {
+    let assignment = format!("{var}={value}");
     let mut out = String::with_capacity(text.len() + assignment.len() + 1);
     let mut replaced = false;
 
     for line in text.split_inclusive('\n') {
-        if !replaced && is_ingest_key_assignment(line) {
+        if !replaced && is_assignment(line, var) {
             out.push_str(&assignment);
             out.push('\n');
             replaced = true;
@@ -185,11 +302,11 @@ fn env_text_with_ingest_key(text: &str, key: &str) -> String {
     out
 }
 
-/// Whether `line` assigns the ingest key. Leading whitespace is tolerated;
-/// a comment is not an assignment, and neither is a longer name that merely
-/// starts the same way.
-fn is_ingest_key_assignment(line: &str) -> bool {
-    line.trim_start().starts_with(&format!("{INGEST_KEY_VAR}="))
+/// Whether `line` assigns `var`. Leading whitespace is tolerated; a comment is
+/// not an assignment, and neither is a longer name that merely starts the same
+/// way.
+fn is_assignment(line: &str, var: &str) -> bool {
+    line.trim_start().starts_with(&format!("{var}="))
 }
 
 #[cfg(test)]
@@ -215,15 +332,20 @@ mod tests {
         (db, tmp)
     }
 
-    /// The key `.env` ended up pinning, so a test can prove the operator can
-    /// actually read back what was generated.
-    fn key_in(env_file: &Path) -> String {
+    /// What `.env` ended up pinning `var` to, so a test can prove the operator
+    /// can actually read back what was generated.
+    fn value_in(env_file: &Path, var: &str) -> String {
         std::fs::read_to_string(env_file)
             .expect("env file")
             .lines()
-            .find_map(|line| line.strip_prefix(&format!("{INGEST_KEY_VAR}=")))
-            .expect("an ingest key assignment")
+            .find_map(|line| line.strip_prefix(&format!("{var}=")))
+            .unwrap_or_else(|| panic!("an assignment of {var}"))
             .to_string()
+    }
+
+    /// [`value_in`] for the ingest key, which most of this module is about.
+    fn key_in(env_file: &Path) -> String {
+        value_in(env_file, INGEST_KEY_VAR)
     }
 
     /// The rule the whole module exists for: whatever boot does about the key,
@@ -436,7 +558,7 @@ mod tests {
     // Blank lines and comments are structure, not noise.
     #[case("# settings\n\nA=1\n", "# settings\n\nA=1\nRADIO_SCOUT_API_KEY=k\n")]
     fn env_file_is_rewritten_in_place(#[case] before: &str, #[case] expected: &str) {
-        assert_eq!(env_text_with_ingest_key(before, "k"), expected);
+        assert_eq!(env_text_with(before, INGEST_KEY_VAR, "k"), expected);
     }
 
     /// Writing over an existing env file keeps the operator's settings and pins
@@ -460,6 +582,182 @@ mod tests {
         );
     }
 
+    // -- The admin password (#19, ADR-0008) ---------------------------------
+
+    /// A password an assertion can hunt for in log output.
+    const ADMIN_SECRET: &str = "s3cr3t-admin-password-do-not-log";
+
+    /// The same rule as the ingest key's, for the credential that gates every
+    /// configuration change: whatever boot does about it, it never reaches a
+    /// log line.
+    #[test]
+    fn a_configured_admin_password_is_used_and_never_logged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+        let capture = LogCapture::start();
+
+        let outcome = provision_admin_password(Some(ADMIN_SECRET), &env_file);
+        log_admin_password(&outcome);
+
+        assert_eq!(outcome.password(), Some(ADMIN_SECRET));
+        capture.assert_never_logged(ADMIN_SECRET);
+        assert!(!env_file.exists(), "a configured password writes nothing");
+        let logged = capture.text();
+        assert!(logged.contains("admin password"), "{logged}");
+    }
+
+    /// `Debug` is written by hand precisely so a `{:?}` — in a `?` chain, an
+    /// `assert!` message, a future panic handler — cannot be the thing that
+    /// leaks the credential ADR-0011 rule 2 protects. Every variant, because
+    /// a redaction that covers two of three is not one.
+    #[test]
+    fn debugging_an_admin_password_never_shows_it() {
+        let outcomes = [
+            AdminPassword::Configured(ADMIN_SECRET.to_string()),
+            AdminPassword::Generated {
+                password: ADMIN_SECRET.to_string(),
+                env_file: PathBuf::from("/srv/.env"),
+            },
+            AdminPassword::NotPersisted {
+                env_file: PathBuf::from("/srv/.env"),
+                error: io::Error::new(ErrorKind::PermissionDenied, "denied"),
+            },
+        ];
+
+        for outcome in &outcomes {
+            let rendered = format!("{outcome:?}");
+            assert!(!rendered.contains(ADMIN_SECRET), "{rendered}");
+            assert!(rendered.contains("redacted") || rendered.contains("NotPersisted"));
+        }
+        // ...and the path, which is not a secret, still comes through — a
+        // redaction that hid it would leave the operator nowhere to look.
+        assert!(format!("{:?}", outcomes[1]).contains("/srv/.env"));
+        assert!(format!("{:?}", outcomes[2]).contains("denied"));
+    }
+
+    /// First run with nothing configured. rdio-scanner ships a *known* default
+    /// password (`rdio-scanner`, `defaults.go`) and nags until it is changed, so
+    /// an instance exposed before anyone reads the nag is open. Radio-Scout
+    /// never has a guessable credential to begin with.
+    #[test]
+    fn a_generated_admin_password_goes_to_the_env_file_and_never_to_a_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+        let capture = LogCapture::start();
+
+        let outcome = provision_admin_password(None, &env_file);
+        log_admin_password(&outcome);
+
+        let generated = outcome
+            .password()
+            .expect("a generated password")
+            .to_string();
+        assert!(!generated.is_empty());
+        capture.assert_never_logged(&generated);
+        // ...and it is the password sitting in the file the operator can read.
+        assert_eq!(value_in(&env_file, ADMIN_PASSWORD_VAR), generated);
+        assert!(capture.text().contains(".env"), "{}", capture.text());
+    }
+
+    /// A password only the server ever saw is worse than none: the operator
+    /// could never log in, and every restart would invent another. So the admin
+    /// surface stays closed and the failure is an ERROR to act on — the same
+    /// bargain the ingest key makes.
+    #[test]
+    fn an_admin_password_that_cannot_be_saved_is_not_used() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join("not-a-file");
+        std::fs::create_dir(&env_file).expect("mkdir");
+        let capture = LogCapture::start();
+
+        let outcome = provision_admin_password(None, &env_file);
+        log_admin_password(&outcome);
+
+        assert_eq!(outcome.password(), None);
+        let logged = capture.text();
+        assert!(logged.contains("ERROR"), "{logged}");
+        assert!(logged.contains(ADMIN_PASSWORD_VAR), "{logged}");
+    }
+
+    /// `RADIO_SCOUT_ADMIN_PASSWORD=` in an env file means "unset", not "the
+    /// empty password" — which would otherwise be a credential anyone can send.
+    #[rstest]
+    #[case(None)]
+    #[case(Some(""))]
+    #[case(Some("   "))]
+    fn a_blank_admin_password_means_unset(#[case] configured: Option<&str>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+
+        let outcome = provision_admin_password(configured, &env_file);
+
+        assert!(
+            matches!(outcome, AdminPassword::Generated { .. }),
+            "{outcome:?}"
+        );
+        assert!(!value_in(&env_file, ADMIN_PASSWORD_VAR).is_empty());
+    }
+
+    /// Whitespace an env file collects around a value must not change the
+    /// password the operator thinks they set.
+    #[test]
+    fn a_configured_admin_password_is_trimmed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+
+        let outcome = provision_admin_password(Some(&format!("  {ADMIN_SECRET}\t")), &env_file);
+
+        assert_eq!(outcome.password(), Some(ADMIN_SECRET));
+    }
+
+    /// The two credentials share one file, so writing the second must not eat
+    /// the first — nor the operator's other settings.
+    #[test]
+    fn the_two_generated_credentials_coexist_in_one_env_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+        std::fs::write(&env_file, "RADIO_SCOUT_PORT=8080\n").expect("seed env");
+
+        provision_admin_password(None, &env_file);
+        // The ingest key writes through the same splice.
+        std::fs::write(
+            &env_file,
+            env_text_with(
+                &std::fs::read_to_string(&env_file).expect("read"),
+                INGEST_KEY_VAR,
+                "an-ingest-key",
+            ),
+        )
+        .expect("write");
+
+        let text = std::fs::read_to_string(&env_file).expect("env file");
+        assert!(text.contains("RADIO_SCOUT_PORT=8080"), "{text}");
+        assert_eq!(value_in(&env_file, INGEST_KEY_VAR), "an-ingest-key");
+        assert!(
+            !value_in(&env_file, ADMIN_PASSWORD_VAR).is_empty(),
+            "{text}"
+        );
+    }
+
+    /// A generated admin password is written `0600` for the same reason the
+    /// ingest key is: it is a credential in the operator's working directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_created_env_file_holding_the_admin_password_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+
+        provision_admin_password(None, &env_file);
+
+        let mode = std::fs::metadata(&env_file)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+    }
+
     proptest::proptest! {
         /// However odd the file, the rewrite leaves exactly one uncommented
         /// assignment of the key, and never loses a line the operator wrote.
@@ -469,8 +767,8 @@ mod tests {
             key in "[a-z0-9]{1,32}",
         ) {
             let before = before.join("\n");
-            let after = env_text_with_ingest_key(&before, &key);
-            let assignments = after.lines().filter(|line| is_ingest_key_assignment(line)).count();
+            let after = env_text_with(&before, INGEST_KEY_VAR, &key);
+            let assignments = after.lines().filter(|line| is_assignment(line, INGEST_KEY_VAR)).count();
             proptest::prop_assert_eq!(assignments, 1, "in:\n{}", after);
             proptest::prop_assert!(after.ends_with('\n'));
             proptest::prop_assert!(

@@ -42,6 +42,7 @@ use clap::Parser;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
+use crate::admin::AdminConfig;
 use crate::blob::{S3Config, StorageConfig};
 use crate::ingest::IngestConfig;
 use crate::observability;
@@ -242,6 +243,7 @@ pub struct Config {
     pub storage: Storage,
     pub retention: Retention,
     pub ingest: Ingest,
+    pub admin: Admin,
     pub log: Log,
 }
 
@@ -325,6 +327,16 @@ impl Config {
         }
     }
 
+    /// The admin surface's session and lockout policy (#19, ADR-0008).
+    pub fn admin(&self) -> AdminConfig {
+        AdminConfig {
+            session_idle: Duration::from_secs(self.admin.session_idle_secs),
+            session_max: Duration::from_secs(self.admin.session_max_secs),
+            lockout_attempts: self.admin.lockout_attempts,
+            lockout: Duration::from_secs(self.admin.lockout_secs),
+        }
+    }
+
     /// Refuse a configuration that parsed but cannot be run.
     ///
     /// Every check here is one an operator would otherwise meet as a runtime
@@ -376,6 +388,37 @@ impl Config {
                 &self.ingest.dedup_window_ms.to_string(),
                 "a duration in milliseconds, 0 to disable",
             ));
+        }
+        // Each of these bricks the admin surface at zero rather than merely
+        // behaving oddly: a session that has already expired when it is issued,
+        // or an address locked out before its first attempt. There is no
+        // "0 disables it" reading to guess at — refusing to boot is the only
+        // answer that doesn't lock an operator out of their own scanner.
+        for (key, value, expected) in [
+            (
+                "admin.session_idle_secs",
+                self.admin.session_idle_secs,
+                "a positive number of seconds",
+            ),
+            (
+                "admin.session_max_secs",
+                self.admin.session_max_secs,
+                "a positive number of seconds",
+            ),
+            (
+                "admin.lockout_secs",
+                self.admin.lockout_secs,
+                "a positive number of seconds",
+            ),
+            (
+                "admin.lockout_attempts",
+                self.admin.lockout_attempts as u64,
+                "a positive number of attempts",
+            ),
+        ] {
+            if value == 0 {
+                return Err(ConfigError::invalid_key(key, "0", expected));
+            }
         }
         Ok(())
     }
@@ -501,6 +544,41 @@ impl Default for Ingest {
         Ingest {
             dedup_window_ms: default.dedup_window_ms,
             auto_populate: default.auto_populate,
+        }
+    }
+}
+
+/// `[admin]` — how the admin surface's sessions and lockout behave (#19,
+/// ADR-0008).
+///
+/// The admin *password* is deliberately not here: like the ingest key, first
+/// run **writes** it, so it lives in the environment and `.env`
+/// (`RADIO_SCOUT_ADMIN_PASSWORD`) rather than in a file `--write-config`
+/// generates. Everything about it that is a knob rather than a secret is here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Admin {
+    /// How long a session survives without being used, refreshed on each
+    /// authenticated request.
+    pub session_idle_secs: u64,
+    /// How long a session may live at all, however active. Never refreshed.
+    pub session_max_secs: u64,
+    /// Failed logins one address may spend before it is locked out.
+    pub lockout_attempts: u32,
+    /// How long a spent address stays locked out, from its last attempt.
+    pub lockout_secs: u64,
+}
+
+impl Default for Admin {
+    /// As shipped — read off [`AdminConfig`] so the file's defaults and the
+    /// code's cannot drift apart.
+    fn default() -> Self {
+        let default = AdminConfig::default();
+        Admin {
+            session_idle_secs: default.session_idle.as_secs(),
+            session_max_secs: default.session_max.as_secs(),
+            lockout_attempts: default.lockout_attempts,
+            lockout_secs: default.lockout.as_secs(),
         }
     }
 }
@@ -814,6 +892,31 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # With this off, only Systems you have already defined are accepted.
 # auto_populate = true
 
+[admin]
+# The admin password itself is NOT here: first run writes it, so it lives in
+# the environment and `.env` as RADIO_SCOUT_ADMIN_PASSWORD. With none set, the
+# first run generates one, writes it to that file 0600, and logs only the path
+# — never the password. `cat .env` is how you read it back.
+#
+# If you terminate TLS at a reverse proxy, set [server] trusted_proxies to that
+# proxy's address. The session cookie is marked Secure only when the proxy says
+# the client's hop was HTTPS (X-Forwarded-Proto), and that header is believed
+# only from a proxy you named — so with the list empty, an HTTPS deployment
+# still gets a cookie a browser will replay over plain http:// to the same host.
+
+# How long a session survives without being used (refreshed on every request),
+# and how long it may live at all however active. The second is the bound on a
+# cookie somebody walked off with, so use does not extend it.
+# session_idle_secs = 28800
+# session_max_secs = 604800
+
+# Failed logins one address may spend before it is locked out, and for how
+# long. The cooldown runs from the last attempt, so hammering keeps it locked
+# and walking away clears it. The address is the TCP peer's unless you named
+# that peer in [server] trusted_proxies.
+# lockout_attempts = 5
+# lockout_secs = 900
+
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a
 # single run.
@@ -1035,6 +1138,34 @@ pub fn resolve(
     }
     if let Some(auto) = parsed_env(&env, "RADIO_SCOUT_INGEST_AUTO_POPULATE", "true or false")? {
         config.ingest.auto_populate = auto;
+    }
+    if let Some(secs) = parsed_env(
+        &env,
+        "RADIO_SCOUT_ADMIN_SESSION_IDLE_SECS",
+        "a number of seconds",
+    )? {
+        config.admin.session_idle_secs = secs;
+    }
+    if let Some(secs) = parsed_env(
+        &env,
+        "RADIO_SCOUT_ADMIN_SESSION_MAX_SECS",
+        "a number of seconds",
+    )? {
+        config.admin.session_max_secs = secs;
+    }
+    if let Some(attempts) = parsed_env(
+        &env,
+        "RADIO_SCOUT_ADMIN_LOCKOUT_ATTEMPTS",
+        "a number of attempts",
+    )? {
+        config.admin.lockout_attempts = attempts;
+    }
+    if let Some(secs) = parsed_env(
+        &env,
+        "RADIO_SCOUT_ADMIN_LOCKOUT_SECS",
+        "a number of seconds",
+    )? {
+        config.admin.lockout_secs = secs;
     }
     // `RUST_LOG`, not a `RADIO_SCOUT_`-prefixed name: it is the variable every
     // Rust operator already reaches for, and ADR-0011 documents it as the
@@ -1539,6 +1670,45 @@ mod tests {
         assert!(!ingest.auto_populate);
     }
 
+    /// The admin surface's policy (#19), settable without a UI — which is the
+    /// point, since the UI it gates is the thing you would need it for.
+    #[test]
+    fn admin_session_and_lockout_policy_is_configurable() {
+        let config = resolve(
+            &cli(&[]),
+            no_env,
+            Some(&file(
+                "[admin]\nsession_idle_secs = 60\nsession_max_secs = 600\n\
+                 lockout_attempts = 2\nlockout_secs = 30\n",
+            )),
+        )
+        .expect("resolve");
+
+        let admin = config.admin();
+        assert_eq!(admin.session_idle, Duration::from_secs(60));
+        assert_eq!(admin.session_max, Duration::from_secs(600));
+        assert_eq!(admin.lockout_attempts, 2);
+        assert_eq!(admin.lockout, Duration::from_secs(30));
+    }
+
+    /// Every one of these bricks the admin surface at zero — a session already
+    /// expired when it is issued, or an address locked out before its first
+    /// attempt. There is no "0 disables it" reading to guess at, so the boot
+    /// stops and names the key (ADR-0012). rdio would have taken the value and
+    /// locked the operator out of their own scanner.
+    #[rstest]
+    #[case("[admin]\nsession_idle_secs = 0\n", "admin.session_idle_secs")]
+    #[case("[admin]\nsession_max_secs = 0\n", "admin.session_max_secs")]
+    #[case("[admin]\nlockout_attempts = 0\n", "admin.lockout_attempts")]
+    #[case("[admin]\nlockout_secs = 0\n", "admin.lockout_secs")]
+    fn an_impossible_admin_policy_refuses_to_boot(#[case] text: &str, #[case] key: &str) {
+        let error =
+            resolve(&cli(&[]), no_env, Some(&file(text))).expect_err("an impossible policy");
+
+        assert!(error.to_string().contains(key), "{error}");
+        assert!(error.to_string().contains("positive"), "{error}");
+    }
+
     /// The defaults are the shipped ones, not a second copy that can drift.
     #[test]
     fn unconfigured_ingest_and_retention_are_the_shipped_defaults() {
@@ -2017,6 +2187,10 @@ mod tests {
     #[case::database(&[("RADIO_SCOUT_DATABASE_URL", "postgres://db/rs")], |c: &Config| assert_eq!(c.database_url(), "postgres://db/rs"))]
     #[case::log(&[("RUST_LOG", "trace")], |c: &Config| assert_eq!(c.log.directives, "trace"))]
     #[case::proxies(&[("RADIO_SCOUT_TRUSTED_PROXIES", "10.0.0.1")], |c: &Config| assert!(c.trusted_proxies().trusts(ip("10.0.0.1"))))]
+    #[case::session_idle(&[("RADIO_SCOUT_ADMIN_SESSION_IDLE_SECS", "60")], |c: &Config| assert_eq!(c.admin().session_idle, Duration::from_secs(60)))]
+    #[case::session_max(&[("RADIO_SCOUT_ADMIN_SESSION_MAX_SECS", "600")], |c: &Config| assert_eq!(c.admin().session_max, Duration::from_secs(600)))]
+    #[case::lockout_attempts(&[("RADIO_SCOUT_ADMIN_LOCKOUT_ATTEMPTS", "2")], |c: &Config| assert_eq!(c.admin().lockout_attempts, 2))]
+    #[case::lockout_secs(&[("RADIO_SCOUT_ADMIN_LOCKOUT_SECS", "30")], |c: &Config| assert_eq!(c.admin().lockout, Duration::from_secs(30)))]
     fn every_setting_can_come_from_the_environment(
         #[case] vars: &[(&str, &str)],
         #[case] expected: fn(&Config),

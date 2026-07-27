@@ -84,6 +84,22 @@ _Avoid_: password, passcode.
 **API key**:
 A recorder-facing secret that authorizes ingesting calls into specific systems. Distinct from an **access code**.
 
+**Admin password**:
+The single operator-facing secret that opens the admin surface — everything under `/api/admin/`, which configures the scanner. Distinct from both an **access code** (listener-facing, scoped) and an **API key** (recorder-facing). There is exactly one; it lives in the environment (`RADIO_SCOUT_ADMIN_PASSWORD`), not the database.
+_Avoid_: admin key, admin token.
+
+**Session**:
+The server-side record that an operator has proved they know the **admin password**, referred to by an opaque id in an httpOnly cookie. Ends when it is logged out, when it goes unused for its idle window, when its absolute lifetime runs out, or when the process restarts. Unqualified "session" always means this one — a listener needs none.
+_Avoid_: token, login, JWT.
+
+**CSRF token**:
+The secret bound to a **session** that a state-changing admin request must echo back in `X-CSRF-Token`, proving the request came from this origin's own page rather than from another site trading on the cookie.
+_Avoid_: nonce, anti-forgery token.
+
+**Lockout**:
+The refusal to check any password from an address that has spent its budget of failed logins, until a cooldown measured from its last attempt has passed. Per address, and never shared: one address's failures neither spend nor restore another's.
+_Avoid_: ban, throttle, rate limit.
+
 ### Storage & retention
 
 **Retention**:

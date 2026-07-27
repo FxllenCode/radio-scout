@@ -32,12 +32,12 @@
 //!
 //! # Security
 //!
-//! **`POST /api/admin/talkgroups/import` is not authenticated yet.** ADR-0008
-//! requires the admin surface to be password-gated; the cookie session that does
-//! it is #19, which has not landed. Until it does, anyone who can reach the
-//! server can rewrite Talkgroup curation (they cannot read or delete Calls
-//! through it). The route sits under `/api/admin/` precisely so #19 can gate the
-//! whole prefix with one middleware layer rather than hunting handlers.
+//! **`POST /api/admin/talkgroups/import` sits behind the admin session** (#19,
+//! ADR-0008). It shipped unauthenticated — the deviation this route's
+//! `/api/admin/` prefix existed to make cheap to close — and the prefix did its
+//! job: one `route_layer` in [`crate::admin_routes`] now gates it and everything
+//! added beside it. A caller needs a session cookie *and*, because this is a
+//! state-changing `POST`, the session's CSRF token in `X-CSRF-Token`.
 
 use std::collections::HashMap;
 

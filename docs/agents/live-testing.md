@@ -46,6 +46,26 @@ first run generates one and **writes it into `.env`** — it is never printed or
 logged (ADR-0011 rule 2), so read it back with `cat .env` and point the feeder
 or the recorder at it.
 
+**The admin surface is gated** (#19, ADR-0008). `RADIO_SCOUT_ADMIN_PASSWORD`
+lives in the same `.env` for the same reason — first run *writes* it — and with
+none set, a wiped `./radio-scout-live-test` generates a fresh one and puts it
+there. Nothing in the SPA logs in yet (there is no admin UI until #30), so a
+live test that needs `/api/admin/…` drives it with curl, which is two steps
+because the CSRF token comes back in the login body:
+
+```bash
+PW=$(grep '^RADIO_SCOUT_ADMIN_PASSWORD=' .env | cut -d= -f2-)
+CSRF=$(curl -sc /tmp/rs-admin.jar -H 'content-type: application/json' \
+  -d "{\"password\":\"$PW\"}" localhost:3000/api/admin/login | jq -r .csrf_token)
+curl -b /tmp/rs-admin.jar -H "x-csrf-token: $CSRF" -H 'content-type: text/csv' \
+  --data-binary @talkgroups.csv 'localhost:3000/api/admin/talkgroups/import?system=1'
+```
+
+Five wrong passwords lock **your address** out for fifteen minutes and answer
+429 with `Retry-After` — that is the point, but it is worth knowing before you
+mistype it five times against a live instance. Restarting clears the ledger
+(and every open session with it).
+
 The feeder posts to `POST /api/call-upload` with rdio's field names and a real
 mono 16-bit WAV per Call, pitched by Talkgroup so two Talkgroups are told apart
 **by ear** — a wrong-Call bug is audible before it is visible. Useful flags:

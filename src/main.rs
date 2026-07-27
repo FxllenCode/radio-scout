@@ -18,6 +18,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
+use radio_scout::admin::AdminAuth;
 use radio_scout::config::{self, Cli, Config};
 use radio_scout::db;
 use radio_scout::retention;
@@ -114,6 +115,17 @@ async fn serve(
         &startup::provision_ingest_key(&db, configured.as_deref(), &env_file, now_ms()).await?,
     );
 
+    // The admin password (#19, ADR-0008), from the same file for the same
+    // reason: first run *writes* it. With none configured a random one is
+    // generated — Radio-Scout never ships a guessable default the way rdio does
+    // — and if it cannot be saved, no password is set and the admin surface
+    // stays shut rather than opening on a credential only the server ever saw.
+    let admin = startup::provision_admin_password(
+        std::env::var(startup::ADMIN_PASSWORD_VAR).ok().as_deref(),
+        &env_file,
+    );
+    startup::log_admin_password(&admin);
+
     let audio = Arc::new(BlobStore::open(&config.storage())?);
 
     // Retention (#10): bound the archive so the disk can't fill. Sweeps once
@@ -124,6 +136,7 @@ async fn serve(
 
     let mut state = AppState::new(audio, db, config.ingest());
     state.trusted_proxies = config.trusted_proxies();
+    state.admin = AdminAuth::provisioned(&admin, config.admin());
     let app = build_app(state);
 
     let port = config.server.port;

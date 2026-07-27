@@ -5,6 +5,7 @@
 //! router the binary serves and the integration harness drives in-process over
 //! its real HTTP + WS boundary (ADR-0009).
 
+pub mod admin;
 pub mod archive;
 pub mod blob;
 pub mod call;
@@ -33,6 +34,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use sea_orm::DatabaseConnection;
 
+use crate::admin::AdminAuth;
 use crate::call::CallId;
 use crate::config::TrustedProxies;
 use crate::db::repo;
@@ -55,11 +57,14 @@ pub struct AppState {
     /// Whose `X-Forwarded-For` the request log may believe (#17). Empty — the
     /// shipped default — means nobody's.
     pub trusted_proxies: TrustedProxies,
+    /// The admin surface's credential and its live sessions (#19).
+    pub admin: AdminAuth,
 }
 
 impl AppState {
     /// Assemble state from a blob store, a database connection, and ingest
-    /// config, with a fresh live-feed hub and no trusted proxies.
+    /// config, with a fresh live-feed hub, no trusted proxies, and an admin
+    /// surface nothing can authenticate to until a password is provisioned.
     pub fn new(audio: Arc<BlobStore>, db: DatabaseConnection, ingest: IngestConfig) -> Self {
         AppState {
             audio,
@@ -67,6 +72,7 @@ impl AppState {
             live: LiveFeed::new(),
             ingest,
             trusted_proxies: TrustedProxies::default(),
+            admin: AdminAuth::locked(),
         }
     }
 }
@@ -90,15 +96,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/catalog", get(catalog::catalog))
         .route("/api/call/{id}/audio", get(serve_audio))
         .route("/api/call/{id}/download", get(archive::download))
-        // Admin surface. Everything under `/api/admin/` mutates configuration
-        // and must sit behind the cookie session ADR-0008 requires — that is
-        // #19, and until it lands this prefix is UNAUTHENTICATED. Grouping the
-        // routes here means #19 gates them with one `route_layer`, with no risk
-        // of missing a handler.
-        .route(
-            "/api/admin/talkgroups/import",
-            post(import::import_talkgroups),
-        )
+        // The way in to the admin surface, and the only route under
+        // `/api/admin/` outside the session guard — there is no session yet.
+        .route("/api/admin/login", post(admin::login))
+        .merge(admin_routes(state.admin.clone()))
         .route("/healthz", get(healthz))
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.
@@ -113,6 +114,29 @@ pub fn build_app(state: AppState) -> Router {
             http_log::log_requests,
         ))
         .with_state(state)
+}
+
+/// Everything under `/api/admin/` that mutates or reveals configuration.
+///
+/// One router, so the session guard #19 puts over it is a **prefix layer** and
+/// not a decoration each handler has to remember: a route added here is gated
+/// by default, and a route that must not be — `/api/admin/login` — has to be
+/// written outside on purpose.
+fn admin_routes(admin: AdminAuth) -> Router<AppState> {
+    Router::new()
+        .route("/api/admin/session", get(admin::session))
+        .route("/api/admin/logout", post(admin::logout))
+        .route(
+            "/api/admin/talkgroups/import",
+            post(import::import_talkgroups),
+        )
+        // `route_layer`, not `layer`: it runs only for paths this router
+        // matched, so an unrouted URL still 404s rather than being told to log
+        // in first — which would turn the guard into a map of what exists.
+        .route_layer(axum::middleware::from_fn_with_state(
+            admin,
+            admin::require_session,
+        ))
 }
 
 /// How long a client may keep a Call's audio. The bytes behind a Call id never

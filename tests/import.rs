@@ -17,6 +17,17 @@ use serde_json::Value;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// An app with an admin session already open.
+///
+/// The importer is the oldest route on the `/api/admin/` surface, and since #19
+/// that surface is gated: a bare `TestApp::spawn` reaches it with a 401. That
+/// the guard is real is asserted in `tests/admin.rs`; here it is a precondition.
+async fn admin_app() -> TestApp {
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app
+}
+
 /// POST a CSV body, returning the status and parsed JSON.
 async fn import(app: &TestApp, query: &str, csv: &str) -> (u16, Value) {
     import_bytes(app, query, csv.as_bytes().to_vec()).await
@@ -24,7 +35,7 @@ async fn import(app: &TestApp, query: &str, csv: &str) -> (u16, Value) {
 
 async fn import_bytes(app: &TestApp, query: &str, body: Vec<u8>) -> (u16, Value) {
     let (status, body) = app
-        .post_bytes(
+        .post_admin_bytes(
             &format!("/api/admin/talkgroups/import{query}"),
             "text/csv",
             body,
@@ -138,7 +149,7 @@ async fn seed_call(db: &DatabaseConnection, system_ref: i64, label: &str, talkgr
 /// The ticket, end to end: a `ref,label,group,tag,led` CSV bulk-sets all four.
 #[tokio::test]
 async fn csv_bulk_sets_labels_groups_tags_and_leds() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
 
     let report = import_ok(
         &app,
@@ -174,7 +185,7 @@ async fn csv_bulk_sets_labels_groups_tags_and_leds() {
 /// tidy the archive you already have.
 #[tokio::test]
 async fn import_curates_auto_populated_talkgroups() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     seed_call(&app.db, 11, "butco", 54241).await;
 
     // Auto-populate gave it rdio's defaults.
@@ -202,7 +213,7 @@ async fn import_curates_auto_populated_talkgroups() {
 /// duplicates every Talkgroup. Ours upserts on (System, Ref).
 #[tokio::test]
 async fn re_importing_the_same_file_changes_nothing() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     let csv = "ref,label,group,tag,led\n\
                54241,TDB A1,Fire,Dispatch,red\n\
                54242,TDB A2,Fire,Fireground,orange\n";
@@ -227,7 +238,7 @@ async fn re_importing_the_same_file_changes_nothing() {
 /// only within a System, so an import must not collapse them.
 #[tokio::test]
 async fn the_same_ref_in_two_systems_stays_two_talkgroups() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
 
     import_ok(
         &app,
@@ -257,7 +268,7 @@ async fn the_same_ref_in_two_systems_stays_two_talkgroups() {
 /// two-column `ref,led` file safe to run over a fully-curated archive.
 #[tokio::test]
 async fn a_blank_cell_leaves_the_stored_value_alone() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     import_ok(
         &app,
         "?system=11",
@@ -291,7 +302,7 @@ async fn a_blank_cell_leaves_the_stored_value_alone() {
 /// so a field that silently never updates can't hide behind its neighbours.
 #[tokio::test]
 async fn each_named_column_updates_an_existing_talkgroup() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     import_ok(
         &app,
         "?system=11",
@@ -332,7 +343,7 @@ async fn each_named_column_updates_an_existing_talkgroup() {
 /// A Talkgroup can be in several Groups; rdio's importer only ever assigned one.
 #[tokio::test]
 async fn a_row_can_put_a_talkgroup_in_several_groups() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     import_ok(
         &app,
         "?system=11",
@@ -355,7 +366,7 @@ async fn a_row_can_put_a_talkgroup_in_several_groups() {
 /// is how a Talkgroup gets removed from one. (rdio has no way to do this at all.)
 #[tokio::test]
 async fn re_importing_narrower_groups_removes_the_others() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     import_ok(&app, "?system=11", "ref,group\n54241,\"Fire;EMS\"\n").await;
     let tg = must_store(&app.db, 11, 54241).await;
     assert_eq!(groups_of(&app.db, tg.id).await.len(), 2);
@@ -384,7 +395,7 @@ async fn re_importing_narrower_groups_removes_the_others() {
 /// System, and the report says so, so a mistyped column is visible.
 #[tokio::test]
 async fn a_system_ref_may_be_created_and_is_reported() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     let report = import_ok(&app, "?system=77", "ref,label\n54241,TDB A1\n").await;
 
     assert_eq!(report["systemsCreated"], 1);
@@ -398,7 +409,7 @@ async fn a_system_ref_may_be_created_and_is_reported() {
 /// would scatter Talkgroups into a System nothing ever ingests into.
 #[tokio::test]
 async fn an_unknown_system_label_rejects_its_rows_and_creates_nothing() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     seed_call(&app.db, 11, "butco", 1).await;
 
     let report = import_ok(
@@ -427,7 +438,7 @@ async fn an_unknown_system_label_rejects_its_rows_and_creates_nothing() {
 /// A Trunk Recorder `short_name` is the System name an operator actually knows.
 #[tokio::test]
 async fn a_system_label_resolves_to_the_existing_system() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     seed_call(&app.db, 11, "butco", 1).await;
 
     import_ok(&app, "?system=butco", "ref,label\n54241,TDB A1\n").await;
@@ -445,7 +456,7 @@ async fn a_system_label_resolves_to_the_existing_system() {
 /// A dry run reports exactly what the real run does, and writes nothing.
 #[tokio::test]
 async fn dry_run_reports_the_real_run_and_writes_nothing() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     let csv = "ref,label,group,tag,led\n\
                54241,TDB A1,Fire,Dispatch,red\n\
                54242,TDB A2,Fire,Fireground,purple\n";
@@ -499,7 +510,7 @@ async fn dry_run_is_a_flag_not_a_value() {
         "?system=11&dryRun=",
         "?system=11&dryRun=true",
     ] {
-        let app = TestApp::spawn().await;
+        let app = admin_app().await;
         let report = import_ok(&app, query, csv).await;
         assert_eq!(report["dryRun"], true, "query={query}");
         assert_eq!(
@@ -517,7 +528,7 @@ async fn dry_run_is_a_flag_not_a_value() {
         "?system=11&dryRun=no",
         "?system=11&dryRun=off",
     ] {
-        let app = TestApp::spawn().await;
+        let app = admin_app().await;
         let report = import_ok(&app, query, csv).await;
         assert_eq!(report["dryRun"], false, "query={query}");
         assert_eq!(
@@ -531,7 +542,7 @@ async fn dry_run_is_a_flag_not_a_value() {
 /// A blank `?system=` is no default at all, not a System named "".
 #[tokio::test]
 async fn a_blank_system_parameter_is_no_default() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     let report = import_ok(&app, "?system=", "ref,label\n54241,TDB A1\n").await;
 
     assert_eq!(report["rejected"][0]["reason"], "no-system");
@@ -548,7 +559,7 @@ async fn a_blank_system_parameter_is_no_default() {
 /// missing from the archive's Tag/Group filter facets forever.
 #[tokio::test]
 async fn an_invented_talkgroup_gets_the_same_defaults_ingest_would_give_it() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     import_ok(&app, "?system=11", "ref,label,led\n54241,TDB A1,red\n").await;
 
     let tg = must_store(&app.db, 11, 54241).await;
@@ -574,7 +585,7 @@ async fn an_invented_talkgroup_gets_the_same_defaults_ingest_would_give_it() {
 /// defaults are for creation only, and must never overwrite curation.
 #[tokio::test]
 async fn defaults_never_overwrite_an_existing_talkgroup() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     import_ok(&app, "?system=11", "ref,tag,group\n54241,Dispatch,Fire\n").await;
 
     // A later narrow import mentions neither tag nor group.
@@ -590,7 +601,7 @@ async fn defaults_never_overwrite_an_existing_talkgroup() {
 /// on the Talkgroup the operator already curated, not a second one.
 #[tokio::test]
 async fn a_call_arriving_after_curation_lands_on_the_curated_talkgroup() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     import_ok(&app, "?system=11", "ref,label,led\n54241,TDB A1,green\n").await;
     let curated = must_store(&app.db, 11, 54241).await;
 
@@ -611,7 +622,7 @@ async fn a_call_arriving_after_curation_lands_on_the_curated_talkgroup() {
 /// reported with the line number and a machine-readable reason, in file order.
 #[tokio::test]
 async fn rejected_rows_are_reported_in_file_order() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     let report = import_ok(
         &app,
         "?system=11",
@@ -647,7 +658,7 @@ async fn rejected_rows_are_reported_in_file_order() {
 /// A whole-file problem is a 400 naming the problem, not a 200 that did nothing.
 #[tokio::test]
 async fn unreadable_files_are_named_400s() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
 
     for (csv, reason) in [
         ("foo,bar\nx,y\n", "no-ref-column"),
@@ -677,7 +688,7 @@ async fn unreadable_files_are_named_400s() {
 /// whichever System happens to exist.
 #[tokio::test]
 async fn rows_with_no_system_are_rejected() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     let report = import_ok(&app, "", "ref,label\n54241,TDB A1\n").await;
 
     assert_eq!(report["talkgroupsCreated"], 0);
@@ -691,11 +702,11 @@ async fn rows_with_no_system_are_rejected() {
 #[tokio::test]
 async fn a_broken_database_is_a_server_error_not_a_false_report() {
     let capture = common::logs::LogCapture::start();
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     app.db.clone().close().await.expect("close the pool");
 
     let (status, body) = app
-        .post_bytes(
+        .post_admin_bytes(
             "/api/admin/talkgroups/import?system=11",
             "text/csv",
             b"ref,label\n54241,TDB A1\n".to_vec(),
@@ -719,7 +730,7 @@ async fn a_broken_database_is_a_server_error_not_a_false_report() {
 /// feeds to rdio-scanner, imported unchanged.
 #[tokio::test]
 async fn a_headerless_radioreference_export_imports_unchanged() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     let report = import_ok(
         &app,
         "?system=11",
@@ -745,7 +756,7 @@ async fn a_headerless_radioreference_export_imports_unchanged() {
 /// fields and shifts every column after it.
 #[tokio::test]
 async fn quoted_commas_do_not_shift_the_columns() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     import_ok(
         &app,
         "?system=11",
@@ -767,7 +778,7 @@ async fn quoted_commas_do_not_shift_the_columns() {
 /// the same denormalized Call the live feed and the archive deliver (#11/#14).
 #[tokio::test]
 async fn an_imported_led_rides_the_call_payload() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
     seed_call(&app.db, 11, "butco", 54241).await;
 
     // Before curation there is no color, and the client falls back.
@@ -789,7 +800,7 @@ async fn an_imported_led_rides_the_call_payload() {
 /// Systems/Tags/Groups rather than by the row count.
 #[tokio::test]
 async fn a_full_county_list_imports_in_one_pass() {
-    let app = TestApp::spawn().await;
+    let app = admin_app().await;
 
     let mut csv = String::from("ref,label,group,tag,led\n");
     for i in 0..500 {

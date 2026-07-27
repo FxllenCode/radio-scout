@@ -26,6 +26,13 @@
 //! second time on the other dialect (#22, ADR-0003). No test says which; see
 //! [`postgres_server`] and `docs/agents/dual-dialect.md`.
 //!
+//! The client carries a **cookie jar**, so the admin session (#19) behaves as it
+//! does in a browser: [`TestApp::login`] once and every later `post_admin_*` on
+//! that handle is authenticated, with the CSRF token remembered alongside the
+//! cookie the way a page keeps it in memory. Every spawned app is gated by
+//! [`ADMIN_PASSWORD`]; [`TestAppBuilder::admin`] takes an [`AdminAuth`] for the
+//! tests that need a different policy — or none.
+//!
 //! **The handle owns its temp directory**, so a test never has to keep a `_tmp`
 //! binding alive by hand — dropping the app deletes the database and the audio.
 //! (It does *not* own the `axum::serve` task: that runs until the test binary
@@ -63,6 +70,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use radio_scout::admin::{AdminAuth, AdminConfig, CSRF_HEADER};
 use radio_scout::config::TrustedProxies;
 use radio_scout::db::entities::{call, system, tag, talkgroup};
 use radio_scout::db::repo::{self, NewCall};
@@ -87,6 +95,10 @@ pub struct TestApp {
     /// The same blob store the app writes audio to.
     pub store: Arc<BlobStore>,
     client: reqwest::Client,
+    /// The admin session [`TestApp::login`] opened, if any: the raw session
+    /// cookie and the CSRF token bound to it. The client's jar carries the
+    /// cookie too — this is the copy a test can still present after logout.
+    session: std::sync::Mutex<Option<(String, String)>>,
     tmp: tempfile::TempDir,
 }
 
@@ -184,6 +196,123 @@ impl TestApp {
             .send()
             .await
             .expect("multipart POST")
+    }
+
+    /// POST a JSON body to `path`, keeping the whole response — the admin
+    /// surface (#19) speaks JSON, and its interesting half is in the headers.
+    pub async fn post_json(&self, path: &str, body: serde_json::Value) -> reqwest::Response {
+        self.client
+            .post(self.url(path))
+            .json(&body)
+            .send()
+            .await
+            .expect("JSON POST")
+    }
+
+    // -- The admin surface (#19) ---------------------------------------------
+
+    /// Log in with the default [`ADMIN_PASSWORD`], returning the CSRF token the
+    /// session is bound to — and remembering both, the way a browser holds the
+    /// cookie in its jar and the token in the page. Every later
+    /// `post_admin_*` on this handle is then authenticated.
+    pub async fn login(&self) -> String {
+        let response = self.login_as(ADMIN_PASSWORD).await;
+        assert_eq!(response.status(), 200, "login failed");
+        let cookie = header_of(&response, "set-cookie")
+            .expect("a session cookie")
+            .split(';')
+            .next()
+            .expect("a name=value pair")
+            .to_string();
+        let csrf = response
+            .json::<serde_json::Value>()
+            .await
+            .expect("a session body")["csrf_token"]
+            .as_str()
+            .expect("a csrf token")
+            .to_string();
+        *self.session.lock().expect("session") = Some((cookie, csrf.clone()));
+        csrf
+    }
+
+    /// The `name=value` pair of the session [`TestApp::login`] opened, ready to
+    /// replay as a `Cookie` header.
+    ///
+    /// The client's jar already carries it — this is for the tests that must
+    /// keep presenting a session *after* the browser has been told to drop it,
+    /// which is how server-side revocation is told apart from the client merely
+    /// losing the cookie.
+    pub fn session_cookie(&self) -> String {
+        self.session
+            .lock()
+            .expect("session")
+            .clone()
+            .expect("log in first")
+            .0
+    }
+
+    /// Attempt a login with an arbitrary password, keeping the whole response —
+    /// for the rejections (401, and the 429 the lockout answers with).
+    pub async fn login_as(&self, password: &str) -> reqwest::Response {
+        self.login_request(password).send().await.expect("login")
+    }
+
+    /// A login the caller adds headers to before sending: the proxy claims
+    /// (`X-Forwarded-For`, `X-Forwarded-Proto`) that decide which address the
+    /// lockout charges and whether the cookie is marked `Secure`.
+    pub fn login_request(&self, password: &str) -> reqwest::RequestBuilder {
+        self.client
+            .post(self.url("/api/admin/login"))
+            .json(&serde_json::json!({ "password": password }))
+    }
+
+    /// The CSRF token of the session [`TestApp::login`] opened.
+    fn csrf(&self) -> String {
+        self.session
+            .lock()
+            .expect("session")
+            .clone()
+            .expect("log in before posting to the admin surface")
+            .1
+    }
+
+    /// POST to the admin surface as an authenticated client: the session from
+    /// the cookie jar, and the CSRF token from the login that opened it.
+    pub async fn post_admin_bytes(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (u16, String) {
+        read(
+            self.admin_request(path, Some(&self.csrf()))
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(body)
+                .send()
+                .await
+                .expect("admin POST"),
+        )
+        .await
+    }
+
+    /// POST to the admin surface with no body — logout, and anything else whose
+    /// news is entirely in the status and the headers.
+    pub async fn post_admin(&self, path: &str) -> reqwest::Response {
+        self.admin_request(path, Some(&self.csrf()))
+            .send()
+            .await
+            .expect("admin POST")
+    }
+
+    /// A POST to the admin surface carrying the CSRF token of the caller's
+    /// choosing — a forged one, or none at all. For the tests *about* the CSRF
+    /// check; everything else uses [`TestApp::post_admin_bytes`].
+    pub fn admin_request(&self, path: &str, csrf: Option<&str>) -> reqwest::RequestBuilder {
+        let request = self.client.post(self.url(path));
+        match csrf {
+            Some(csrf) => request.header(CSRF_HEADER, csrf),
+            None => request,
+        }
     }
 
     /// POST a raw body with a `Content-Type` of the caller's choosing — a
@@ -462,7 +591,13 @@ pub struct TestAppBuilder {
     store: Option<BlobStore>,
     database_url: Option<String>,
     trusted_proxies: Option<String>,
+    admin: Option<AdminAuth>,
 }
+
+/// The admin password every spawned app is gated by (#19), so any test can log
+/// in without configuring one. A test *about* provisioning takes
+/// [`TestAppBuilder::admin`] instead.
+pub const ADMIN_PASSWORD: &str = "test-admin-password";
 
 impl TestAppBuilder {
     /// Ingest configuration — the dedup window and the auto-populate toggle
@@ -493,6 +628,14 @@ impl TestAppBuilder {
     /// them. The default trusts nobody, which is what ships.
     pub fn trusted_proxies(mut self, proxies: &str) -> Self {
         self.trusted_proxies = Some(proxies.to_string());
+        self
+    }
+
+    /// Gate the admin surface with this rather than the default
+    /// [`ADMIN_PASSWORD`] — a shorter session TTL, or
+    /// [`AdminAuth::locked`] for an app nobody can get into.
+    pub fn admin(mut self, admin: AdminAuth) -> Self {
+        self.admin = Some(admin);
         self
     }
 
@@ -530,12 +673,22 @@ impl TestAppBuilder {
         if let Some(proxies) = self.trusted_proxies {
             state.trusted_proxies = trusted_proxies(&proxies);
         }
+        state.admin = self
+            .admin
+            .unwrap_or_else(|| AdminAuth::new(ADMIN_PASSWORD, AdminConfig::default()));
 
         TestApp {
             addr: serve(build_app(state)).await,
             db,
             store,
-            client: reqwest::Client::new(),
+            // With a cookie jar, so the client behaves like the browser the
+            // admin session (#19) is designed around: log in once and every
+            // later request on this handle carries the session.
+            client: reqwest::Client::builder()
+                .cookie_store(true)
+                .build()
+                .expect("client"),
+            session: std::sync::Mutex::new(None),
             tmp,
         }
     }
