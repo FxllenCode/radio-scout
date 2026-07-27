@@ -248,7 +248,7 @@ pub async fn insert_call<C: ConnectionTrait>(
         // column default, because a fresh database gets its `calls` table from
         // the entity-derived DDL in `m0001_init`, which carries no defaults —
         // only an upgraded database goes through `m0006`'s `ALTER`.
-        enhancement: Set(call::Enhancement::NONE.to_string()),
+        enhancement: Set(call::EnhancementState::NONE.to_string()),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
@@ -1200,7 +1200,7 @@ pub async fn get_call_audio<C: ConnectionTrait>(
 pub struct CallAudio {
     pub object_key: String,
     pub mime: Option<String>,
-    /// One of [`call::Enhancement`]'s values. `pending` is why this is here at
+    /// One of [`call::EnhancementState`]'s values. `pending` is why this is here at
     /// all: audio that is queued for enhancement must not be cached as
     /// immutable, because the object behind this id is going to change.
     pub enhancement: String,
@@ -1214,7 +1214,7 @@ pub struct CallAudio {
 pub async fn enhancement_scope<C: ConnectionTrait>(
     db: &C,
     id: CallId,
-) -> Result<Option<(Option<bool>, Option<bool>)>, DbErr> {
+) -> Result<Option<crate::enhance::Scope>, DbErr> {
     let Some(call) = call::Entity::find_by_id(id).one(db).await? else {
         return Ok(None);
     };
@@ -1222,10 +1222,10 @@ pub async fn enhancement_scope<C: ConnectionTrait>(
     let talkgroup = talkgroup::Entity::find_by_id(call.talkgroup_id)
         .one(db)
         .await?;
-    Ok(Some((
-        system.and_then(|s| s.enhancement),
-        talkgroup.and_then(|t| t.enhancement),
-    )))
+    Ok(Some(crate::enhance::Scope {
+        system: system.and_then(|s| s.enhancement),
+        talkgroup: talkgroup.and_then(|t| t.enhancement),
+    }))
 }
 
 /// Move a Call to an enhancement state, leaving its audio alone.
@@ -1262,7 +1262,7 @@ pub async fn store_enhanced_audio<C: ConnectionTrait>(
         .col_expr(call::Column::DurationMs, Expr::value(audio.duration_ms))
         .col_expr(
             call::Column::Enhancement,
-            Expr::value(call::Enhancement::DONE),
+            Expr::value(call::EnhancementState::DONE),
         )
         .filter(call::Column::Id.eq(id))
         .exec(db)
@@ -1289,7 +1289,7 @@ pub struct EnhancedAudio<'a> {
 /// on silently rewrote an operator's whole archive on the next boot.
 pub async fn calls_pending_enhancement<C: ConnectionTrait>(db: &C) -> Result<Vec<CallId>, DbErr> {
     Ok(call::Entity::find()
-        .filter(call::Column::Enhancement.eq(call::Enhancement::PENDING))
+        .filter(call::Column::Enhancement.eq(call::EnhancementState::PENDING))
         .order_by_asc(call::Column::Id)
         .all(db)
         .await?

@@ -403,7 +403,7 @@ mod m0006_enhancement {
                                     // `none` rather than `pending` is what stops
                                     // enabling enhancement from silently
                                     // rewriting an archive on the next boot.
-                                    .default(call::Enhancement::NONE),
+                                    .default(call::EnhancementState::NONE),
                             )
                             .to_owned(),
                     )

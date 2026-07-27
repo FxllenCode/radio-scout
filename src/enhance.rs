@@ -71,9 +71,23 @@ impl EnhancementConfig {
     ///
     /// So scope **narrows and never widens** — which is exactly what US 34
     /// asks for, since its case is keeping one chatty System from eating a Pi.
-    pub fn applies_to(&self, system: Option<bool>, talkgroup: Option<bool>) -> bool {
-        self.mode != Mode::Off && talkgroup.or(system).unwrap_or(true)
+    pub fn applies_to(&self, scope: Scope) -> bool {
+        self.mode != Mode::Off && scope.talkgroup.or(scope.system).unwrap_or(true)
     }
+}
+
+/// What the rows a Call belongs to say about enhancing it.
+///
+/// A named pair rather than a tuple because the two fields have the same type
+/// and opposite precedence: read positionally, swapping them silently inverts
+/// which one wins, and every test would still pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Scope {
+    /// The System's column, or `None` to inherit the instance.
+    pub system: Option<bool>,
+    /// The Talkgroup's column, or `None` to inherit the System. More specific,
+    /// so it wins.
+    pub talkgroup: Option<bool>,
 }
 
 impl Default for EnhancementConfig {
@@ -96,12 +110,22 @@ impl Default for EnhancementConfig {
 /// an operator migrating from rdio hears the same levels they are used to.
 pub const DEFAULT_TARGET_LUFS: f64 = -16.0;
 
-/// The ceiling enhanced audio is limited to, in dBFS.
+/// The **sample-peak** ceiling enhanced audio is held under, in dBFS.
 ///
 /// Below 0 on purpose: normalizing to a loudness *target* can leave individual
 /// peaks above full scale, and a sample that clips is worse than one that is
-/// quiet. -1.5 dBTP is rdio's preset and the usual broadcast allowance.
-pub const TRUE_PEAK_CEILING_DBFS: f64 = -1.5;
+/// quiet. -1.5 matches rdio's preset (`TP=-1.5`) and the usual broadcast
+/// allowance, so an operator migrating hears familiar levels.
+///
+/// **Deliberately sample-peak, not true-peak.** A true-peak measurement
+/// oversamples to catch inter-sample peaks a reconstruction filter can produce
+/// above the highest stored sample. That headroom matters when a signal is
+/// about to be re-encoded by a lossy codec at a high sample rate; here the
+/// output is 16-bit PCM band-limited to 3.4 kHz at 8 kHz, where inter-sample
+/// overshoot is a fraction of a dB and the 1.5 dB of headroom absorbs it. The
+/// oversampling would be pure CPU on a Pi for a peak nothing can hear. Named
+/// for what it is so the gap is a decision rather than a surprise.
+pub const PEAK_CEILING_DBFS: f64 = -1.5;
 
 /// How many Calls may be waiting to be enhanced.
 ///
@@ -482,13 +506,18 @@ fn filter(kind: Type<f32>, cutoff: f32, rate: u32) -> DirectForm2Transposed<f32>
     DirectForm2Transposed::<f32>::new(coefficients)
 }
 
-/// Two-pass EBU R128 loudness normalization, then a true-peak limit.
+/// Two-pass EBU R128 loudness normalization, held under a peak ceiling.
 ///
 /// **The stage that earns its keep.** Measure the whole Call, apply one gain to
-/// land it on the target, then scale back if that would push a peak past the
-/// ceiling. One gain for the Call rather than a moving one, because a
-/// compressor riding the level would pump the noise floor up between words —
-/// the exact artefact that makes cheap AGC unpleasant on scanner audio.
+/// land it on the target, then scale that gain back if it would push a sample
+/// past the ceiling.
+///
+/// One **static** gain for the whole Call, not a limiter riding the level: a
+/// compressor would pump the noise floor up between words, which is the exact
+/// artefact that makes cheap AGC unpleasant on scanner audio. The trade is
+/// real and worth stating — a Call with one loud transient lands below
+/// `target_lufs`, because the ceiling wins. Consistent-and-slightly-quiet is
+/// the better failure for a scanner than consistent-and-clipped.
 fn normalize(samples: &mut [f32], rate: u32, target_lufs: f64) -> Result<(), EnhanceError> {
     let mut meter = ebur128::EbuR128::new(1, rate, ebur128::Mode::I)
         .map_err(|_| EnhanceError::Failed("measure-loudness"))?;
@@ -515,7 +544,7 @@ fn normalize(samples: &mut [f32], rate: u32, target_lufs: f64) -> Result<(), Enh
     };
     // Peaks are found after the gain would be applied, so the ceiling holds for
     // what is actually written rather than for what was measured.
-    let ceiling = 10f32.powf((TRUE_PEAK_CEILING_DBFS / 20.0) as f32);
+    let ceiling = 10f32.powf((PEAK_CEILING_DBFS / 20.0) as f32);
     let peak = samples.iter().fold(0f32, |max, s| max.max(s.abs())) * gain;
     if peak > ceiling {
         gain *= ceiling / peak;
@@ -598,11 +627,20 @@ impl Enhancer {
         }
     }
 
+    /// Whether this instance enhances anything at all.
+    ///
+    /// Asked **before** any lookup that would decide *which* Calls: on the
+    /// shipped default this is the whole answer, and the ingest path must not
+    /// buy three SELECTs to rediscover that a disabled feature is disabled.
+    pub fn is_enabled(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// Whether a Call on this System and Talkgroup would be enhanced.
-    pub fn applies_to(&self, system: Option<bool>, talkgroup: Option<bool>) -> bool {
+    pub fn applies_to(&self, scope: Scope) -> bool {
         self.0
             .as_ref()
-            .is_some_and(|inner| inner.config.applies_to(system, talkgroup))
+            .is_some_and(|inner| inner.config.applies_to(scope))
     }
 
     /// Offer a Call to the queue. `false` means it stays passthrough.
@@ -671,7 +709,11 @@ async fn catch_up(state: &AppState) {
     let pending = match repo::calls_pending_enhancement(&state.db).await {
         Ok(pending) => pending,
         Err(error) => {
-            warn!(%error, "could not look for Calls left mid-enhancement");
+            warn!(
+                reason = %"sweep-failed",
+                %error,
+                "could not look for Calls left mid-enhancement"
+            );
             return;
         }
     };
@@ -683,9 +725,32 @@ async fn catch_up(state: &AppState) {
         "resuming enhancement after a restart"
     );
     for call_id in pending {
-        // A queue that fills here needs no special case: `submit` says so and
-        // the Call keeps its passthrough audio, exactly as at ingest.
-        state.enhancer.submit(call_id);
+        offer(state, call_id).await;
+    }
+}
+
+/// Offer an already-`pending` Call to the queue, and record it as `skipped` if
+/// the queue would not take it.
+///
+/// Shared by ingest and the boot sweep so the two cannot drift: a refusal that
+/// left the row `pending` would be re-queued by every subsequent boot, and —
+/// because a `pending` Call is deliberately served without `immutable`
+/// ([`crate::audio_cache_control`]) — would stay permanently uncacheable. That
+/// is exactly what happens when a restart interrupts more Calls than the queue
+/// is deep.
+pub(crate) async fn offer(state: &AppState, call_id: CallId) {
+    if state.enhancer.submit(call_id) {
+        return;
+    }
+    // `submit` has already said why it refused.
+    if let Err(error) =
+        repo::mark_enhancement(&state.db, call_id, call::EnhancementState::SKIPPED).await
+    {
+        warn!(
+            reason = %"mark-skipped-failed",
+            %error,
+            "a refused Call is still marked pending and will be re-queued every boot"
+        );
     }
 }
 
@@ -771,9 +836,14 @@ async fn skipped(
     cause: &(dyn Display + Send + Sync),
 ) {
     warn!(reason = %reason, cause = %cause, "enhancement skipped");
-    if let Err(error) = repo::mark_enhancement(&state.db, call_id, call::Enhancement::SKIPPED).await
+    if let Err(error) =
+        repo::mark_enhancement(&state.db, call_id, call::EnhancementState::SKIPPED).await
     {
-        warn!(%error, "could not record that enhancement was skipped");
+        warn!(
+            reason = %"mark-skipped-failed",
+            %error,
+            "could not record that enhancement was skipped"
+        );
     }
 }
 
@@ -962,20 +1032,29 @@ mod tests {
     }
 
     /// A recorder killed mid-upload leaves a header promising more audio than
-    /// the file contains. The frames that did arrive are still a Call worth
-    /// levelling, so the damaged tail is dropped rather than the whole upload.
+    /// the file contains. The frames that *did* arrive are still a Call worth
+    /// levelling, so the damaged tail is dropped rather than the whole upload —
+    /// which is the difference between a listener hearing half a transmission
+    /// and hearing nothing.
     #[test]
     fn a_truncated_upload_keeps_the_audio_that_did_arrive() {
-        let mut truncated = wav(&tone(1000.0, 16_000, 0.2), 16_000);
+        let whole = wav(&tone(1000.0, 16_000, 0.2), 16_000);
+        let mut truncated = whole.clone();
         truncated.truncate(truncated.len() / 2);
 
-        match enhance(&truncated, &normalizing()) {
-            // Whatever symphonia makes of the short read, the two acceptable
-            // outcomes are "some audio" and "a named refusal" — never a panic
-            // and never silence presented as success.
-            Ok(enhanced) => assert!(!enhanced.bytes.is_empty()),
-            Err(error) => assert!(!error.reason().is_empty()),
-        }
+        let enhanced = enhance(&truncated, &normalizing()).expect("half a Call is still a Call");
+
+        let (samples, rate) = read_wav(&enhanced.bytes);
+        assert_eq!(rate, OUTPUT_RATE);
+        // About half the original two seconds, at the storage rate — enough to
+        // pin that the surviving frames were kept rather than the file being
+        // padded back out or truncated to nothing.
+        let expected = OUTPUT_RATE as usize;
+        assert!(
+            samples.len().abs_diff(expected) < expected / 4,
+            "{} samples; half of a two-second Call is about {expected}",
+            samples.len()
+        );
     }
 
     // -- The queue's admission decision -------------------------------------
@@ -1053,7 +1132,11 @@ mod tests {
     fn a_disabled_instance_accepts_nothing() {
         assert!(!Enhancer::disabled().submit(1));
         assert!(!Enhancer::default().submit(1));
-        assert!(!Enhancer::disabled().applies_to(None, None));
+        assert!(!Enhancer::disabled().applies_to(Scope::default()));
+        assert!(
+            !Enhancer::disabled().is_enabled(),
+            "and says so before any I/O"
+        );
     }
 
     /// `mode = "off"` is the master switch, so building from configuration must
@@ -1063,7 +1146,9 @@ mod tests {
         let enhancer = Enhancer::from_config(EnhancementConfig::default());
 
         assert!(!enhancer.submit(1));
-        assert!(!enhancer.applies_to(None, None));
+        assert!(!enhancer.applies_to(Scope::default()));
+        // The check ingest makes *before* it will pay for a scope lookup.
+        assert!(!enhancer.is_enabled());
     }
 
     /// ...and configuration that *is* on builds one that accepts Calls and
@@ -1072,9 +1157,13 @@ mod tests {
     fn configuration_with_enhancement_on_builds_a_working_queue() {
         let enhancer = Enhancer::from_config(normalizing());
 
-        assert!(enhancer.applies_to(None, None));
+        assert!(enhancer.is_enabled());
+        assert!(enhancer.applies_to(Scope::default()));
         assert!(
-            !enhancer.applies_to(Some(false), None),
+            !enhancer.applies_to(Scope {
+                system: Some(false),
+                talkgroup: None,
+            }),
             "scope still narrows"
         );
         assert!(enhancer.submit(1));
@@ -1111,7 +1200,7 @@ mod tests {
             ..EnhancementConfig::default()
         };
 
-        assert_eq!(config.applies_to(system, talkgroup), expected);
+        assert_eq!(config.applies_to(Scope { system, talkgroup }), expected);
     }
 
     /// Found by `every_enhanced_call_is_finite_levelled_and_at_the_storage_rate`,
@@ -1133,9 +1222,9 @@ mod tests {
         );
     }
 
-    /// The linear amplitude [`TRUE_PEAK_CEILING_DBFS`] describes.
+    /// The linear amplitude [`PEAK_CEILING_DBFS`] describes.
     fn ceiling() -> f32 {
-        10f32.powf((TRUE_PEAK_CEILING_DBFS / 20.0) as f32)
+        10f32.powf((PEAK_CEILING_DBFS / 20.0) as f32)
     }
 
     fn peak_of(encoded: &[u8]) -> f32 {
@@ -1329,7 +1418,17 @@ mod tests {
         fn arbitrary_bytes_are_refused_rather_than_fatal(
             bytes in proptest::collection::vec(any::<u8>(), 0..4096),
         ) {
-            let _ = enhance(&bytes, &normalizing());
+            // Not merely "does not panic": whichever way it goes must be
+            // *usable* — audio a browser can play, or a slug an operator can
+            // grep. A silent `Ok` carrying nothing would pass a panic-only
+            // check and leave a Call pointing at an empty object.
+            match enhance(&bytes, &normalizing()) {
+                Ok(enhanced) => {
+                    prop_assert!(!enhanced.bytes.is_empty());
+                    prop_assert_eq!(enhanced.mime, "audio/wav");
+                }
+                Err(error) => prop_assert!(!error.reason().is_empty()),
+            }
         }
 
         /// The three invariants every enhanced Call has, whatever went in:

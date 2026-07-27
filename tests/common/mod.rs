@@ -456,7 +456,7 @@ impl TestApp {
                 .await
                 .expect("read call")
                 .expect("the Call still exists");
-            if call.enhancement != radio_scout::db::entities::call::Enhancement::PENDING {
+            if call.enhancement != radio_scout::db::entities::call::EnhancementState::PENDING {
                 return call;
             }
             assert!(

@@ -1128,10 +1128,11 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # Safari from iOS 18.4 — and is not built yet (see the note it refuses with).
 # output = "wav"
 
-# The loudness every enhanced Call is normalized to, in LUFS, and the ceiling
-# peaks are limited to. -16 is a speech target that sounds right on a phone
-# speaker; EBU R128 broadcast is -23, which is noticeably quieter. This is the
-# setting that fixes the level swings between Talkgroups.
+# The loudness every enhanced Call is normalized to, in LUFS. -16 is a speech
+# target that sounds right on a phone speaker; EBU R128 broadcast is -23, which
+# is noticeably quieter. This is the setting that fixes the level swings between
+# Talkgroups. (The peak ceiling that keeps a normalized Call from clipping is
+# fixed at -1.5 dBFS and is not configurable.)
 # target_lufs = -16.0
 
 # How many Calls may be waiting to be enhanced before an arriving one simply

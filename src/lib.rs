@@ -180,7 +180,7 @@ const PENDING_AUDIO_CACHE_CONTROL: &str = "private, max-age=30";
 /// The `Cache-Control` a Call's audio is served with, given its enhancement
 /// state.
 fn audio_cache_control(enhancement: &str) -> &'static str {
-    match enhancement == db::entities::call::Enhancement::PENDING {
+    match enhancement == db::entities::call::EnhancementState::PENDING {
         true => PENDING_AUDIO_CACHE_CONTROL,
         false => AUDIO_CACHE_CONTROL,
     }

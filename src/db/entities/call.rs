@@ -36,13 +36,20 @@ pub struct Model {
 
 /// The states a Call moves through as it is enhanced.
 ///
-/// Deliberately not an enum in the entity: SeaORM's `ActiveEnum` would bind the
-/// stored spelling to a Rust type across two dialects, and this is a column two
-/// queries filter on and nothing joins to. The constants are the single source
-/// of the spellings.
-pub struct Enhancement;
+/// Named `EnhancementState`, not `Enhancement`: CONTEXT.md reserves
+/// **Enhancement** for the *act* of reprocessing a Call's audio, and a type
+/// holding `none`/`pending`/`done`/`skipped` is where that act has got to.
+///
+/// Constants rather than a Rust enum, because the value crosses a database
+/// boundary in both directions. A row written by a newer version — or edited by
+/// hand — must degrade to "not pending", which is the safe reading (serve it,
+/// cache it normally); parsing into an enum would turn an unrecognised string
+/// into an error on a read path that has no useful way to fail. SeaORM's
+/// `ActiveEnum` is avoided for the related reason that it would bind the stored
+/// spelling to a Rust type across two dialects.
+pub struct EnhancementState;
 
-impl Enhancement {
+impl EnhancementState {
     /// Stored exactly as the recorder sent it. Every Call that predates
     /// enhancement, and every Call ingested while it was off.
     pub const NONE: &'static str = "none";

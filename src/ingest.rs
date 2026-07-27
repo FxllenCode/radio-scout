@@ -31,6 +31,7 @@ use sea_orm::TransactionTrait;
 use serde::Deserialize;
 use tracing::{Instrument, Level, Span, field, info, span, warn};
 
+use crate::db::entities::call;
 use crate::db::repo::{self, NewCall, NewCallFrequency, NewCallUnit};
 use crate::failure::ServerError;
 use crate::{AppState, now_ms};
@@ -340,41 +341,43 @@ async fn run_pipeline(
 /// Everything here is best-effort by design: the Call is already stored, already
 /// answered and already on the live feed, so nothing that goes wrong from this
 /// point costs a listener anything — it costs only the levelling.
+///
+/// **The disabled check comes first, and buys no I/O.** On the shipped default
+/// there is nothing to enhance, and an ingest path that spent three SELECTs
+/// rediscovering that would make every operator pay for a feature none of them
+/// turned on — on the hardware least able to afford it.
 async fn queue_for_enhancement(state: &AppState, call_id: crate::call::CallId) {
+    if !state.enhancer.is_enabled() {
+        return;
+    }
     let scope = match repo::enhancement_scope(&state.db, call_id).await {
         Ok(Some(scope)) => scope,
+        // Pruned between the insert and here, which retention is entitled to do.
         Ok(None) => return,
         Err(error) => {
-            warn!(%error, "could not decide whether to enhance this Call");
-            return;
+            return warn!(
+                reason = %"scope-unreadable",
+                %error,
+                "could not decide whether to enhance this Call"
+            );
         }
     };
-    if !state.enhancer.applies_to(scope.0, scope.1) {
+    if !state.enhancer.applies_to(scope) {
         return;
     }
     // Marked before it is offered, so a process that dies between the two finds
     // it again at the next boot rather than losing it. The reverse order would
     // leave a Call queued in memory and `none` on disk.
-    if let Err(error) = repo::mark_enhancement(
-        &state.db,
-        call_id,
-        crate::db::entities::call::Enhancement::PENDING,
-    )
-    .await
+    if let Err(error) =
+        repo::mark_enhancement(&state.db, call_id, call::EnhancementState::PENDING).await
     {
-        warn!(%error, "could not mark a Call for enhancement");
-        return;
+        return warn!(
+            reason = %"mark-pending-failed",
+            %error,
+            "could not mark a Call for enhancement"
+        );
     }
-    if !state.enhancer.submit(call_id) {
-        // `submit` has already said why. Recording it keeps the row honest —
-        // otherwise it stays `pending` forever and every boot re-queues it.
-        let _ = repo::mark_enhancement(
-            &state.db,
-            call_id,
-            crate::db::entities::call::Enhancement::SKIPPED,
-        )
-        .await;
-    }
+    crate::enhance::offer(state, call_id).await;
 }
 
 async fn insert_in_txn(

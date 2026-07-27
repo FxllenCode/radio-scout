@@ -15,6 +15,7 @@
 mod common;
 
 use common::{CallUpload, TestApp};
+use radio_scout::db::entities::call::EnhancementState;
 use radio_scout::enhance::{EnhancementConfig, Mode};
 
 /// The bytes a recorder would send: two seconds of 16 kHz tone, deliberately
@@ -229,7 +230,7 @@ async fn a_call_awaiting_enhancement_is_not_cached_as_immutable() {
     let app = TestApp::with_key("k").await;
     app.upload_ok(call()).await;
     let id = app.the_call().await.id;
-    radio_scout::db::repo::mark_enhancement(&app.db, id, "pending")
+    radio_scout::db::repo::mark_enhancement(&app.db, id, EnhancementState::PENDING)
         .await
         .expect("mark pending");
 
@@ -360,7 +361,7 @@ async fn a_restart_resumes_the_calls_it_was_part_way_through() {
     before.create_api_key("k").await;
     before.upload_ok(call()).await;
     let id = before.the_call().await.id;
-    radio_scout::db::repo::mark_enhancement(&before.db, id, "pending")
+    radio_scout::db::repo::mark_enhancement(&before.db, id, EnhancementState::PENDING)
         .await
         .expect("leave it mid-flight");
 
@@ -458,7 +459,7 @@ async fn a_call_whose_audio_vanished_is_skipped_rather_than_retried_forever() {
     let stored = before.the_call().await;
     // The Call is queued, and its audio is then gone — the order a prune
     // interrupted between the row and the object leaves things in.
-    radio_scout::db::repo::mark_enhancement(&before.db, stored.id, "pending")
+    radio_scout::db::repo::mark_enhancement(&before.db, stored.id, EnhancementState::PENDING)
         .await
         .expect("queue it");
     before
@@ -554,7 +555,7 @@ async fn a_store_that_cannot_be_read_skips_the_call_and_keeps_going() {
     before.create_api_key("k").await;
     before.upload_ok(call()).await;
     let id = before.the_call().await.id;
-    radio_scout::db::repo::mark_enhancement(&before.db, id, "pending")
+    radio_scout::db::repo::mark_enhancement(&before.db, id, EnhancementState::PENDING)
         .await
         .expect("queue it");
 
@@ -586,4 +587,71 @@ async fn a_store_that_cannot_be_read_skips_the_call_and_keeps_going() {
         200,
         "the process must still be serving"
     );
+}
+
+/// **A restart that interrupted more Calls than the queue is deep.**
+///
+/// The boot sweep offers every `pending` Call at once, so a shallow queue
+/// refuses most of them. Those refusals have to be *recorded*: a Call left
+/// `pending` is re-queued by every subsequent boot and — because a pending Call
+/// is deliberately served without `immutable` — stays permanently uncacheable.
+/// So the sweep sheds exactly the way ingest does, and nothing is left in
+/// limbo.
+#[tokio::test]
+async fn a_sweep_that_overflows_the_queue_leaves_nothing_pending() {
+    let shared = tempfile::tempdir().expect("tempdir");
+    let url = shared_database_url(&shared).await;
+    let store =
+        || radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("shared store");
+
+    let before = TestApp::builder()
+        .database_url(url.clone())
+        .store(store())
+        .spawn()
+        .await;
+    before.create_api_key("k").await;
+    for n in 0..8 {
+        before
+            .upload_ok(call().talkgroup(100 + n).at(1_000 + n))
+            .await;
+    }
+    for stored in before.calls().await {
+        radio_scout::db::repo::mark_enhancement(&before.db, stored.id, EnhancementState::PENDING)
+            .await
+            .expect("interrupt it");
+    }
+
+    // A queue one Call deep: the sweep offers eight and can hold one.
+    let after = TestApp::builder()
+        .database_url(url)
+        .store(store())
+        .enhancement(EnhancementConfig {
+            queue_depth: 1,
+            ..normalizing()
+        })
+        .spawn()
+        .await;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let states: Vec<String> = after
+            .calls()
+            .await
+            .into_iter()
+            .map(|c| c.enhancement)
+            .collect();
+        if !states.iter().any(|s| s == EnhancementState::PENDING) {
+            assert_eq!(states.len(), 8);
+            assert!(
+                states.iter().any(|s| s == EnhancementState::SKIPPED),
+                "a one-deep queue offered eight Calls must have refused some: {states:?}"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Calls left pending after the sweep: {states:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
