@@ -1393,17 +1393,21 @@ pub async fn upsert_push_subscription<C: ConnectionTrait>(
 }
 
 /// Forget the subscription holding `token` — the listener turned notifications
-/// off. Returns whether there was one.
+/// off.
+///
+/// Deliberately says nothing about whether there *was* one: unsubscribing is
+/// idempotent by design (a browser that unsubscribes twice, or whose row a
+/// `410 Gone` already removed, is not an error), so a caller has nothing to do
+/// with the count.
 pub async fn delete_push_subscription<C: ConnectionTrait>(
     db: &C,
     token: &str,
-) -> Result<bool, DbErr> {
-    Ok(push_subscription::Entity::delete_many()
+) -> Result<(), DbErr> {
+    push_subscription::Entity::delete_many()
         .filter(push_subscription::Column::Token.eq(token))
         .exec(db)
-        .await?
-        .rows_affected
-        > 0)
+        .await?;
+    Ok(())
 }
 
 /// The subscription a token belongs to, by **Id** — what the live-feed socket

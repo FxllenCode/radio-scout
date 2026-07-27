@@ -64,4 +64,22 @@ beforeAll(() => {
     intercepted(absolute(input), init)) as typeof fetch
 })
 afterEach(() => server.resetHandlers())
+
+// The Selection is persisted per browser (spec US 22, `lib/persist.ts`), and
+// jsdom hands every test in a file the *same* storage — so a test that changes
+// what the listener hears silently changes what the next test's store hydrates,
+// and a Call on a Talkgroup an earlier test switched off simply never arrives.
+//
+// It bit only on Linux, which is the reason it is worth a comment: Node 22 ships
+// an experimental `localStorage` of its own that shadows jsdom's unless
+// `--localstorage-file` is given, so on a Mac the persistence quietly no-ops and
+// the leak is invisible. Tests that care about storage pass their own
+// (`test/storage.ts`); this is for the ones that never think about it.
+afterEach(() => {
+  try {
+    globalThis.localStorage?.clear()
+  } catch {
+    // A context genuinely without one. Nothing was persisted either.
+  }
+})
 afterAll(() => server.close())

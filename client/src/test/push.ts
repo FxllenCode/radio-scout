@@ -8,6 +8,7 @@
  * test asserts on what the app did rather than on which method it called.
  */
 import type {
+  Push,
   PushEnvironment,
   PushRegistration,
   PushSubscriptionLike,
@@ -94,4 +95,26 @@ export function fakePush({
 
   if (subscribed) current = subscription()
   return env
+}
+
+/**
+ * A push handle that does nothing at all — no `/api/push/key`, no
+ * subscription, no state changes.
+ *
+ * This is what [`renderWithProviders`](./utils.tsx) hands the app by default,
+ * because most tests are not about notifications and a shared handle that
+ * fetches on mount would put an unrelated request (and a second `sub` frame
+ * when it settles) inside every one of them. A test that *is* about
+ * notifications passes a real `createPush` instead.
+ */
+export function inertPush(): Push {
+  return {
+    ready: Promise.resolve(),
+    state: 'unsupported',
+    token: undefined,
+    subscribe: () => () => {},
+    enable: async () => 'unsupported',
+    disable: async () => {},
+    sync: async () => {},
+  }
 }

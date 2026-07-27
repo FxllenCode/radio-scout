@@ -580,12 +580,13 @@ mod tests {
             .expect("the vapid token's claims");
         let claims: serde_json::Value = serde_json::from_slice(&claims).expect("json");
         assert_eq!(claims["aud"], "https://push.example.net");
-        // 24 hours is the RFC 8292 ceiling; ours is well inside it and in the
-        // future, which is the whole of what a push service checks.
-        let exp = claims["exp"].as_i64().expect("an exp claim");
-        assert!(
-            (1_700_000_000..=1_700_086_400).contains(&exp),
-            "exp {exp} is not a sane window from the given now"
+        // Exactly twelve hours on. A range assertion would let the lifetime
+        // become nonsense — a token good for two minutes is refused by a push
+        // service the moment a device's clock is a little off, and one past RFC
+        // 8292's 24-hour ceiling is refused outright.
+        assert_eq!(
+            claims["exp"].as_i64().expect("an exp claim"),
+            1_700_000_000 + 12 * 60 * 60
         );
 
         // A 16-byte salt, a 4-byte record size, a 1-byte key length and the

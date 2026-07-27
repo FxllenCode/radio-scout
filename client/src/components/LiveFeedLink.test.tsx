@@ -17,21 +17,34 @@ import { createPush } from '@/lib/push'
 import { renderApp } from '@/test/utils'
 import type { Call } from '@/types'
 
-let subscriptions: Record<string, unknown>[] = []
-let connections = 0
+/** What one test's socket did, recorded against that test. */
+interface Recorded {
+  subscriptions: Record<string, unknown>[]
+  connections: number
+}
+
+let feed: Recorded = { subscriptions: [], connections: 0 }
 /** What the server pushes as soon as a client connects. */
 let greeting: unknown[] = []
 
 beforeEach(() => {
-  subscriptions = []
-  connections = 0
   greeting = []
+  // The socket the *previous* test opened is closed when its component
+  // unmounts, but a frame already in flight can still land after this test has
+  // begun — and a `sub` re-sent when a push subscription resolves (#16) makes
+  // that a routine event rather than a rare one. Each test's handler therefore
+  // closes over its own arrays rather than over the bindings above, so a late
+  // frame is recorded against the test that caused it and nothing leaks
+  // forward.
+  const mine: Recorded = { subscriptions: [], connections: 0 }
+  feed = mine
   server.use(
     liveFeed.addEventListener('connection', ({ client }) => {
-      connections += 1
+      mine.connections += 1
       client.addEventListener('message', (event) => {
-        subscriptions.push(JSON.parse(String(event.data)))
+        mine.subscriptions.push(JSON.parse(String(event.data)))
       })
+      // `greeting` is read live, not captured: a test sets it after this runs.
       for (const frame of greeting) client.send(JSON.stringify(frame))
     }),
   )
@@ -47,8 +60,8 @@ const call: Call = {
 }
 
 async function lastSubscription() {
-  await waitFor(() => expect(subscriptions.length).toBeGreaterThan(0))
-  return subscriptions.at(-1)
+  await waitFor(() => expect(feed.subscriptions.length).toBeGreaterThan(0))
+  return feed.subscriptions.at(-1)
 }
 
 describe('the live-feed link and Web Push (#16)', () => {
@@ -177,7 +190,7 @@ describe('the live-feed link', () => {
       liveFeed.addEventListener('connection', ({ client }) => {
         sockets += 1
         client.addEventListener('message', (event) => {
-          subscriptions.push(JSON.parse(String(event.data)))
+          feed.subscriptions.push(JSON.parse(String(event.data)))
         })
         if (sockets > 1) return
         client.send(JSON.stringify({ t: 'call', call }))
@@ -188,19 +201,19 @@ describe('the live-feed link', () => {
     renderApp('/')
 
     await waitFor(() => expect(sockets).toBe(2), { timeout: 3_000 })
-    await waitFor(() => expect(subscriptions.at(-1)?.since).toBe(call.id))
+    await waitFor(() => expect(feed.subscriptions.at(-1)?.since).toBe(call.id))
   })
 
   it('holds one socket open across the whole app', async () => {
     const user = userEvent.setup()
     renderApp('/')
-    await waitFor(() => expect(connections).toBe(1))
+    await waitFor(() => expect(feed.connections).toBe(1))
 
     await user.click(screen.getByRole('link', { name: 'Search' }))
     await user.click(screen.getByRole('link', { name: 'Live' }))
 
     // Moving between tabs must not drop the feed — or the queue behind it.
-    expect(connections).toBe(1)
+    expect(feed.connections).toBe(1)
   })
 
   /** CONTEXT.md: the live feed and playback mode are mutually exclusive, and

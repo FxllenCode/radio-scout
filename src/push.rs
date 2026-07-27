@@ -249,7 +249,7 @@ pub async fn unsubscribe(
     Json(body): Json<UnsubscribeBody>,
 ) -> Response {
     match repo::delete_push_subscription(&state.db, &body.token).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => ServerError::new("delete-push-subscription", err).into_response(),
     }
 }
