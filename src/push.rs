@@ -654,6 +654,30 @@ mod tests {
         );
     }
 
+    /// The sweep's boundary has to be the *same* boundary [`Coalescer::admit`]
+    /// uses, or the two disagree about what a spent window is. A bucket exactly
+    /// one window old would notify on its next Call anyway, so dropping it
+    /// changes nothing — while keeping one a millisecond younger is the
+    /// difference between coalescing and a second notification.
+    #[test]
+    fn the_sweep_drops_exactly_the_buckets_whose_window_has_passed() {
+        let mut coalescer = coalescer();
+        let window = WINDOW.as_millis() as i64;
+        coalescer.admit((1, 11, 1), 0); // a full window old when swept
+        coalescer.admit((1, 11, 2), 1); // one millisecond short of it
+
+        coalescer.prune(window);
+
+        assert!(
+            !coalescer.seen.contains_key(&(1, 11, 1)),
+            "a bucket a full window old is spent"
+        );
+        assert!(
+            coalescer.seen.contains_key(&(1, 11, 2)),
+            "a bucket still inside its window would suppress its next Call"
+        );
+    }
+
     /// A window of zero is "notify me about everything", which is a legitimate
     /// thing to configure and must not divide by anything.
     #[test]
