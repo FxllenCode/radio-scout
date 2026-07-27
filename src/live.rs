@@ -40,6 +40,7 @@ use tracing::{Instrument, Span, debug, info, warn};
 use crate::AppState;
 use crate::call::{CallId, StoredCall};
 use crate::db::repo;
+use crate::selection::Selection;
 
 /// Live-feed protocol version, announced in the `hello` frame. Bumped on a
 /// breaking wire change so clients can negotiate.
@@ -78,7 +79,10 @@ impl LiveFeed {
         LiveFeed { tx, heartbeat }
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<Arc<StoredCall>> {
+    /// A receiver on the fanout. Every live-feed connection takes one, and so
+    /// does the Web Push sender (#16) — a notification is decided from the same
+    /// broadcast a socket is served from.
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<StoredCall>> {
         self.tx.subscribe()
     }
 
@@ -144,56 +148,10 @@ impl AccessScope {
     }
 }
 
-/// The listener's subscription matrix: `systemRef -> talkgroupRef -> enabled`.
-/// JSON object keys are strings, so refs are compared as strings. `all` is the
-/// spec's global all-on (story 21) — a "monitor everything" client.
-#[derive(Debug, Default)]
-struct Subscription {
-    selection: HashMap<String, HashMap<String, bool>>,
-    all: bool,
-}
-
-/// The Talkgroup key meaning "every Talkgroup in this System" (#11). A client
-/// holding a System can't enumerate its Talkgroups — it only knows the ones it
-/// has heard — and rdio only avoids the problem by shipping its whole config to
-/// the client, so the matrix gets a wildcard instead.
-const TALKGROUP_WILDCARD: &str = "*";
-
-impl Subscription {
-    /// Is `(system_ref, talkgroup_ref)` selected?
-    ///
-    /// Most specific wins: an explicit entry for the Talkgroup, then the
-    /// System's wildcard, then global-all. That ordering is what lets a listener
-    /// **avoid** one Talkgroup out of an all-on selection (spec US 14) or out of
-    /// a held System (US 11) — an exception to a default, rather than something
-    /// the default overrules.
-    fn selects(&self, system_ref: i64, talkgroup_ref: i64) -> bool {
-        let system = self.selection.get(&system_ref.to_string());
-        if let Some(explicit) = system.and_then(|tgs| tgs.get(&talkgroup_ref.to_string())) {
-            return *explicit;
-        }
-        if let Some(wildcard) = system.and_then(|tgs| tgs.get(TALKGROUP_WILDCARD)) {
-            return *wildcard;
-        }
-        self.all
-    }
-
-    /// Nothing is selected at all (rdio's `IsAllOff`): no global-all and no
-    /// enabled entry — exclusions alone select nothing. Lets [`ConnState::wants`]
-    /// skip patch resolution for an idle connection.
-    fn is_all_off(&self) -> bool {
-        !self.all
-            && self
-                .selection
-                .values()
-                .all(|talkgroups| talkgroups.values().all(|&on| !on))
-    }
-}
-
-/// Per-connection filtering state: the subscription matrix, the access scope, and
-/// the heartbeat tracker.
+/// Per-connection filtering state: the listener's Selection, the access scope,
+/// the heartbeat tracker, and the push subscription this socket stands in for.
 struct ConnState {
-    sub: Subscription,
+    sub: Selection,
     scope: AccessScope,
     heartbeat: Heartbeat,
 }
@@ -202,27 +160,19 @@ impl ConnState {
     /// A fresh connection: nothing selected, full access (v1 open listening).
     fn new() -> Self {
         ConnState {
-            sub: Subscription::default(),
+            sub: Selection::default(),
             scope: AccessScope::All,
             heartbeat: Heartbeat::new(),
         }
     }
 
-    /// Does this connection receive `call`? Yes when some Talkgroup the Call
-    /// reaches — its own, or any patched one within the Call's System — is both
-    /// selected by the subscription matrix and permitted by the access scope.
-    /// Mirrors rdio's `IsEnabled` (primary OR patch) and adds the scope gate.
+    /// Does this connection receive `call`? The shared Selection rule
+    /// ([`crate::selection`]), gated further by the connection's access scope —
+    /// so a Talkgroup the listener selected but may not hear delivers nothing.
     fn wants(&self, call: &StoredCall) -> bool {
-        if self.sub.is_all_off() {
-            return false;
-        }
-        let system_ref = call.system_ref;
-        std::iter::once(call.talkgroup_ref)
-            .chain(call.patches.iter().copied())
-            .any(|talkgroup_ref| {
-                self.sub.selects(system_ref, talkgroup_ref)
-                    && self.scope.permits(system_ref, talkgroup_ref)
-            })
+        self.sub.reaches(call, |system_ref, talkgroup_ref| {
+            self.scope.permits(system_ref, talkgroup_ref)
+        })
     }
 }
 
@@ -300,8 +250,7 @@ fn on_broadcast(
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t")]
 enum ClientMessage {
-    /// Replace the subscription matrix, optionally with a reconnect catch-up
-    /// cursor.
+    /// Replace the Selection, optionally with a reconnect catch-up cursor.
     #[serde(rename = "sub")]
     Sub {
         #[serde(default)]
@@ -312,6 +261,14 @@ enum ClientMessage {
         /// backfills matching Calls with a greater id before resuming live.
         #[serde(default)]
         since: Option<CallId>,
+        /// The token of the listener's push subscription (#16), if they have
+        /// one. While this socket is open they are demonstrably listening, so
+        /// the push sender leaves them alone; when it closes — a shut tab, or
+        /// the heartbeat reaping a phone iOS suspended — notifications take
+        /// over. A **token**, not an Id: an Id is sequential, and a client that
+        /// could name any subscription could silence any listener.
+        #[serde(default)]
+        push: Option<String>,
     },
 }
 
@@ -379,6 +336,10 @@ async fn run_connection(mut socket: WebSocket, state: AppState) {
     let mut receiver = state.live.subscribe();
     let heartbeat_period = state.live.heartbeat();
     let mut conn = ConnState::new();
+    // The listener's claim on their push subscription, held for as long as this
+    // connection is. Dropping it (any way this function returns) is what hands
+    // them back to the push sender (#16).
+    let mut attached: Option<crate::push::Attached> = None;
 
     // Greet the client before anything else.
     if socket
@@ -402,9 +363,15 @@ async fn run_connection(mut socket: WebSocket, state: AppState) {
                         conn.heartbeat.on_activity();
                         match message {
                             Message::Text(text) => {
-                                if handle_text(&mut socket, &state, &mut conn, text.as_str())
-                                    .await
-                                    .is_err()
+                                if handle_text(
+                                    &mut socket,
+                                    &state,
+                                    &mut conn,
+                                    &mut attached,
+                                    text.as_str(),
+                                )
+                                .await
+                                .is_err()
                                 {
                                     break;
                                 }
@@ -463,18 +430,36 @@ async fn handle_text(
     socket: &mut WebSocket,
     state: &AppState,
     conn: &mut ConnState,
+    attached: &mut Option<crate::push::Attached>,
     text: &str,
 ) -> Result<(), Disconnected> {
-    let Ok(ClientMessage::Sub { sel, all, since }) = serde_json::from_str::<ClientMessage>(text)
+    let Ok(ClientMessage::Sub {
+        sel,
+        all,
+        since,
+        push,
+    }) = serde_json::from_str::<ClientMessage>(text)
     else {
         return Ok(());
     };
-    conn.sub.selection = sel;
-    conn.sub.all = all;
+    conn.sub = Selection { sel, all };
+    // Released before the new claim is taken: re-subscribing with the *same*
+    // subscription would otherwise attach it and then immediately detach it as
+    // the old guard dropped.
+    attached.take();
+    *attached = match push {
+        // A token nobody holds attaches nothing — silently, because a stale
+        // token is what a client that unsubscribed on another device has.
+        Some(token) => repo::push_subscription_id(&state.db, &token)
+            .await
+            .unwrap_or_default()
+            .map(|subscription| state.push.attach(subscription)),
+        None => None,
+    };
     // Protocol detail, so DEBUG (rule 7): a listener re-subscribes every time
     // they toggle a Talkgroup. The shape of the selection, never its contents —
     // what someone listens to is theirs (rule 5's spirit).
-    let systems = conn.sub.selection.len();
+    let systems = conn.sub.sel.len();
     let catchup = since.is_some();
     debug!(systems, all, catchup, "live-feed subscription updated");
     // Ack so the client knows the subscription is live before it relies on
@@ -540,7 +525,6 @@ async fn send_catchup(
 mod tests {
     use super::*;
     use crate::testing::LogCapture;
-    use rstest::rstest;
 
     fn call(system_ref: i64, talkgroup_ref: i64) -> StoredCall {
         call_with_patches(system_ref, talkgroup_ref, vec![])
@@ -567,15 +551,14 @@ mod tests {
         }
     }
 
-    fn subscription(pairs: &[(&str, &str)], all: bool) -> Subscription {
-        let mut selection: HashMap<String, HashMap<String, bool>> = HashMap::new();
+    fn selection(pairs: &[(&str, &str)], all: bool) -> Selection {
+        let mut sel: HashMap<String, HashMap<String, bool>> = HashMap::new();
         for (system, talkgroup) in pairs {
-            selection
-                .entry((*system).to_string())
+            sel.entry((*system).to_string())
                 .or_default()
                 .insert((*talkgroup).to_string(), true);
         }
-        Subscription { selection, all }
+        Selection { sel, all }
     }
 
     /// A connection with the given selection, full v1 access scope.
@@ -585,7 +568,7 @@ mod tests {
 
     fn conn_scoped(pairs: &[(&str, &str)], scope: AccessScope) -> ConnState {
         ConnState {
-            sub: subscription(pairs, false),
+            sub: selection(pairs, false),
             scope,
             heartbeat: Heartbeat::new(),
         }
@@ -609,7 +592,7 @@ mod tests {
     fn explicitly_disabled_talkgroup_is_not_wanted() {
         let mut c = conn(&[]);
         c.sub
-            .selection
+            .sel
             .entry("11".to_string())
             .or_default()
             .insert("54241".to_string(), false);
@@ -619,7 +602,7 @@ mod tests {
     #[test]
     fn all_wants_everything() {
         let c = ConnState {
-            sub: subscription(&[], true),
+            sub: selection(&[], true),
             scope: AccessScope::All,
             heartbeat: Heartbeat::new(),
         };
@@ -651,13 +634,13 @@ mod tests {
     #[test]
     fn explicit_entry_overrides_global_all() {
         let mut avoiding = ConnState {
-            sub: subscription(&[], true),
+            sub: selection(&[], true),
             scope: AccessScope::All,
             heartbeat: Heartbeat::new(),
         };
         avoiding
             .sub
-            .selection
+            .sel
             .entry("11".to_string())
             .or_default()
             .insert("54241".to_string(), false);
@@ -676,7 +659,7 @@ mod tests {
     fn explicit_entry_overrides_the_system_wildcard() {
         let mut held = conn(&[("11", "*")]);
         held.sub
-            .selection
+            .sel
             .entry("11".to_string())
             .or_default()
             .insert("54241".to_string(), false);
@@ -692,7 +675,7 @@ mod tests {
         let mut nothing = conn(&[]);
         nothing
             .sub
-            .selection
+            .sel
             .entry("11".to_string())
             .or_default()
             .insert("54241".to_string(), false);
@@ -789,25 +772,8 @@ mod tests {
         );
     }
 
-    // --- is_all_off ----------------------------------------------------------
-
-    #[rstest]
-    #[case(subscription(&[], false), true)] // truly empty
-    #[case(subscription(&[("11", "100")], false), false)] // one enabled
-    #[case(subscription(&[], true), false)] // global all-on
-    fn is_all_off_cases(#[case] sub: Subscription, #[case] expected: bool) {
-        assert_eq!(sub.is_all_off(), expected);
-    }
-
-    #[test]
-    fn is_all_off_with_only_disabled_entries() {
-        let mut sub = subscription(&[], false);
-        sub.selection
-            .entry("11".to_string())
-            .or_default()
-            .insert("100".to_string(), false);
-        assert!(sub.is_all_off(), "an explicit-false entry is still all-off");
-    }
+    // (The Selection algebra itself — `selects`, `is_all_off` — is tested in
+    // `crate::selection`, which the push sender shares.)
 
     // --- LiveFeed ------------------------------------------------------------
 
@@ -931,17 +897,37 @@ mod tests {
     fn sub_message_parses_since_cursor() {
         let msg: ClientMessage =
             serde_json::from_str(r#"{"t":"sub","sel":{"11":{"100":true}},"since":42}"#).unwrap();
-        let ClientMessage::Sub { since, all, .. } = msg;
+        let ClientMessage::Sub {
+            since, all, push, ..
+        } = msg;
         assert_eq!(since, Some(42));
         assert!(!all);
+        assert_eq!(push, None, "a client without notifications sends none");
+    }
+
+    /// The push subscription a socket stands in for (#16): while it is open,
+    /// its listener is not notified. A token rather than an Id, so a client
+    /// cannot name a subscription it was never given.
+    #[test]
+    fn sub_message_parses_the_push_subscription() {
+        let msg: ClientMessage =
+            serde_json::from_str(r#"{"t":"sub","all":true,"push":"a-token"}"#).unwrap();
+        let ClientMessage::Sub { push, .. } = msg;
+        assert_eq!(push.as_deref(), Some("a-token"));
     }
 
     #[test]
     fn sub_message_without_since_defaults_to_none() {
         let msg: ClientMessage = serde_json::from_str(r#"{"t":"sub","all":true}"#).unwrap();
-        let ClientMessage::Sub { since, all, sel } = msg;
+        let ClientMessage::Sub {
+            since,
+            all,
+            sel,
+            push,
+        } = msg;
         assert_eq!(since, None);
         assert!(all);
         assert!(sel.is_empty());
+        assert_eq!(push, None);
     }
 }

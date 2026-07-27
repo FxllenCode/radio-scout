@@ -9,7 +9,7 @@
  *
  * 1. **What is stored is what goes on the wire.** No rebuild step, and the
  *    client can filter its own queue with exactly the rule the server applies
- *    (`Subscription::selects` in `src/live.rs`), so the two can't drift.
+ *    (`Selection::selects` in `src/selection.rs`), so the two can't drift.
  * 2. **A Talkgroup nobody has decided about inherits the default**, so a
  *    Talkgroup auto-populated (#8) after the selection was saved is heard
  *    rather than silently missing. rdio has to rebuild its map against its

@@ -46,6 +46,7 @@ use crate::admin::AdminConfig;
 use crate::blob::{S3Config, StorageConfig};
 use crate::ingest::IngestConfig;
 use crate::observability;
+use crate::push::PushConfig;
 use crate::retention::RetentionConfig;
 
 /// Radio-Scout's command line. Every flag here overrides the same setting from
@@ -244,6 +245,7 @@ pub struct Config {
     pub retention: Retention,
     pub ingest: Ingest,
     pub admin: Admin,
+    pub push: Push,
     pub log: Log,
 }
 
@@ -337,6 +339,17 @@ impl Config {
         }
     }
 
+    /// How Web Push behaves (#16, ADR-0005). The identity it signs with is not
+    /// here: like the ingest key and the admin password, first run *writes* it
+    /// (`RADIO_SCOUT_VAPID_PRIVATE_KEY`).
+    pub fn push(&self) -> PushConfig {
+        PushConfig {
+            coalesce: Duration::from_secs(self.push.coalesce_secs),
+            ttl: Duration::from_secs(self.push.ttl_secs),
+            subject: self.push.subject.clone(),
+        }
+    }
+
     /// Refuse a configuration that parsed but cannot be run.
     ///
     /// Every check here is one an operator would otherwise meet as a runtime
@@ -379,6 +392,18 @@ impl Config {
                 "retention.batch_size",
                 "0",
                 "a positive number of Calls per batch",
+            ));
+        }
+        // RFC 8292 §2.1: `sub` is a contact URI. A push service that refuses a
+        // token over it fails *every* notification, silently, hours later.
+        if !["mailto:", "https://"]
+            .iter()
+            .any(|scheme| self.push.subject.starts_with(scheme))
+        {
+            return Err(ConfigError::invalid_key(
+                "push.subject",
+                &self.push.subject,
+                "a contact URI: \"mailto:you@example.com\" or \"https://example.com/contact\"",
             ));
         }
         validate_directives("log.directives", &self.log.directives)?;
@@ -579,6 +604,39 @@ impl Default for Admin {
             session_max_secs: default.session_max.as_secs(),
             lockout_attempts: default.lockout_attempts,
             lockout_secs: default.lockout.as_secs(),
+        }
+    }
+}
+
+/// `[push]` — Web Push notifications (#16, spec US 32, ADR-0005).
+///
+/// The VAPID identity itself is deliberately not here, for the same reason the
+/// admin password isn't: first run **writes** it, so it lives in the
+/// environment and `.env` as `RADIO_SCOUT_VAPID_PRIVATE_KEY`. Everything here
+/// is a knob rather than a secret.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Push {
+    /// At most one notification per Talkgroup per device in this window. `0`
+    /// notifies about every Call.
+    pub coalesce_secs: u64,
+    /// How long a push service holds a notification for a device that is
+    /// offline.
+    pub ttl_secs: u64,
+    /// The VAPID `sub` claim: a `mailto:` or `https:` URI a push service's
+    /// operator can reach this instance's operator through.
+    pub subject: String,
+}
+
+impl Default for Push {
+    /// As shipped — read off [`PushConfig`] so the file's defaults and the
+    /// code's cannot drift apart.
+    fn default() -> Self {
+        let default = PushConfig::default();
+        Push {
+            coalesce_secs: default.coalesce.as_secs(),
+            ttl_secs: default.ttl.as_secs(),
+            subject: default.subject,
         }
     }
 }
@@ -917,6 +975,29 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # lockout_attempts = 5
 # lockout_secs = 900
 
+[push]
+# Web Push notifications for a phone that has the app installed (#16). The
+# identity notifications are signed with is NOT here: first run generates one
+# and writes it to the env file as RADIO_SCOUT_VAPID_PRIVATE_KEY, exactly like
+# the ingest key. Delete that line and the next boot makes a new one — which
+# every browser that had already subscribed will no longer be notified by.
+#
+# Notifications only go to a listener who is *not* listening: a device with the
+# live feed open already has the Call.
+
+# At most one notification per Talkgroup per device in this window, carrying a
+# count of the Calls it stands for. 0 notifies about every Call.
+# coalesce_secs = 300
+
+# How long a push service should hold a notification for a phone that is off or
+# out of signal before giving up.
+# ttl_secs = 3600
+
+# The contact a push service's operator can reach you through (RFC 8292 asks
+# for a mailto: or https: URI). Some services refuse notifications without a
+# real one, so set it if you use a public instance.
+# subject = "mailto:admin@localhost"
+
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a
 # single run.
@@ -1121,6 +1202,19 @@ pub fn resolve(
         "a number of Calls per batch",
     )? {
         config.retention.batch_size = batch;
+    }
+    if let Some(secs) = parsed_env(
+        &env,
+        "RADIO_SCOUT_PUSH_COALESCE_SECS",
+        "a number of seconds",
+    )? {
+        config.push.coalesce_secs = secs;
+    }
+    if let Some(secs) = parsed_env(&env, "RADIO_SCOUT_PUSH_TTL_SECS", "a number of seconds")? {
+        config.push.ttl_secs = secs;
+    }
+    if let Some(subject) = set_env(&env, "RADIO_SCOUT_PUSH_SUBJECT") {
+        config.push.subject = subject;
     }
     if let Some(secs) = parsed_env(
         &env,
@@ -1691,6 +1785,60 @@ mod tests {
         assert_eq!(admin.lockout, Duration::from_secs(30));
     }
 
+    /// Web Push (#16). The window is the anti-storm knob and the subject is
+    /// what a push service's operator contacts ours through, so both have to be
+    /// settable on a headless install.
+    #[test]
+    fn push_coalescing_and_contact_are_configurable() {
+        let config = resolve(
+            &cli(&[]),
+            no_env,
+            Some(&file(
+                "[push]\ncoalesce_secs = 60\nttl_secs = 120\nsubject = \"mailto:ops@example.com\"\n",
+            )),
+        )
+        .expect("resolve");
+
+        let push = config.push();
+        assert_eq!(push.coalesce, Duration::from_secs(60));
+        assert_eq!(push.ttl, Duration::from_secs(120));
+        assert_eq!(push.subject, "mailto:ops@example.com");
+    }
+
+    /// RFC 8292 requires `sub` to be a `mailto:` or `https:` URI, and some push
+    /// services refuse a token without one — which would surface as every
+    /// notification silently failing, long after the boot that misconfigured
+    /// it.
+    #[rstest]
+    #[case("ops@example.com")] // an address, not a URI
+    #[case("http://example.com/contact")] // not TLS
+    #[case("")]
+    fn a_contact_that_is_not_a_uri_refuses_to_boot(#[case] subject: &str) {
+        let error = resolve(
+            &cli(&[]),
+            no_env,
+            Some(&file(&format!("[push]\nsubject = \"{subject}\"\n"))),
+        )
+        .expect_err("an unusable contact");
+
+        assert!(error.to_string().contains("push.subject"), "{error}");
+        assert!(error.to_string().contains("mailto:"), "{error}");
+    }
+
+    /// Zero is a legitimate window — "tell me about everything" — and must not
+    /// be mistaken for the impossible values `[admin]` refuses.
+    #[test]
+    fn a_zero_coalescing_window_is_allowed() {
+        let config = resolve(
+            &cli(&[]),
+            no_env,
+            Some(&file("[push]\ncoalesce_secs = 0\n")),
+        )
+        .expect("resolve");
+
+        assert_eq!(config.push().coalesce, Duration::ZERO);
+    }
+
     /// Every one of these bricks the admin surface at zero — a session already
     /// expired when it is issued, or an address locked out before its first
     /// attempt. There is no "0 disables it" reading to guess at, so the boot
@@ -2191,6 +2339,9 @@ mod tests {
     #[case::session_max(&[("RADIO_SCOUT_ADMIN_SESSION_MAX_SECS", "600")], |c: &Config| assert_eq!(c.admin().session_max, Duration::from_secs(600)))]
     #[case::lockout_attempts(&[("RADIO_SCOUT_ADMIN_LOCKOUT_ATTEMPTS", "2")], |c: &Config| assert_eq!(c.admin().lockout_attempts, 2))]
     #[case::lockout_secs(&[("RADIO_SCOUT_ADMIN_LOCKOUT_SECS", "30")], |c: &Config| assert_eq!(c.admin().lockout, Duration::from_secs(30)))]
+    #[case::push_coalesce(&[("RADIO_SCOUT_PUSH_COALESCE_SECS", "60")], |c: &Config| assert_eq!(c.push().coalesce, Duration::from_secs(60)))]
+    #[case::push_ttl(&[("RADIO_SCOUT_PUSH_TTL_SECS", "120")], |c: &Config| assert_eq!(c.push().ttl, Duration::from_secs(120)))]
+    #[case::push_subject(&[("RADIO_SCOUT_PUSH_SUBJECT", "mailto:ops@example.com")], |c: &Config| assert_eq!(c.push().subject, "mailto:ops@example.com"))]
     fn every_setting_can_come_from_the_environment(
         #[case] vars: &[(&str, &str)],
         #[case] expected: fn(&Config),

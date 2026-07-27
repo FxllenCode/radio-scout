@@ -2,11 +2,18 @@ import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { avoid, received, selectLiveMatrix } from '@/store/live'
+import {
+  avoid,
+  chooseTalkgroups,
+  received,
+  selectLiveMatrix,
+} from '@/store/live'
 import { makeStore } from '@/store/store'
 import { enterPlaybackMode } from '@/store/playback'
 import { liveFeed } from '@/test/handlers'
 import { server } from '@/test/setup'
+import { fakePush } from '@/test/push'
+import { createPush } from '@/lib/push'
 import { renderApp } from '@/test/utils'
 import type { Call } from '@/types'
 
@@ -43,6 +50,55 @@ async function lastSubscription() {
   await waitFor(() => expect(subscriptions.length).toBeGreaterThan(0))
   return subscriptions.at(-1)
 }
+
+describe('the live-feed link and Web Push (#16)', () => {
+  /** A listener with notifications on, holding the server's token. */
+  const subscribed = () => createPush({ environment: fakePush({ permission: 'granted', subscribed: true }) })
+
+  // While this socket is open the listener is demonstrably listening, so the
+  // server holds its notifications; presenting the subscription id is how it
+  // knows which listener that is.
+  it('tells the server which push subscription is listening', async () => {
+    renderApp('/', undefined, subscribed())
+
+    await waitFor(async () =>
+      expect(await lastSubscription()).toMatchObject({
+        push: 'a-subscription-token',
+      }),
+    )
+  })
+
+  it('sends no subscription id when notifications are off', async () => {
+    renderApp('/', undefined, createPush({ environment: fakePush() }))
+
+    expect(await lastSubscription()).toEqual({ t: 'sub', all: true, sel: {} })
+  })
+
+  // Notifications are about *watched* Talkgroups, so a Selection the listener
+  // changes has to reach the server's copy — otherwise a phone in a pocket
+  // keeps being woken by a Talkgroup its owner turned off an hour ago.
+  it('re-registers the Selection when the listener changes it', async () => {
+    const push = subscribed()
+    const store = makeStore()
+    const synced = vi.spyOn(push, 'sync')
+    renderApp('/', store, push)
+    await lastSubscription()
+
+    act(() => {
+      store.dispatch(
+        chooseTalkgroups({
+          keys: [{ systemRef: 11, talkgroupRef: 54241 }],
+          on: false,
+        }),
+      )
+    })
+
+    await waitFor(() => expect(synced).toHaveBeenCalled())
+    expect(synced.mock.lastCall?.[0]).toMatchObject({
+      sel: { 11: { 54241: false } },
+    })
+  })
+})
 
 describe('the live-feed link', () => {
   it('asks for everything until the listener says otherwise', async () => {

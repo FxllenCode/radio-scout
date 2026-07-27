@@ -1,11 +1,12 @@
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
+import { NotificationsRow } from '@/components/NotificationsRow'
 import { useGetHealthQuery } from '@/store/api'
 
 /** Settings — connection/server status, audio enhancement, notifications, theme,
  *  admin (#19). Server settings are a TOML file + flags, not a UI (ADR-0012);
- *  the server-status row is live now (RTK Query → /healthz),
- *  proving the store + one-origin wiring end to end. */
+ *  the server-status row is live now (RTK Query → /healthz), and notifications
+ *  are the Web Push switch (#16). */
 export function SettingsScreen() {
   const { data, isSuccess, isError, isLoading } = useGetHealthQuery()
   const online = isSuccess && data?.trim() === 'ok'
@@ -20,7 +21,8 @@ export function SettingsScreen() {
             {isLoading ? 'checking…' : online ? 'online' : isError ? 'unreachable' : 'unknown'}
           </span>
         </li>
-        {['Audio enhancement', 'Notifications', 'Theme', 'Admin'].map((label) => (
+        <NotificationsRow />
+        {['Audio enhancement', 'Theme', 'Admin'].map((label) => (
           <li
             key={label}
             className="flex items-center justify-between px-4 py-3.5 text-muted-foreground"

@@ -1,0 +1,13 @@
+{
+  /* The service worker runs in a WebWorker scope: `self` is a
+     `ServiceWorkerGlobalScope`, there is no `window`, and the DOM lib's own
+     `self` would shadow it. Its own project, so the app keeps DOM types and the
+     worker keeps worker types. */
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo",
+    "lib": ["ES2023", "WebWorker"],
+    "types": ["vite/client"]
+  },
+  "include": ["src/sw.ts", "src/lib/pushMessage.ts", "src/lib/pushOpen.ts"]
+}

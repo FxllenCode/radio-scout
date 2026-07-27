@@ -44,6 +44,7 @@ use sea_orm::DbErr;
 use tracing::{error, info};
 
 use crate::db::repo;
+use crate::webpush::VapidKey;
 
 /// The environment variable — and `.env` key — that pins the ingest key.
 pub const INGEST_KEY_VAR: &str = "RADIO_SCOUT_API_KEY";
@@ -237,6 +238,119 @@ pub fn log_admin_password(outcome: &AdminPassword) {
                 "could not save a generated admin password; the admin surface is closed — set one yourself and restart"
             );
         }
+    }
+}
+
+/// The environment variable — and `.env` key — holding the server's VAPID
+/// identity (#16, ADR-0005).
+pub const VAPID_KEY_VAR: &str = "RADIO_SCOUT_VAPID_PRIVATE_KEY";
+
+/// What booting did about the Web Push identity.
+///
+/// The third credential with this shape, and for the third time the same
+/// reason: first run **writes** it, so it lives in the environment and `.env`
+/// rather than in a file `--write-config` generates.
+///
+/// One thing is different. An identity that cannot be read back is not merely
+/// unusable — a new one every boot would silently invalidate every subscription
+/// a browser had already pinned to the old public key, and a listener would
+/// stop being notified with nothing anywhere saying why. So a key that cannot
+/// be saved, or one that cannot be parsed, leaves push **off** and says so,
+/// rather than running on an identity that will not survive the restart.
+pub enum Vapid {
+    /// The operator's own key, from the environment or `.env`.
+    Configured(VapidKey),
+    /// First run with nothing configured: one was generated and written to
+    /// `env_file`.
+    Generated { key: VapidKey, env_file: PathBuf },
+    /// `env_file` could not be written, so no identity is in service.
+    NotPersisted { env_file: PathBuf, error: io::Error },
+    /// A configured value that is not a P-256 private key.
+    Invalid,
+}
+
+impl std::fmt::Debug for Vapid {
+    /// The key redacts itself; this exists so the enum around it does too.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Vapid::Configured(_) => f.write_str("Configured(<redacted>)"),
+            Vapid::Generated { env_file, .. } => f
+                .debug_struct("Generated")
+                .field("key", &"<redacted>")
+                .field("env_file", env_file)
+                .finish(),
+            Vapid::NotPersisted { env_file, error } => f
+                .debug_struct("NotPersisted")
+                .field("env_file", env_file)
+                .field("error", error)
+                .finish(),
+            Vapid::Invalid => f.write_str("Invalid"),
+        }
+    }
+}
+
+impl Vapid {
+    /// The identity to send notifications with, or `None` to leave Web Push
+    /// off.
+    pub fn key(self) -> Option<VapidKey> {
+        match self {
+            Vapid::Configured(key) => Some(key),
+            Vapid::Generated { key, .. } => Some(key),
+            Vapid::NotPersisted { .. } | Vapid::Invalid => None,
+        }
+    }
+}
+
+/// Make sure the server has a Web Push identity, and report what that took.
+pub fn provision_vapid_key(configured: Option<&str>, env_file: &Path) -> Vapid {
+    if let Some(text) = configured.map(str::trim).filter(|value| !value.is_empty()) {
+        return match VapidKey::parse(text) {
+            Ok(key) => Vapid::Configured(key),
+            Err(_) => Vapid::Invalid,
+        };
+    }
+
+    let key = VapidKey::generate();
+    let env_file = env_file.to_path_buf();
+    match persist(&env_file, VAPID_KEY_VAR, &key.secret_base64url()) {
+        Ok(()) => Vapid::Generated { key, env_file },
+        Err(error) => Vapid::NotPersisted { env_file, error },
+    }
+}
+
+/// Say what boot did about the Web Push identity — never what the key is. The
+/// **public** half is logged when there is one: it is not a secret, it is what
+/// a browser pins, and an operator debugging a subscription needs to be able to
+/// tell which identity is in service.
+pub fn log_vapid_key(outcome: &Vapid) {
+    match outcome {
+        Vapid::Configured(key) => info!(
+            source = VAPID_KEY_VAR,
+            public_key = %key.public_base64url(),
+            "web push identity configured"
+        ),
+        Vapid::Generated { key, env_file } => {
+            let env_file = env_file.display();
+            info!(
+                %env_file,
+                var = VAPID_KEY_VAR,
+                public_key = %key.public_base64url(),
+                "no web push identity configured; generated one and wrote it to the env file"
+            );
+        }
+        Vapid::NotPersisted { env_file, error } => {
+            let env_file = env_file.display();
+            error!(
+                %env_file,
+                var = VAPID_KEY_VAR,
+                %error,
+                "could not save a generated web push identity; notifications are off — set one yourself and restart"
+            );
+        }
+        Vapid::Invalid => error!(
+            var = VAPID_KEY_VAR,
+            "web push identity is not a valid key; notifications are off"
+        ),
     }
 }
 
@@ -756,6 +870,143 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+    }
+
+    // -- The Web Push identity (#16, ADR-0005) -------------------------------
+
+    /// The identity has to be the *same* one next boot: a browser pins the
+    /// public key at subscribe time, so an identity that changes on restart
+    /// silently stops every existing subscription from ever being notified
+    /// again. That is why it is written to a file rather than kept in memory.
+    #[test]
+    fn a_generated_vapid_key_is_written_to_the_env_file_and_survives_a_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+        let capture = LogCapture::start();
+
+        let first = provision_vapid_key(None, &env_file);
+        log_vapid_key(&first);
+        let secret = value_in(&env_file, VAPID_KEY_VAR);
+        // The next boot reads what the first one wrote.
+        let second = provision_vapid_key(Some(&secret), &env_file);
+        log_vapid_key(&second);
+
+        let public = first
+            .key()
+            .expect("a generated identity")
+            .public_base64url();
+        assert_eq!(
+            second.key().expect("the same identity").public_base64url(),
+            public,
+            "a restart must not invent a new identity"
+        );
+        // The private half never reaches a log line; the public half does,
+        // because it is what a browser pinned and is not a secret.
+        capture.assert_never_logged(&secret);
+        assert!(capture.text().contains(&public), "{}", capture.text());
+    }
+
+    /// A credential only the server ever saw is worse than none: every restart
+    /// would invent another and quietly orphan the last one's subscriptions.
+    #[test]
+    fn a_vapid_key_that_cannot_be_saved_leaves_push_off() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join("not-a-file");
+        std::fs::create_dir(&env_file).expect("mkdir");
+        let capture = LogCapture::start();
+
+        let outcome = provision_vapid_key(None, &env_file);
+        log_vapid_key(&outcome);
+
+        assert!(outcome.key().is_none());
+        let logged = capture.text();
+        assert!(logged.contains("ERROR"), "{logged}");
+        assert!(logged.contains(VAPID_KEY_VAR), "{logged}");
+    }
+
+    /// A typo'd key is a configuration mistake, but not one worth refusing to
+    /// serve audio over: notifications go off, loudly, and the scanner keeps
+    /// scanning.
+    #[test]
+    fn a_vapid_key_that_is_not_a_key_leaves_push_off() {
+        let capture = LogCapture::start();
+
+        let outcome = provision_vapid_key(Some("not-a-key"), Path::new("/nowhere/.env"));
+        log_vapid_key(&outcome);
+
+        assert!(matches!(outcome, Vapid::Invalid), "{outcome:?}");
+        assert!(outcome.key().is_none());
+        assert!(capture.text().contains("ERROR"), "{}", capture.text());
+    }
+
+    #[rstest]
+    #[case(None)]
+    #[case(Some(""))]
+    #[case(Some("   "))]
+    fn a_blank_vapid_key_means_unset(#[case] configured: Option<&str>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+
+        let outcome = provision_vapid_key(configured, &env_file);
+
+        assert!(matches!(outcome, Vapid::Generated { .. }), "{outcome:?}");
+        assert!(!value_in(&env_file, VAPID_KEY_VAR).is_empty());
+    }
+
+    /// `Debug` is hand-written for the same reason [`AdminPassword`]'s is —
+    /// every variant, because a redaction that covers three of four is not one.
+    #[test]
+    fn debugging_a_vapid_outcome_never_shows_the_key() {
+        let key = VapidKey::generate();
+        let secret = key.secret_base64url();
+        let outcomes = [
+            Vapid::Configured(VapidKey::parse(&secret).expect("key")),
+            Vapid::Generated {
+                key,
+                env_file: PathBuf::from("/srv/.env"),
+            },
+            Vapid::NotPersisted {
+                env_file: PathBuf::from("/srv/.env"),
+                error: io::Error::new(ErrorKind::PermissionDenied, "denied"),
+            },
+            Vapid::Invalid,
+        ];
+
+        for outcome in &outcomes {
+            let rendered = format!("{outcome:?}");
+            assert!(!rendered.contains(&secret), "{rendered}");
+        }
+        assert!(format!("{:?}", outcomes[1]).contains("/srv/.env"));
+        assert!(format!("{:?}", outcomes[2]).contains("denied"));
+    }
+
+    /// All three credentials share one file, and none of them may eat another.
+    #[test]
+    fn the_three_generated_credentials_coexist_in_one_env_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let env_file = tmp.path().join(".env");
+        std::fs::write(&env_file, "RADIO_SCOUT_PORT=8080\n").expect("seed env");
+
+        provision_admin_password(None, &env_file);
+        provision_vapid_key(None, &env_file);
+        std::fs::write(
+            &env_file,
+            env_text_with(
+                &std::fs::read_to_string(&env_file).expect("read"),
+                INGEST_KEY_VAR,
+                "an-ingest-key",
+            ),
+        )
+        .expect("write");
+
+        let text = std::fs::read_to_string(&env_file).expect("env file");
+        assert!(text.contains("RADIO_SCOUT_PORT=8080"), "{text}");
+        assert_eq!(value_in(&env_file, INGEST_KEY_VAR), "an-ingest-key");
+        assert!(
+            !value_in(&env_file, ADMIN_PASSWORD_VAR).is_empty(),
+            "{text}"
+        );
+        assert!(!value_in(&env_file, VAPID_KEY_VAR).is_empty(), "{text}");
     }
 
     proptest::proptest! {

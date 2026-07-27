@@ -6,6 +6,7 @@ import {
   type LiveStatus,
   type Subscription,
 } from '@/lib/liveFeed'
+import { usePush } from '@/hooks/usePush'
 import { useAppDispatch, useAppSelector, useAppStore } from '@/store/hooks'
 import {
   connected,
@@ -40,6 +41,10 @@ export function LiveFeedLink() {
   const dispatch = useAppDispatch()
   const store = useAppStore()
   const feed = useRef<LiveFeedHandle>(null)
+  // Notifications (#16): the socket presents the subscription so the server
+  // knows this listener is listening, and re-registers the matrix so what wakes
+  // their phone is what they actually hear.
+  const { push, token: pushToken } = usePush()
 
   // Serialized, so this re-runs when the *matrix* changes rather than on every
   // render that rebuilds an equal one.
@@ -55,14 +60,26 @@ export function LiveFeedLink() {
       // Read at send time, not subscribe time: the cursor moves with every Call
       // and only matters when the socket comes back (ADR-0004).
       since: () => selectSince(store.getState()),
+      // Read at send time: notifications can be switched on while this socket
+      // is already open, and the next `sub` frame is what tells the server.
+      pushToken: () => push?.token,
     })
     feed.current = handle
     return () => handle.close()
-  }, [dispatch, store])
+  }, [dispatch, store, push])
 
+  // Re-sent on both counts: when the listener changes what they hear, and when
+  // a push subscription appears or goes while this socket is already open —
+  // otherwise someone who just switched notifications on would keep being
+  // notified about their own listening until the next reconnect.
   useEffect(() => {
-    feed.current?.subscribe(JSON.parse(matrix) as Subscription)
-  }, [matrix])
+    const selection = JSON.parse(matrix) as Subscription
+    feed.current?.subscribe(selection)
+    // The server's copy of the Selection decides which Calls are worth waking a
+    // phone for, so it moves with the listener's. A no-op while notifications
+    // are off, and a no-op when the server already has this one.
+    void push?.sync(selection)
+  }, [matrix, push, pushToken])
 
   // A timed avoid has to reactivate on its own (spec US 14), and nothing else
   // is guaranteed to wake the store when its moment comes.

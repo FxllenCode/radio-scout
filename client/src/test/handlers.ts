@@ -99,6 +99,12 @@ export function archivePage(url: URL) {
   }
 }
 
+/** The server's VAPID public key in tests — RFC 8291's application-server key,
+ *  the same constant the Rust harness uses, so the two halves of #16 are
+ *  described by one value. */
+export const VAPID_PUBLIC_KEY =
+  'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8'
+
 /** The live-feed socket, same origin as the API (ADR-0004). Tests that care
  *  what the feed sends override this link through `server.use(...)`. */
 export const liveFeed = ws.link(`${ORIGIN.replace('http', 'ws')}/api/live`)
@@ -119,6 +125,18 @@ export const handlers = [
     HttpResponse.json(FILTER_OPTIONS),
   ),
   http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(CATALOG)),
+  // Web Push (#16). A server that has an identity, takes subscriptions, and
+  // forgets them on request — the shape every screen mounts against.
+  http.get(`${ORIGIN}/api/push/key`, () =>
+    HttpResponse.json({ key: VAPID_PUBLIC_KEY }),
+  ),
+  http.post(`${ORIGIN}/api/push/subscribe`, () =>
+    HttpResponse.json({ token: 'a-subscription-token' }),
+  ),
+  http.post(
+    `${ORIGIN}/api/push/unsubscribe`,
+    () => new HttpResponse(null, { status: 204 }),
+  ),
   /** A Call's audio. Nothing in jsdom decodes it — it is here because the
    *  player prefetches the next Call's audio (#14), and an unhandled request
    *  is a test failure. */

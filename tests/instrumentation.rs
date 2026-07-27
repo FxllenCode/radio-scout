@@ -654,3 +654,60 @@ async fn a_reaped_connection_says_so() {
     let line = capture.wait_for("live-feed listener reaped").await;
     assert!(line.contains(" WARN "), "{line}");
 }
+
+/// Rule 5 on the Web Push path (#16). A push endpoint is a stable per-device
+/// identifier — worse than an IP address, because it survives a lease — so it
+/// never appears in a log line, at any level, however the subscription is
+/// refused. The push *service* may be named on a failure, because which service
+/// is broken is the operator's problem; the device may not.
+#[tokio::test]
+async fn a_refused_push_subscription_says_why_without_naming_the_device() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    let endpoint = "https://push.example.net/p/a-device-nobody-else-should-see";
+
+    let response = app
+        .post_json(
+            "/api/push/subscribe",
+            serde_json::json!({
+                "endpoint": endpoint,
+                "keys": { "p256dh": "not-a-key", "auth": "BTBZMqHH6r4Tts7J_aSIgg" },
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), 400);
+    let line = capture.only_line_containing("push subscription rejected");
+    assert!(line.contains(" WARN "), "{line}");
+    assert!(line.contains(r#"reason="bad-key""#), "{line}");
+    capture.assert_never_logged(endpoint);
+}
+
+/// A push service that says the device is gone is worth one line — the
+/// subscription's **Id**, never its endpoint — because a subscription
+/// disappearing on its own is otherwise invisible.
+#[tokio::test]
+async fn a_gone_device_is_logged_by_its_id_and_not_its_endpoint() {
+    let capture = LogCapture::start();
+    let service = common::PushService::start().await;
+    let app = TestApp::with_key("k").await;
+    let endpoint = service.endpoint();
+    app.post_json(
+        "/api/push/subscribe",
+        serde_json::json!({
+            "endpoint": endpoint,
+            "keys": { "p256dh": common::SUBSCRIBER_PUBLIC, "auth": common::SUBSCRIBER_AUTH },
+            "selection": { "all": true, "sel": {} },
+        }),
+    )
+    .await;
+    service.answer_with(410);
+
+    app.upload_ok(CallUpload::new()).await;
+
+    let line = capture.wait_for("push subscription gone").await;
+    assert!(line.contains(" INFO "), "{line}");
+    assert!(line.contains("status=410"), "{line}");
+    assert!(line.contains("subscription="), "{line}");
+    capture.assert_never_logged(&endpoint);
+}

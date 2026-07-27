@@ -18,9 +18,12 @@ pub mod import;
 pub mod ingest;
 pub mod live;
 pub mod observability;
+pub mod push;
 pub mod retention;
+pub mod selection;
 pub mod startup;
 pub mod web;
+pub mod webpush;
 
 #[cfg(test)]
 mod testing;
@@ -40,6 +43,7 @@ use crate::config::TrustedProxies;
 use crate::db::repo;
 use crate::failure::ServerError;
 use crate::live::LiveFeed;
+use crate::push::Push;
 
 // Re-exported so the binary and the integration harness can wire the app up
 // without reaching into module paths.
@@ -59,6 +63,9 @@ pub struct AppState {
     pub trusted_proxies: TrustedProxies,
     /// The admin surface's credential and its live sessions (#19).
     pub admin: AdminAuth,
+    /// The Web Push surface: the server's VAPID identity, or nothing at all
+    /// when push is unconfigured (#16).
+    pub push: Push,
 }
 
 impl AppState {
@@ -73,6 +80,7 @@ impl AppState {
             ingest,
             trusted_proxies: TrustedProxies::default(),
             admin: AdminAuth::locked(),
+            push: Push::disabled(),
         }
     }
 }
@@ -96,6 +104,12 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/catalog", get(catalog::catalog))
         .route("/api/call/{id}/audio", get(serve_audio))
         .route("/api/call/{id}/download", get(archive::download))
+        // Web Push (#16): the listener-facing half. Unauthenticated like the
+        // rest of listening (ADR-0008) — what it grants is notifications to a
+        // device that already holds the endpoint.
+        .route("/api/push/key", get(push::key))
+        .route("/api/push/subscribe", post(push::subscribe))
+        .route("/api/push/unsubscribe", post(push::unsubscribe))
         // The way in to the admin surface, and the only route under
         // `/api/admin/` outside the session guard — there is no session yet.
         .route("/api/admin/login", post(admin::login))

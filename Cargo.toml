@@ -50,6 +50,14 @@ argon2 = { version = "0.5.3", features = ["std"] }
 # via argon2's `password-hash`; named directly because a hand-rolled loop is one
 # the optimiser is free to turn back into an early exit.
 subtle = { version = "2.6.1", default-features = false }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+hkdf = "0.12"
+aes-gcm = "0.10"
+base64 = "0.22"
+# Outbound HTTP, for delivering Web Push (#16). Default features are rustls in
+# 0.13 — no OpenSSL, so the aarch64 and Windows cross-builds stay a plain
+# `cargo build`.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 # Nothing is un-instrumented (ADR-0011): application output goes through
 # `tracing`, so the print macros are a compile error rather than a habit. Cargo
@@ -63,7 +71,10 @@ print_stderr = "deny"
 dbg_macro = "deny"
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "cookies"] }
+# The same major the library sends push notifications with (and the same one
+# `object_store` already pulls in): two versions of reqwest in one package makes
+# the name ambiguous in test targets.
+reqwest = { version = "0.13", default-features = false, features = ["multipart", "json", "cookies"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tempfile = "3"

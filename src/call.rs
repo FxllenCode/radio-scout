@@ -62,6 +62,15 @@ pub struct StoredCall {
     pub audio_url: String,
 }
 
+impl StoredCall {
+    /// Every Talkgroup this Call reaches: its own, then the ones it is patched
+    /// to. What "does this listener hear it?" is asked over, on the live feed
+    /// (#9) and in Web Push (#16) alike.
+    pub fn talkgroups(&self) -> impl Iterator<Item = i64> + '_ {
+        std::iter::once(self.talkgroup_ref).chain(self.patches.iter().copied())
+    }
+}
+
 /// One System that has Calls matching the current archive-search filters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

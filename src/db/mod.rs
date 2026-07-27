@@ -73,6 +73,7 @@ mod tests {
             "m0002_api_keys",
             "m0003_call_audio_size",
             "m0004_system_auto_populate",
+            "m0005_push_subscriptions",
         ] {
             assert!(
                 logged.contains(&format!("migration=\"{name}\"")),
@@ -103,7 +104,11 @@ mod tests {
         connect(&url).await.expect("upgrade");
 
         let logged = capture.text();
-        for applied in ["m0003_call_audio_size", "m0004_system_auto_populate"] {
+        for applied in [
+            "m0003_call_audio_size",
+            "m0004_system_auto_populate",
+            "m0005_push_subscriptions",
+        ] {
             assert!(
                 logged.contains(&format!("migration=\"{applied}\"")),
                 "{applied} missing from:\n{logged}"
@@ -115,7 +120,7 @@ mod tests {
                 "{already_there} was already applied; re-reporting it is a lie:\n{logged}"
             );
         }
-        assert!(logged.contains("pending=2"), "{logged}");
+        assert!(logged.contains("pending=3"), "{logged}");
     }
 
     /// A database already at the current schema says so — quietly, at DEBUG, so

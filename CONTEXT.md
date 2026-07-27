@@ -67,6 +67,14 @@ _Avoid_: mute, block, ignore.
 The listener's chosen set of active systems/talkgroups/groups that the live feed plays. Persisted per browser (optionally namespaced so one browser can run independent scanners).
 _Avoid_: subscription, filter.
 
+**Push subscription**:
+One browser's registration for **Web Push** notifications — the push service endpoint it is reachable at, the keys that make a message readable only by that device, and the **Selection** it wants to be woken for. The delivery half, distinct from the Selection itself: a listener has one Selection and zero or one push subscription per browser. Identified in logs by its **Id**, never by its endpoint (a stable per-device identifier).
+_Avoid_: notification subscription, device token, registration.
+
+**Coalescing**:
+The rule that bounds notifications: at most one per **talkgroup** per push subscription per configured window, each carrying a count of the calls it stands for. A busy system must never storm a phone, and nothing is silently dropped for it.
+_Avoid_: throttling, rate limiting, batching, debouncing.
+
 ### Ingest & distribution
 
 **Ingest**:

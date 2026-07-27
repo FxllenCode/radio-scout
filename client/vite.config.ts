@@ -21,6 +21,13 @@ export default defineConfig({
       // default — see that module.
       injectRegister: false,
       registerType: 'prompt',
+      // Our own worker source (#16): a generated worker cannot have a `push`
+      // handler, and handling `push` is the whole of Web Push on the device.
+      // Everything the generated one did — precache, navigation fallback, the
+      // `/api` denylist — `src/sw.ts` now does explicitly.
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       manifest: {
         name: 'Radio-Scout',
         short_name: 'Radio-Scout',
@@ -51,20 +58,12 @@ export default defineConfig({
           },
         ],
       },
-      workbox: {
+      injectManifest: {
         // The app shell, fonts included — a phone that opens the app offline
-        // should get the app, not a browser error page.
+        // should get the app, not a browser error page. (`clientsClaim`,
+        // `skipWaiting` and the navigation denylist moved into `src/sw.ts`,
+        // which is where they are now decided.)
         globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
-        // The first worker takes charge immediately (there is nothing yet to
-        // interrupt); a *replacement* still waits for `applyUpdate`, which is
-        // the rule that keeps a deploy from cutting off a Call.
-        clientsClaim: true,
-        skipWaiting: false,
-        navigateFallback: '/index.html',
-        // Nothing the server owns is ever answered from the cache: an API
-        // response would be stale, `/healthz` would lie about the server being
-        // up, and Call audio would fill a phone with an archive.
-        navigateFallbackDenylist: [/^\/api\//, /^\/healthz$/, /^\/rdio-scanner/],
       },
     }),
   ],
@@ -106,17 +105,24 @@ export default defineConfig({
         'src/**/*.{test,spec}.{ts,tsx}',
         'src/test/**',
         'src/main.tsx',
+        // The service worker is a different global scope with no jsdom
+        // implementation (no `PushEvent`, no `clients`, no precache manifest).
+        // Everything in it with a decision is `lib/pushMessage.ts`, at 100%;
+        // what is left is glue, covered by the Playwright layer and the
+        // real-device gate (ADR-0010).
+        'src/sw.ts',
         'src/components/ui/**',
         'src/**/*.d.ts',
       ],
       // Ratcheting project floor (ADR-0010): below the measured baseline, only
-      // ever raised. Raised with #15 (PWA + keep-alive), which took the
-      // measured numbers to 100% lines and ~97% branches.
+      // ever raised. Raised with #16 (Web Push), which holds 100% lines and
+      // ~97% branches with the push manager, the notification builder and the
+      // Settings switch all covered.
       thresholds: {
-        lines: 97,
-        functions: 97,
-        statements: 97,
-        branches: 92,
+        lines: 99,
+        functions: 98,
+        statements: 98,
+        branches: 94,
       },
     },
   },

@@ -7,8 +7,8 @@ use sea_orm::Schema;
 use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, group, site, system, tag, talkgroup,
-    talkgroup_group, unit,
+    api_key, call, call_frequency, call_patch, call_unit, group, push_subscription, site, system,
+    tag, talkgroup, talkgroup_group, unit,
 };
 
 pub struct Migrator;
@@ -21,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0002_api_keys::Migration),
             Box::new(m0003_call_audio_size::Migration),
             Box::new(m0004_system_auto_populate::Migration),
+            Box::new(m0005_push_subscriptions::Migration),
         ]
     }
 }
@@ -325,6 +326,38 @@ mod m0004_system_auto_populate {
                     .await?;
             }
             Ok(())
+        }
+    }
+}
+
+/// Web Push (#16) needs a device to survive the restart between the Call that
+/// interested it and the one that arrives at 3am — so a subscription is a row,
+/// not memory. A new table rather than a column, so the entity-derived-DDL tax
+/// m0003 and m0004 pay does not apply: nothing already exists to diverge from.
+mod m0005_push_subscriptions {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0005_push_subscriptions"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(push_subscription::Entity))
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(push_subscription::Entity).to_owned())
+                .await
         }
     }
 }

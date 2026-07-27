@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Outlet } from 'react-router-dom'
 
 import { CallPlayer } from '@/components/CallPlayer'
@@ -5,6 +6,9 @@ import { InstallBanner } from '@/components/InstallBanner'
 import { LiveFeedLink } from '@/components/LiveFeedLink'
 import { UpdateBanner } from '@/components/UpdateBanner'
 import { useAppUpdate } from '@/hooks/useAppUpdate'
+import { onPushOpen } from '@/lib/pushOpen'
+import { useAppDispatch } from '@/store/hooks'
+import { resume } from '@/store/transport'
 
 import { BottomTabBar } from './BottomTabBar'
 
@@ -17,6 +21,12 @@ import { BottomTabBar } from './BottomTabBar'
  *  (ADR-0005: one reused element; ADR-0004: the queue is client state). */
 export function AppShell() {
   const update = useAppUpdate()
+  const dispatch = useAppDispatch()
+
+  // A tapped notification (#16) focuses this tab rather than opening a second
+  // one, and the tap is the gesture that resumes playback — the listener came
+  // back, so they should not land on a paused player they never paused.
+  useEffect(() => onPushOpen(() => dispatch(resume())), [dispatch])
 
   return (
     <div className="mx-auto flex min-h-[100dvh] w-full max-w-2xl flex-col">

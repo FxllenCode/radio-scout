@@ -51,12 +51,18 @@
 #![allow(dead_code)]
 
 pub mod logs;
+mod push;
 mod upload;
 mod ws;
 
 // Each binary uses a subset of these, so in most of them most are unused. The
 // allow is scoped to the re-exports alone — the module's own `use` statements
 // below stay checked.
+#[allow(unused_imports)]
+pub use push::{
+    PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRIBER_PUBLIC, VAPID_PRIVATE_KEY,
+    VAPID_PUBLIC_KEY,
+};
 #[allow(unused_imports)]
 pub use upload::CallUpload;
 #[allow(unused_imports)]
@@ -76,6 +82,8 @@ use radio_scout::db::entities::{call, system, tag, talkgroup};
 use radio_scout::db::repo::{self, NewCall};
 use radio_scout::db::{self};
 use radio_scout::live::LiveFeed;
+use radio_scout::push::{Push, PushConfig};
+use radio_scout::webpush::VapidKey;
 use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
 use sea_orm::{
     ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryOrder,
@@ -592,6 +600,7 @@ pub struct TestAppBuilder {
     database_url: Option<String>,
     trusted_proxies: Option<String>,
     admin: Option<AdminAuth>,
+    push: Option<Push>,
 }
 
 /// The admin password every spawned app is gated by (#19), so any test can log
@@ -639,6 +648,15 @@ impl TestAppBuilder {
         self
     }
 
+    /// Wire Web Push differently — a shorter coalescing window, or
+    /// [`Push::disabled`] for a server with no VAPID identity at all. The
+    /// default gives every app [`VAPID_PRIVATE_KEY`], so push is on and its
+    /// public key is a constant.
+    pub fn push(mut self, push: Push) -> Self {
+        self.push = Some(push);
+        self
+    }
+
     /// Use this database instead of the one this run would have chosen.
     ///
     /// A per-call-site override, for a test about *which* database an app used.
@@ -676,6 +694,16 @@ impl TestAppBuilder {
         state.admin = self
             .admin
             .unwrap_or_else(|| AdminAuth::new(ADMIN_PASSWORD, AdminConfig::default()));
+        state.push = self.push.unwrap_or_else(|| {
+            Push::new(
+                VapidKey::parse(VAPID_PRIVATE_KEY).expect("the test VAPID key"),
+                PushConfig::default(),
+            )
+        });
+
+        // The real sender, on the real fanout: a test asserts on the request
+        // that leaves the process, not on a decision to make one.
+        radio_scout::push::spawn(state.clone());
 
         TestApp {
             addr: serve(build_app(state)).await,

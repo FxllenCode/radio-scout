@@ -24,8 +24,8 @@ use sea_orm::{
 use crate::call::{CallId, FilterOptions, StoredCall, SystemOption, TalkgroupOption};
 use crate::catalog::{Catalog, CatalogSystem, CatalogTalkgroup, display_order};
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, group, system, tag, talkgroup,
-    talkgroup_group, unit,
+    api_key, call, call_frequency, call_patch, call_unit, group, push_subscription, system, tag,
+    talkgroup, talkgroup_group, unit,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -1331,6 +1331,111 @@ pub async fn system_ref_for_short_name<C: ConnectionTrait>(
         return Ok(sys.r#ref);
     }
     lowest_free_system_ref(db).await
+}
+
+// -- Web Push subscriptions (#16) -------------------------------------------
+
+/// Store a browser's push subscription, or update the one already registered
+/// for the same endpoint. Returns the token that device proves itself with.
+///
+/// An endpoint **is** the device: a browser that re-subscribes — because the
+/// listener changed their Selection, or because the push service rotated the
+/// URL and the client subscribed again — must not leave a second row behind
+/// notifying the same phone twice. Its token survives that, so a socket already
+/// holding one keeps working.
+///
+/// `selection` is optional because re-subscribing has two reasons: syncing a
+/// changed Selection (which passes one) and a reload learning its token back
+/// (which must not overwrite what the listener chose on another visit).
+pub async fn upsert_push_subscription<C: ConnectionTrait>(
+    db: &C,
+    endpoint: &str,
+    p256dh: &str,
+    auth: &str,
+    selection: Option<&str>,
+    now_ms: i64,
+) -> Result<String, DbErr> {
+    let existing = push_subscription::Entity::find()
+        .filter(push_subscription::Column::Endpoint.eq(endpoint))
+        .one(db)
+        .await?;
+
+    if let Some(existing) = existing {
+        let token = existing.token.clone();
+        let mut update: push_subscription::ActiveModel = existing.into();
+        update.p256dh = Set(p256dh.to_string());
+        update.auth = Set(auth.to_string());
+        if let Some(selection) = selection {
+            update.selection = Set(selection.to_string());
+        }
+        update.updated_at_ms = Set(now_ms);
+        update.update(db).await?;
+        return Ok(token);
+    }
+
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    push_subscription::ActiveModel {
+        endpoint: Set(endpoint.to_string()),
+        token: Set(token.clone()),
+        p256dh: Set(p256dh.to_string()),
+        auth: Set(auth.to_string()),
+        // A subscription nobody has said anything about hears nothing, rather
+        // than everything: the safe direction for a row whose Selection was
+        // lost.
+        selection: Set(selection.unwrap_or("{}").to_string()),
+        created_at_ms: Set(now_ms),
+        updated_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+    Ok(token)
+}
+
+/// Forget the subscription holding `token` — the listener turned notifications
+/// off. Returns whether there was one.
+pub async fn delete_push_subscription<C: ConnectionTrait>(
+    db: &C,
+    token: &str,
+) -> Result<bool, DbErr> {
+    Ok(push_subscription::Entity::delete_many()
+        .filter(push_subscription::Column::Token.eq(token))
+        .exec(db)
+        .await?
+        .rows_affected
+        > 0)
+}
+
+/// The subscription a token belongs to, by **Id** — what the live-feed socket
+/// presents to say its listener is listening (#16).
+pub async fn push_subscription_id<C: ConnectionTrait>(
+    db: &C,
+    token: &str,
+) -> Result<Option<i64>, DbErr> {
+    Ok(push_subscription::Entity::find()
+        .filter(push_subscription::Column::Token.eq(token))
+        .one(db)
+        .await?
+        .map(|row| row.id))
+}
+
+/// Forget one subscription by Id — what a push service's `410 Gone` means.
+pub async fn delete_push_subscription_by_id<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+) -> Result<(), DbErr> {
+    push_subscription::Entity::delete_by_id(id).exec(db).await?;
+    Ok(())
+}
+
+/// Every registered push subscription, oldest first.
+pub async fn push_subscriptions<C: ConnectionTrait>(
+    db: &C,
+) -> Result<Vec<push_subscription::Model>, DbErr> {
+    push_subscription::Entity::find()
+        .order_by_asc(push_subscription::Column::Id)
+        .all(db)
+        .await
 }
 
 #[cfg(test)]

@@ -48,6 +48,19 @@ function isInstalled(): boolean {
   )
 }
 
+/**
+ * Is this the one browser that installs through the Share sheet, not yet
+ * installed? iOS Safari is the only place `navigator.standalone` exists, so its
+ * presence identifies the browser and its value says whether it already did —
+ * a feature check, not a user-agent sniff.
+ *
+ * Exported because it is also the answer to "why can't I turn notifications
+ * on?" (#16): iOS offers Web Push to home-screen apps and to nothing else.
+ */
+export function needsHomeScreen(): boolean {
+  return navigator.standalone === false
+}
+
 export interface Install {
   /** What to offer right now. */
   readonly offer: InstallOffer
@@ -115,7 +128,7 @@ export function createInstall({
       if (pending) return 'prompt'
       // No dialog, but a browser that can install: the Share sheet is the
       // only route, so the app explains it (design brief 19).
-      return navigator.standalone === false ? 'manual' : 'none'
+      return needsHomeScreen() ? 'manual' : 'none'
     },
 
     async install() {

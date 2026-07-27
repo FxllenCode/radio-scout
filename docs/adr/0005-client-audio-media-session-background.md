@@ -72,3 +72,69 @@ The gap-bridging half shipped in #15, alongside the PWA that makes it reachable 
 - **The worker never touches the server's namespace.** `/api/*`, `/healthz` and `/rdio-scanner` are denied the navigation fallback and given no runtime cache: a cached API response would be stale, a cached `/healthz` would lie about the server being up, and cached Call audio would fill a phone with an archive nobody asked for.
 
 Owed after this ticket: the **real-device gate** (research §14 — the mechanism is unproven on hardware until someone runs it), and **Vitest Browser Mode**, which [ADR-0010](0010-coverage-policy-and-test-tooling.md) names for the audio-player component. #15 brought Playwright in for the PWA/service-worker/offline layer that has no other home, but Browser Mode re-tests #14's component wiring rather than #15's features, so it stayed out.
+
+## Implementation notes (#16)
+
+Web Push shipped in #16 — the third tier of the target behavior above, and the
+one that ends a lull the keep-alive's five-minute budget could not. Five
+sub-decisions, all reversible:
+
+- **The `web-push` crate named above was rejected, and the RFCs implemented
+  directly.** `web-push` 0.11 depends on `ece` 2.3, whose *only* backend is
+  OpenSSL — there is no pure-Rust option in that crate — which would have taken
+  `openssl-sys` (and a C toolchain per target) into a project whose CI
+  cross-builds `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc` from a
+  plain `cargo build`, and whose whole distribution story is one static binary
+  ([ADR-0007](0007-single-binary-embedded-frontend-distribution.md)). So
+  `src/webpush.rs` implements RFC 8291 (aes128gcm) and RFC 8292 (VAPID) over
+  RustCrypto — `p256`, `hkdf`, `aes-gcm` — in about 200 lines, **pinned to RFC
+  8291 §5's own worked example**: the salt and the ephemeral key are parameters
+  precisely so the standard's expected ciphertext is reproduced byte for byte
+  rather than round-tripped against our own decrypt.
+- **Notifications ride the live-feed fanout, not the ingest path.** A recorder's
+  upload gets its `200` without waiting on a push service on the other side of
+  the internet, and a Call reaches a notification through the same broadcast
+  that reaches a socket — so the two cannot disagree about what a listener
+  hears. The Selection algebra moved to `src/selection.rs` for the same reason:
+  one rule, three consumers (socket, push, client).
+- **Nothing is pushed to a listener who is demonstrably listening.** The `sub`
+  frame carries the subscription's Id; while that socket is open the sender
+  skips it, and #9's heartbeat reaps a phone iOS suspended within a period — so
+  notifications take over at almost exactly the moment listening stopped. This
+  is the piece that makes the feature usable rather than annoying, and it has no
+  rdio equivalent, because rdio has no push and no heartbeat.
+- **Coalescing is leading-edge, and counts what it swallows.** The
+  first Call of a quiet Talkgroup notifies at once (a scanner is only useful if
+  it is prompt); everything inside the window is counted into the *next*
+  notification, so a lull ending with twelve Calls says twelve. No timers — a
+  suppressed Call needs no wake-up of its own, which matters on a Pi. The RFC
+  8030 `Topic` header is the second half: a phone that was off for an hour wakes
+  to one notification per Talkgroup rather than a queue, because the push
+  service itself replaced the undelivered ones.
+- **The identity must survive a restart, so it is a file, not memory.** A
+  browser pins the VAPID public key when it subscribes; a server that generated
+  a new one each boot would silently orphan every existing subscription. So
+  `RADIO_SCOUT_VAPID_PRIVATE_KEY` joins the ingest key and the admin password in
+  `.env` (`0600`, only the path and the *public* half ever logged) — and an
+  identity that cannot be saved, or cannot be parsed, leaves notifications
+  **off** with an ERROR rather than running on one that will not outlive the
+  process.
+
+Two platform rules shaped the client half. `Notification.requestPermission()` is
+spent once per origin, so it is spent on a tap on the Settings switch and
+nowhere else — asked on load it is refused, and on iOS the only way back is
+deleting the home-screen app. And **every push must show a notification**: iOS
+revokes a subscription that receives one and shows nothing, so a payload the
+worker cannot read still becomes a generic notification (`lib/pushMessage.ts`).
+
+The worker itself is now ours (`src/sw.ts`, `injectManifest`) rather than
+generated: a generated worker cannot have a `push` handler at all. Everything in
+it with a decision lives in `lib/pushMessage.ts` at 100% coverage; the glue is
+proven by a Playwright spec that delivers a real push through CDP and asserts on
+what the worker asks the platform to show.
+
+Still owed, unchanged: the **real-device gate** (research §14), and Vitest
+Browser Mode. Deep-linking a tap to the specific Call that woke the listener is
+deliberately left open — the notification carries the Call id (`/?call=<id>`),
+and the app currently uses the tap to resume the feed rather than to open one
+Call.

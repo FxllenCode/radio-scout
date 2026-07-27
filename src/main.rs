@@ -21,6 +21,7 @@ use clap::Parser;
 use radio_scout::admin::AdminAuth;
 use radio_scout::config::{self, Cli, Config};
 use radio_scout::db;
+use radio_scout::push::Push;
 use radio_scout::retention;
 use radio_scout::startup::{self, INGEST_KEY_VAR};
 use radio_scout::{AppState, BlobStore, build_app, now_ms, observability};
@@ -126,6 +127,21 @@ async fn serve(
     );
     startup::log_admin_password(&admin);
 
+    // The Web Push identity (#16, ADR-0005), from the same file for the same
+    // reason again: first run writes it. Unlike the other two it must be the
+    // *same* key next boot — a browser pins the public half at subscribe time —
+    // so a key that cannot be saved leaves notifications off rather than
+    // running on one that will not survive a restart.
+    let vapid = startup::provision_vapid_key(
+        std::env::var(startup::VAPID_KEY_VAR).ok().as_deref(),
+        &env_file,
+    );
+    startup::log_vapid_key(&vapid);
+    let push = match vapid.key() {
+        Some(key) => Push::new(key, config.push()),
+        None => Push::disabled(),
+    };
+
     let audio = Arc::new(BlobStore::open(&config.storage())?);
 
     // Retention (#10): bound the archive so the disk can't fill. Sweeps once
@@ -137,6 +153,10 @@ async fn serve(
     let mut state = AppState::new(audio, db, config.ingest());
     state.trusted_proxies = config.trusted_proxies();
     state.admin = AdminAuth::provisioned(&admin, config.admin());
+    state.push = push;
+    // Notifications ride the live-feed fanout (#16), so an ingest never waits
+    // on a push service. A server with no identity spawns nothing.
+    radio_scout::push::spawn(state.clone());
     let app = build_app(state);
 
     let port = config.server.port;
