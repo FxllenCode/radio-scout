@@ -13,7 +13,6 @@ use common::{CallUpload, TestApp, next_json};
 use futures_util::SinkExt;
 use radio_scout::db::repo::NewCall;
 use radio_scout::http_log::REQUEST_ID_HEADER;
-use sea_orm::ConnectionTrait;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// A Call whose audio really is in the store, so `/api/call/{id}/audio` answers
@@ -146,10 +145,7 @@ async fn a_5xx_logs_at_error_without_a_listener_address() {
     let id = seed_playable_call(&app).await;
 
     // Break the lookup under the handler's feet, the way a missing column did.
-    app.db
-        .execute_unprepared("DROP TABLE calls")
-        .await
-        .expect("drop calls");
+    app.break_table("calls").await;
 
     let audio = format!("/api/call/{id}/audio");
     assert_eq!(app.get(&audio).await.status(), 500);

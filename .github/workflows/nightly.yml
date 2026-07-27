@@ -1,0 +1,64 @@
+# The slow half of ADR-0010's quality signal, off the merge path.
+#
+# `cargo mutants` changes the code under the tests and asks whether anything
+# fails. It is the only check that answers "do the assertions bite?" — coverage
+# only answers "did the line run" — but a full run mutates the whole codebase,
+# which is hours of work no pull request should wait on. So the PR job mutates
+# only the diff (advisory, in ci.yml) and the whole surface is swept here,
+# nightly and sharded.
+#
+# Exclusions come from `.cargo/mutants.toml`, which mirrors ADR-0010's
+# documented coverage carve-outs, so what this reports is real gaps.
+name: Nightly
+
+on:
+  schedule:
+    # 07:00 UTC — overnight for the maintainer, and off the hour to stay out of
+    # GitHub's cron stampede.
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  mutants:
+    name: Mutants ${{ matrix.shard }}/4
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      # No artifact to download from another workflow, so this job builds the
+      # SPA itself — `rust-embed` needs the real one either way, or the
+      # frontend-serving tests assert the fallback page and every mutant in that
+      # area survives for the wrong reason.
+      - run: npm ci
+        working-directory: client
+      - run: npm run build
+        working-directory: client
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+      - name: Mutate
+        run: cargo mutants --shard ${{ matrix.shard }}/4 --test-tool nextest -j 2 -- --locked
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out/
+          retention-days: 14

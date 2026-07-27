@@ -2,7 +2,7 @@
 //! test seam.
 //!
 //! [`TestApp`] brings up the **real** Axum router in-process on an ephemeral
-//! port, against a fresh SQLite database and a filesystem blob store in a temp
+//! port, against a fresh database and a filesystem blob store in a temp
 //! directory it owns, and drives it over its actual HTTP + WebSocket boundary.
 //! Nothing here reaches past a handler: an assertion is made about what an
 //! operator could observe — a response body, a database row, a stored object, a
@@ -19,6 +19,12 @@
 //! assert_eq!(app.count::<call::Entity>().await, 1);
 //! assert!(app.stored(&app.the_call().await.object_key).await);
 //! ```
+//!
+//! The database is **SQLite by default and Postgres when the run was given
+//! one** — set `TEST_POSTGRES_URL` and every app spawned here lands on a
+//! `rs_test_<uuid>` database of its own, which is how the whole suite runs a
+//! second time on the other dialect (#22, ADR-0003). No test says which; see
+//! [`postgres_server`] and `docs/agents/dual-dialect.md`.
 //!
 //! **The handle owns its temp directory**, so a test never has to keep a `_tmp`
 //! binding alive by hand — dropping the app deletes the database and the audio.
@@ -63,7 +69,10 @@ use radio_scout::db::repo::{self, NewCall};
 use radio_scout::db::{self};
 use radio_scout::live::LiveFeed;
 use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryOrder,
+    Set,
+};
 
 /// A running Radio-Scout, and everything needed to observe it.
 ///
@@ -351,6 +360,40 @@ impl TestApp {
         .expect("seed system");
     }
 
+    /// Take a table out from under the running app, the way a half-applied
+    /// migration or a hand-edited database does.
+    ///
+    /// This is the only way to reach the 5xx paths (#29) from outside a handler:
+    /// every other failure mode is a 4xx by design. The DDL is **dialect-
+    /// specific**, which is why it lives here rather than in five test files —
+    /// Postgres refuses to drop a table that constraints still depend on, and
+    /// SQLite has no `CASCADE` to offer it.
+    pub async fn break_table(&self, table: &str) {
+        let cascade = match self.db.get_database_backend() {
+            db::DbBackend::Postgres => " CASCADE",
+            _ => "",
+        };
+        self.db
+            .execute_unprepared(&format!("DROP TABLE {table}{cascade}"))
+            .await
+            .unwrap_or_else(|err| panic!("break table {table}: {err}"));
+    }
+
+    /// How **this** dialect words "that table isn't there" — SQLite says
+    /// `no such table: calls`, Postgres says `relation "calls" does not exist`.
+    ///
+    /// The 5xx tests assert that the driver's own explanation reaches the
+    /// operator's log and never the client's body ([`TestApp::break_table`] is
+    /// how they get one). A test that pins a single wording keeps asserting that
+    /// on one dialect and quietly asserts nothing on the other — precisely the
+    /// half-blind green a dual-dialect run exists to catch.
+    pub fn missing_table_cause(&self, table: &str) -> String {
+        match self.db.get_database_backend() {
+            db::DbBackend::Postgres => format!(r#"relation "{table}" does not exist"#),
+            _ => format!("no such table: {table}"),
+        }
+    }
+
     // -- Stored objects -----------------------------------------------------
 
     /// Write an object directly to the store the app reads from.
@@ -453,18 +496,12 @@ impl TestAppBuilder {
         self
     }
 
-    /// Use this database instead of a fresh SQLite file in the temp directory.
+    /// Use this database instead of the one this run would have chosen.
     ///
-    /// This is the *seam* for the dual-dialect run ADR-0009 asks for, not the
-    /// run itself: it is per-call-site, and every `TestApp::spawn` in the suite
-    /// still takes the SQLite default. Making the whole suite run on Postgres is
-    /// #22's job and needs two more things this deliberately does not have —
-    /// somewhere to read the container's URL from (`tests/db.rs` already reads
-    /// `TEST_POSTGRES_URL` and skips when it is unset), and a **per-test
-    /// database or schema**, because one shared Postgres would put every
-    /// concurrent test's rows in the same tables. Isolation is a property the
-    /// SQLite default gets for free from having a file each; Postgres will have
-    /// to buy it.
+    /// A per-call-site override, for a test about *which* database an app used.
+    /// The dual-dialect run ADR-0009 asks for does not go through here: it is
+    /// [`postgres_server`], which moves the whole suite at once and gives every
+    /// spawned app a database of its own.
     pub fn database_url(mut self, url: impl Into<String>) -> Self {
         self.database_url = Some(url.into());
         self
@@ -477,9 +514,13 @@ impl TestAppBuilder {
             self.store
                 .unwrap_or_else(|| BlobStore::filesystem(tmp.path().join("audio")).expect("blob")),
         );
-        let url = self
-            .database_url
-            .unwrap_or_else(|| format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display()));
+        let url = match self.database_url {
+            Some(url) => url,
+            None => match postgres_server() {
+                Some(server) => create_test_database(&server).await,
+                None => format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display()),
+            },
+        };
         let db = db::connect(&url).await.expect("db connect");
 
         let mut state = AppState::new(store.clone(), db.clone(), self.ingest.unwrap_or_default());
@@ -497,6 +538,62 @@ impl TestAppBuilder {
             client: reqwest::Client::new(),
             tmp,
         }
+    }
+}
+
+/// The Postgres server this run was handed, or `None` for the SQLite default.
+///
+/// `TEST_POSTGRES_URL` is the whole switch for the dual-dialect run (#22): CI
+/// stands one server up for the job and sets it, and every `TestApp::spawn` in
+/// every binary then lands on Postgres. Unset — the everyday loop, and any
+/// machine without Docker — is SQLite, so nothing about local TDD changes.
+pub fn postgres_server() -> Option<String> {
+    std::env::var("TEST_POSTGRES_URL").ok()
+}
+
+/// Create a database of this test's own on `server`, returning its URL.
+///
+/// Isolation is a property the SQLite default gets for free from having a file
+/// each; Postgres buys it here, because one shared database would put every
+/// concurrently running test's rows in the same tables. The name is a v4 UUID,
+/// so it is unique across the *processes* nextest runs tests in, not just within
+/// one.
+///
+/// The database is deliberately **not** dropped afterwards: `Drop` cannot await,
+/// and the server these run against is a throwaway — CI's dies with the job, and
+/// `docs/agents/dual-dialect.md` says to `docker rm -f` the local one.
+pub async fn create_test_database(server: &str) -> String {
+    let name = format!("rs_test_{}", uuid::Uuid::new_v4().simple());
+    let admin = sea_orm::Database::connect(server)
+        .await
+        .expect("connect to the TEST_POSTGRES_URL server");
+    admin
+        .execute_unprepared(&format!(r#"CREATE DATABASE "{name}""#))
+        .await
+        .expect("create this test's database");
+    admin.close().await.expect("close the admin connection");
+    database_url_in(server, &name)
+}
+
+/// The same Postgres server, addressing the database called `name`.
+///
+/// Only the database name is replaced: the credentials before it and the
+/// connection parameters after it (`sslmode`, `options`) are the caller's, and a
+/// rewrite that ate either would quietly connect somewhere else.
+pub fn database_url_in(server: &str, name: &str) -> String {
+    let (base, query) = match server.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (server, None),
+    };
+    // The first `/` *after* the scheme separator starts the path; before it lies
+    // `user:password@host:port`, whose own `//` must not be mistaken for one.
+    let authority = base.find("://").map_or(0, |i| i + 3);
+    let root = &base[..base[authority..]
+        .find('/')
+        .map_or(base.len(), |i| authority + i)];
+    match query {
+        Some(query) => format!("{root}/{name}?{query}"),
+        None => format!("{root}/{name}"),
     }
 }
 

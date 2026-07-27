@@ -1,0 +1,44 @@
+# The "every change ships with tests" gate (ADR-0010): 100% patch coverage.
+#
+# Self-contained on purpose. ADR-0010 pencilled this in against Codecov, whose
+# `patch` status does this well — but it makes merging depend on a third party
+# being reachable *and* on the repository having been linked there, and a
+# required check that never reports blocks every PR rather than failing one.
+# `diff-cover` reads the same lcov the floor is measured from, resolves the diff
+# with git, and answers on the runner.
+#
+# The work itself is `.github/scripts/patch-coverage.sh`; this only names the
+# inputs. Nothing is interpolated into the shell — a branch name is attacker-
+# controlled text on a fork's pull request, and `${{ }}` inside a `run:` block
+# is substituted before bash ever sees it.
+name: Patch coverage
+description: Fail unless every line this branch changed is covered by a test.
+
+inputs:
+  lcov:
+    description: Path to an lcov report, relative to the repository root.
+    required: true
+  label:
+    description: Which half of the project this is — names the step in the log.
+    required: true
+  prefix:
+    description: >-
+      Prepended to every source path in the report, for a report written from a
+      subdirectory. Empty when the paths are already repository-relative.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Patch coverage (${{ inputs.label }})
+      shell: bash
+      env:
+        # The branch the pull request is merging into. This action runs on pull
+        # requests only (see ci.yml): on a push there is no base, and comparing
+        # a long-lived branch against master would judge the whole branch as one
+        # "patch" — a gate that fails for history rather than for the change.
+        BASE_REF: ${{ github.base_ref }}
+        LCOV: ${{ inputs.lcov }}
+        PREFIX: ${{ inputs.prefix }}
+      run: .github/scripts/patch-coverage.sh "$LCOV" "$BASE_REF" "$PREFIX"

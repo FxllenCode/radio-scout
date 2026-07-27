@@ -1,0 +1,289 @@
+# The merge gate (ticket #22, ADR-0009 + ADR-0010).
+#
+# Shape, and why: the SPA is embedded into the binary at **compile time**
+# (`rust-embed`, src/web.rs), so `client/dist` is a build input to every Rust
+# job, not an output beside it. One `client` job builds it once and publishes it
+# as an artifact; everything that runs cargo downloads it first. A Rust job
+# without it compiles a binary that serves the minimal fallback page, and
+# `tests/frontend.rs` then passes by asserting the fallback — green, and proving
+# nothing about what ships. `tests/ci.rs` pins that, and the other properties
+# whose loss would be invisible in a green run.
+#
+# HARD gates (block merge): fmt, clippy -D warnings, the full suite on **both
+# dialects**, doctests, the ratcheting coverage floor, and 100% patch coverage.
+# ADVISORY (run, annotate, never block): mutation testing on the diff, and the
+# Playwright PWA suite until it has a track record on CI.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, v1]
+
+# A branch pushed twice in a minute should not build twice. The default branch
+# is exempt: its runs are the record of what merged.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: >-
+    ${{ github.ref != 'refs/heads/master' && github.ref != 'refs/heads/v1' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Nothing here is ever rebuilt on top of itself, so incremental artifacts are
+  # pure cache weight.
+  CARGO_INCREMENTAL: 0
+  # ADR-0010's documented coverage exclusions: generated entities, schema DDL,
+  # `main()` bootstrap glue, the `#[cfg(test)]`-only helpers, and build.rs. Kept
+  # byte-identical to CLAUDE.md's command and `.cargo/mutants.toml`'s list.
+  COVERAGE_IGNORE: '(db/entities/|db/migration\.rs|src/main\.rs|src/testing\.rs|build\.rs)'
+  # The ratcheting project floor (ADR-0010) — raised as the measured number
+  # rises, never lowered. Backend measures ~96%.
+  COVERAGE_FLOOR: 90
+
+jobs:
+  # --------------------------------------------------------------------------
+  # The SPA: gates of its own, and the artifact every Rust job builds against.
+  # --------------------------------------------------------------------------
+  client:
+    name: Client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # diff-cover needs the merge base, not just the tip.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - run: npm run typecheck
+        working-directory: client
+      - run: npm run lint
+        working-directory: client
+      - name: Tests + coverage floor
+        run: npm run test:coverage
+        working-directory: client
+      - name: Build the embeddable SPA
+        run: npm run build
+        working-directory: client
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-dist
+          path: client/dist
+          retention-days: 1
+          if-no-files-found: error
+      - uses: ./.github/actions/patch-coverage
+        if: github.event_name == 'pull_request'
+        with:
+          # Vitest writes paths relative to Vite's root (`client/`); git's are
+          # relative to the repository, and diff-cover matches the two by name.
+          lcov: client/coverage/lcov.info
+          prefix: client/
+          label: frontend
+
+  # --------------------------------------------------------------------------
+  # The backend: the whole suite, twice — once per dialect (ADR-0003).
+  # --------------------------------------------------------------------------
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    needs: client
+    services:
+      # One server for the job; each test then creates a database of its own
+      # (tests/common/mod.rs), which is what makes a parallel run isolated.
+      # Postgres' default 100-connection ceiling is ample: a 4-core runner runs
+      # ~4 tests at a time, each holding a handful.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-llvm-cov
+      - uses: actions/download-artifact@v4
+        with:
+          name: client-dist
+          path: client/dist
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Both runs feed one coverage profile, so a line reached only on one
+      # dialect still counts as reached — which means starting from an empty
+      # one. `Swatinem/rust-cache` restores `target/`, and a `.profraw` left
+      # there by an earlier run would merge straight into the floor and the
+      # patch gate, the two numbers that block a merge.
+      - name: Discard any restored coverage data
+        run: cargo llvm-cov clean --workspace
+      - name: Tests — SQLite
+        run: cargo llvm-cov --no-report nextest --locked --no-fail-fast
+      - name: Tests — Postgres
+        env:
+          TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cargo llvm-cov --no-report nextest --locked --no-fail-fast
+
+      - name: Coverage floor
+        run: |
+          cargo llvm-cov report --summary-only \
+            --ignore-filename-regex "$COVERAGE_IGNORE" \
+            --fail-under-lines "$COVERAGE_FLOOR"
+      - name: Coverage report
+        run: |
+          cargo llvm-cov report --lcov --output-path lcov.info \
+            --ignore-filename-regex "$COVERAGE_IGNORE"
+      - uses: ./.github/actions/patch-coverage
+        if: github.event_name == 'pull_request'
+        with:
+          lcov: lcov.info
+          label: backend
+
+      # Last, because it is the one step that rebuilds without coverage
+      # instrumentation — and nextest does not run doctests at all.
+      - name: Doctests
+        run: cargo test --doc --locked
+
+  # --------------------------------------------------------------------------
+  # Every target the project ships on still compiles, with the real SPA in it.
+  # Release artifacts, installers and Docker are #23.
+  # --------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: client
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          # The scanner itself: a Raspberry Pi 5.
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, cross: true }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        if: matrix.cross
+        with:
+          target: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: client-dist
+          path: client/dist
+      - run: cargo build --locked --target ${{ matrix.target }}
+
+  # --------------------------------------------------------------------------
+  # Advisory: signal on the PR, never a gate.
+  # --------------------------------------------------------------------------
+
+  # Coverage says a line ran; mutation says an assertion would have caught it
+  # changing (ADR-0010). Advisory by design — a tests-only diff yields no
+  # mutants at all, so it can never be the sole gate.
+  mutants:
+    name: Mutation testing on the diff (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs: client
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+      - uses: actions/download-artifact@v4
+        with:
+          name: client-dist
+          path: client/dist
+      - name: Mutate only what this PR changed
+        env:
+          # Never interpolated into the shell: a branch name is attacker-
+          # controlled text on a fork's pull request.
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          git diff "origin/$BASE_REF...HEAD" > pr.diff
+          cargo mutants --in-diff pr.diff --test-tool nextest --no-shuffle -j 2 -- --locked
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-diff
+          path: mutants.out/
+          retention-days: 7
+
+  # The browser-only layer (#15): install criteria, the service worker, offline.
+  # Advisory until it has a track record here — ADR-0010 makes the PWA specs a
+  # required check only once they have proven not to flake on CI.
+  e2e:
+    name: PWA end-to-end (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - run: npx playwright install --with-deps chromium
+        working-directory: client
+      # The Playwright config builds `dist/` itself and serves it with
+      # `vite preview` — a service worker only exists in a production build.
+      - run: npm run test:e2e
+        working-directory: client
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: client/playwright-report/
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # The pipeline checks itself: a malformed workflow is not a failing run, it is
+  # a run that never happens.
+  # --------------------------------------------------------------------------
+  workflows:
+    name: Workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" --workdir /repo \
+            rhysd/actionlint:latest -color
+      # actionlint reads `.github/workflows` only, so shell living in a
+      # composite action is the one shell it never sees. That shell is a script
+      # precisely so this can read it.
+      - name: shellcheck
+        run: shellcheck .github/scripts/*.sh

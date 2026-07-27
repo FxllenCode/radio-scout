@@ -19,4 +19,6 @@ Stand up the full test pyramid from v1:
 
 - Higher upfront investment (the integration harness, golden fixtures, and Playwright setup) before feature velocity — accepted for the correctness guarantees.
 - Postgres testing requires Docker available in CI/dev (testcontainers).
+
+> **Amended by #22 (2026-07-26).** The dual-dialect run is `TEST_POSTGRES_URL` + a `postgres:17` service in CI, not the `testcontainers` crate — see [ADR-0010's amendment](0010-coverage-policy-and-test-tooling.md#amendment-22-2026-07-26-the-patch-gate-runs-in-repo-not-on-codecov). Docker is therefore required in **CI only**: with the variable unset the suite runs on SQLite, so no developer needs a daemon to run `cargo test`.
 - Recorder compatibility can never silently regress, which is the single biggest risk to the "drop-in replacement" promise.

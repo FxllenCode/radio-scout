@@ -4,6 +4,8 @@
 /mutants.out
 /mutants.out.old
 client/coverage
+# The lcov the coverage floor and the patch gate are both read from (#22).
+/lcov.info
 
 /rdio-scanner
 /sdrtrunk

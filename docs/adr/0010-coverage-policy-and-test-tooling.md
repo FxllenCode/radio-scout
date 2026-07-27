@@ -35,6 +35,16 @@ Extend ADR-0009 with a concrete, enforceable coverage policy and a named tool st
 
 CI does not exist yet (ticket #22). Until it does, coverage + mutation join the **local merge-gate ritual** alongside `cargo fmt` / `clippy -D warnings` / tests. #22 then wires the full gate set (nextest, llvm-cov → Codecov flags, Vitest coverage, the patch gate, the `client/dist` build-artifact → Rust-jobs ordering for `rust-embed`, arm64 release matrix, sharded Playwright, nightly mutation).
 
+## Amendment (#22, 2026-07-26): the patch gate runs in-repo, not on Codecov
+
+Everything above stands except **where the patch gate runs**. `.github/workflows/ci.yml` enforces it with [`diff-cover`](../../.github/actions/patch-coverage/action.yml) over the very lcov the project floor is already measured from.
+
+The reasoning that put the *floor* in-repo — "so the gate never depends on a third-party service's uptime" — turned out to apply to the patch gate too, and harder. Codecov's `patch` status is genuinely the best of its kind, but making it a **required** check means a PR cannot merge unless a third party is reachable *and* the repository has been linked there; a required check that never reports blocks every pull request rather than failing one, and the repository has no Codecov account. `diff-cover` reads the same lcov, resolves the diff with git, and answers on the runner. The `project`-status trend view and the `carryforward` flags are what this gives up; the blocking gate is what it buys.
+
+Codecov remains a reasonable *addition* later, as an advisory upload for the trend UI. It is not a dependency of merging.
+
+The other half of this ticket — **dual-dialect** — is `TEST_POSTGRES_URL` plus a `postgres:17` service, not the `testcontainers` crate named under "Backend, selective CI jobs". Same reason in a different key: `testcontainers` boots a container from inside the test process, and nextest runs process-per-test, so every developer would need a Docker daemon to run `cargo test` at all. The env-var seam keeps the everyday loop on SQLite and moves the whole suite with one variable. Real-S3 (MinIO/Garage) is still owed. See [`docs/agents/dual-dialect.md`](../agents/dual-dialect.md).
+
 ## Considered options
 
 - **Hard 100%-total line-coverage gate** (the literal ask) — rejected: coverage theater, brittle tests, and the 90→100 grind's poor bug-yield outweigh the marginal confidence. Achievable in Rust only with heavy exclusions of derives/glue.

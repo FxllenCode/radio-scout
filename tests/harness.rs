@@ -16,8 +16,12 @@ use common::{CallUpload, TestApp, frame_within, next_json, no_frame_within, subs
 
 use std::time::Duration;
 
+use rstest::rstest;
+
 use radio_scout::IngestConfig;
+use radio_scout::db::DbBackend;
 use radio_scout::db::entities::{call, call_patch, system};
+use sea_orm::ConnectionTrait;
 
 // ---------------------------------------------------------------------------
 // Bring-up: the real app, on a real port, over a temp SQLite DB + temp store.
@@ -430,10 +434,58 @@ async fn the_builder_accepts_a_caller_supplied_store() {
     );
 }
 
-/// The database is a seam, not a hard-coded SQLite path: #22 points it at a
-/// testcontainers Postgres so the suite runs on both dialects (ADR-0009) without
-/// a single test changing. Proven here with a second SQLite file, which is the
-/// same substitution.
+/// The dual-dialect run (#22, ADR-0003/0009) is the *whole* suite a second time,
+/// not one hand-written Postgres test: with `TEST_POSTGRES_URL` set, every
+/// `TestApp::spawn` in every binary lands on Postgres; with it unset — the
+/// everyday loop, and any machine without Docker — the default stays SQLite.
+///
+/// This is the one assertion that catches a dual-dialect job silently running
+/// SQLite twice, which is a green CI that proves half of what it claims. That
+/// each app gets its **own** Postgres database is proven by
+/// `two_apps_share_no_database_and_no_store`, which runs on whichever dialect it
+/// was given.
+#[tokio::test]
+async fn spawn_runs_on_the_dialect_the_run_was_given() {
+    let app = TestApp::spawn().await;
+
+    let expected = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(_) => DbBackend::Postgres,
+        Err(_) => DbBackend::Sqlite,
+    };
+    assert_eq!(app.db.get_database_backend(), expected);
+}
+
+/// A per-test Postgres database is named by rewriting **only** the database
+/// name out of the server URL the run was handed (#22). The parts around it are
+/// load-bearing: credentials live before the path, and connection parameters
+/// (`sslmode`, `options`) live after it — a rewrite that ate either would send
+/// the whole dual-dialect run at the wrong server, or at the right one
+/// unencrypted.
+#[rstest]
+#[case::a_database_named_in_the_path(
+    "postgres://u:p@host:5432/postgres",
+    "postgres://u:p@host:5432/rs_test_1"
+)]
+#[case::parameters_after_it(
+    "postgres://u:p@host:5432/postgres?sslmode=disable",
+    "postgres://u:p@host:5432/rs_test_1?sslmode=disable"
+)]
+#[case::no_database_at_all("postgres://host", "postgres://host/rs_test_1")]
+#[case::no_database_but_parameters(
+    "postgres://host?sslmode=disable",
+    "postgres://host/rs_test_1?sslmode=disable"
+)]
+fn a_per_test_database_url_replaces_only_the_database_name(
+    #[case] server: &str,
+    #[case] expected: &str,
+) {
+    assert_eq!(common::database_url_in(server, "rs_test_1"), expected);
+}
+
+/// A test can name the database it wants, rather than taking the one the run
+/// would have chosen. Proven here with a second SQLite file — the per-call-site
+/// override, distinct from the whole-suite dialect switch
+/// `spawn_runs_on_the_dialect_the_run_was_given` covers.
 #[tokio::test]
 async fn the_builder_accepts_a_caller_supplied_database() {
     let elsewhere = tempfile::tempdir().expect("tempdir");

@@ -2,9 +2,11 @@
 //! Call insert with child rows, and the archive-search aggregation query.
 //!
 //! SQLite runs everywhere (a fresh temp-file DB per test). The aggregation query
-//! also runs against Postgres when `TEST_POSTGRES_URL` is set — CI provisions a
-//! fresh Postgres and sets it (ADR-0003: every migration and query is exercised
-//! on both dialects). Locally that test skips (no Docker here).
+//! also runs against Postgres when `TEST_POSTGRES_URL` is set — #22's
+//! dual-dialect job stands one server up and sets it (ADR-0003: every migration
+//! and query is exercised on both dialects). Without it, that test skips.
+
+mod common;
 
 use radio_scout::db::entities::{
     api_key, call_frequency, call_patch, call_unit, group, system, tag, talkgroup, unit,
@@ -236,11 +238,15 @@ async fn dialect_sensitive_queries_on_sqlite() {
 
 /// The archive-search + Group aggregation, the selection catalog, and
 /// retention's `SUM(audio_size)` on Postgres — the highest dialect-divergence
-/// risks (ADR-0003). They run in one test because they share the single
-/// CI-provisioned database. Runs only when CI provides a fresh Postgres.
+/// risks (ADR-0003). They run in one test because each builds on the dataset the
+/// last one seeded. Runs only when the run was given a Postgres.
+///
+/// Against a **database of its own** (#22), like every other test: connecting to
+/// the server's own database instead would make the suite pass once and then
+/// fail on the rows it left behind.
 #[tokio::test]
 async fn dialect_sensitive_queries_on_postgres_when_available() {
-    let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
+    let Some(server) = common::postgres_server() else {
         // Test-runner output, not application output: a skipped test has to say
         // so to whoever is reading the run, and no subscriber is installed here.
         #[allow(clippy::print_stderr)]
@@ -251,6 +257,7 @@ async fn dialect_sensitive_queries_on_postgres_when_available() {
         }
         return;
     };
+    let url = common::create_test_database(&server).await;
     let db = db::connect(&url).await.expect("connect + migrate postgres");
     run_search_suite(&db).await;
     run_catalog_suite(&db).await;
