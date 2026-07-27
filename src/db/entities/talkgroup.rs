@@ -16,6 +16,10 @@ pub struct Model {
     pub tag_id: Option<i64>,
     /// LED color name (see the client LED palette); assigned via curation (#18).
     pub led: Option<String>,
+    /// Whether Calls on this Talkgroup are enhanced (#20). `NULL` inherits the
+    /// System, which in turn inherits the instance. The most specific row wins,
+    /// so a Talkgroup may opt back into a System that opted out.
+    pub enhancement: Option<bool>,
     pub created_at_ms: i64,
 }
 

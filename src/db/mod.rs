@@ -103,24 +103,31 @@ mod tests {
         let capture = LogCapture::start();
         connect(&url).await.expect("upgrade");
 
+        // Derived from the migration list rather than written out, so adding a
+        // migration does not break a test about *reporting* migrations.
+        let names: Vec<String> = migration::Migrator::migrations()
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect();
+        let (already_there, applied) = names.split_at(2);
+
         let logged = capture.text();
-        for applied in [
-            "m0003_call_audio_size",
-            "m0004_system_auto_populate",
-            "m0005_push_subscriptions",
-        ] {
+        for name in applied {
             assert!(
-                logged.contains(&format!("migration=\"{applied}\"")),
-                "{applied} missing from:\n{logged}"
+                logged.contains(&format!("migration=\"{name}\"")),
+                "{name} missing from:\n{logged}"
             );
         }
-        for already_there in ["m0001_init", "m0002_api_keys"] {
+        for name in already_there {
             assert!(
-                !logged.contains(&format!("migration=\"{already_there}\"")),
-                "{already_there} was already applied; re-reporting it is a lie:\n{logged}"
+                !logged.contains(&format!("migration=\"{name}\"")),
+                "{name} was already applied; re-reporting it is a lie:\n{logged}"
             );
         }
-        assert!(logged.contains("pending=3"), "{logged}");
+        assert!(
+            logged.contains(&format!("pending={}", applied.len())),
+            "{logged}"
+        );
     }
 
     /// A database already at the current schema says so — quietly, at DEBUG, so

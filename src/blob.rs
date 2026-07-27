@@ -12,6 +12,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// A fresh object key, sharded by a two-character prefix so no directory grows
+/// unbounded.
+///
+/// Shared by ingest and enhancement rather than written twice: both create
+/// objects in this store, and a sharding rule that drifted between them would
+/// leave orphan-GC listing one layout while something else wrote another.
+pub fn new_object_key(extension: &str) -> String {
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    format!("{}/{}.{}", &uuid[0..2], uuid, extension)
+}
+
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use object_store::aws::{AmazonS3, AmazonS3Builder};

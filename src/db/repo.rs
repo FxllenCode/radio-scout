@@ -15,7 +15,7 @@
 //! (`GROUP_CONCAT`/`STRING_AGG` diverge by dialect, ADR-0003) — a call's groups
 //! are loaded separately and assembled in Rust.
 
-use sea_orm::sea_query::Alias;
+use sea_orm::sea_query::{Alias, Expr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, JoinType, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
@@ -244,6 +244,11 @@ pub async fn insert_call<C: ConnectionTrait>(
         audio_name: Set(new.audio_name.clone()),
         audio_size: Set(new.audio_size),
         duration_ms: Set(new.duration_ms),
+        // Every Call arrives passthrough. Set explicitly rather than left to a
+        // column default, because a fresh database gets its `calls` table from
+        // the entity-derived DDL in `m0001_init`, which carries no defaults —
+        // only an upgraded database goes through `m0006`'s `ALTER`.
+        enhancement: Set(call::Enhancement::NONE.to_string()),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
@@ -1178,11 +1183,119 @@ pub async fn find_call<C: ConnectionTrait>(
 pub async fn get_call_audio<C: ConnectionTrait>(
     db: &C,
     id: CallId,
-) -> Result<Option<(String, Option<String>)>, DbErr> {
+) -> Result<Option<CallAudio>, DbErr> {
     Ok(call::Entity::find_by_id(id)
         .one(db)
         .await?
-        .map(|c| (c.object_key, c.audio_mime)))
+        .map(|c| CallAudio {
+            object_key: c.object_key,
+            mime: c.audio_mime,
+            enhancement: c.enhancement,
+        }))
+}
+
+/// What serving a Call's audio needs to know: where the bytes are, what to call
+/// them, and whether they are about to be replaced (#20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallAudio {
+    pub object_key: String,
+    pub mime: Option<String>,
+    /// One of [`call::Enhancement`]'s values. `pending` is why this is here at
+    /// all: audio that is queued for enhancement must not be cached as
+    /// immutable, because the object behind this id is going to change.
+    pub enhancement: String,
+}
+
+/// The System's and Talkgroup's enhancement flags for a Call, in that order.
+///
+/// Read *after* the Call is inserted rather than before, because auto-populate
+/// may have created either row a moment ago — and a row that has just been
+/// created has `NULL`, which is the value that inherits.
+pub async fn enhancement_scope<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<(Option<bool>, Option<bool>)>, DbErr> {
+    let Some(call) = call::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+    let system = system::Entity::find_by_id(call.system_id).one(db).await?;
+    let talkgroup = talkgroup::Entity::find_by_id(call.talkgroup_id)
+        .one(db)
+        .await?;
+    Ok(Some((
+        system.and_then(|s| s.enhancement),
+        talkgroup.and_then(|t| t.enhancement),
+    )))
+}
+
+/// Move a Call to an enhancement state, leaving its audio alone.
+pub async fn mark_enhancement<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+    state: &str,
+) -> Result<(), DbErr> {
+    call::Entity::update_many()
+        .col_expr(call::Column::Enhancement, Expr::value(state))
+        .filter(call::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Point a Call at its enhanced audio.
+///
+/// One statement, so a Call is never briefly `done` while still naming the old
+/// object — a reader between the two writes would serve audio that orphan-GC is
+/// entitled to delete. The old object is left behind deliberately: #10's sweep
+/// reclaims it once its grace period is up, which is also what makes this safe
+/// to do while somebody is mid-download of the original.
+pub async fn store_enhanced_audio<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+    audio: EnhancedAudio<'_>,
+) -> Result<(), DbErr> {
+    call::Entity::update_many()
+        .col_expr(call::Column::ObjectKey, Expr::value(audio.object_key))
+        .col_expr(call::Column::AudioMime, Expr::value(audio.mime))
+        .col_expr(call::Column::AudioName, Expr::value(audio.name))
+        .col_expr(call::Column::AudioSize, Expr::value(audio.bytes))
+        .col_expr(call::Column::DurationMs, Expr::value(audio.duration_ms))
+        .col_expr(
+            call::Column::Enhancement,
+            Expr::value(call::Enhancement::DONE),
+        )
+        .filter(call::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// The result of enhancing a Call, as the row records it.
+#[derive(Debug, Clone)]
+pub struct EnhancedAudio<'a> {
+    pub object_key: &'a str,
+    pub mime: &'a str,
+    pub name: String,
+    pub bytes: i64,
+    /// Measured while decoding — the first time this column is ever anything
+    /// but `NULL`, since ingest only ever sees bytes.
+    pub duration_ms: i64,
+}
+
+/// Calls a restart interrupted: queued or in flight when the process went away.
+///
+/// Deliberately only `pending`. Calls marked `none` were ingested while
+/// enhancement was off, and re-queueing those would mean switching enhancement
+/// on silently rewrote an operator's whole archive on the next boot.
+pub async fn calls_pending_enhancement<C: ConnectionTrait>(db: &C) -> Result<Vec<CallId>, DbErr> {
+    Ok(call::Entity::find()
+        .filter(call::Column::Enhancement.eq(call::Enhancement::PENDING))
+        .order_by_asc(call::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|c| c.id)
+        .collect())
 }
 
 /// Build the denormalized `StoredCall` view (the live-feed / serve DTO) for a

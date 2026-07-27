@@ -23,5 +23,5 @@ CI (GitHub Actions) uses a target matrix; each job builds the frontend → embed
 
 ## Consequences
 
-- Releases are self-contained with no runtime dependencies, except an optional *system* ffmpeg used only if the AAC-muxing fallback in [ADR-0006](0006-optional-rust-native-audio-enhancement.md) is taken.
+- Releases are self-contained with **no runtime dependencies at all**. The ffmpeg escape hatch [ADR-0006](0006-optional-rust-native-audio-enhancement.md) once reserved for AAC muxing is moot as of #20's amendment: no AAC encoder ships, so nothing in the binary needs muxing help.
 - The frontend must be built before the Rust binary in every CI job (build-order dependency).

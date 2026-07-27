@@ -26,7 +26,34 @@ pub struct Model {
     /// count as zero toward the cap.
     pub audio_size: Option<i64>,
     pub duration_ms: Option<i64>,
+    /// Where this Call is in the enhancement pipeline (#20) — one of
+    /// [`Enhancement`]'s four values. Stored as text rather than an integer so
+    /// a `SELECT` is readable by a human debugging a stuck queue, and so a
+    /// value added later cannot silently collide with an existing number.
+    pub enhancement: String,
     pub created_at_ms: i64,
+}
+
+/// The states a Call moves through as it is enhanced.
+///
+/// Deliberately not an enum in the entity: SeaORM's `ActiveEnum` would bind the
+/// stored spelling to a Rust type across two dialects, and this is a column two
+/// queries filter on and nothing joins to. The constants are the single source
+/// of the spellings.
+pub struct Enhancement;
+
+impl Enhancement {
+    /// Stored exactly as the recorder sent it. Every Call that predates
+    /// enhancement, and every Call ingested while it was off.
+    pub const NONE: &'static str = "none";
+    /// Queued or in flight. Audio serving must not mark this `immutable` — the
+    /// object behind it is about to be replaced.
+    pub const PENDING: &'static str = "pending";
+    /// Enhanced; the object key points at the result.
+    pub const DONE: &'static str = "done";
+    /// Tried and could not be — undecodable audio, or a queue that was full.
+    /// The Call keeps its passthrough audio and stays playable.
+    pub const SKIPPED: &'static str = "skipped";
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

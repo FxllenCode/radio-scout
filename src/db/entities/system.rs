@@ -20,6 +20,12 @@ pub struct Model {
     /// Comma-separated Talkgroup Refs never ingested for this system (#8). `NULL`
     /// or empty blacklists nothing. Mirrors rdio-scanner's per-system `blacklists`.
     pub blacklist: Option<String>,
+    /// Whether Calls on this System are enhanced (#20). `NULL` inherits the
+    /// instance-wide `[enhancement] mode`; `false` keeps a chatty System off a
+    /// Pi's CPU. Nullable on purpose — a plain boolean has no way to say
+    /// "follow the instance", which is why `auto_populate` above is awkward to
+    /// turn off for one System.
+    pub enhancement: Option<bool>,
     pub created_at_ms: i64,
 }
 

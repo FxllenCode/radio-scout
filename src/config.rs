@@ -44,6 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::AdminConfig;
 use crate::blob::{S3Config, StorageConfig};
+use crate::enhance::{EnhancementConfig, Mode, Output};
 use crate::ingest::IngestConfig;
 use crate::observability;
 use crate::push::PushConfig;
@@ -246,6 +247,7 @@ pub struct Config {
     pub ingest: Ingest,
     pub admin: Admin,
     pub push: Push,
+    pub enhancement: Enhancement,
     pub log: Log,
 }
 
@@ -350,6 +352,18 @@ impl Config {
         }
     }
 
+    /// How audio enhancement behaves (#20, ADR-0006 as amended). *Scope* — the
+    /// Systems and Talkgroups it applies to — is not here: it is a column on
+    /// those rows, following the auto-populate precedent (#8).
+    pub fn enhancement(&self) -> EnhancementConfig {
+        EnhancementConfig {
+            mode: self.enhancement.mode,
+            output: self.enhancement.output,
+            target_lufs: self.enhancement.target_lufs,
+            queue_depth: self.enhancement.queue_depth,
+        }
+    }
+
     /// Refuse a configuration that parsed but cannot be run.
     ///
     /// Every check here is one an operator would otherwise meet as a runtime
@@ -404,6 +418,39 @@ impl Config {
                 "push.subject",
                 &self.push.subject,
                 "a contact URI: \"mailto:you@example.com\" or \"https://example.com/contact\"",
+            ));
+        }
+        // Zero admits nothing, so enhancement would be configured on and never
+        // run — the `[admin]` zeros' shape. `mode = "off"` is how it is turned
+        // off, so there is no second reading to guess at.
+        if self.enhancement.queue_depth == 0 {
+            return Err(ConfigError::invalid_key(
+                "enhancement.queue_depth",
+                "0",
+                "a positive number of Calls — use mode = \"off\" to disable enhancement",
+            ));
+        }
+        // LUFS is referenced to full scale, so a usable target is negative and
+        // not arbitrarily so. The bounds are `loudnorm`'s own accepted range,
+        // which makes an operator's ffmpeg knowledge transfer — and rules out
+        // NaN, which would otherwise propagate silently through every gain.
+        if !(LOUDNESS_RANGE_LUFS.contains(&self.enhancement.target_lufs)) {
+            return Err(ConfigError::invalid_key(
+                "enhancement.target_lufs",
+                &self.enhancement.target_lufs.to_string(),
+                "a loudness between -70 and -5 LUFS, e.g. -16",
+            ));
+        }
+        // An output that parses but is not built. Accepting it and writing WAV
+        // instead is rdio-scanner's failure mode — warn once, then silently do
+        // something else forever (`server/ffmpeg.go:79-86`) — so this refuses,
+        // and names the ticket that lands it rather than leaving an operator to
+        // guess whether they mistyped something.
+        if self.enhancement.output == Output::Opus {
+            return Err(ConfigError::invalid_key(
+                "enhancement.output",
+                &self.enhancement.output.to_string(),
+                "\"wav\" — \"opus\" needs libopus, which lands with #23",
             ));
         }
         validate_directives("log.directives", &self.log.directives)?;
@@ -640,6 +687,64 @@ impl Default for Push {
         }
     }
 }
+
+/// `[enhancement]` — audio enhancement (#20, spec US 33-34, ADR-0006 as
+/// amended by #20).
+///
+/// Policy only. **Scope** — which Systems and Talkgroups are enhanced — is a
+/// column on those rows rather than a list here, following the auto-populate
+/// precedent (#8): a setting that names Refs in a file goes stale the moment a
+/// recorder discovers a new one.
+///
+/// rdio-scanner puts the whole thing in its database behind its admin UI (a
+/// four-value `audioConversion`, `server/options.go:56-59`), which is exactly
+/// what this module's header refuses: a headless install cannot configure it
+/// and nothing is version-controllable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Enhancement {
+    /// How far the chain runs. `off` — the default — is passthrough.
+    pub mode: Mode,
+    /// What enhanced audio is encoded as.
+    pub output: Output,
+    /// Integrated loudness every enhanced Call is normalized to, in LUFS.
+    pub target_lufs: f64,
+    /// How many Calls may be waiting to be enhanced.
+    pub queue_depth: usize,
+}
+
+impl Default for Enhancement {
+    /// As shipped — read off [`EnhancementConfig`] so the file's defaults and
+    /// the code's cannot drift apart.
+    fn default() -> Self {
+        let default = EnhancementConfig::default();
+        Enhancement {
+            mode: default.mode,
+            output: default.output,
+            target_lufs: default.target_lufs,
+            queue_depth: default.queue_depth,
+        }
+    }
+}
+
+/// What an unusable `[enhancement] mode` is told it should have been.
+///
+/// Spelled out rather than built from [`Mode::ALL`], because
+/// [`ConfigError::Invalid`] carries a `&'static str` and joining at runtime
+/// would not fit it. That makes drift possible, so a test holds this to
+/// naming every mode the enum has.
+const EXPECTED_MODE: &str = "\"off\", \"normalize\" or \"denoise\"";
+
+/// ...and the same for `[enhancement] output`. Both spellings parse; whether
+/// one is *built* is [`Config::validate`]'s business, so an operator who wrote
+/// `opus` is told it is unbuilt rather than that it is unknown.
+const EXPECTED_OUTPUT: &str = "\"wav\" or \"opus\"";
+
+/// The loudness targets `[enhancement] target_lufs` will accept — `loudnorm`'s
+/// own range, so what an operator knows from ffmpeg carries over. `contains`
+/// on a float range is also how NaN is refused: it compares false against
+/// everything, so a target that is not a number never reaches the gain.
+const LOUDNESS_RANGE_LUFS: std::ops::RangeInclusive<f64> = -70.0..=-5.0;
 
 /// `[log]` — how much the scanner says (ADR-0011).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -998,6 +1103,43 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # real one, so set it if you use a public instance.
 # subject = "mailto:admin@localhost"
 
+[enhancement]
+# Audio enhancement (#20): reprocess each Call's audio after it is stored, to
+# make it clearer and consistently loud between Talkgroups. Off by default, and
+# never on the ingest path — a recorder's upload is answered before any of this
+# starts, so enabling it cannot slow ingest down or lose a Call.
+#
+#   "off"        store exactly what the recorder sent (passthrough)
+#   "normalize"  voice band-pass + EBU R128 loudness normalization
+#   "denoise"    ...and RNNoise noise suppression on top
+#
+# "normalize" is the proven win — it fixes the level swings between Talkgroups
+# that make scanning fatiguing. "denoise" is unproven on already-decoded
+# digital (P25/DMR) audio; try it on your own systems before trusting it.
+#
+# This is the instance-wide setting. To enhance only some Systems or Talkgroups
+# — which is how you keep one chatty System from eating a Pi — set it per row
+# instead; a row that says nothing inherits this.
+# mode = "off"
+
+# What enhanced audio is written as. "wav" is 8 kHz 16-bit mono: it plays on
+# every iOS version and in every browser, and is still smaller than what most
+# recorders send. "opus" is roughly five times smaller again, but only plays in
+# Safari from iOS 18.4 — and is not built yet (see the note it refuses with).
+# output = "wav"
+
+# The loudness every enhanced Call is normalized to, in LUFS, and the ceiling
+# peaks are limited to. -16 is a speech target that sounds right on a phone
+# speaker; EBU R128 broadcast is -23, which is noticeably quieter. This is the
+# setting that fixes the level swings between Talkgroups.
+# target_lufs = -16.0
+
+# How many Calls may be waiting to be enhanced before an arriving one simply
+# keeps the audio the recorder sent. Deep on purpose: the live feed is
+# published at ingest, not after enhancement, so a backlog never delays a
+# listener — it only decides how long a burst can outrun the worker.
+# queue_depth = 512
+
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a
 # single run.
@@ -1096,6 +1238,9 @@ impl Loaded {
             %database,
             storage = %config.storage.backend,
             trusted_proxies,
+            // The one setting that changes the bytes a listener receives, so
+            // "why does this sound different" is answerable from the log.
+            enhancement = %config.enhancement.mode,
             "configuration"
         );
     }
@@ -1260,6 +1405,30 @@ pub fn resolve(
         "a number of seconds",
     )? {
         config.admin.lockout_secs = secs;
+    }
+    if let Some(mode) = set_env(&env, "RADIO_SCOUT_ENHANCEMENT_MODE") {
+        config.enhancement.mode = mode.parse().map_err(|_| {
+            ConfigError::invalid_env("RADIO_SCOUT_ENHANCEMENT_MODE", &mode, EXPECTED_MODE)
+        })?;
+    }
+    if let Some(output) = set_env(&env, "RADIO_SCOUT_ENHANCEMENT_OUTPUT") {
+        config.enhancement.output = output.parse().map_err(|_| {
+            ConfigError::invalid_env("RADIO_SCOUT_ENHANCEMENT_OUTPUT", &output, EXPECTED_OUTPUT)
+        })?;
+    }
+    if let Some(lufs) = parsed_env(
+        &env,
+        "RADIO_SCOUT_ENHANCEMENT_TARGET_LUFS",
+        "a loudness in LUFS, e.g. -16",
+    )? {
+        config.enhancement.target_lufs = lufs;
+    }
+    if let Some(depth) = parsed_env(
+        &env,
+        "RADIO_SCOUT_ENHANCEMENT_QUEUE_DEPTH",
+        "a number of Calls",
+    )? {
+        config.enhancement.queue_depth = depth;
     }
     // `RUST_LOG`, not a `RADIO_SCOUT_`-prefixed name: it is the variable every
     // Rust operator already reaches for, and ADR-0011 documents it as the
@@ -1857,6 +2026,214 @@ mod tests {
         assert!(error.to_string().contains("positive"), "{error}");
     }
 
+    /// US 34, and the whole safety property of the feature: a Pi that was never
+    /// asked to do DSP must not start doing it because it was upgraded. Off is
+    /// the default at every layer — the section absent, the section present and
+    /// empty, and the key absent from a section that sets something else.
+    #[rstest]
+    #[case::no_file(None)]
+    #[case::empty_section(Some("[enhancement]\n"))]
+    #[case::a_section_that_sets_something_else(Some("[enhancement]\ntarget_lufs = -18.0\n"))]
+    fn enhancement_is_off_until_it_is_turned_on(#[case] text: Option<&str>) {
+        let config = resolve(&cli(&[]), no_env, text.map(file).as_ref()).expect("resolve");
+
+        assert_eq!(config.enhancement().mode, Mode::Off);
+    }
+
+    /// US 36 — settable without a UI, in either spelling, with the environment
+    /// over the file. A container is configured by environment and nothing
+    /// else, so a setting only the file can reach is a setting Docker cannot
+    /// use.
+    #[rstest]
+    #[case::from_the_file("[enhancement]\nmode = \"normalize\"\n", &[], Mode::Normalize)]
+    #[case::from_the_environment("", &[("RADIO_SCOUT_ENHANCEMENT_MODE", "denoise")], Mode::Denoise)]
+    #[case::the_environment_wins(
+        "[enhancement]\nmode = \"normalize\"\n",
+        &[("RADIO_SCOUT_ENHANCEMENT_MODE", "off")],
+        Mode::Off
+    )]
+    fn the_enhancement_mode_comes_from_either_layer(
+        #[case] text: &str,
+        #[case] vars: &[(&str, &str)],
+        #[case] expected: Mode,
+    ) {
+        let config = resolve(&cli(&[]), env(vars), Some(&file(text))).expect("resolve");
+
+        assert_eq!(config.enhancement().mode, expected);
+    }
+
+    /// WAV is the enhanced output because it is the only one that plays on
+    /// *every* iOS version with no patent surface — and measured against real
+    /// scanner audio (96 kHz AAC at 320 kbps) 8 kHz WAV is still 2.5x smaller
+    /// than what recorders send, so universality costs nothing here.
+    #[test]
+    fn enhanced_audio_is_wav_unless_told_otherwise() {
+        let config = resolve(&cli(&[]), no_env, None).expect("resolve");
+
+        assert_eq!(config.enhancement().output, Output::Wav);
+    }
+
+    /// ADR-0012: boot says what it is configured to do. Enhancement is the one
+    /// setting that changes the *bytes* a listener receives, so "why does my
+    /// audio sound different than it used to" has to be answerable from the
+    /// log rather than by diffing config files.
+    #[rstest]
+    #[case(Mode::Off, "enhancement=off")]
+    #[case(Mode::Normalize, "enhancement=normalize")]
+    fn boot_says_whether_audio_is_enhanced(#[case] mode: Mode, #[case] expected: &str) {
+        let capture = LogCapture::start();
+
+        Loaded {
+            config: Config {
+                enhancement: Enhancement {
+                    mode,
+                    ..Enhancement::default()
+                },
+                ..Config::default()
+            },
+            file: None,
+        }
+        .log_summary();
+
+        let logged = capture.text();
+        assert!(logged.contains(expected), "{logged}");
+    }
+
+    /// The two remaining knobs, from either layer: how loud a Call is
+    /// normalized to, and how many Calls may be waiting to be enhanced.
+    #[test]
+    fn the_loudness_target_and_queue_depth_are_configurable() {
+        let config = resolve(
+            &cli(&[]),
+            env(&[("RADIO_SCOUT_ENHANCEMENT_QUEUE_DEPTH", "64")]),
+            Some(&file(
+                "[enhancement]\ntarget_lufs = -23.0\nqueue_depth = 8\n",
+            )),
+        )
+        .expect("resolve");
+
+        let enhancement = config.enhancement();
+        assert_eq!(enhancement.target_lufs, -23.0);
+        assert_eq!(enhancement.queue_depth, 64, "the environment is louder");
+    }
+
+    /// Both of these brick enhancement rather than merely behaving oddly, so
+    /// they stop the boot that wrote them (ADR-0012).
+    ///
+    /// A queue that admits nothing means enhancement silently never runs — the
+    /// same shape as `[admin]`'s zeros, and with no "0 disables it" reading to
+    /// guess at, since `mode = "off"` is how you disable it. A loudness target
+    /// outside R128's usable span is not a preference but an impossibility:
+    /// LUFS is referenced to full scale, so a positive target asks for audio
+    /// louder than digital silence-to-clipping allows. The bounds are
+    /// `loudnorm`'s own accepted range, so an operator's ffmpeg knowledge
+    /// transfers.
+    #[rstest]
+    #[case::zero_queue("[enhancement]\nqueue_depth = 0\n", "enhancement.queue_depth")]
+    #[case::positive_lufs("[enhancement]\ntarget_lufs = 3.0\n", "enhancement.target_lufs")]
+    #[case::deafening("[enhancement]\ntarget_lufs = -1.0\n", "enhancement.target_lufs")]
+    #[case::inaudible("[enhancement]\ntarget_lufs = -90.0\n", "enhancement.target_lufs")]
+    #[case::not_a_number("[enhancement]\ntarget_lufs = nan\n", "enhancement.target_lufs")]
+    fn an_impossible_enhancement_policy_refuses_to_boot(#[case] text: &str, #[case] key: &str) {
+        let error =
+            resolve(&cli(&[]), no_env, Some(&file(text))).expect_err("an impossible policy");
+
+        assert!(error.to_string().contains(key), "{error}");
+    }
+
+    /// An output that parses but is not built must **refuse to boot**, from
+    /// either layer, and say which ticket lands it.
+    ///
+    /// The alternative — accepting it and quietly writing WAV — is the failure
+    /// mode this whole project exists to avoid: rdio-scanner, told to convert
+    /// audio with no ffmpeg installed, warns *once* and then silently passes
+    /// every Call through forever (`server/ffmpeg.go:79-86`), so an operator
+    /// reading their config believes something is happening that is not.
+    ///
+    /// It refuses even with `mode = "off"`, when nothing would be encoded at
+    /// all: an unusable setting should fail at the boot where it was written,
+    /// not three boots later when enhancement is finally switched on.
+    #[rstest]
+    #[case::in_the_file("[enhancement]\noutput = \"opus\"\n", &[])]
+    #[case::in_the_environment("", &[("RADIO_SCOUT_ENHANCEMENT_OUTPUT", "opus")])]
+    #[case::even_with_enhancement_off("[enhancement]\nmode = \"off\"\noutput = \"opus\"\n", &[])]
+    fn an_output_that_is_not_built_yet_refuses_to_boot(
+        #[case] text: &str,
+        #[case] vars: &[(&str, &str)],
+    ) {
+        let error = resolve(&cli(&[]), env(vars), Some(&file(text))).expect_err("opus is unbuilt");
+
+        let message = error.to_string();
+        assert!(message.contains("enhancement.output"), "{message}");
+        assert!(message.contains("opus"), "{message}");
+        assert!(
+            message.contains("#23"),
+            "an operator must be told where it lands: {message}"
+        );
+    }
+
+    /// A format nobody has heard of is a different failure from one that exists
+    /// but is not built yet, and gets a different message: "here is the set"
+    /// rather than "here is the ticket".
+    #[test]
+    fn an_output_format_that_does_not_exist_refuses_to_boot() {
+        let error = resolve(
+            &cli(&[]),
+            env(&[("RADIO_SCOUT_ENHANCEMENT_OUTPUT", "flac")]),
+            None,
+        )
+        .expect_err("no such format");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("RADIO_SCOUT_ENHANCEMENT_OUTPUT"),
+            "{message}"
+        );
+        for output in Output::ALL {
+            assert!(
+                message.contains(&output.to_string()),
+                "the message must name every format; `{output}` is missing from {message}"
+            );
+        }
+    }
+
+    /// A mode nobody implements must stop the boot rather than quietly meaning
+    /// `off` — an operator who asked for `normalise` and silently got
+    /// passthrough would conclude the feature does not work. Both layers, and
+    /// both must name the setting *and* every mode there is, so the message is
+    /// enough to fix it without reading source.
+    #[rstest]
+    #[case::in_the_file("[enhancement]\nmode = \"normalise\"\n", &[], CONFIG_FILE_NAME)]
+    #[case::in_the_environment(
+        "",
+        &[("RADIO_SCOUT_ENHANCEMENT_MODE", "loud")],
+        "RADIO_SCOUT_ENHANCEMENT_MODE"
+    )]
+    fn an_unknown_enhancement_mode_refuses_to_boot(
+        #[case] text: &str,
+        #[case] vars: &[(&str, &str)],
+        #[case] written_where: &str,
+    ) {
+        let error = resolve(&cli(&[]), env(vars), Some(&file(text))).expect_err("an unknown mode");
+
+        // Where they wrote it, and what they could have written instead — the
+        // two things that turn a refused boot into a fixed one. Deliberately
+        // not the *punctuation*: the file layer reports through serde
+        // (``expected one of `off`, …``) and the environment through our own
+        // message (`expected "off", …`), and pinning either one's quoting
+        // would test the formatter rather than the behaviour. The file's
+        // locator is its path plus a line:column, because serde names the bad
+        // *variant* rather than the key — the same shape `Backend` has.
+        let message = error.to_string();
+        assert!(message.contains(written_where), "{message}");
+        for mode in Mode::ALL {
+            assert!(
+                message.contains(&mode.to_string()),
+                "the message must name every mode; `{mode}` is missing from {message}"
+            );
+        }
+    }
+
     /// The defaults are the shipped ones, not a second copy that can drift.
     #[test]
     fn unconfigured_ingest_and_retention_are_the_shipped_defaults() {
@@ -2342,6 +2719,12 @@ mod tests {
     #[case::push_coalesce(&[("RADIO_SCOUT_PUSH_COALESCE_SECS", "60")], |c: &Config| assert_eq!(c.push().coalesce, Duration::from_secs(60)))]
     #[case::push_ttl(&[("RADIO_SCOUT_PUSH_TTL_SECS", "120")], |c: &Config| assert_eq!(c.push().ttl, Duration::from_secs(120)))]
     #[case::push_subject(&[("RADIO_SCOUT_PUSH_SUBJECT", "mailto:ops@example.com")], |c: &Config| assert_eq!(c.push().subject, "mailto:ops@example.com"))]
+    #[case::enhancement_mode(&[("RADIO_SCOUT_ENHANCEMENT_MODE", "normalize")], |c: &Config| assert_eq!(c.enhancement().mode, Mode::Normalize))]
+    #[case::enhancement_lufs(&[("RADIO_SCOUT_ENHANCEMENT_TARGET_LUFS", "-20.5")], |c: &Config| assert_eq!(c.enhancement().target_lufs, -20.5))]
+    #[case::enhancement_queue(&[("RADIO_SCOUT_ENHANCEMENT_QUEUE_DEPTH", "16")], |c: &Config| assert_eq!(c.enhancement().queue_depth, 16))]
+    // `RADIO_SCOUT_ENHANCEMENT_OUTPUT` is absent on purpose: its only non-default
+    // value refuses to boot, so there is nothing here it could resolve *to*.
+    // That it is read is proved by `an_output_that_is_not_built_yet_refuses_to_boot`.
     fn every_setting_can_come_from_the_environment(
         #[case] vars: &[(&str, &str)],
         #[case] expected: fn(&Config),

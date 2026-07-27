@@ -21,6 +21,7 @@ use clap::Parser;
 use radio_scout::admin::AdminAuth;
 use radio_scout::config::{self, Cli, Config};
 use radio_scout::db;
+use radio_scout::enhance::Enhancer;
 use radio_scout::push::Push;
 use radio_scout::retention;
 use radio_scout::startup::{self, INGEST_KEY_VAR};
@@ -154,9 +155,15 @@ async fn serve(
     state.trusted_proxies = config.trusted_proxies();
     state.admin = AdminAuth::provisioned(&admin, config.admin());
     state.push = push;
+    state.enhancer = Enhancer::from_config(config.enhancement());
     // Notifications ride the live-feed fanout (#16), so an ingest never waits
     // on a push service. A server with no identity spawns nothing.
     radio_scout::push::spawn(state.clone());
+    // Enhancement (#20) runs off its own queue, behind ingest rather than in
+    // it. With `[enhancement] mode = "off"` — what ships — this spawns nothing,
+    // and the first thing it does when it is on is pick up whatever a previous
+    // process was part-way through.
+    radio_scout::enhance::spawn(state.clone());
     let app = build_app(state);
 
     let port = config.server.port;

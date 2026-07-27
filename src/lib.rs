@@ -12,6 +12,7 @@ pub mod call;
 pub mod catalog;
 pub mod config;
 pub mod db;
+pub mod enhance;
 pub mod failure;
 pub mod http_log;
 pub mod import;
@@ -41,6 +42,7 @@ use crate::admin::AdminAuth;
 use crate::call::CallId;
 use crate::config::TrustedProxies;
 use crate::db::repo;
+use crate::enhance::Enhancer;
 use crate::failure::ServerError;
 use crate::live::LiveFeed;
 use crate::push::Push;
@@ -66,6 +68,9 @@ pub struct AppState {
     /// The Web Push surface: the server's VAPID identity, or nothing at all
     /// when push is unconfigured (#16).
     pub push: Push,
+    /// The enhancement queue, or nothing at all when `[enhancement] mode` is
+    /// `off` — which is what ships (#20).
+    pub enhancer: Enhancer,
 }
 
 impl AppState {
@@ -81,6 +86,7 @@ impl AppState {
             trusted_proxies: TrustedProxies::default(),
             admin: AdminAuth::locked(),
             push: Push::disabled(),
+            enhancer: Enhancer::disabled(),
         }
     }
 }
@@ -153,12 +159,32 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
         ))
 }
 
-/// How long a client may keep a Call's audio. The bytes behind a Call id never
-/// change, so this is `immutable`; `private` keeps it out of shared proxies,
-/// since listening will become access-scoped (ADR-0008). A week is long enough
-/// for the client's next-Call prefetch (#14) and for re-listening within a
-/// session, without pinning audio that retention has since pruned.
+/// How long a client may keep a Call's audio. The bytes behind a settled Call
+/// never change, so this is `immutable`; `private` keeps it out of shared
+/// proxies, since listening will become access-scoped (ADR-0008). A week is long
+/// enough for the client's next-Call prefetch (#14) and for re-listening within
+/// a session, without pinning audio that retention has since pruned.
 const AUDIO_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
+
+/// ...and how long it may keep audio that is **queued for enhancement** (#20).
+///
+/// `immutable` is a promise the bytes behind this URL will never change, and for
+/// a pending Call that promise is exactly false: the worker is about to point
+/// the row at a different object. A client that cached it in the window would
+/// keep the un-levelled version for a week and never learn otherwise, so the
+/// promise is withheld until there is nothing left to replace. Short rather than
+/// `no-store`, because the Call still has to play now — and a range request
+/// mid-playback should not re-fetch the whole object.
+const PENDING_AUDIO_CACHE_CONTROL: &str = "private, max-age=30";
+
+/// The `Cache-Control` a Call's audio is served with, given its enhancement
+/// state.
+fn audio_cache_control(enhancement: &str) -> &'static str {
+    match enhancement == db::entities::call::Enhancement::PENDING {
+        true => PENDING_AUDIO_CACHE_CONTROL,
+        false => AUDIO_CACHE_CONTROL,
+    }
+}
 
 /// `GET /api/call/{id}/audio` — serve a stored call's audio (ADR-0002).
 ///
@@ -170,12 +196,14 @@ async fn serve_audio(
     Path(id): Path<CallId>,
     headers: HeaderMap,
 ) -> Response {
-    let (object_key, audio_mime) = match repo::get_call_audio(&state.db, id).await {
+    let audio = match repo::get_call_audio(&state.db, id).await {
         Ok(Some(audio)) => audio,
         Ok(None) => return (StatusCode::NOT_FOUND, "call not found\n").into_response(),
         Err(err) => return ServerError::new("look-up-call", err).into_response(),
     };
 
+    let cache_control = audio_cache_control(&audio.enhancement);
+    let object_key = audio.object_key;
     if state.audio.is_presigning() {
         match state.audio.presigned_get_url(&object_key).await {
             Some(Ok(url)) => return Redirect::temporary(&url).into_response(),
@@ -189,7 +217,9 @@ async fn serve_audio(
         Ok(None) => return (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
         Err(err) => return ServerError::new("stat-audio", err).into_response(),
     };
-    let mime = audio_mime.unwrap_or_else(|| "application/octet-stream".to_string());
+    let mime = audio
+        .mime
+        .unwrap_or_else(|| "application/octet-stream".to_string());
 
     match parse_range_header(headers.get(header::RANGE), size) {
         RangeOutcome::None => match state.audio.get(&object_key).await {
@@ -198,7 +228,7 @@ async fn serve_audio(
                 [
                     (header::CONTENT_TYPE, mime),
                     (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (header::CACHE_CONTROL, AUDIO_CACHE_CONTROL.to_string()),
+                    (header::CACHE_CONTROL, cache_control.to_string()),
                 ],
                 bytes,
             )
@@ -214,7 +244,7 @@ async fn serve_audio(
                         (header::CONTENT_TYPE, mime),
                         (header::ACCEPT_RANGES, "bytes".to_string()),
                         (header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}")),
-                        (header::CACHE_CONTROL, AUDIO_CACHE_CONTROL.to_string()),
+                        (header::CACHE_CONTROL, cache_control.to_string()),
                     ],
                     bytes,
                 )

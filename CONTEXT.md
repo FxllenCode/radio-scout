@@ -108,6 +108,20 @@ _Avoid_: nonce, anti-forgery token.
 The refusal to check any password from an address that has spent its budget of failed logins, until a cooldown measured from its last attempt has passed. Per address, and never shared: one address's failures neither spend nor restore another's.
 _Avoid_: ban, throttle, rate limit.
 
+### Audio quality
+
+**Enhancement**:
+Reprocessing a stored call's audio to make it clearer and consistently loud — noise suppression, voice band-pass, loudness normalization — replacing the audio object the call points at. Opt-in and off by default, scoped per instance, system or talkgroup. Never happens on the ingest path: a recorder's upload is answered before any of it starts.
+_Avoid_: conversion (rdio-scanner's word, for the narrower act of changing format), transcoding, processing, normalization (one stage of enhancement, not the whole of it).
+
+**Passthrough**:
+Keeping a call's audio exactly as the recorder sent it. The default, and what a call keeps whenever enhancement is off, out of scope for it, or unable to run.
+_Avoid_: raw, as-is, unconverted.
+
+**Enhancement queue**:
+The calls waiting to be enhanced. Server-side work, and distinct from the **listening queue**, which is what a listener is about to hear — the two are never the same set. Bounded: a call that cannot be admitted keeps its **passthrough** audio rather than waiting.
+_Avoid_: work queue, job queue, backlog, pipeline.
+
 ### Storage & retention
 
 **Retention**:

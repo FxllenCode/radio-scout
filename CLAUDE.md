@@ -86,7 +86,7 @@ Full rationale: [ADR-0012](docs/adr/0012-configuration-model.md). One `Config` (
 - **`[server] trusted_proxies`** (#28's deferred setting) is a list of addresses **and CIDR blocks** — Docker's bridge is a subnet. See the [Logging policy](#logging-policy) for which entry of the chain is believed and why.
 - **Boot says where its configuration came from** — the file it read, or that there wasn't one — then the settings that resulted, so "why isn't my setting applying?" has an answer in the log.
 - **Every setting has both spellings**, a TOML key and a `RADIO_SCOUT_*` variable (`.env.example` lists them); `main.rs` stays thin because it is excluded from coverage — every decision worth testing is in `config.rs`.
-- **Not here yet:** `[enhancement]` (spec US 36) lands with the ADR-0006 pipeline rather than as a knob that does nothing.
+- **`[enhancement]`** (#20, spec US 33-34) is `mode` (`off` — what ships — / `normalize` / `denoise`), `output`, `target_lufs` and `queue_depth`. It carries *policy* only; **scope** is `systems.enhancement` / `talkgroups.enhancement`, nullable so `NULL` inherits — the auto-populate precedent (#8), because a file naming Refs goes stale the moment a recorder finds a new one. `output = "opus"` parses and then **refuses to boot** naming #23: an unbuilt option must never quietly write a different format than the operator asked for.
 
 ## Improve, don't clone rdio
 

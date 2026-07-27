@@ -58,6 +58,12 @@ base64 = "0.22"
 # 0.13 — no OpenSSL, so the aarch64 and Windows cross-builds stay a plain
 # `cargo build`.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+symphonia = { version = "0.6.0", default-features = false, features = ["wav", "pcm", "mp3", "aac", "isomp4"] }
+rubato = "4.0.0"
+ebur128 = "0.1.10"
+biquad = "0.6.0"
+nnnoiseless = { version = "0.5.2", default-features = false }
+audioadapter-buffers = "4.0.0"
 
 # Nothing is un-instrumented (ADR-0011): application output goes through
 # `tracing`, so the print macros are a compile error rather than a habit. Cargo

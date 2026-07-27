@@ -22,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0003_call_audio_size::Migration),
             Box::new(m0004_system_auto_populate::Migration),
             Box::new(m0005_push_subscriptions::Migration),
+            Box::new(m0006_enhancement::Migration),
         ]
     }
 }
@@ -357,6 +358,112 @@ mod m0005_push_subscriptions {
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
                 .drop_table(Table::drop().table(push_subscription::Entity).to_owned())
+                .await
+        }
+    }
+}
+
+/// Audio enhancement (#20) needs two different things recorded.
+///
+/// **State, on the Call** — enhancement happens after the `200`, so at any
+/// moment a Call is passthrough, queued, enhanced, or was tried and could not
+/// be. Two things read it: audio serving, which must not tell a client to cache
+/// a version about to be replaced, and boot, which re-queues what a restart
+/// interrupted.
+///
+/// **Scope, on the System and the Talkgroup** — nullable, because `NULL` is the
+/// third state that makes inheritance work: *say nothing and follow the
+/// instance*. `auto_populate` (m0004) is a plain boolean for the same job and
+/// cannot express it, which is why turning that off for one System is awkward.
+mod m0006_enhancement {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0006_enhancement"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("calls", "enhancement").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(
+                                ColumnDef::new(call::Column::Enhancement)
+                                    .string()
+                                    .not_null()
+                                    // Every Call that already exists was stored
+                                    // as the recorder sent it. Marking them
+                                    // `none` rather than `pending` is what stops
+                                    // enabling enhancement from silently
+                                    // rewriting an archive on the next boot.
+                                    .default(call::Enhancement::NONE),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            for (table, entity) in [("systems", system::Entity)] {
+                if !manager.has_column(table, "enhancement").await? {
+                    manager
+                        .alter_table(
+                            Table::alter()
+                                .table(entity)
+                                .add_column(
+                                    ColumnDef::new(system::Column::Enhancement).boolean().null(),
+                                )
+                                .to_owned(),
+                        )
+                        .await?;
+                }
+            }
+            if !manager.has_column("talkgroups", "enhancement").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(talkgroup::Entity)
+                            .add_column(
+                                ColumnDef::new(talkgroup::Column::Enhancement)
+                                    .boolean()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call::Entity)
+                        .drop_column(call::Column::Enhancement)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(system::Entity)
+                        .drop_column(system::Column::Enhancement)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(talkgroup::Entity)
+                        .drop_column(talkgroup::Column::Enhancement)
+                        .to_owned(),
+                )
                 .await
         }
     }

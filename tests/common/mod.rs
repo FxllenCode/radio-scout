@@ -81,6 +81,7 @@ use radio_scout::config::TrustedProxies;
 use radio_scout::db::entities::{call, system, tag, talkgroup};
 use radio_scout::db::repo::{self, NewCall};
 use radio_scout::db::{self};
+use radio_scout::enhance::{EnhancementConfig, Enhancer};
 use radio_scout::live::LiveFeed;
 use radio_scout::push::{Push, PushConfig};
 use radio_scout::webpush::VapidKey;
@@ -436,6 +437,36 @@ impl TestApp {
         calls.into_iter().next().expect("one call")
     }
 
+    /// Wait for a Call to leave the `pending` enhancement state, and hand back
+    /// the row as it ended up.
+    ///
+    /// Polls, because enhancement is deliberately asynchronous: the whole point
+    /// of #20 is that ingest answers before any of it starts, so there is no
+    /// synchronous moment for a test to hook. Polling the *observable* state —
+    /// the row — rather than reaching into the worker keeps this an assertion
+    /// about what an operator could see.
+    ///
+    /// Fails rather than hanging: a worker that never finishes should be a
+    /// named failure, not a test run that times out with no explanation.
+    pub async fn await_enhancement(&self, id: i64) -> call::Model {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let call = call::Entity::find_by_id(id)
+                .one(&self.db)
+                .await
+                .expect("read call")
+                .expect("the Call still exists");
+            if call.enhancement != radio_scout::db::entities::call::Enhancement::PENDING {
+                return call;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Call {id} was still pending enhancement after 20s"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// The System a Call belongs to.
     pub async fn system_of(&self, call: &call::Model) -> system::Model {
         system::Entity::find_by_id(call.system_id)
@@ -601,6 +632,7 @@ pub struct TestAppBuilder {
     trusted_proxies: Option<String>,
     admin: Option<AdminAuth>,
     push: Option<Push>,
+    enhancement: Option<EnhancementConfig>,
 }
 
 /// The admin password every spawned app is gated by (#19), so any test can log
@@ -657,6 +689,13 @@ impl TestAppBuilder {
         self
     }
 
+    /// Turn audio enhancement on (#20). The default is what ships — off — so
+    /// every other test in the suite is untouched by this existing.
+    pub fn enhancement(mut self, enhancement: EnhancementConfig) -> Self {
+        self.enhancement = Some(enhancement);
+        self
+    }
+
     /// Use this database instead of the one this run would have chosen.
     ///
     /// A per-call-site override, for a test about *which* database an app used.
@@ -701,9 +740,16 @@ impl TestAppBuilder {
             )
         });
 
+        state.enhancer = match self.enhancement {
+            Some(config) => Enhancer::from_config(config),
+            None => Enhancer::disabled(),
+        };
+
         // The real sender, on the real fanout: a test asserts on the request
         // that leaves the process, not on a decision to make one.
         radio_scout::push::spawn(state.clone());
+        // ...and the real worker, on the real queue, for the same reason.
+        radio_scout::enhance::spawn(state.clone());
 
         TestApp {
             addr: serve(build_app(state)).await,

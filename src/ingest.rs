@@ -289,14 +289,7 @@ async fn run_pipeline(
         Err(err) => return ServerError::new("dedup", err).into_response(),
     }
 
-    // Key is sharded by a two-char prefix so no directory grows unbounded.
-    let uuid = uuid::Uuid::new_v4().simple().to_string();
-    new_call.object_key = format!(
-        "{}/{}.{}",
-        &uuid[0..2],
-        uuid,
-        audio_extension(&new_call.audio_name)
-    );
+    new_call.object_key = crate::blob::new_object_key(&audio_extension(&new_call.audio_name));
 
     // The byte length rides along on the row so retention's size cap is a `SUM()`
     // rather than a stat per object (#10).
@@ -328,11 +321,60 @@ async fn run_pipeline(
         Err(err) => return ServerError::new("build-call-view", err).into_response(),
     }
 
+    // Enhancement (#20) starts *here* — after the recorder has its answer and
+    // after the live feed already has the Call. Scope is resolved now rather
+    // than before the insert because auto-populate may have created the System
+    // or the Talkgroup a moment ago, and a row that has just been created says
+    // `NULL`, which is the value that inherits.
+    queue_for_enhancement(state, call.id).await;
+
     // The other half of rule 3: an ingest that *did* become a row is a notable
     // normal event, so "nothing is arriving" is answerable without waiting for
     // something to go wrong. Per-Call, never per-anything-smaller (rule 8).
     info!(audio_bytes, "call stored");
     (StatusCode::OK, CALL_IMPORTED).into_response()
+}
+
+/// Offer a stored Call to the enhancement queue, if this instance enhances it.
+///
+/// Everything here is best-effort by design: the Call is already stored, already
+/// answered and already on the live feed, so nothing that goes wrong from this
+/// point costs a listener anything — it costs only the levelling.
+async fn queue_for_enhancement(state: &AppState, call_id: crate::call::CallId) {
+    let scope = match repo::enhancement_scope(&state.db, call_id).await {
+        Ok(Some(scope)) => scope,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(%error, "could not decide whether to enhance this Call");
+            return;
+        }
+    };
+    if !state.enhancer.applies_to(scope.0, scope.1) {
+        return;
+    }
+    // Marked before it is offered, so a process that dies between the two finds
+    // it again at the next boot rather than losing it. The reverse order would
+    // leave a Call queued in memory and `none` on disk.
+    if let Err(error) = repo::mark_enhancement(
+        &state.db,
+        call_id,
+        crate::db::entities::call::Enhancement::PENDING,
+    )
+    .await
+    {
+        warn!(%error, "could not mark a Call for enhancement");
+        return;
+    }
+    if !state.enhancer.submit(call_id) {
+        // `submit` has already said why. Recording it keeps the row honest —
+        // otherwise it stays `pending` forever and every boot re-queues it.
+        let _ = repo::mark_enhancement(
+            &state.db,
+            call_id,
+            crate::db::entities::call::Enhancement::SKIPPED,
+        )
+        .await;
+    }
 }
 
 async fn insert_in_txn(
