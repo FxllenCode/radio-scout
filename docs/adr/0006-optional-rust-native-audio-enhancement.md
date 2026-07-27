@@ -78,9 +78,17 @@ rdio calls `FFMpeg.Convert()` **inline** in ingest (`server/controller.go:335`),
 
 The loudness stage is one **static** gain held under a **sample-peak** ceiling of -1.5 dBFS, not a limiter and not a true-peak measurement. A compressor riding the level would pump the noise floor between words; and true-peak oversampling buys headroom that matters before a lossy re-encode at a high rate, not for 16-bit PCM band-limited to 3.4 kHz at 8 kHz. The trade is that a Call with one loud transient lands below `target_lufs` — consistent-and-slightly-quiet beats consistent-and-clipped for a scanner.
 
-### 4. Denoise stays a hypothesis until it is heard
+### 4. Denoise stays a hypothesis, and stays opt-in
 
-The original status section flagged RNNoise's benefit on vocoder-decoded P25/DMR as unproven. It still is; nothing about this amendment validates it. `mode = "normalize"` (band-pass + EBU R128 — the proven win) is what enabling enhancement means, and `mode = "denoise"` is opt-in on top. #20 renders A/B sets from real P25 Calls for a listening test, and the verdict is recorded here when there is one.
+The original status section flagged RNNoise's benefit on vocoder-decoded P25/DMR as unproven. It still is; nothing about this amendment validates it. `mode = "normalize"` (band-pass + EBU R128 — the proven win) is what enabling enhancement means, and `mode = "denoise"` is opt-in on top.
+
+**Decision (2026-07-27, #36): denoise remains opt-in.** The maintainer's call, taken with the A/B renders from the real P25 archive in hand. This is a decision *not to promote*, not a measurement that denoise is harmful — the hypothesis is neither retired nor confirmed, and it should not be described as either.
+
+The asymmetry is what settles it. Loudness normalization has a stated mechanism and an audible, reproducible effect: every Call lands on the same level. RNNoise has neither here — it was trained on noisy microphone signal, and a P25 vocoder's output is not that. It may remove hiss; it may equally chew on codec artefacts and take the quiet ends of words with them. Making the unproven stage the default would mean every operator who typed `mode = "normalize"`'s successor got a transformation nobody has evidence for, applied irreversibly to their archive — because enhancement replaces the object, and the original is reclaimed by orphan-GC.
+
+Opt-in costs an operator one word of configuration. Default-on costs anyone it hurts their audio, silently, with no way back.
+
+**What would change this:** a listening comparison on real P25 or DMR traffic where denoise is clearly better — not merely different — recorded here with the reasoning. `cargo run --example enhance_ab` produces the material; the renderer is kept for exactly that. A verdict on analog FM would be a separate finding, since the objection is specifically about vocoder output.
 
 ### Consequences of the amendment
 
