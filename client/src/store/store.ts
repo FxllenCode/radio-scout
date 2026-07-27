@@ -27,10 +27,13 @@ export interface StoreOptions {
  *  The selection is hydrated from local storage on the way in and written back
  *  whenever it changes (spec US 22) — and only then, so a Call arriving every
  *  few seconds costs nothing. */
-export function makeStore({
-  storage = globalThis.localStorage,
-  namespace = namespaceOf(),
-}: StoreOptions = {}) {
+export function makeStore(options: StoreOptions = {}) {
+  // `'storage' in options`, not a destructuring default: saying `storage:
+  // undefined` out loud means "this browser has none", and a default would
+  // silently hand back `globalThis.localStorage` instead — the opposite of what
+  // was asked for, on the one path whose whole point is not touching it.
+  const storage = 'storage' in options ? options.storage : globalThis.localStorage
+  const namespace = options.namespace ?? namespaceOf()
   const remembered = storage && loadSelection(storage, namespace)
   const store = configureStore({
     reducer: {

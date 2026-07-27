@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { selectionKey } from '@/lib/persist'
 import { EVERYTHING, setTalkgroups } from '@/lib/selection'
@@ -30,6 +30,23 @@ function fakeStorage(seed: Record<string, string> = {}) {
 const NARROWED = setTalkgroups(EVERYTHING, [{ systemRef: 11, talkgroupRef: 100 }], false)
 
 describe('makeStore', () => {
+  /** Whether `globalThis.localStorage` exists at all differs by Node version —
+   *  and two of these tests deliberately take the *default* storage rather than
+   *  passing one. Left ambient, they assert something different on a laptop than
+   *  on a runner, which is how CI found `{ storage: undefined }` silently
+   *  falling back to the browser's. Pinned, they assert the same thing
+   *  everywhere. */
+  let ambient: ReturnType<typeof fakeStorage>
+
+  beforeEach(() => {
+    ambient = fakeStorage()
+    vi.stubGlobal('localStorage', ambient.storage)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('starts a listener who has never chosen on everything', () => {
     const { storage } = fakeStorage()
 
@@ -75,8 +92,14 @@ describe('makeStore', () => {
     expect(writes).toEqual([])
   })
 
-  /** A browser with site data blocked (and this jsdom, which has no local
-   *  storage at all) still gets a working scanner — just not a remembered one. */
+  /** A browser with site data blocked — or a sandboxed context — still gets a
+   *  working scanner, just not a remembered one.
+   *
+   *  Saying so out loud (`storage: undefined`) has to *mean* it. It used to fall
+   *  through to a destructuring default and quietly take the browser's storage
+   *  instead, so this test asserted nothing about the case it names and, worse,
+   *  persisted a narrowed selection that the next test then read back. Hence the
+   *  second assertion: unremembered means nothing was written anywhere. */
   it('runs unremembered when the browser has no storage', () => {
     const store = makeStore({ storage: undefined, namespace: 'default' })
 
@@ -85,6 +108,7 @@ describe('makeStore', () => {
     )
 
     expect(selectSelection(store.getState())).toEqual(NARROWED)
+    expect(ambient.writes).toEqual([])
   })
 
   it('defaults to this browser and this tab’s scanner', () => {

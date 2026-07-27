@@ -51,11 +51,11 @@ jobs:
     name: Client
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # diff-cover needs the merge base, not just the tip.
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -72,7 +72,7 @@ jobs:
       - name: Build the embeddable SPA
         run: npm run build
         working-directory: client
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: client-dist
           path: client/dist
@@ -112,7 +112,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -122,7 +122,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,cargo-llvm-cov
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: client-dist
           path: client/dist
@@ -181,7 +181,7 @@ jobs:
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -192,7 +192,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: client-dist
           path: client/dist
@@ -212,7 +212,7 @@ jobs:
     needs: client
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -220,7 +220,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,cargo-nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: client-dist
           path: client/dist
@@ -233,7 +233,7 @@ jobs:
           git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
           git diff "origin/$BASE_REF...HEAD" > pr.diff
           cargo mutants --in-diff pr.diff --test-tool nextest --no-shuffle -j 2 -- --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-diff
@@ -248,8 +248,8 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -262,7 +262,7 @@ jobs:
       # `vite preview` — a service worker only exists in a production build.
       - run: npm run test:e2e
         working-directory: client
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-report
@@ -277,7 +277,7 @@ jobs:
     name: Workflows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: actionlint
         run: |
           docker run --rm -v "$PWD:/repo" --workdir /repo \
