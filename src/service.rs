@@ -295,11 +295,21 @@ impl std::error::Error for Error {}
 /// relative `./radio-scout-data` in a unit file would resolve against `/` and
 /// the scanner would come up on an empty archive beside the one it was
 /// installed to serve.
+/// The `.` components come out, because the default base directory *is*
+/// `./radio-scout-data` — so without this every definition an operator reads
+/// names `/home/pi/./radio-scout-data`, three times over (`ExecStart`,
+/// `WorkingDirectory`, `ReadWritePaths`). `..` is left alone: resolving it
+/// lexically is wrong the moment a symlink is involved, and the kernel resolves
+/// it correctly anyway.
 pub fn absolute(path: &Path, cwd: &Path) -> PathBuf {
-    match path.is_absolute() {
+    let joined = match path.is_absolute() {
         true => path.to_path_buf(),
         false => cwd.join(path),
-    }
+    };
+    joined
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect()
 }
 
 /// Run `radio-scout service …`: work out what this host uses, build the plan,
@@ -1316,7 +1326,10 @@ mod tests {
 
     #[rstest]
     #[case::relative("radio-scout-data", "/home/pi/radio-scout-data")]
-    #[case::dotted("./data", "/home/pi/./data")]
+    // `./radio-scout-data` is the *default* base directory, so this is the
+    // ordinary case rather than an odd one.
+    #[case::dotted("./radio-scout-data", "/home/pi/radio-scout-data")]
+    #[case::dot_in_the_middle("data/./archive", "/home/pi/data/archive")]
     #[case::already_absolute("/srv/scanner", "/srv/scanner")]
     fn a_relative_directory_is_resolved_before_it_is_written_down(
         #[case] path: &str,
@@ -1324,7 +1337,12 @@ mod tests {
     ) {
         let resolved = absolute(Path::new(path), Path::new("/home/pi"));
 
-        assert_eq!(resolved, PathBuf::from(expected));
+        // Compared as *text*, not as a `PathBuf`. `Path`'s `PartialEq` runs
+        // over components, which normalise `.` away — so a comparison against a
+        // `PathBuf` would pass for `/home/pi/./radio-scout-data` and see none of
+        // the difference that matters, which is what a service definition ends
+        // up *saying*.
+        assert_eq!(resolved.display().to_string(), expected);
     }
 
     /// Not every write fails for want of root, and the ones that don't must not
