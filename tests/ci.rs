@@ -308,6 +308,33 @@ fn the_release_workflow_publishes_the_checksums_the_installer_verifies() {
     assert!(release_workflow().contains("SHA256SUMS"));
 }
 
+/// The image name is lowercased before it becomes a tag.
+///
+/// A Docker repository name must be lowercase, and `github.repository` is
+/// `FxllenCode/radio-scout` — capitals and all. Interpolating it straight into a
+/// tag makes buildx refuse the build outright, so the image is never published
+/// under the name `docs/deploy.md` tells operators to pull.
+///
+/// This cost a release to find: the `image` job only runs on a tag, so no amount
+/// of green CI could have caught it, and `workflow_dispatch` publishes nothing.
+/// It is pinned here because the tempting "simplification" is to hoist the name
+/// back into `env:` as `ghcr.io/${{ github.repository }}` — which reads fine and
+/// has never worked.
+#[test]
+fn the_image_name_is_lowercased_before_it_is_used_as_a_tag() {
+    let release = release_workflow();
+
+    assert!(
+        !release.contains("ghcr.io/${{ github.repository }}"),
+        "`github.repository` carries the owner's capitals; buildx refuses a tag \
+         that is not lowercase"
+    );
+    assert!(
+        release.contains("${GITHUB_REPOSITORY,,}"),
+        "nothing lowercases the image name, so the published tag is a guess"
+    );
+}
+
 /// The Pi is the target that matters and it is arm64, so an image built only
 /// for amd64 is an image the scanner's own hardware cannot run.
 #[test]

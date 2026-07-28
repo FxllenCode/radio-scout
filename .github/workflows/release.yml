@@ -33,7 +33,8 @@ env:
   # The tag being released, or a name that is obviously not one. Every asset
   # carries it, so a downloaded archive says what it is without being opened.
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-smoke.{0}', github.run_number) }}
-  IMAGE: ghcr.io/${{ github.repository }}
+  # NOTE: the image name is **not** an env var, because it has to be lowercased
+  # and GitHub's expression language cannot do that — see the `image` job.
 
 jobs:
   # --------------------------------------------------------------------------
@@ -239,6 +240,13 @@ jobs:
       - name: Which tags this version gets
         id: tags
         run: |
+          # A Docker repository name must be lowercase, and `github.repository`
+          # preserves the owner's capitals (`FxllenCode/radio-scout`) — buildx
+          # refuses that tag outright. GitHub's expression language has no
+          # lowercase function, so it is done here, in the one place the name is
+          # built. Deriving it (rather than hardcoding the owner) keeps a fork
+          # publishing to its own namespace.
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           printf 'list<<EOF\n%s:%s\n' "$IMAGE" "$VERSION" >> "$GITHUB_OUTPUT"
           case "$VERSION" in *-*) ;; *) printf '%s:latest\n' "$IMAGE" >> "$GITHUB_OUTPUT" ;; esac
           printf 'EOF\n' >> "$GITHUB_OUTPUT"
