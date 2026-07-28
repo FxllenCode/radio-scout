@@ -6,6 +6,12 @@
 client/coverage
 # The lcov the coverage floor and the patch gate are both read from (#22).
 /lcov.info
+# Seeds proptest saves when a property fails. Upstream recommends committing
+# them; this repo deliberately does not. A counterexample worth keeping is worth
+# reading, and these are opaque — tens of kilobytes of float arrays naming
+# nothing. So a real find gets promoted into the test as a named `rstest` case,
+# where the next person can see what it proves, and the seed file stays local.
+/proptest-regressions
 
 /rdio-scanner
 /sdrtrunk
