@@ -1,0 +1,5 @@
+# The image is assembled from prebuilt binaries laid out in `dist/`
+# (docker/Dockerfile), so the build context needs almost nothing from here —
+# and `target/` alone is gigabytes of it.
+*
+!dist

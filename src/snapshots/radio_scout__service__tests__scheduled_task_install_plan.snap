@@ -1,0 +1,59 @@
+---
+source: src/service.rs
+assertion_line: 1394
+expression: printed
+---
+--- mkdir /var/lib/radio-scout ---
+--- write /var/lib/radio-scout/radio-scout-task.xml ---
+<?xml version="1.0" encoding="UTF-16"?>
+<!-- Written by `radio-scout service install`. Reinstalling overwrites this file. -->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Radio-Scout scanner audio server</Description>
+    <URI>\Radio-Scout</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <LogonType>ServiceAccount</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>/usr/local/bin/radio-scout</Command>
+      <Arguments>--base-dir /var/lib/radio-scout</Arguments>
+      <WorkingDirectory>/var/lib/radio-scout</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+--- run schtasks /Create /TN Radio-Scout /XML /var/lib/radio-scout/radio-scout-task.xml /F ---
+--- run schtasks /Run /TN Radio-Scout ---

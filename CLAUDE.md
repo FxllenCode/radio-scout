@@ -59,7 +59,7 @@ The pipeline's own invisible-failure modes are pinned by **`tests/ci.rs`** (a `-
 
 Full rationale + the incident that bought these rules: [ADR-0011](docs/adr/0011-observability-logging-policy.md). The rules that bind day-to-day work — these are **hard rules**, not style preferences:
 
-1. **`println!` / `eprintln!` / `dbg!` are denied by lint** — `[lints.clippy]` in `Cargo.toml`, so `cargo clippy --all-targets -- -D warnings` fails on a reintroduced one. Output goes through `tracing`, always. `examples/feed.rs` (a hand-run CLI whose stdout is its product) and the one test that reports being skipped carry a narrow `#![allow]` with a comment; `build.rs` needs none (cargo doesn't run clippy over build scripts).
+1. **`println!` / `eprintln!` / `dbg!` are denied by lint** — `[lints.clippy]` in `Cargo.toml`, so `cargo clippy --all-targets -- -D warnings` fails on a reintroduced one. Output goes through `tracing`, always. There are exactly **three** narrow `#[allow]`s, each with a comment saying why, and each a command whose stdout *is* its product: `examples/feed.rs` (a hand-run CLI), the one test that reports being skipped, and `service::show` (#23 — `service … --print` emits the unit file it would write, and a document interleaved with timestamps is not one). `build.rs` needs none (cargo doesn't run clippy over build scripts).
 2. **Never log a secret** — API keys, access codes, admin passwords or hashes — at any level, in any form, not even truncated. Identify a key by its database id or label, resolved after lookup. A credential the operator has no other copy of goes to **a file, never a log line**: first run writes its generated ingest key into `.env` — or into `<base_dir>/.env` when there is no env file to have read it from — created `0600`, with only the path logged (`src/startup.rs`).
 3. **Every rejected ingest logs at WARN with a machine-readable `reason`** (`invalid-api-key`, `duplicate`, `blacklisted`, `no-talkgroup`, `not-populated`, plus the malformed-body family). A Call that doesn't become a row leaves a line saying why. Every rejection goes through one funnel (`ingest::rejected`, which writes the line and hands back the response the recorder gets) — a convention, not a guarantee, so a new rejection path has to use it. For the rdio 417s the slug **is** the wire detail with dashes for spaces (`no-talkgroup` ⇄ `Incomplete call data: no talkgroup`), one string rather than two that can drift — so renaming a slug rewrites a recorder-facing string, and every such body is pinned verbatim in `tests/instrumentation.rs`.
 4. **Every 5xx logs at ERROR with the cause and a correlation ref**; the response body carries only `internal error (ref: …)`. A handler returns `failure::ServerError::new("<stage-slug>", err)`; the request middleware logs `stage=` + `cause=` against the request id (#28's, echoed as `x-request-id`) and replaces the body — for *any* 5xx, so a route that fails some other way is covered by construction. The rdio-compatible strings for *known* outcomes stay byte-identical — they're a wire contract.
@@ -122,6 +122,7 @@ Backend (Rust):
 cargo build                 # build
 cargo run                   # run the binary (zero-config: creates ./radio-scout-data)
 cargo run -- --help         # every flag (#17); --write-config writes a commented radio-scout.toml
+cargo run -- service install --print   # (#23) the unit/plist/task it would write, and nothing else
 cargo nextest run           # run all tests (preferred runner; `cargo test` still works)
 cargo test --doc            # doctests (nextest does not run these)
 cargo test <name>           # run tests matching a substring
@@ -167,6 +168,17 @@ npm run lint                # oxlint
 - **iOS background audio + lock-screen/Control-Center controls are a real-device manual gate** — Playwright's bundled WebKit is not iOS Safari and cannot validate them. There is no CI substitute. The executable checklist is **§14 of [`docs/research/ios-gap-bridging-mechanism.md`](docs/research/ios-gap-bridging-mechanism.md)**.
 
 **PWA app icons** are rasterized from `client/icons/icon.svg` by `client/scripts/build-icons.sh` (macOS `sips`) into `client/public/`. The PNGs are committed, so neither the build nor CI runs it — re-run it by hand only when the mark changes.
+
+## Packaging & release
+
+Full rationale: [ADR-0007](docs/adr/0007-single-binary-embedded-frontend-distribution.md) + its #23 amendment; the operator-facing guide is [`docs/deploy.md`](docs/deploy.md). What binds day-to-day work:
+
+- **One asset name, three consumers.** `radio-scout-<tag>-<target>.tar.gz` (`.zip` on Windows) is built by `.github/workflows/release.yml`, fetched by `install.sh`, and documented in `docs/deploy.md`. Nothing connects them at runtime, so **`tests/packaging.rs` does**: it parses the release matrix, and *runs the installer for real* against a release served over `file://` — fetch, checksum, unpack, install, and a binary that executes afterwards. Add a target to the matrix and the installer has to be able to ask for it; break the checksum and the test that proves nothing gets installed fails.
+- **Linux ships static musl, built natively.** No cross-compilation anywhere: musl inside `rust:alpine` (arm64 on `ubuntu-24.04-arm`), macOS on macOS, Windows on Windows. A glibc binary would not start on the Raspberry Pi OS most Pis run.
+- **`[profile.release]` exists and is deliberate** — `lto = "fat"`, one codegen unit, `strip = "debuginfo"` (symbols stay, so a panic on someone's Pi arrives as function names), and `panic = "unwind"` spelled out because `"abort"` would let one bad request take the whole server down. `ci.yml` builds every target in **debug**; `release.yml` is the only place `--release` runs.
+- **`radio-scout service …`** (`src/service.rs`) is `install`/`uninstall`/`start`/`stop`/`restart`/`status` over systemd, launchd and a Windows scheduled task. **The platform is a value, not a `cfg`**: `Manager::plan(action, params)` returns a `Plan` of `Write`/`Remove`/`Run` steps, so every platform's unit file, plist and task XML renders — and is snapshot-tested — wherever the suite runs. `--print` shows exactly that plan and touches nothing. The flags given to `install` are baked into the definition (absolutised), and `--database-url` is **refused** rather than written into a world-readable file.
+- **The image packages, it does not build.** `docker/Dockerfile` is `FROM scratch` around the binaries the release already produced — so the image and the release are the same bytes. Building from source is `cargo build --release`.
+- **Cutting a release is a `v*` tag**, and the tag must match `Cargo.toml`'s version or the workflow refuses. `workflow_dispatch` builds everything and publishes nothing, so the pipeline can be exercised without cutting one.
 
 ## Live testing (real binary, real browser, real recorder)
 

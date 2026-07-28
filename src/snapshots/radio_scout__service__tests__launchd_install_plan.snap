@@ -1,0 +1,42 @@
+---
+source: src/service.rs
+assertion_line: 1394
+expression: printed
+---
+--- mkdir /var/lib/radio-scout ---
+--- run chown -R radio-scout /var/lib/radio-scout ---
+--- write /Library/LaunchDaemons/io.github.fxllencode.radio-scout.plist ---
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Written by `radio-scout service install`. Reinstalling overwrites this file. -->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>io.github.fxllencode.radio-scout</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/local/bin/radio-scout</string>
+      <string>--base-dir</string>
+      <string>/var/lib/radio-scout</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/var/lib/radio-scout</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>UserName</key>
+    <string>radio-scout</string>
+    <key>StandardOutPath</key>
+    <string>/var/lib/radio-scout/radio-scout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/lib/radio-scout/radio-scout.log</string>
+  </dict>
+</plist>
+--- run launchctl enable system/io.github.fxllencode.radio-scout ---
+--- run launchctl bootstrap system /Library/LaunchDaemons/io.github.fxllencode.radio-scout.plist ---

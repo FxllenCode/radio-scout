@@ -1,0 +1,257 @@
+# What ships (ticket #23, spec US 42, ADR-0007).
+#
+# `ci.yml` proves every target still *compiles*, in debug, and uploads nothing.
+# This is the other half: the same targets built with `--release`, packaged,
+# checksummed, and published — plus the multi-arch container image.
+#
+# Two properties are worth stating because they are choices, not accidents:
+#
+#   * **Every Linux binary is static musl, built natively on its own
+#     architecture.** Static because a glibc binary only runs on glibc at least
+#     as new as the builder's, and a release built on ubuntu-latest would fail
+#     to start on the Raspberry Pi OS release most Pis are actually running —
+#     the exact portability rdio-scanner gets for free from Go. Natively (in an
+#     Alpine container on an arm64 runner, not cross-compiled) because the tree
+#     carries C dependencies — aws-lc-sys builds with cmake — and a native build
+#     has no cross-toolchain to be subtly wrong.
+#   * **Nothing is published from a dispatch.** `workflow_dispatch` builds and
+#     uploads artifacts so this file can be smoke-tested without cutting a tag,
+#     as #22 asked for; only a `v*` tag creates a release or pushes an image.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The tag being released, or a name that is obviously not one. Every asset
+  # carries it, so a downloaded archive says what it is without being opened.
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-smoke.{0}', github.run_number) }}
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # --------------------------------------------------------------------------
+  # The SPA, once. `rust-embed` reads client/dist at compile time (src/web.rs),
+  # so it is a build input to every cargo job — a release built without it would
+  # serve the fallback page instead of the app.
+  # --------------------------------------------------------------------------
+  client:
+    name: Client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - run: npm run build
+        working-directory: client
+      - uses: actions/upload-artifact@v7
+        with:
+          name: client-dist
+          path: client/dist
+          retention-days: 1
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # The tag and the binary have to agree about what version this is.
+  # --------------------------------------------------------------------------
+  version:
+    name: Version
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # `--version` comes from Cargo.toml (clap's `version` attribute), so a tag
+      # that disagrees ships a binary that misreports which release it is —
+      # green everywhere, and wrong in every bug report afterwards.
+      - name: The tag matches Cargo.toml
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          crate="$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "$TAG" != "v$crate" ]; then
+            echo "tag $TAG does not match Cargo.toml's $crate:" \
+                 "the release and 'radio-scout --version' would disagree" >&2
+            exit 1
+          fi
+
+  # --------------------------------------------------------------------------
+  # One archive per target.
+  # --------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: client
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            alpine: true
+          # The scanner itself: a Raspberry Pi 5, built on an arm64 runner.
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            alpine: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: client-dist
+          path: client/dist
+
+      # Alpine is musl all the way down, so this is an ordinary native build —
+      # no cross-toolchain, no linker configuration, and the C dependencies
+      # (aws-lc-sys, libsqlite3-sys) build the way their authors test them.
+      # `docker run` rather than a job `container:` so checkout and the actions
+      # around it stay on the host.
+      - name: Build (static musl, natively)
+        if: matrix.alpine
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work -e CARGO_TERM_COLOR=always \
+            rust:alpine sh -c "
+              apk add --no-cache musl-dev cmake make g++ perl &&
+              cargo build --release --locked --target $TARGET
+            "
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: '!matrix.alpine'
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        if: '!matrix.alpine'
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build
+        if: '!matrix.alpine'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          tar -czf "radio-scout-$VERSION-$TARGET.tar.gz" \
+            -C "target/$TARGET/release" radio-scout
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "target/${{ matrix.target }}/release/radio-scout.exe" `
+            -DestinationPath "radio-scout-$env:VERSION-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: asset-${{ matrix.target }}
+          path: radio-scout-*.*
+          retention-days: 7
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # The release itself: every archive, one checksum file, one set of notes.
+  # --------------------------------------------------------------------------
+  publish:
+    name: Publish
+    if: github.ref_type == 'tag'
+    needs: [build, version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: asset-*
+          path: dist
+          merge-multiple: true
+      # One file, one format, computed by one tool — `install.sh` reads it with
+      # `awk` and refuses to install anything that does not match a line in it.
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum radio-scout-* > SHA256SUMS
+      # A tag with a pre-release part (`v1.0.0-rc.1`) is published as one, so it
+      # stays out of `releases/latest` — which is the endpoint `install.sh`
+      # resolves when no `--version` is given. A release candidate that quietly
+      # became what `curl | sh` installs would be the worst kind of surprise.
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" dist/* --generate-notes --verify-tag $prerelease
+
+  # --------------------------------------------------------------------------
+  # The container image, from the binaries that were just built.
+  # --------------------------------------------------------------------------
+  image:
+    name: Image
+    if: github.ref_type == 'tag'
+    # `version` too, not just `build`: without it a tag that disagrees with
+    # `Cargo.toml` skips the release and pushes the image anyway — including
+    # `:latest` — which is the exact mismatch that job exists to stop.
+    needs: [build, version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: asset-*-linux-musl
+          path: assets
+          merge-multiple: true
+      # `TARGETARCH` is Docker's spelling (amd64/arm64); the archives are named
+      # by Rust's. Renaming here keeps the Dockerfile to a single COPY that
+      # works for either platform of the manifest.
+      - name: Lay the binaries out the way the Dockerfile expects
+        run: |
+          mkdir -p dist
+          tar -xzf "assets/radio-scout-$VERSION-x86_64-unknown-linux-musl.tar.gz" -C dist
+          mv dist/radio-scout dist/radio-scout-amd64
+          tar -xzf "assets/radio-scout-$VERSION-aarch64-unknown-linux-musl.tar.gz" -C dist
+          mv dist/radio-scout dist/radio-scout-arm64
+      # `:latest` moves only for a final release. A pre-release tag gets its own
+      # version tag and nothing else, so `docker run …:latest` — what
+      # docs/deploy.md tells operators to run — never lands on a release
+      # candidate, and agrees with the `releases/latest` the installer resolves.
+      - name: Which tags this version gets
+        id: tags
+        run: |
+          printf 'list<<EOF\n%s:%s\n' "$IMAGE" "$VERSION" >> "$GITHUB_OUTPUT"
+          case "$VERSION" in *-*) ;; *) printf '%s:latest\n' "$IMAGE" >> "$GITHUB_OUTPUT" ;; esac
+          printf 'EOF\n' >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.list }}

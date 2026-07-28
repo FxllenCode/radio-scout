@@ -170,11 +170,87 @@ fn ci_gates_on_format_lints_and_both_coverage_rules() {
     }
 }
 
+/// `ci.yml` builds every target in **debug** and uploads nothing, deliberately
+/// (#22). `release.yml` (#23) is therefore the only place `--release` ever
+/// runs, which makes it the only place `[profile.release]` — fat LTO, one
+/// codegen unit — is exercised at all.
+#[test]
+fn the_release_workflow_is_the_one_that_builds_in_release_mode() {
+    let release = release_workflow();
+
+    assert!(
+        release.contains("--release"),
+        "a release built in debug is a release nobody wants on a Pi"
+    );
+    assert!(
+        release.contains("--locked"),
+        "a release must build the dependency versions that were tested"
+    );
+}
+
+/// A checksum file nobody publishes is a checksum nobody can check — and
+/// `install.sh` refuses to install without one, so this is the difference
+/// between a working `curl | sh` and one that dies at the last step.
+#[test]
+fn the_release_workflow_publishes_the_checksums_the_installer_verifies() {
+    assert!(release_workflow().contains("SHA256SUMS"));
+}
+
+/// The Pi is the target that matters and it is arm64, so an image built only
+/// for amd64 is an image the scanner's own hardware cannot run.
+#[test]
+fn the_published_image_covers_both_architectures() {
+    let release = release_workflow();
+
+    for platform in ["linux/amd64", "linux/arm64"] {
+        assert!(release.contains(platform), "missing {platform}:\n{release}");
+    }
+}
+
+/// The image and the release both carry a version, and only the `version` job
+/// checks that the version is the one `Cargo.toml` will report. A publishing
+/// job that does not wait for it publishes past it.
+#[test]
+fn nothing_is_published_without_the_version_check() {
+    for (job, block) in jobs(&release_workflow()) {
+        if !block.contains("push: true") && !block.contains("gh release create") {
+            continue;
+        }
+        assert!(
+            block.contains("needs: [build, version]"),
+            "{job} publishes without waiting for the tag to be checked:\n{block}"
+        );
+    }
+}
+
+/// `install.sh` is the one piece of hand-written shell this project invites a
+/// user to pipe into their own. `actionlint` reads workflows only, so nothing
+/// else would ever look at it.
+#[test]
+fn the_installer_is_shellchecked_by_the_pipeline() {
+    let ci = ci_workflow();
+
+    assert!(ci.contains("shellcheck"), "the pipeline runs no shellcheck");
+    assert!(
+        ci.contains("install.sh"),
+        "shellcheck does not cover the installer:\n{ci}"
+    );
+}
+
 /// The pull-request pipeline, which is where every merge gate lives.
 fn ci_workflow() -> String {
+    named_workflow("ci.yml")
+}
+
+/// The tag pipeline: what ships (#23).
+fn release_workflow() -> String {
+    named_workflow("release.yml")
+}
+
+fn named_workflow(name: &str) -> String {
     workflows()
         .into_iter()
-        .find(|(name, _)| name == "ci.yml")
-        .expect("`.github/workflows/ci.yml` is the pull-request pipeline")
+        .find(|(found, _)| found == name)
+        .unwrap_or_else(|| panic!("`.github/workflows/{name}` is missing"))
         .1
 }

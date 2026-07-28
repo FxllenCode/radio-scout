@@ -165,7 +165,10 @@ jobs:
 
   # --------------------------------------------------------------------------
   # Every target the project ships on still compiles, with the real SPA in it.
-  # Release artifacts, installers and Docker are #23.
+  # Debug, and nothing is uploaded: this answers "does it still compile for
+  # every target", cheaply, on every push. What ships is `release.yml` (#23),
+  # which builds the same targets with `--release` — statically linked musl for
+  # Linux, natively on each architecture — and publishes them.
   # --------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.target }}
@@ -284,6 +287,8 @@ jobs:
             rhysd/actionlint:latest -color
       # actionlint reads `.github/workflows` only, so shell living in a
       # composite action is the one shell it never sees. That shell is a script
-      # precisely so this can read it.
+      # precisely so this can read it — and `install.sh` (#23) is the one piece
+      # of shell users are invited to pipe into their own, which makes it the
+      # last thing that should go unlinted.
       - name: shellcheck
-        run: shellcheck .github/scripts/*.sh
+        run: shellcheck .github/scripts/*.sh install.sh

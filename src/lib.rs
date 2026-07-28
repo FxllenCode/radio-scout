@@ -22,6 +22,7 @@ pub mod observability;
 pub mod push;
 pub mod retention;
 pub mod selection;
+pub mod service;
 pub mod startup;
 pub mod web;
 pub mod webpush;

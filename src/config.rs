@@ -33,12 +33,12 @@
 //! wherever someone remembered to check.
 
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
@@ -59,48 +59,171 @@ use crate::retention::RetentionConfig;
 #[derive(Debug, Clone, Parser)]
 #[command(name = "radio-scout", version, about = "Scanner audio from Trunk Recorder and SDRTrunk", long_about = None)]
 pub struct Cli {
+    /// What to do. Nothing means serve.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// HTTP port for the API, the SPA and the live feed.
-    #[arg(long, value_name = "PORT")]
+    #[arg(long, value_name = "PORT", global = true)]
     pub port: Option<u16>,
 
     /// Configuration file to read. Unset looks for `radio-scout.toml` in the
     /// working directory, and runs on the defaults if there isn't one.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
 
     /// Directory holding the database and, by default, the audio.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", global = true)]
     pub base_dir: Option<PathBuf>,
 
     /// Database connection URL. Unset means SQLite under the base directory.
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", global = true)]
     pub database_url: Option<String>,
 
     /// Where Call audio is stored.
-    #[arg(long, value_name = "BACKEND")]
+    #[arg(long, value_name = "BACKEND", global = true)]
     pub storage_backend: Option<Backend>,
 
     /// Prune Calls older than this many days. 0 keeps them forever.
-    #[arg(long, value_name = "DAYS")]
+    #[arg(long, value_name = "DAYS", global = true)]
     pub retention_days: Option<u32>,
 
     /// Cap total stored audio at this many gigabytes.
-    #[arg(long, value_name = "GB")]
+    #[arg(long, value_name = "GB", global = true)]
     pub retention_max_size_gb: Option<f64>,
 
     /// Log filter directives, e.g. `debug` or `warn,radio_scout::ingest=trace`.
-    #[arg(long, value_name = "DIRECTIVES")]
+    #[arg(long, value_name = "DIRECTIVES", global = true)]
     pub log: Option<String>,
 
     /// An address or CIDR block whose `X-Forwarded-For` may be believed.
     /// Repeat, or separate with commas, for several.
-    #[arg(long = "trusted-proxy", value_name = "ADDR", value_delimiter = ',')]
+    #[arg(
+        long = "trusted-proxy",
+        value_name = "ADDR",
+        value_delimiter = ',',
+        global = true
+    )]
     pub trusted_proxies: Option<Vec<ProxyNet>>,
 
     /// Write a configuration file with every setting at its default, then exit.
     /// Defaults to `radio-scout.toml`; never overwrites an existing file.
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = CONFIG_FILE_NAME)]
     pub write_config: Option<PathBuf>,
+}
+
+/// The subcommands. Every setting flag above is `global`, so it reads the same
+/// before or after one — `radio-scout service install --port 8080` is the
+/// spelling an operator reaches for, and it is the one that gets baked in.
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Run the scanner at boot: install, remove or control the OS service.
+    Service(ServiceCommand),
+}
+
+/// `radio-scout service …` (#23, spec US 42).
+#[derive(Debug, Clone, clap::Args)]
+pub struct ServiceCommand {
+    #[command(subcommand)]
+    pub action: crate::service::Action,
+
+    /// Show what would be written and run; change nothing.
+    #[arg(long, global = true)]
+    pub print: bool,
+
+    /// The account the service runs as. Not supported on Windows, where a
+    /// scheduled task runs as the system account.
+    #[arg(long, value_name = "NAME", global = true)]
+    pub user: Option<String>,
+}
+
+/// Everything `radio-scout service …` needs about this configuration (#23).
+///
+/// This is the same translation every other section gets — [`Config::ingest`],
+/// [`Config::retention`], [`Config::push`] — for the service module, and it
+/// lives here for the same reason: `main.rs` is excluded from coverage, so a
+/// decision made there is a decision nothing tests. There are three, and each
+/// one is a bug if it goes the other way. The base directory and the
+/// configuration file are made **absolute**, because a service's working
+/// directory is the service manager's rather than the operator's shell's — a
+/// relative `radio-scout-data` in a unit file resolves against `/`, and a
+/// `radio-scout.toml` discovered beside the operator would never be found
+/// again. And the port comes from the *resolved* configuration rather than the
+/// flag, because it decides whether the unit is granted the capability to bind
+/// a privileged one.
+pub fn service_params(
+    cli: &Cli,
+    loaded: &Loaded,
+    cwd: &Path,
+    exec: PathBuf,
+    user: Option<String>,
+) -> Result<crate::service::Params, ConfigError> {
+    let base_dir = crate::service::absolute(&loaded.config.server.base_dir, cwd);
+    let config_file = loaded
+        .file
+        .as_ref()
+        .map(|path| crate::service::absolute(path, cwd));
+    Ok(crate::service::Params {
+        exec,
+        args: service_args(cli, &base_dir, config_file.as_deref())?,
+        base_dir,
+        port: loaded.config.server.port,
+        user,
+    })
+}
+
+/// The command line a service should run: the flags this one was given, plus
+/// the two things a service cannot inherit — an absolute base directory (its
+/// working directory is not the operator's) and the configuration file that was
+/// actually read (discovery looks in the *working* directory, which under
+/// systemd or launchd is somewhere else entirely).
+///
+/// `--database-url` is refused rather than copied. It routinely carries a
+/// password, and a unit file is world-readable — ADR-0011 rule 2 keeps a
+/// credential out of a log line for the same reason it belongs out of this. The
+/// operator has two places to put it that a service reads, and the message says
+/// so.
+pub fn service_args(
+    cli: &Cli,
+    base_dir: &Path,
+    config_file: Option<&Path>,
+) -> Result<Vec<String>, ConfigError> {
+    if cli.database_url.is_some() {
+        return Err(ConfigError::NotForService {
+            flag: "--database-url",
+            because: "it may carry a password and a service definition is world-readable",
+            instead: "[database] url in the configuration file, or RADIO_SCOUT_DATABASE_URL",
+        });
+    }
+
+    let mut args = Vec::new();
+    let mut push = |flag: &str, value: String| {
+        args.push(flag.to_string());
+        args.push(value);
+    };
+    if let Some(path) = config_file {
+        push("--config", path.display().to_string());
+    }
+    push("--base-dir", base_dir.display().to_string());
+    if let Some(port) = cli.port {
+        push("--port", port.to_string());
+    }
+    if let Some(backend) = cli.storage_backend {
+        push("--storage-backend", backend.to_string());
+    }
+    if let Some(days) = cli.retention_days {
+        push("--retention-days", days.to_string());
+    }
+    if let Some(gb) = cli.retention_max_size_gb {
+        push("--retention-max-size-gb", gb.to_string());
+    }
+    if let Some(directives) = &cli.log {
+        push("--log", directives.clone());
+    }
+    for proxy in cli.trusted_proxies.iter().flatten() {
+        push("--trusted-proxy", proxy.to_string());
+    }
+    Ok(args)
 }
 
 /// Where a config file came from and what was in it, so an error can name the
@@ -156,6 +279,14 @@ pub enum ConfigError {
     Missing {
         key: &'static str,
         because: &'static str,
+    },
+    /// A flag that cannot be baked into a service definition (#23) was given to
+    /// `service install`. Names the flag and where the setting belongs instead
+    /// — never the value, which is why this exists.
+    NotForService {
+        flag: &'static str,
+        because: &'static str,
+        instead: &'static str,
     },
 }
 
@@ -230,6 +361,14 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Missing { key, because } => {
                 write!(f, "{key} must be set when {because}")
             }
+            ConfigError::NotForService {
+                flag,
+                because,
+                instead,
+            } => write!(
+                f,
+                "{flag} cannot be baked into a service because {because}; set it with {instead} and install again"
+            ),
         }
     }
 }
@@ -2854,5 +2993,204 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("prot"), "{message}");
         assert!(message.contains("radio-scout.toml"), "{message}");
+    }
+
+    /// A service runs from a working directory that is not the operator's and
+    /// finds no `radio-scout.toml` beside it, so the two things discovery
+    /// resolved have to be written down. Everything else is what was typed.
+    #[test]
+    fn a_service_bakes_in_the_settings_it_was_installed_with() {
+        let cli = Cli::parse_from([
+            "radio-scout",
+            "service",
+            "install",
+            "--port",
+            "8080",
+            "--log",
+            "debug",
+            "--trusted-proxy",
+            "172.17.0.0/16",
+        ]);
+
+        let args = service_args(
+            &cli,
+            Path::new("/var/lib/radio-scout"),
+            Some(Path::new("/etc/radio-scout.toml")),
+        )
+        .expect("nothing secret was given");
+
+        assert_eq!(
+            args,
+            [
+                "--config",
+                "/etc/radio-scout.toml",
+                "--base-dir",
+                "/var/lib/radio-scout",
+                "--port",
+                "8080",
+                "--log",
+                "debug",
+                "--trusted-proxy",
+                "172.17.0.0/16",
+            ]
+        );
+    }
+
+    /// The three things `main.rs` used to decide, where they can be seen: both
+    /// paths absolute against the working directory, and the port from the
+    /// resolved configuration rather than the flag — it decides whether the
+    /// unit is granted the capability to bind a privileged one, so reading it
+    /// from the flag would ignore a `port = 80` in the file.
+    #[test]
+    fn a_service_gets_absolute_paths_and_the_port_that_was_resolved() {
+        let cli = Cli::parse_from(["radio-scout", "service", "install"]);
+        let loaded = Loaded {
+            config: Config {
+                server: Server {
+                    port: 80,
+                    base_dir: PathBuf::from("radio-scout-data"),
+                    ..Server::default()
+                },
+                ..Config::default()
+            },
+            file: Some(PathBuf::from("radio-scout.toml")),
+        };
+
+        let params = service_params(
+            &cli,
+            &loaded,
+            Path::new("/home/pi"),
+            PathBuf::from("/usr/local/bin/radio-scout"),
+            Some("radio-scout".into()),
+        )
+        .expect("nothing secret");
+
+        assert_eq!(params.base_dir, PathBuf::from("/home/pi/radio-scout-data"));
+        assert_eq!(params.port, 80);
+        assert_eq!(params.user.as_deref(), Some("radio-scout"));
+        assert_eq!(
+            params.args,
+            [
+                "--config",
+                "/home/pi/radio-scout.toml",
+                "--base-dir",
+                "/home/pi/radio-scout-data",
+            ]
+        );
+    }
+
+    /// The refusal has to survive the extra layer, or the flag it refuses gets
+    /// baked in after all.
+    #[test]
+    fn a_database_url_is_still_refused_through_the_parameters() {
+        let cli = Cli::parse_from([
+            "radio-scout",
+            "service",
+            "install",
+            "--database-url",
+            "postgres://scanner:hunter2@db.example/radio",
+        ]);
+        let loaded = Loaded {
+            config: Config::default(),
+            file: None,
+        };
+
+        let error = service_params(
+            &cli,
+            &loaded,
+            Path::new("/home/pi"),
+            PathBuf::from("/usr/local/bin/radio-scout"),
+            None,
+        )
+        .expect_err("a URL that may carry a password");
+
+        assert!(!error.to_string().contains("hunter2"), "{error}");
+    }
+
+    /// Every flag, not just the ones an example happens to use: a setting that
+    /// silently fails to carry over is a service running on a different policy
+    /// than the command that installed it — and retention is the one where that
+    /// costs an archive.
+    #[test]
+    fn every_setting_flag_carries_over_to_the_service() {
+        let cli = Cli::parse_from([
+            "radio-scout",
+            "service",
+            "install",
+            "--storage-backend",
+            "s3",
+            "--retention-days",
+            "30",
+            "--retention-max-size-gb",
+            "12.5",
+        ]);
+
+        let args = service_args(&cli, Path::new("/srv/scanner"), None).expect("nothing secret");
+
+        assert_eq!(
+            args,
+            [
+                "--base-dir",
+                "/srv/scanner",
+                "--storage-backend",
+                "s3",
+                "--retention-days",
+                "30",
+                "--retention-max-size-gb",
+                "12.5",
+            ]
+        );
+    }
+
+    /// Zero-config is the common case, and there is nothing to point at.
+    #[test]
+    fn with_no_configuration_file_a_service_still_gets_its_base_directory() {
+        let cli = Cli::parse_from(["radio-scout", "service", "install"]);
+
+        let args = service_args(&cli, Path::new("/srv/scanner"), None).expect("nothing secret");
+
+        assert_eq!(args, ["--base-dir", "/srv/scanner"]);
+    }
+
+    /// A unit file is world-readable and a database URL routinely carries a
+    /// password, so this is ADR-0011 rule 2 one step further out: the credential
+    /// never reaches the file, and the refusal never reaches the message.
+    #[test]
+    fn a_database_url_is_refused_rather_than_written_into_a_service_definition() {
+        let cli = Cli::parse_from([
+            "radio-scout",
+            "service",
+            "install",
+            "--database-url",
+            "postgres://scanner:hunter2@db.example/radio",
+        ]);
+
+        let error = service_args(&cli, Path::new("/srv/scanner"), None)
+            .expect_err("a URL that may carry a password");
+
+        let message = error.to_string();
+        assert!(message.contains("--database-url"), "{message}");
+        assert!(message.contains("RADIO_SCOUT_DATABASE_URL"), "{message}");
+        assert!(!message.contains("hunter2"), "the secret leaked: {message}");
+    }
+
+    /// Every setting flag is `global`, which is the whole reason
+    /// `service install --port 8080` reads the way an operator expects.
+    #[test]
+    fn a_setting_flag_reads_the_same_before_and_after_the_subcommand() {
+        let before = Cli::parse_from(["radio-scout", "--port", "8080", "service", "install"]);
+        let after = Cli::parse_from(["radio-scout", "service", "install", "--port", "8080"]);
+
+        assert_eq!(before.port, Some(8080));
+        assert_eq!(after.port, before.port);
+    }
+
+    /// Nothing named means serve, which is what running the binary has always
+    /// done and what every existing invocation depends on.
+    #[test]
+    fn no_subcommand_still_means_serve() {
+        let cli = Cli::parse_from(["radio-scout", "--port", "3000"]);
+
+        assert!(cli.command.is_none());
     }
 }

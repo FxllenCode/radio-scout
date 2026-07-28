@@ -122,6 +122,20 @@ _Avoid_: raw, as-is, unconverted.
 The calls waiting to be enhanced. Server-side work, and distinct from the **listening queue**, which is what a listener is about to hear — the two are never the same set. Bounded: a call that cannot be admitted keeps its **passthrough** audio rather than waiting.
 _Avoid_: work queue, job queue, backlog, pipeline.
 
+### Deployment
+
+**Service**:
+The operating system's registration that runs Radio-Scout at boot and restarts it if it dies — a systemd unit, a launchd daemon, or a Windows scheduled task. Installed, removed and controlled by `radio-scout service …`. Distinct from the running process: uninstalling the service leaves the binary, and stopping the process leaves the service.
+_Avoid_: daemon, unit, task (each is one platform's word for it), autostart.
+
+**Target**:
+One platform a release is built for, named by its Rust triple (`aarch64-unknown-linux-musl`). The thing an **asset** name and the installer's machine detection have to agree about.
+_Avoid_: platform, architecture, arch (each is only half of one).
+
+**Asset**:
+One file published with a release: an archive holding the binary for a single **target**, or the `SHA256SUMS` covering all of them. What `install.sh` downloads and verifies.
+_Avoid_: artifact (reserve that for CI build outputs, which are not published), download, package.
+
 ### Storage & retention
 
 **Retention**:

@@ -24,6 +24,7 @@ use radio_scout::db;
 use radio_scout::enhance::Enhancer;
 use radio_scout::push::Push;
 use radio_scout::retention;
+use radio_scout::service;
 use radio_scout::startup::{self, INGEST_KEY_VAR};
 use radio_scout::{AppState, BlobStore, build_app, now_ms, observability};
 use tracing::{debug, error, info};
@@ -75,6 +76,14 @@ async fn main() -> ExitCode {
     };
 
     observability::init(&loaded.config.log.directives);
+
+    // `service …` (#23) is configured exactly like a boot — it bakes the
+    // settings just resolved into the definition it writes — but it never
+    // serves, so it answers before anything is opened.
+    if let Some(config::Command::Service(command)) = cli.command.clone() {
+        return service_command(&cli, command, &loaded, &cwd);
+    }
+
     match &env_file {
         Ok(path) => debug!(env_file = %path.display(), "loaded env file"),
         Err(error) => debug!(%error, "no env file loaded"),
@@ -85,6 +94,42 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             error!(%error, "radio-scout stopped");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `radio-scout service …`: hand the resolved configuration to the plan that
+/// will run it at boot (#23).
+///
+/// The one thing the library cannot answer is where this executable is; every
+/// decision — which paths become absolute, which flags may be baked in, and
+/// what the plan then does — is `config::service_params` and
+/// `service::dispatch`, both of which the suite can see.
+fn service_command(
+    cli: &Cli,
+    command: config::ServiceCommand,
+    loaded: &config::Loaded,
+    cwd: &std::path::Path,
+) -> ExitCode {
+    let exec = match std::env::current_exe() {
+        Ok(exec) => exec,
+        Err(error) => {
+            error!(%error, "could not find this executable's own path");
+            return ExitCode::FAILURE;
+        }
+    };
+    let params = match config::service_params(cli, loaded, cwd, exec, command.user) {
+        Ok(params) => params,
+        Err(error) => {
+            error!(%error, "these settings cannot be baked into a service");
+            return ExitCode::from(EXIT_MISCONFIGURED);
+        }
+    };
+    match service::dispatch(command.action, command.print, &params) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!(%error, "the service command did not finish");
             ExitCode::FAILURE
         }
     }

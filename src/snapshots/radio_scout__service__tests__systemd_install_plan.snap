@@ -1,0 +1,54 @@
+---
+source: src/service.rs
+assertion_line: 1394
+expression: printed
+---
+--- mkdir /var/lib/radio-scout ---
+--- run chown -R radio-scout /var/lib/radio-scout ---
+--- write /etc/systemd/system/radio-scout.service ---
+# radio-scout.service — written by `radio-scout service install`.
+# Reinstalling overwrites this file; edits belong in the configuration
+# the ExecStart line points at.
+[Unit]
+Description=Radio-Scout scanner audio server
+Documentation=https://github.com/FxllenCode/radio-scout
+# `network-online` rather than `network`: an ingest key is registered
+# and a store is opened at boot, and both can want a resolver.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/radio-scout --base-dir /var/lib/radio-scout
+WorkingDirectory=/var/lib/radio-scout
+Restart=on-failure
+RestartSec=5
+# ADR-0011: the scanner logs to stdout and journald owns persistence
+# and rotation. Nothing writes a log file.
+StandardOutput=journal
+StandardError=journal
+User=radio-scout
+CapabilityBoundingSet=
+
+# The scanner reads its own state and nothing else on the disk.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/radio-scout
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
+--- run systemctl daemon-reload ---
+--- run systemctl enable --now radio-scout.service ---

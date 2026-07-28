@@ -65,6 +65,31 @@ biquad = "0.6.0"
 nnnoiseless = { version = "0.5.2", default-features = false }
 audioadapter-buffers = "4.0.0"
 
+# What ships (#23, ADR-0007). Nothing had ever been built in release mode
+# before this ticket, so every value here is a deliberate choice rather than an
+# inherited one:
+#
+# - `opt-level = 3` because the release binary is where the audio work happens —
+#   resampling, loudness, noise suppression (#20) — on a Pi 5 that is also
+#   running the recorder. Size matters, but not more than keeping up.
+# - `lto = "fat"` + one codegen unit: the single largest win for both size and
+#   speed, and a release build is cut rarely enough that the compile time is
+#   nobody's inner loop.
+# - `strip = "debuginfo"`, *not* `"symbols"`. Dropping DWARF is most of the size;
+#   keeping the symbol table is what makes a panic on someone else's Pi arrive
+#   as function names instead of hex addresses, and a scanner nobody can debug
+#   remotely is worth more megabytes than it saves.
+# - `panic = "unwind"` is the default, and is spelled out because `"abort"` is
+#   the tempting size win and would be a correctness bug: one panicking request
+#   handler would take the whole server — every listener, every recorder — down
+#   with it instead of failing that one task.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
+panic = "unwind"
+
 # Nothing is un-instrumented (ADR-0011): application output goes through
 # `tracing`, so the print macros are a compile error rather than a habit. Cargo
 # applies these to every target in the package, so the places whose stdout
