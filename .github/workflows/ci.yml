@@ -164,6 +164,43 @@ jobs:
         run: cargo test --doc --locked
 
   # --------------------------------------------------------------------------
+  # The scanner's own architecture, running the suite rather than compiling for
+  # it (#38).
+  #
+  # Everything above runs on x86_64, and the matrix below only ever *compiles*
+  # for aarch64 — so until this job, no test had ever executed on the hardware
+  # the maintainer's scanner is. The enhancement pipeline (#20) is float-heavy
+  # and `nnnoiseless` selects SIMD paths per architecture; a test that passes on
+  # the runner and fails on the Pi ships to exactly the user this is built for.
+  #
+  # Deliberately **not** coverage: `backend` owns the single profile the floor
+  # and the patch gate are both measured from, and a second profile from another
+  # architecture would muddy both. Deliberately **not** dual-dialect either —
+  # the dialect difference is not architectural, and `backend` already runs the
+  # suite twice for it. This job answers one question: does it work on arm64.
+  # --------------------------------------------------------------------------
+  arm64:
+    name: Backend on arm64
+    runs-on: ubuntu-24.04-arm
+    needs: client
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: arm64
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: actions/download-artifact@v8
+        with:
+          name: client-dist
+          path: client/dist
+      # `--no-fail-fast`, like the x86 runs: one architecture-specific failure
+      # should report every other one in the same push, not the first.
+      - run: cargo nextest run --locked --no-fail-fast
+
+  # --------------------------------------------------------------------------
   # Every target the project ships on still compiles, with the real SPA in it.
   # Debug, and nothing is uploaded: this answers "does it still compile for
   # every target", cheaply, on every push. What ships is `release.yml` (#23),

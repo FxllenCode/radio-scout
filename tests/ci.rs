@@ -170,6 +170,34 @@ fn ci_gates_on_format_lints_and_both_coverage_rules() {
     }
 }
 
+/// The suite runs on the architecture the scanner runs on (#38).
+///
+/// Every test here only ever ran on x86_64 until this job: the matrix
+/// *compiles* for aarch64 and stops. The enhancement pipeline (#20) is
+/// float-heavy and `nnnoiseless` picks SIMD paths per architecture, so a test
+/// that passes on the runner and fails on the Pi would ship to exactly the user
+/// this project is built for.
+///
+/// The failure this pins is the cheap one: a job narrowed to `cargo build` goes
+/// green faster while proving only what the matrix already proved.
+#[test]
+fn the_suite_runs_on_arm64_rather_than_only_compiling_for_it() {
+    let ci = ci_workflow();
+    let (name, block) = jobs(&ci)
+        .into_iter()
+        .find(|(_, block)| block.contains("ubuntu-24.04-arm"))
+        .expect("no job runs on an arm64 runner, so the Pi's architecture is never tested");
+
+    assert!(
+        block.contains("nextest run"),
+        "{name} runs on arm64 without running the suite there"
+    );
+    assert!(
+        !block.contains("continue-on-error"),
+        "{name} tests the primary deployment target; it is a gate, not a signal"
+    );
+}
+
 /// `ci.yml` builds every target in **debug** and uploads nothing, deliberately
 /// (#22). `release.yml` (#23) is therefore the only place `--release` ever
 /// runs, which makes it the only place `[profile.release]` — fat LTO, one
