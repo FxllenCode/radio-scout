@@ -129,6 +129,14 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
 
+      # The storage half of ADR-0009 (#35). Without it `tests/s3.rs` skips and
+      # the S3 backend is exercised only by offline SigV4 — signatures nothing
+      # ever verifies, over objects that never land. MinIO here because it is
+      # the store every contributor already has; Garage, ADR-0002's first-class
+      # recommendation, gets a job of its own below.
+      - name: An object store that answers
+        run: .github/scripts/object-store-up.sh minio
+
       # Both runs feed one coverage profile, so a line reached only on one
       # dialect still counts as reached — which means starting from an empty
       # one. `Swatinem/rust-cache` restores `target/`, and a `.profraw` left
@@ -162,6 +170,44 @@ jobs:
       # instrumentation — and nextest does not run doctests at all.
       - name: Doctests
         run: cargo test --doc --locked
+
+  # --------------------------------------------------------------------------
+  # The *other* S3 implementation (#35).
+  #
+  # `backend` runs the real-S3 suite against MinIO. ADR-0002 makes **Garage**
+  # the first-class recommendation — Rust, self-hostable, Pi-friendly — so the
+  # store the docs tell an operator to run is the one that must not be the
+  # untested one. The two differ in ways this suite can actually see: Garage
+  # checks the region a request was signed for (the bring-up leaves it at
+  # Garage's own `garage`, so `TEST_S3_REGION` is exercised rather than merely
+  # matching the default), and the S3 API surface the presigned redirect and
+  # orphan-GC lean on is independently implemented in each.
+  #
+  # Deliberately only `--test s3`: everything else in the suite is
+  # storage-agnostic and `backend` already ran it twice. Deliberately not
+  # coverage either — `backend` owns the single profile the floor and the patch
+  # gate are measured from.
+  # --------------------------------------------------------------------------
+  garage:
+    name: Object store on Garage
+    runs-on: ubuntu-latest
+    needs: client
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: garage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: actions/download-artifact@v8
+        with:
+          name: client-dist
+          path: client/dist
+      - name: An object store that answers
+        run: .github/scripts/object-store-up.sh garage
+      - run: cargo nextest run --locked --no-fail-fast --test s3
 
   # --------------------------------------------------------------------------
   # The scanner's own architecture, running the suite rather than compiling for

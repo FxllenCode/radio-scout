@@ -61,3 +61,9 @@ profile, so a line reached only on one dialect still counts as reached.
 
 `tests/ci.rs` pins the trap that job could otherwise fall into: a Postgres service stood up and the
 URL never handed to the suite is a green run of SQLite twice.
+
+## The storage half
+
+[`real-s3.md`](real-s3.md) is this document's sibling for [ADR-0002](../adr/0002-audio-object-storage.md)'s
+object store: `TEST_S3_ENDPOINT` runs `tests/s3.rs` against a MinIO or Garage that answers, a bucket
+per test. It deliberately moves only that binary rather than the whole suite — the reason is there.

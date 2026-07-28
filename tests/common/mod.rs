@@ -52,6 +52,7 @@
 
 pub mod logs;
 mod push;
+pub mod s3;
 mod upload;
 mod ws;
 

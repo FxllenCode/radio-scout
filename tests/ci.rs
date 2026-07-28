@@ -24,7 +24,7 @@ use std::path::Path;
 /// legitimately sit inside a value (`COVERAGE_IGNORE`'s regex), and mangling one
 /// would be its own kind of wrong answer.
 fn workflows() -> Vec<(String, String)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let dir = repo_file(".github/workflows");
     let mut found: Vec<_> = std::fs::read_dir(&dir)
         .unwrap_or_else(|err| panic!("read {}: {err}", dir.display()))
         .map(|entry| entry.expect("dir entry").path())
@@ -147,6 +147,90 @@ fn ci_points_the_suite_at_the_postgres_it_provisions() {
         ci.contains("TEST_POSTGRES_URL"),
         "and the suite is told where it is"
     );
+}
+
+/// The real-S3 run is a real run (#35) — ADR-0009's storage half, and the same
+/// trap as the Postgres one above wearing a different hat.
+///
+/// `tests/s3.rs` skips when `TEST_S3_ENDPOINT` is unset. That is the right
+/// answer on a laptop and a silent, permanent skip in CI: a job that stands
+/// MinIO or Garage up and never gets the endpoint to the suite pays for the
+/// store and then goes on testing offline signing, exactly as before the ticket
+/// — green, and proving nothing about a round trip.
+///
+/// Both stores are named because ADR-0002 ships against both: Garage is the
+/// first-class recommendation, MinIO is the one every contributor already has.
+#[test]
+fn every_job_that_provisions_an_object_store_runs_the_real_s3_suite_against_it() {
+    let bring_up = bring_up_command();
+    let mut provisioned: Vec<&str> = Vec::new();
+    for (job, block) in jobs(&ci_workflow()) {
+        let lines: Vec<&str> = block.lines().collect();
+        let Some(brought_up) = lines.iter().position(|line| line.contains(bring_up)) else {
+            continue;
+        };
+        // *After* the bring-up, not merely somewhere in the same job: the
+        // endpoint reaches the suite through `$GITHUB_ENV`, which only steps
+        // that run later read. A suite that ran first would skip every one of
+        // its tests and say nothing about it.
+        let tested = lines
+            .iter()
+            .position(|line| runs_the_suite(line))
+            .unwrap_or_else(|| panic!("`{job}` provisions an object store and runs no suite"));
+        assert!(
+            tested > brought_up,
+            "`{job}` runs the suite before the store it provisions exists, so every \
+             real-S3 test skips"
+        );
+        provisioned.extend(
+            ["minio", "garage"]
+                .into_iter()
+                .filter(|store| block.contains(&format!("{bring_up} {store}"))),
+        );
+    }
+    provisioned.sort_unstable();
+    assert_eq!(
+        provisioned,
+        ["garage", "minio"],
+        "ADR-0002's two S3 backends are not both exercised by the pipeline"
+    );
+
+    // Bringing the store up is only half the link. The harness reads the
+    // endpoint from the *environment* (`tests/common/s3.rs`), and `$GITHUB_ENV`
+    // is the one way a step's export reaches the step that runs cargo — so a
+    // bring-up that stopped writing it would leave every real-S3 test skipping,
+    // inside the job built to run them.
+    let script = std::fs::read_to_string(repo_file(BRING_UP_PATH))
+        .unwrap_or_else(|err| panic!("read {BRING_UP_PATH}: {err}"));
+    for handoff in ["TEST_S3_ENDPOINT", "GITHUB_ENV"] {
+        assert!(
+            script.contains(handoff),
+            "{BRING_UP_PATH} never mentions {handoff}, so the suite is never told \
+             where the store it just started is"
+        );
+    }
+}
+
+/// The bring-up script the real-S3 jobs run.
+const BRING_UP_PATH: &str = ".github/scripts/object-store-up.sh";
+
+/// What a workflow step calls it — derived rather than written twice, because
+/// two spellings of one path are two things that can drift apart.
+fn bring_up_command() -> &'static str {
+    BRING_UP_PATH
+        .rsplit('/')
+        .next()
+        .expect("a path has a last segment")
+}
+
+/// Whether this step actually *runs* the suite.
+///
+/// `cargo ` with a space, because `taiki-e/install-action`'s `tool:
+/// cargo-nextest` names the runner without running it — and it does so several
+/// steps *before* anything is provisioned, which is enough to make an
+/// order-of-steps assertion answer about the wrong line.
+fn runs_the_suite(step: &str) -> bool {
+    step.contains("cargo ") && step.contains("nextest")
 }
 
 /// Merging is gated on formatting, lints, the ratcheting project floor **and**
@@ -273,6 +357,11 @@ fn ci_workflow() -> String {
 /// The tag pipeline: what ships (#23).
 fn release_workflow() -> String {
     named_workflow("release.yml")
+}
+
+/// A path inside the repository, from a test binary that may run anywhere.
+fn repo_file(relative: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
 fn named_workflow(name: &str) -> String {

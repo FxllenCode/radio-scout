@@ -93,8 +93,8 @@ panic = "unwind"
 # Nothing is un-instrumented (ADR-0011): application output goes through
 # `tracing`, so the print macros are a compile error rather than a habit. Cargo
 # applies these to every target in the package, so the places whose stdout
-# genuinely *is* their product — `examples/feed.rs` (a hand-run CLI) and the one
-# test that reports being skipped — carry a narrow `#![allow]` saying why.
+# genuinely *is* their product — the hand-run examples, and the tests that report
+# themselves skipped — carry a narrow `#![allow]` saying why.
 # (`build.rs` needs no exemption: cargo doesn't run clippy over build scripts.)
 [lints.clippy]
 print_stdout = "deny"

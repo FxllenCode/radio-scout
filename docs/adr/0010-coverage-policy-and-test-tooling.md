@@ -43,7 +43,9 @@ The reasoning that put the *floor* in-repo — "so the gate never depends on a t
 
 Codecov remains a reasonable *addition* later, as an advisory upload for the trend UI. It is not a dependency of merging.
 
-The other half of this ticket — **dual-dialect** — is `TEST_POSTGRES_URL` plus a `postgres:17` service, not the `testcontainers` crate named under "Backend, selective CI jobs". Same reason in a different key: `testcontainers` boots a container from inside the test process, and nextest runs process-per-test, so every developer would need a Docker daemon to run `cargo test` at all. The env-var seam keeps the everyday loop on SQLite and moves the whole suite with one variable. Real-S3 (MinIO/Garage) is still owed. See [`docs/agents/dual-dialect.md`](../agents/dual-dialect.md).
+The other half of this ticket — **dual-dialect** — is `TEST_POSTGRES_URL` plus a `postgres:17` service, not the `testcontainers` crate named under "Backend, selective CI jobs". Same reason in a different key: `testcontainers` boots a container from inside the test process, and nextest runs process-per-test, so every developer would need a Docker daemon to run `cargo test` at all. The env-var seam keeps the everyday loop on SQLite and moves the whole suite with one variable. See [`docs/agents/dual-dialect.md`](../agents/dual-dialect.md).
+
+**Real S3** (#35) took the same seam for the same reason — `TEST_S3_ENDPOINT` rather than `testcontainers` — with one deliberate difference: it runs `tests/s3.rs` and nothing else. A database is one connection per app; a bucket would be a network round-trip behind every `put_object`, `stored` and `object_keys` in the project, which is a price the everyday loop should not pay for a backend this self-contained. CI provisions both of ADR-0002's backends. See [`docs/agents/real-s3.md`](../agents/real-s3.md).
 
 ## Considered options
 

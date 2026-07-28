@@ -1,7 +1,8 @@
 //! Blob-store tests (ticket #4): the filesystem backend, orphan-GC, and S3
-//! presigning. The S3 test signs offline (SigV4 is computed locally, no network),
-//! so it runs everywhere; real S3 I/O against Garage/MinIO is CI/manual (needs a
-//! running store — no Docker here).
+//! presigning. The S3 test signs offline (SigV4 is computed locally, no
+//! network), so it runs everywhere — and proves nothing about a round trip.
+//! That half is `tests/s3.rs` (#35), which needs a store that answers and skips
+//! when the run was not given one.
 
 use std::collections::HashSet;
 
