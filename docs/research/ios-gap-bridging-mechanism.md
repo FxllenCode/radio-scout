@@ -630,6 +630,25 @@ Force a suspension: after a Step 4 FAIL (or by leaving the phone locked for 10+ 
 
 **Recording the result.** Every run gets: exact iOS build, mechanism variant, pass/fail per step, and the 3‑of‑3 tally for Step 4. This checklist is per‑iOS‑point‑release — a pass on 26.5 says nothing about 26.6 (§3 is the evidence for that).
 
+### Run log
+
+#### 2026‑07‑28 — iPhone 16 Pro, iOS 26.5.2 — mechanism (a), keep‑alive silence loop — **PASS** ([#33](https://github.com/FxllenCode/radio-scout/issues/33))
+
+| Step | Result |
+|---|---|
+| 1 — Codec probe | Ran; **falsified §7** — see the correction there and [#40](https://github.com/FxllenCode/radio-scout/issues/40). Does not bear on (a). |
+| 2 — Background playback baseline | **PASS** — audio continued to the end of the Call after lock |
+| 3 — Lock‑screen metadata repaints per Call | **PASS** — full repaint, no PARTIAL; artwork included |
+| 4 — **The gate**: queue advances across a silent gap while locked | **PASS 3/3**, plus **PASS** on the app‑switched‑away path |
+| 5 — Dither vs true‑zero silence | Not run — no toggle exists (`silence.ts` exposes only `keepAliveLoopUrl()`) |
+| 6 — `disableRemotePlayback` cost | Not run — only required if the ladder reaches rung D, and Step 4 passed |
+| 7 — Battery sanity | **Not run** — the one real gap; there is still no baseline number |
+| 8 — Suspension recovery | **PASS** |
+
+**What this establishes:** the keep‑alive holds a backgrounded home‑screen PWA resident across a ~84 s silent gap on this build, both screen‑locked and app‑switched, and recovers cleanly afterwards. Step 4 is the WebKit‑bug workaround's whole reason for existing, and 3/3 clears the intermittency bar §14 sets.
+
+**What it does not:** battery cost is unmeasured, and whether the ±1‑LSB dither is *necessary* (versus true‑zero silence) is still unsettled — the question §5 exists to answer. Neither blocks the claim that background audio works; both are follow‑ups.
+
 ---
 
 ## 15. Sources (with dates)
