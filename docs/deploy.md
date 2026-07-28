@@ -4,7 +4,13 @@ Radio-Scout is **one file**. The frontend is compiled into the binary, first run
 creates its own database and audio store, and there is nothing else to install —
 no runtime, no ffmpeg, no package manager ([ADR-0007](adr/0007-single-binary-embedded-frontend-distribution.md)).
 
-Four ways in, in the order most people want them.
+Four ways in, in the order most people want them. The [README](../README.md)
+covers the quickest of them in a paragraph; this is the whole picture, including
+the ones it skips.
+
+Once it is running: [recorders.md](recorders.md) to point a recorder at it,
+[operating.md](operating.md) for storage, retention, enhancement and logging, and
+[using.md](using.md) for the app itself.
 
 ---
 
@@ -13,6 +19,15 @@ Four ways in, in the order most people want them.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/install.sh | sh
 ```
+
+> **While 0.1.0 is a release candidate**, the bare command above cannot resolve a
+> version: the installer asks for the *latest* release, and pre-releases are
+> deliberately excluded from that. Pin it:
+> ```sh
+> curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/install.sh | sh -s -- --version v0.1.0-rc.1
+> ```
+> The same applies to `ghcr.io/fxllencode/radio-scout:latest`, which moves only
+> on a final release — use `:v0.1.0-rc.1` until then.
 
 It works out which binary this machine wants, downloads it from the latest
 GitHub release, **checks it against the release's published SHA-256**, and puts
@@ -62,6 +77,8 @@ Then open `http://localhost:3000`. First run creates `./radio-scout-data`, an
 ingest key in `.env`, and an admin password — all of it printed as *paths*,
 never as secrets ([ADR-0011](adr/0011-observability-logging-policy.md) rule 2),
 so `cat .env` after the scrollback is gone.
+
+Next step is a recorder: [recorders.md](recorders.md).
 
 ## 3. Run it at boot
 
@@ -188,6 +205,8 @@ from source — `docker/Dockerfile` is a *packaging* file that assembles an imag
 around binaries the release workflow has already produced, which is why the
 image and the release are provably the same bytes rather than two builds that
 happen to have the same version number.
+
+Contributing, and the test policy every change is held to: [CLAUDE.md](../CLAUDE.md).
 
 ## How a release is made
 

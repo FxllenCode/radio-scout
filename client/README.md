@@ -1,32 +1,54 @@
-# React + TypeScript + Vite
+# Radio-Scout — web app
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The listener-facing app: Vite + React + TypeScript, Tailwind v4, shadcn/ui, Redux Toolkit /
+RTK Query. It is a PWA, and on iOS it is the only thing that makes background audio work
+([ADR-0005](../docs/adr/0005-client-audio-media-session-background.md)).
 
-Currently, two official plugins are available:
+**This is not deployed separately.** The production build is compiled *into* the Rust binary by
+`rust-embed`, and the API, the WebSocket and the app are all served from one origin
+([ADR-0007](../docs/adr/0007-single-binary-embedded-frontend-distribution.md)).
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+> **`npm run build` must run before `cargo build` or `cargo test`.** `rust-embed` reads
+> `client/dist` **at compile time**. Without it the binary serves a minimal fallback page — and
+> the Rust tests that assert about the frontend then pass by asserting the *fallback*, which is
+> green and proves nothing.
 
-## React Compiler
+## Commands
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```sh
+npm install          # first time
+npm run dev          # Vite dev server; proxies /api, /healthz and the WS to :3000
+npm run build        # type-check + production build into dist/, which the binary embeds
+npm run typecheck    # tsc -b
+npm run lint         # oxlint
+npm run test         # Vitest + React Testing Library
+npm run test:watch
+npm run test:coverage  # with thresholds; MSW mocks at the network boundary
+npm run test:e2e     # Playwright: service worker, offline, install criteria
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+For the dev server to be useful, run the backend too — `cargo run` in the repository root.
+
+## Testing
+
+Integration tests with React Testing Library are the workhorse, with **MSW** mocking at the
+network boundary — never `fetch` or module mocking. Unit tests cover `store/`, `lib/` and
+`utils/`. Coverage thresholds are enforced and ratchet upward.
+
+Playwright is reserved for what jsdom cannot do at all: service-worker registration, offline
+app-shell serving, install criteria, and delivering a real push. It runs against a production
+build served by `vite preview`, because the service worker only exists in a build.
+
+**iOS background audio, lock-screen controls and Add-to-Home-Screen are a real-device manual
+gate.** Playwright's bundled WebKit is not iOS Safari and cannot validate them.
+
+## Icons
+
+App icons are rasterised from `icons/icon.svg` by `scripts/build-icons.sh` into `public/`. The
+PNGs are committed, so neither the build nor CI runs it — re-run it by hand only when the mark
+changes.
+
+---
+
+Project overview: [../README.md](../README.md) · Contributing and the full test policy:
+[../CLAUDE.md](../CLAUDE.md)

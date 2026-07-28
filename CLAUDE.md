@@ -4,19 +4,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Radio-Scout is a full-stack, one-stop-shop application for listening to audio from Trunk Recorder and SDRTrunk. It is a replacement for rdio-scanner (which will remain accessible at `/rdio-scanner`). Every feature from rdio-scanner carries over, but optimized, with a beautiful UI.
+Radio-Scout is a full-stack, one-stop-shop application for listening to audio from Trunk Recorder and SDRTrunk. It is a replacement for rdio-scanner. Every feature from rdio-scanner carries over, but optimized, with a beautiful UI.
+
+**`/rdio-scanner` is not served, and is not v1 scope.** Hosting the legacy Angular app is on the spec's "later" list (#24), so nothing should be built against the assumption that it exists — the compatibility promise lives at the *ingest* boundary (wire formats, response strings), not at a legacy URL. `README.md` says so publicly, under "What is missing".
 
 The philosophy is a simple setup: a one-program install from the command line that just works. There will be a database (choice TBD via a grilling session) and possibly an object store for the audio. This application is likely to run on hardware as low as a Raspberry Pi, so it must be highly optimized, fast, and performant.
 
 - **Backend:** Rust, entirely.
 - **Frontend:** Vite + React (TypeScript) + TailwindCSS + shadcn, located in `client/`.
 
+## Where the documentation lives
+
+Three readers, and a document is written for exactly one of them. Keeping a fact in the wrong reader's document is how it goes stale — an Operator never reads `docs/agents/`, so a truth kept only there is not published.
+
+| Reader | Documents |
+| --- | --- |
+| **Operator** — installs and runs an Instance | [`README.md`](README.md) (front door + happy path), [`docs/deploy.md`](docs/deploy.md) (every install path, service, Docker), [`docs/recorders.md`](docs/recorders.md) (Trunk Recorder + SDRTrunk), [`docs/operating.md`](docs/operating.md) (storage, retention, enhancement, admin, logging), [`docs/migrating-from-rdio-scanner.md`](docs/migrating-from-rdio-scanner.md) |
+| **Listener** — uses the app | [`docs/using.md`](docs/using.md) |
+| **Contributor** — this file's reader | `CLAUDE.md`, [`CONTEXT.md`](CONTEXT.md), [`docs/adr/`](docs/adr/), [`docs/agents/`](docs/agents/), [`docs/spec/`](docs/spec/) |
+
+**`tests/docs.rs` gates the operator-facing set**: every `RADIO_SCOUT_*` they name must be one `src/` reads, the README's platform table must match the release matrix, the `curl | sh` URL must match `install.sh`'s own repository slug, and every relative link and image must resolve. Prose is not gated — this pins the facts that drift, not the writing. ADRs are deliberately excluded: an ADR is a dated record and is *supposed* to keep saying what it said at the time.
+
+`--write-config` remains the settings reference (two tests hold it complete), so `docs/operating.md` explains *whether you want* a setting and never restates the list.
+
 ## Hard constraints
 
 - **All development is Test-Driven Development, under a quantified coverage policy** — see [Testing & coverage policy](#testing--coverage-policy) below ([ADR-0009](docs/adr/0009-testing-strategy.md) + [ADR-0010](docs/adr/0010-coverage-policy-and-test-tooling.md)). CI is used heavily and is essential for deployment across targets (PC, Mac, Raspberry Pi); dev/testing happens on Mac, the target scanner runs on a Raspberry Pi 5. Red-green-refactor on **native tests** — Rust `cargo nextest` (unit + the in-process HTTP/WS integration harness) and Vitest + React Testing Library (frontend). Every PR must hold **100% patch/diff coverage** (every new/changed line tested) over a **ratcheting project floor**, with quality enforced by **mutation testing** (`cargo-mutants` + `proptest`) — *not* by a 100%-total gate. Reserve Playwright for browser-only flows; iOS background audio / lock-screen controls are a **real-device manual gate**.
 - **Performance is first-class.** The app must be fast and performant on hardware as low as a Raspberry Pi.
 - **Simple install.** A one-command install that just works.
-- **rdio-scanner compatibility — as a floor, not a ceiling.** Figure out what features exist in rdio-scanner — all of them need to work in Radio-Scout. Upstream and downstream must exist and should be backwards compatible with rdio-scanner if at all possible. **But Radio-Scout must _improve_ on rdio, not clone it.** For every feature, first research how rdio does it, then research how to do it *better* — the goal is a superset that fixes rdio's weaknesses (see [Improve, don't clone](#improve-dont-clone-rdio)). Compatibility is preserved at the wire/contract boundaries (ingest response strings, recorder payloads, `/rdio-scanner` legacy surface); everything behind those boundaries is free to be better.
+- **rdio-scanner compatibility — as a floor, not a ceiling.** Figure out what features exist in rdio-scanner — all of them need to work in Radio-Scout. Upstream and downstream must exist and should be backwards compatible with rdio-scanner if at all possible. **But Radio-Scout must _improve_ on rdio, not clone it.** For every feature, first research how rdio does it, then research how to do it *better* — the goal is a superset that fixes rdio's weaknesses (see [Improve, don't clone](#improve-dont-clone-rdio)). Compatibility is preserved at the wire/contract boundaries (ingest response strings, recorder payloads, and the `/rdio-scanner` legacy surface *if it is ever built*); everything behind those boundaries is free to be better.
 - **Recorder integrations.** Create an integration or plugin (per their docs) for both SDRTrunk and Trunk Recorder. The maintainer runs Trunk Recorder on their scanner, so have a plugin/integration ready for that testing phase.
 - **Nothing is un-instrumented.** All application output goes through `tracing` — `println!`/`eprintln!`/`dbg!` are **denied by lint** in library and binary code ([ADR-0011](docs/adr/0011-observability-logging-policy.md)). Secrets are never logged at any level in any form; every rejected ingest logs *why*; every 5xx logs its cause against a correlation ref and returns only that ref. See [Logging policy](#logging-policy).
 - **PWA / mobile support is extremely important.** You must be able to add the website to your phone and have scanner audio actually work correctly within the OS — e.g. functioning pause/next/previous buttons — and work correctly in the background, especially on iOS. This is lacking in rdio-scanner and is a big problem with it.
@@ -98,7 +114,7 @@ Full rationale: [ADR-0012](docs/adr/0012-configuration-model.md). One `Config` (
 
 1. **Research how rdio does it** — read the actual source in `rdio-scanner/` (and the recorders when relevant), not just the docs. Understand the behavior *and its weaknesses* (rdio's real pain points: DB-stored audio, proprietary JSON-over-WS, no background/lock-screen audio, dated UI, stale/half-open connections, missed calls across reconnects, no heartbeat of its own).
 2. **Research how to do it better** — deliberately look for an improvement: robustness (heartbeat, reconnect catch-up, backpressure), performance (Pi-first), UX (mobile/PWA/background), or correctness. Cite the improvement in the ADR/PR/commit so the *why* is durable.
-3. **Preserve compatibility only where it's a contract** — recorder-facing wire formats, response strings, and the legacy `/rdio-scanner` surface stay byte-compatible; internal protocols and storage are ours to improve (e.g. our own live-feed protocol per [ADR-0004](docs/adr/0004-live-feed-raw-websocket.md), object-storage audio per [ADR-0002](docs/adr/0002-audio-object-storage.md)).
+3. **Preserve compatibility only where it's a contract** — recorder-facing wire formats and response strings stay byte-compatible (as would the legacy `/rdio-scanner` surface, which is deferred and unbuilt); internal protocols and storage are ours to improve (e.g. our own live-feed protocol per [ADR-0004](docs/adr/0004-live-feed-raw-websocket.md), object-storage audio per [ADR-0002](docs/adr/0002-audio-object-storage.md)).
 4. **When an improvement is non-trivial or crosses an ADR boundary, surface the trade-off and get a decision** before building it — don't silently gold-plate, and don't silently settle for parity.
 
 The bar for every feature is "measurably better than rdio for our users (Pi operators + mobile listeners)," not "matches rdio."

@@ -1,8 +1,20 @@
 # Radio-Scout
 
-Radio-Scout ingests audio "calls" from software-defined-radio recorders and distributes them to listeners through a scanner-style web app. This glossary is the project's ubiquitous language — use these terms exactly, in code and in conversation.
+Radio-Scout ingests **Calls** from **Recorders** and distributes them to **Listeners** through a scanner-style web app. This glossary is the project's ubiquitous language — use these terms exactly, in code and in conversation.
+
+**"Scanner" is an adjective here, never a noun.** "Scanner audio", "a scanner-style app" — fine. The nouns it used to stand in for each have their own word, because it was carrying four meanings at once: a running Radio-Scout is an **Instance**, a Listener's independent setup is a **Profile**, the software that feeds us Calls is a **Recorder**, and the physical radio hardware is out of scope for this glossary entirely.
 
 ## Language
+
+### People
+
+**Operator**:
+The person who runs an **Instance** — installs it, points **Recorders** at it, and decides retention, storage and enhancement policy. Holds the **admin password**; the only person who needs one.
+_Avoid_: admin, user, host, owner.
+
+**Listener**:
+The person who listens through the web app. Needs no account and no **Session**: their whole state — **Selection**, **Hold**, **Avoid**, **Profile**, **push subscription** — lives in their own browser. One person is often both a Listener and the **Operator**; the terms name the role, not the human.
+_Avoid_: user, client, subscriber, viewer.
 
 ### Core entities
 
@@ -64,8 +76,12 @@ Muting a talkgroup in the live feed, optionally for a fixed duration (e.g. 30/60
 _Avoid_: mute, block, ignore.
 
 **Selection**:
-The listener's chosen set of active systems/talkgroups/groups that the live feed plays. Persisted per browser (optionally namespaced so one browser can run independent scanners).
+The **Listener's** chosen set of active systems/talkgroups/groups that the live feed plays. Persisted per browser, under a **Profile**.
 _Avoid_: subscription, filter.
+
+**Profile**:
+One named, independent **Listener** setup within a single browser — its own **Selection**, **Avoid** list and **Hold** state. Two Profiles behave as two entirely separate radios in the same browser: a "truck" Profile and a "desk" Profile share nothing. Spelled `namespace` in the client's persistence layer, which is the mechanism rather than the concept.
+_Avoid_: namespace (in prose), workspace, preset, scanner.
 
 **Push subscription**:
 One browser's registration for **Web Push** notifications — the push service endpoint it is reachable at, the keys that make a message readable only by that device, and the **Selection** it wants to be woken for. The delivery half, distinct from the Selection itself: a listener has one Selection and zero or one push subscription per browser. Identified in logs by its **Id**, never by its endpoint (a stable per-device identifier).
@@ -77,8 +93,12 @@ _Avoid_: throttling, rate limiting, batching, debouncing.
 
 ### Ingest & distribution
 
+**Recorder**:
+The software that receives radio and uploads **Calls** to an **Instance** — Trunk Recorder or SDRTrunk. Authenticates with an **API key**. Radio-Scout ships no plugin for either: both already speak the rdio-scanner upload dialect, and that dialect is the compatibility contract.
+_Avoid_: source, uploader, feeder, scanner.
+
 **Ingest**:
-Accepting a call from a recorder into Radio-Scout (via the HTTP upload API or, later, directory watching).
+Accepting a **Call** from a **Recorder** into Radio-Scout (via the HTTP upload API or, later, directory watching).
 _Avoid_: upload, import (except in user-facing recorder docs).
 
 **Auto-populate**:
@@ -93,7 +113,7 @@ _Avoid_: password, passcode.
 A recorder-facing secret that authorizes ingesting calls into specific systems. Distinct from an **access code**.
 
 **Admin password**:
-The single operator-facing secret that opens the admin surface — everything under `/api/admin/`, which configures the scanner. Distinct from both an **access code** (listener-facing, scoped) and an **API key** (recorder-facing). There is exactly one; it lives in the environment (`RADIO_SCOUT_ADMIN_PASSWORD`), not the database.
+The single **Operator**-facing secret that opens the admin surface — everything under `/api/admin/`, which configures the **Instance**. Distinct from both an **access code** (**Listener**-facing, scoped) and an **API key** (**Recorder**-facing). There is exactly one; it lives in the environment (`RADIO_SCOUT_ADMIN_PASSWORD`), not the database.
 _Avoid_: admin key, admin token.
 
 **Session**:
@@ -124,6 +144,10 @@ _Avoid_: work queue, job queue, backlog, pipeline.
 
 ### Deployment
 
+**Instance**:
+One running Radio-Scout: a process, its **Archive**, its configuration and its **admin password**. The unit an **Operator** installs, upgrades and points **Recorders** at. Two Instances share nothing unless they are given the same database and object store.
+_Avoid_: scanner, server, deployment, node, site (Site is a tower).
+
 **Service**:
 The operating system's registration that runs Radio-Scout at boot and restarts it if it dies — a systemd unit, a launchd daemon, or a Windows scheduled task. Installed, removed and controlled by `radio-scout service …`. Distinct from the running process: uninstalling the service leaves the binary, and stopping the process leaves the service.
 _Avoid_: daemon, unit, task (each is one platform's word for it), autostart.
@@ -138,8 +162,12 @@ _Avoid_: artifact (reserve that for CI build outputs, which are not published), 
 
 ### Storage & retention
 
+**Archive**:
+Every **Call** an **Instance** currently holds — what a **Listener** searches and replays in **playback mode**, and what **Retention** bounds. Metadata in the database, audio in the object store; "the Archive" means both halves together, never one of them.
+_Avoid_: history, library, database, back catalogue.
+
 **Retention**:
-The policy that bounds the archive: an age window (in days) plus an optional cap on total stored audio. Expressed as configuration; enforced by sweeps.
+The policy that bounds the **Archive**: an age window (in days) plus an optional cap on total stored audio. Expressed as configuration; enforced by sweeps.
 _Avoid_: expiry, TTL, cleanup.
 
 **Sweep**:
