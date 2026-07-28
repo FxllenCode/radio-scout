@@ -24,10 +24,10 @@ curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/insta
 > version: the installer asks for the *latest* release, and pre-releases are
 > deliberately excluded from that. Pin it:
 > ```sh
-> curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/install.sh | sh -s -- --version v0.1.0-rc.1
+> curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/install.sh | sh -s -- --version v0.1.0-rc.2
 > ```
 > The same applies to `ghcr.io/fxllencode/radio-scout:latest`, which moves only
-> on a final release — use `:v0.1.0-rc.1` until then.
+> on a final release — use `:v0.1.0-rc.2` until then.
 
 It works out which binary this machine wants, downloads it from the latest
 GitHub release, **checks it against the release's published SHA-256**, and puts

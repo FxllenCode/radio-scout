@@ -74,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/insta
 > **While 0.1.0 is a release candidate, pin it** — the installer resolves the *latest* release
 > and pre-releases are deliberately excluded from that:
 > ```sh
-> curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/install.sh | sh -s -- --version v0.1.0-rc.1
+> curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/install.sh | sh -s -- --version v0.1.0-rc.2
 > ```
 
 It works out which binary your machine wants, verifies it against the release's published
