@@ -377,6 +377,40 @@ MediaPlayerEnums::SupportsType SourceBufferParser::isContentTypeSupported(const 
 
 **So on iOS Safari: `MediaSource.isTypeSupported('audio/mpeg')` and `'audio/aac'` are expected `false`; `'audio/mp4; codecs="mp4a.40.2"'` (AAC‑LC in fMP4) is the appendable target.** Verify both on device (§13 Step 1) before spending anything on (b) — the parser audit is source‑derived, but AVFoundation's runtime `audiovisualMIMETypes` list is not something I can read from here, so the exact strings are **unverified until probed**.
 
+> ### ⚠️ CORRECTION — measured on device 2026‑07‑28, iPhone 16 Pro / iOS 26.5.2 ([#40](https://github.com/FxllenCode/radio-scout/issues/40))
+>
+> **The prediction above is wrong, exactly where this paragraph said it was unverified.** The probe found:
+>
+> | | `MediaSource` | `ManagedMediaSource` |
+> |---|---|---|
+> | `audio/mpeg` | absent | **`true`** — predicted `false` |
+> | `audio/aac` | absent | **`true`** — predicted `false` |
+> | `audio/mp4; codecs="mp4a.40.2"` | absent | `true` — as predicted |
+> | `audio/mp4; codecs="mp4a.40.34"` | absent | `false` — as predicted |
+>
+> And it is not merely an optimistic capability hint. A real `SourceBuffer` of type
+> `audio/mpeg` was **constructed**, **took 16 680 bytes of real MPEG‑1 Layer III frames**,
+> and reported `buffered` = **0.000–1.045 s** — the same duration CoreAudio and Chromium
+> independently decode from those bytes. **MP3 is directly appendable on iOS 26.5.2.**
+>
+> Two things follow:
+>
+> 1. **`MediaSource` does not exist on iPhone at all** — only `ManagedMediaSource`. The
+>    source read above was about `SourceBufferParser`, which is presumably still accurate;
+>    what it could not see is AVFoundation's runtime type list, and that is what answers.
+>    Any probe must test both constructors and distinguish "no constructor" from
+>    "unsupported codec".
+> 2. **The MP3 row of the cost table below is void.** It says MP3 needs "a full decode +
+>    re‑encode of every Call, on the Pi". The real cost is **zero** — append the bytes.
+>    This matters concretely: **SDRTrunk encodes every Call as MP3**
+>    (`BroadcastFormat.MP3`, `RdioScannerConfiguration.java:48`).
+>
+> **What is *not* revived:** the M4A row still stands — a plain `.m4a` is still not a valid
+> MSE byte stream and still needs a per‑Call remux. And **WAV**, which this table never
+> listed, is what Trunk Recorder commonly sends *and* what enhancement writes
+> (`Output::Wav`, 8 kHz) — it is not appendable either. So (b) is **re‑costed, not
+> rehabilitated**: free for MP3 Calls, unchanged for everything else.
+
 ### What this costs Radio‑Scout per Call
 
 ADR‑0002 serves per‑Call **MP3** and **M4A/AAC** files as they arrive from the recorder.
@@ -523,6 +557,8 @@ Escalate in this order, only when the rung above fails the real‑device gate:
 **Step 1 — Codec probe (decides whether (b) is even on the table).**
 In Safari (a normal tab is fine for this one), open the app and paste into the URL bar a `javascript:` bookmarklet, or add a temporary debug button that `alert()`s the results of:
 `MediaSource.isTypeSupported('audio/mpeg')`, `('audio/aac')`, `('audio/mp4; codecs="mp4a.40.2"')`, `('audio/mp4; codecs="mp4a.40.34"')`, and `typeof ManagedMediaSource`.
+
+> **⚠️ Probe `ManagedMediaSource.isTypeSupported` too — it is the only one that exists on iPhone.** Corrected 2026‑07‑28 ([#40](https://github.com/FxllenCode/radio-scout/issues/40)): on iOS 26.5.2 `window.MediaSource` is `undefined`, so every call above throws or returns nothing, and reading that as `false` yields the **opposite** verdict to the truth — "no MSE, (b) impossible", when in fact all four types answer on `ManagedMediaSource`. Test both constructors and keep "no constructor" (`n/a`) distinct from "unsupported codec" (`false`). And treat `isTypeSupported` as a hint only: construct a `SourceBuffer` and `appendBuffer` real bytes before believing it.
 > **Do not use `alert()` while the Claude browser extension is driving anything** (CLAUDE.md). Render the results into the page instead.
 - **PASS for (b) being possible:** `audio/mp4; codecs="mp4a.40.2"` is `true` **and** `ManagedMediaSource` is `"function"`.
 - **CONFIRMS §7:** `audio/mpeg` and `audio/aac` are `false`, and `mp4a.40.34` is `false`.
