@@ -5,11 +5,11 @@
 
 mod common;
 use common::logs::LogCapture;
+use common::s3::unreachable_store;
 use common::{TestApp, header_of, request_id_of};
 
 use bytes::Bytes;
 use radio_scout::db::repo::NewCall;
-use radio_scout::{BlobStore, S3Config};
 use serde_json::Value;
 
 /// The dataset every search assertion below reads:
@@ -410,22 +410,14 @@ async fn download_falls_back_when_the_stored_mime_is_not_header_safe() {
 /// Download always proxies (never a presigned redirect), so the store being down
 /// is the download being down.
 ///
-/// Slow by design: `object_store` retries a refused connection with backoff, so
-/// this is the one test in the suite that takes seconds rather than milliseconds.
+/// Takes about a second rather than milliseconds: a refused connection is still
+/// retried with backoff before the store gives up. How *much* backoff is our own
+/// decision since #39 — `blob::retry_policy` bounds it, which is why this is a
+/// second and not the minute-plus tail it used to be able to draw.
 #[tokio::test]
 async fn download_reports_an_unreachable_object_store() {
     let capture = LogCapture::start();
-    // A Garage/MinIO endpoint with nothing listening on it.
-    let s3 = BlobStore::s3(&S3Config {
-        bucket: "radio-scout".into(),
-        region: "us-east-1".into(),
-        endpoint: Some("http://127.0.0.1:1".into()),
-        access_key_id: "test-access".into(),
-        secret_access_key: "test-secret".into(),
-        allow_http: true,
-    })
-    .expect("s3 store");
-    let app = TestApp::builder().store(s3).spawn().await;
+    let app = TestApp::builder().store(unreachable_store()).spawn().await;
     let id = seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &["Emergency"], 1000).await;
 
     let resp = app.get(&format!("/api/call/{id}/download")).await;

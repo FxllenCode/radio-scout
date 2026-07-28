@@ -4,9 +4,12 @@
 //! That half is `tests/s3.rs` (#35), which needs a store that answers and skips
 //! when the run was not given one.
 
+mod common;
+
 use std::collections::HashSet;
 
 use bytes::Bytes;
+use common::s3::{FlakyStore, unreachable_store};
 use radio_scout::blob::{BlobStore, S3Config, orphan_gc};
 use radio_scout::now_ms;
 
@@ -166,4 +169,79 @@ async fn s3_backend_presigns_get_urls_offline() {
     assert!(url.contains("radio-scout"), "url names the bucket: {url}");
     assert!(url.contains("ab/call.m4a"), "url names the key: {url}");
     assert!(url.contains("X-Amz-Signature"), "url is signed: {url}");
+}
+
+/// **A store having a blip is ridden out, not given up on** (#39).
+///
+/// The half of the retry policy that bounding it could have broken: the point of
+/// four retries rather than none is that a store which answers `503` while it
+/// restarts or sheds load still hands over the object. A policy tuned only for
+/// "fail fast" would turn every transient hiccup into a Call skipped and an
+/// upload the recorder has to send again.
+///
+/// The count matters as much as the bytes: two requests for one `get` is the
+/// retry, observed from the server's side rather than inferred.
+#[tokio::test]
+async fn a_store_that_fails_once_is_retried_and_answers() {
+    let audio = Bytes::from_static(b"the second attempt's bytes");
+    let flaky = FlakyStore::start(1, audio.clone()).await;
+
+    let got = flaky
+        .store()
+        .get("ab/call.m4a")
+        .await
+        .expect("a blip must not become a failure")
+        .expect("the object is there");
+
+    assert_eq!(got, audio);
+    assert_eq!(flaky.requests(), 2, "the 503 must have been retried once");
+}
+
+/// **A store that is not there surfaces as an error in seconds** (#39).
+///
+/// `object_store`'s shipped retry policy would sleep for up to the better part
+/// of a minute first, in randomized draws — so "how long until a dead store is
+/// reported" was a variable with a tail past any deadline a caller had set, and
+/// on a Pi it is a worker slot held for minutes over one Call. `src/blob.rs`
+/// overrides it; this is the proof the override actually reaches the client
+/// rather than sitting in a constant nobody passed anywhere.
+///
+/// Asserted two ways, because each catches what the other cannot: the error
+/// `object_store` hands back **names the policy it exhausted**, which is exact
+/// and does not care how loaded the machine is — and the call really does
+/// return in seconds, which is the property the ticket is about and which a
+/// string cannot demonstrate.
+///
+/// The string half is deliberately coupled to `object_store`'s own error
+/// `Display`. If a version bump reformats it this goes red, which is the right
+/// outcome and not a flake: it is deterministic, and "did our policy still reach
+/// the client" is exactly the question a bump should make someone re-answer.
+#[tokio::test]
+async fn an_unreachable_store_gives_up_within_its_retry_policy() {
+    let store = unreachable_store();
+
+    let started = std::time::Instant::now();
+    let error = store
+        .get("ab/call.m4a")
+        .await
+        .expect_err("a store nothing is listening on cannot answer");
+    let elapsed = started.elapsed();
+
+    let message = error.to_string();
+    assert!(
+        message.contains("max_retries: 4"),
+        "the store's own words must name our retry ceiling, not object_store's 10: {message}"
+    );
+    assert!(
+        message.contains("retry_timeout: 5s"),
+        "and our timeout, not object_store's 180s: {message}"
+    );
+    // The policy's own ceiling is five seconds of retrying; the bound here is
+    // deliberately looser than that, because a bound that a loaded CI box can
+    // brush against is the flake this ticket exists to remove. It is still far
+    // below the minute-plus tail of the schedule we replaced.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "gave up only after {elapsed:?}"
+    );
 }

@@ -18,11 +18,49 @@ use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
-use object_store::{Error as ObjectError, ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{
+    BackoffConfig, Error as ObjectError, ObjectStore, ObjectStoreExt, PutPayload, RetryConfig,
+};
 use tracing::warn;
 
 /// How long a presigned URL stays valid.
 const PRESIGN_TTL: Duration = Duration::from_secs(300);
+
+/// How the S3 backend retries a request that failed in a way worth retrying —
+/// a refused connection, a 5xx, a throttle (#39).
+///
+/// `object_store` ships `max_retries: 10` over a `retry_timeout` of three
+/// minutes, with a randomized backoff climbing to 15 s a sleep. That is a policy
+/// for a fleet talking to AWS, and it is the wrong one here twice over: on a Pi
+/// it lets a single Call hold an enhancement worker slot for minutes while its
+/// Garage box is down, and because each sleep is a *random draw* the time to
+/// surface a dead store is a variable with a tail past a minute — which is what
+/// made the unreachable-store tests intermittent rather than simply slow.
+///
+/// So: retry a blip, not an outage. Four retries still ride out a store that
+/// answers `503` while it sheds load; a store that is actually *down* surfaces
+/// as an error in a couple of seconds, and the layer above decides what that
+/// means — the enhancement worker settles the Call as `skipped` and takes the
+/// next one, ingest answers the recorder with a failure it will retry itself.
+/// Neither is improved by waiting three minutes first, and a restart takes
+/// longer than any retry schedule worth having would wait for.
+///
+/// `retry_timeout` bounds only the *scheduling* of a further retry, not a
+/// request already in flight; a store that accepts a connection and then stalls
+/// is bounded instead by `ClientOptions`' own 30 s request timeout, which is
+/// left at its default deliberately — the request body is a Call's audio, and a
+/// tighter one would start failing real uploads over a slow link.
+fn retry_policy() -> RetryConfig {
+    RetryConfig {
+        backoff: BackoffConfig {
+            init_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+            base: 2.0,
+        },
+        max_retries: 4,
+        retry_timeout: Duration::from_secs(5),
+    }
+}
 
 /// A fresh object key, sharded by a two-character prefix so no directory grows
 /// unbounded.
@@ -105,7 +143,8 @@ impl BlobStore {
             .with_region(&cfg.region)
             .with_access_key_id(&cfg.access_key_id)
             .with_secret_access_key(&cfg.secret_access_key)
-            .with_allow_http(cfg.allow_http);
+            .with_allow_http(cfg.allow_http)
+            .with_retry(retry_policy());
         if let Some(endpoint) = &cfg.endpoint {
             builder = builder.with_endpoint(endpoint);
         }
@@ -291,6 +330,99 @@ mod tests {
         assert_eq!(
             is_reclaimable(&object(key, last_modified_ms), &referenced, 1000),
             expected
+        );
+    }
+
+    /// The upper bound of a `RetryConfig`'s backoff schedule — how long it can
+    /// spend *asleep* before giving up, in the unluckiest draw.
+    ///
+    /// An independent model of `object_store`'s `Backoff::next`
+    /// (`src/client/backoff.rs`), which is why it lives here rather than being
+    /// asked of the crate: each sleep is drawn from `init_backoff..(previous *
+    /// base)` and clamped to `max_backoff`, and the value *returned* is the
+    /// previous draw. So the first sleep is always `init_backoff`, and the
+    /// bound of the k-th is the bound of the (k-1)-th draw.
+    fn worst_case_backoff(config: &RetryConfig) -> Duration {
+        let backoff = &config.backoff;
+        let mut bound = backoff.init_backoff.as_secs_f64();
+        let mut total = 0.0;
+        for retry in 0..config.max_retries {
+            total += bound;
+            if retry + 1 < config.max_retries {
+                bound = backoff.max_backoff.as_secs_f64().min(bound * backoff.base);
+            }
+        }
+        Duration::from_secs_f64(total)
+    }
+
+    /// The model itself, against hand-worked schedules — otherwise the bounds
+    /// asserted below are only as trustworthy as an unchecked formula.
+    #[rstest]
+    // `object_store`'s own default: 0.1 + (0.2 + 0.4 + 0.8 + 1.6 + 3.2 + 6.4 +
+    // 12.8 + 15 + 15), the last two clamped by `max_backoff`.
+    #[case(100, 15_000, 2.0, 10, 55_500)]
+    // Ours: 0.1 + 0.2 + 0.4 + 0.8, nothing reaching the clamp.
+    #[case(100, 1_000, 2.0, 4, 1_500)]
+    // `max_backoff` below `init * base` clamps from the very first draw:
+    // 1 + 2 + 2 + 2.
+    #[case(1_000, 2_000, 2.0, 4, 7_000)]
+    // One retry sleeps exactly `init_backoff` once — the schedule never
+    // advances.
+    #[case(100, 15_000, 2.0, 1, 100)]
+    // Retries disabled: no sleeping at all.
+    #[case(100, 15_000, 2.0, 0, 0)]
+    fn worst_case_backoff_of_a_schedule(
+        #[case] init_ms: u64,
+        #[case] max_ms: u64,
+        #[case] base: f64,
+        #[case] max_retries: usize,
+        #[case] expected_ms: u64,
+    ) {
+        let config = RetryConfig {
+            backoff: BackoffConfig {
+                init_backoff: Duration::from_millis(init_ms),
+                max_backoff: Duration::from_millis(max_ms),
+                base,
+            },
+            max_retries,
+            retry_timeout: Duration::from_secs(180),
+        };
+        assert_eq!(
+            worst_case_backoff(&config),
+            Duration::from_millis(expected_ms)
+        );
+    }
+
+    /// Why we override at all (#39): `object_store`'s shipped default can sleep
+    /// for the better part of a minute before it surfaces a dead store, so the
+    /// time to give up is a random variable with a tail far past any deadline a
+    /// caller would think to set — and past any time a Pi should hold an
+    /// enhancement worker slot for one Call.
+    #[test]
+    fn the_shipped_default_gives_up_in_minutes() {
+        assert!(
+            worst_case_backoff(&RetryConfig::default()) > Duration::from_secs(50),
+            "if upstream has fixed this, our override can be reconsidered"
+        );
+    }
+
+    /// Ours gives up in seconds. The bound is what makes an unreachable store a
+    /// *bounded* failure: the worker settles the Call and moves on instead of
+    /// holding the slot through a backoff schedule nobody chose.
+    #[test]
+    fn our_policy_gives_up_in_seconds() {
+        let policy = retry_policy();
+        let bound = worst_case_backoff(&policy);
+        assert!(bound < Duration::from_secs(2), "backoff bound: {bound:?}");
+        assert!(
+            policy.retry_timeout <= Duration::from_secs(5),
+            "the backoff bound above assumes every attempt is instant; this is \
+             what holds when they are not, and it must stay the looser of the two"
+        );
+        assert!(
+            policy.max_retries > 0,
+            "a transient blip should still be retried, not surfaced on first \
+             sight — `a_store_that_fails_once_is_retried_and_answers` is the proof"
         );
     }
 }

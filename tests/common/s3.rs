@@ -13,13 +13,134 @@
 //! project — and the everyday loop's speed is the thing #22 was careful to
 //! protect. The S3 backend is small and self-contained enough that a suite of
 //! its own covers it.
+//!
+//! It is also where the S3 stores that **misbehave on purpose** live (#39) —
+//! [`unreachable_store`] and [`FlakyStore`]. Those need no server to be provided
+//! and so run everywhere, but they are the same kind of thing as the above (an
+//! S3-backed [`BlobStore`] a test is handed) and belong in one place rather than
+//! copied into each file that wants one.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::get;
+use bytes::Bytes;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
 use radio_scout::{BlobStore, S3Config};
+
+/// The bucket the offline stores below pretend to serve. Nothing checks it —
+/// one of them never answers and the other answers everything — but it has to
+/// agree with the endpoint's path for the request to be shaped like S3's.
+const OFFLINE_BUCKET: &str = "radio-scout";
+
+/// Credentials for a store that will never validate them. Present because
+/// `AmazonS3Builder` requires them to sign, and named so a log line or an error
+/// carrying one is obviously from a test.
+const OFFLINE_KEY_ID: &str = "test-access";
+const OFFLINE_SECRET: &str = "test-secret";
+
+/// An S3 store at an endpoint **nothing is listening on**.
+///
+/// Port 1 is reserved and never bound, so every attempt is refused the instant
+/// it is made — which leaves `blob::retry_policy`'s backoff schedule as the only
+/// thing between the call and its error (#39). That is what three tests want
+/// when they assert on an archive that is down: `tests/blob.rs` for the policy
+/// itself, `tests/archive.rs` for the 500 a download becomes, `tests/enhance.rs`
+/// for the Call the worker settles as `skipped` rather than retrying forever.
+pub fn unreachable_store() -> BlobStore {
+    BlobStore::s3(&S3Config {
+        bucket: OFFLINE_BUCKET.into(),
+        region: DEFAULT_REGION.into(),
+        endpoint: Some("http://127.0.0.1:1".into()),
+        access_key_id: OFFLINE_KEY_ID.into(),
+        secret_access_key: OFFLINE_SECRET.into(),
+        allow_http: true,
+    })
+    .expect("build an unreachable s3 store")
+}
+
+/// A stub S3 on an ephemeral port that **fails a fixed number of times and then
+/// works** — a store having a blip rather than an outage (#39).
+///
+/// The other half of the retry policy: [`unreachable_store`] proves it gives up,
+/// this proves it does not give up *first*. `503 Service Unavailable` is what
+/// object storage answers while it is restarting or shedding load, and it is one
+/// of the statuses `object_store` is willing to retry (`is_server_error`), so a
+/// policy that rides out a blip returns the object and a policy that does not
+/// returns the 503.
+#[derive(Clone)]
+pub struct FlakyStore {
+    addr: SocketAddr,
+    state: FlakyState,
+}
+
+#[derive(Clone)]
+struct FlakyState {
+    /// Counts up on every request, so the handler can answer the first
+    /// `failures` differently and the test can assert how many it took.
+    requests: Arc<AtomicUsize>,
+    failures: usize,
+    body: Bytes,
+}
+
+impl FlakyStore {
+    /// Start one: the first `failures` requests get a 503, every one after that
+    /// gets `body`.
+    pub async fn start(failures: usize, body: Bytes) -> Self {
+        let state = FlakyState {
+            requests: Arc::new(AtomicUsize::new(0)),
+            failures,
+            body,
+        };
+        let app = Router::new()
+            .route("/{*key}", get(flaky_get))
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        FlakyStore { addr, state }
+    }
+
+    /// A [`BlobStore`] pointed at it — the real S3 backend, real SigV4, over a
+    /// real socket. Only the server on the other end is a stub.
+    pub fn store(&self) -> BlobStore {
+        BlobStore::s3(&S3Config {
+            bucket: OFFLINE_BUCKET.into(),
+            region: DEFAULT_REGION.into(),
+            endpoint: Some(format!("http://{}", self.addr)),
+            access_key_id: OFFLINE_KEY_ID.into(),
+            secret_access_key: OFFLINE_SECRET.into(),
+            allow_http: true,
+        })
+        .expect("build a flaky s3 store")
+    }
+
+    /// How many requests have arrived — one more than the number of failures
+    /// means the retry happened and the second attempt was the one that worked.
+    pub fn requests(&self) -> usize {
+        self.state.requests.load(Ordering::Relaxed)
+    }
+}
+
+async fn flaky_get(State(state): State<FlakyState>) -> (StatusCode, Bytes) {
+    let seen = state.requests.fetch_add(1, Ordering::Relaxed);
+    if seen < state.failures {
+        return (StatusCode::SERVICE_UNAVAILABLE, Bytes::new());
+    }
+    (StatusCode::OK, state.body.clone())
+}
 
 /// How long the `CreateBucket` signature is valid. It is signed and sent in the
 /// same breath, so this is a timeout, not a lifetime anyone holds.

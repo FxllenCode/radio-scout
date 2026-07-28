@@ -74,6 +74,13 @@ a busy instance is not also an audio proxy. Nothing about the client changes.
 > Put S3 credentials in the environment rather than the TOML if you can. They have no
 > command-line flags on purpose: `ps` is world-readable.
 
+A store that hiccups is retried — a few hundred milliseconds of it — so a busy or briefly
+restarting Garage does not cost you a call. A store that is genuinely *down* is given up on in
+about a second rather than minutes: an upload fails with an error the recorder retries on its own
+schedule, and a call waiting to be enhanced is marked skipped instead of holding a worker slot
+until your storage comes back. So an outage costs you the calls during it, not a stalled instance
+afterwards.
+
 ## Database
 
 **SQLite by default**, in `base_dir`, created on first run. It is genuinely the right choice

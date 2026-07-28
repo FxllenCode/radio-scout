@@ -14,6 +14,7 @@
 
 mod common;
 
+use common::s3::unreachable_store;
 use common::{CallUpload, TestApp};
 use radio_scout::db::entities::call::EnhancementState;
 use radio_scout::enhance::{EnhancementConfig, Mode};
@@ -559,20 +560,13 @@ async fn a_store_that_cannot_be_read_skips_the_call_and_keeps_going() {
         .await
         .expect("queue it");
 
-    // The same archive, now behind a bucket nothing is listening on.
-    let unreachable = radio_scout::BlobStore::s3(&radio_scout::S3Config {
-        bucket: "radio-scout".into(),
-        region: "us-east-1".into(),
-        // Port 1 refuses immediately, so this fails fast rather than hanging.
-        endpoint: Some("http://127.0.0.1:1".into()),
-        access_key_id: "test-access".into(),
-        secret_access_key: "test-secret".into(),
-        allow_http: true,
-    })
-    .expect("s3 store");
+    // The same archive, now behind a bucket nothing is listening on. A refused
+    // connection is not on its own enough to settle inside the deadline below —
+    // the connection fails fast but the *call* retries it — so what actually
+    // bounds this is `blob::retry_policy` (#39).
     let after = TestApp::builder()
         .database_url(url)
-        .store(unreachable)
+        .store(unreachable_store())
         .enhancement(normalizing())
         .spawn()
         .await;
