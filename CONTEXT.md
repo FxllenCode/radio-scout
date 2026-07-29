@@ -71,6 +71,10 @@ A contiguous span of Refs owned as member Refs (`unitFrom..unitTo`). Mostly a Un
 The mode where incoming calls play automatically as they arrive, filtered to the listener's selected systems/talkgroups.
 _Avoid_: live mode, streaming.
 
+**Feed off**:
+The live feed switched off by the **Listener** — a hard off, and not a pause: the playing call stops, the **listening queue** clears, the connection closes, and **Web Push** (if subscribed) takes over, because nothing is being listened to. Persists until switched back on; rejoining starts from now, never backfilling the silence.
+_Avoid_: offline (the network's state, not the listener's choice), disabled, standby.
+
 **Playback mode**:
 The mode where the listener plays archived calls from the searchable history instead of the live feed. Mutually exclusive with live feed.
 _Avoid_: archive mode, replay mode.
