@@ -19,6 +19,7 @@ import {
   formatCallTime,
   pageSummary,
 } from '@/lib/archive'
+import { prefetchAudio } from '@/lib/prefetch'
 import { cn } from '@/lib/utils'
 import { useGetFilterOptionsQuery, useSearchCallsQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -33,6 +34,7 @@ import {
   selectHasPrevious,
   selectIsExhausted,
   selectIsInterrupting,
+  selectIsNearingPageEnd,
   selectPlaybackMode,
   selectPlaybackPosition,
   stop,
@@ -62,11 +64,13 @@ export function SearchScreen() {
   const [offset, setOffset] = useState(0)
 
   const { data: options } = useGetFilterOptionsQuery(filters)
-  const {
-    data: page,
-    isFetching,
-    isError,
-  } = useSearchCallsQuery({ ...filters, limit: PAGE_SIZE, offset })
+  /** The search behind the results on screen. Named because #32's page-ahead has
+   *  to be able to say "the run playing is walking *this* page". */
+  const pageQuery = useMemo(
+    () => ({ ...filters, limit: PAGE_SIZE, offset }),
+    [filters, offset],
+  )
+  const { data: page, isFetching, isError } = useSearchCallsQuery(pageQuery)
 
   const mode = useAppSelector(selectPlaybackMode)
   const current = useAppSelector(selectCurrentCall)
@@ -76,6 +80,7 @@ export function SearchScreen() {
   const position = useAppSelector(selectPlaybackPosition)
   const hasNext = useAppSelector(selectHasNext)
   const hasPrevious = useAppSelector(selectHasPrevious)
+  const nearingPageEnd = useAppSelector(selectIsNearingPageEnd)
 
   // Stable across renders while the page is, so the resume effect below can
   // depend on it without re-firing every render.
@@ -83,6 +88,28 @@ export function SearchScreen() {
 
   /** Set while waiting for the page playback rolled onto (US 25). */
   const [resumeOnNextPage, setResumeOnNextPage] = useState(false)
+
+  /** The search whose page the run currently playing is walking (#32).
+   *
+   *  Playback's index counts into the result set it was *started* from, so it
+   *  only says anything about the page on screen while that is still the same
+   *  page. A filter change replaces the set; the paging buttons move the window
+   *  out from under it. In both cases the index keeps reporting "nearly at the
+   *  end" of a page nobody is on, and a page-ahead decided from it would fetch
+   *  — and warm the audio of — a boundary the listener is nowhere near. Holding
+   *  the *query* rather than a flag makes both cases one comparison; a boolean
+   *  caught the filter one and missed the paging one entirely.
+   *
+   *  **This is not RTK Query's cache key.** That one sorts its keys
+   *  (`defaultSerializeQueryArgs`); this is a plain `JSON.stringify`, so it is
+   *  key-*order* sensitive and only sound because `filters` is only ever
+   *  extended (`{ ...current, ...patch }`), never rebuilt or deleted from.
+   *  Something that rebuilds the object — a "clear filters" button — would
+   *  reorder the keys and leave this permanently false. That fails safe (no
+   *  page-ahead, never a wrong one) but it fails *silently*, so rebuild the
+   *  filters and you have to compare something order-independent instead. */
+  const [playingQuery, setPlayingQuery] = useState<string | null>(null)
+  const walkingThisPage = playingQuery === JSON.stringify(pageQuery)
 
   /** Any filter change invalidates the page window the listener was on — and
    *  any playback that was rolling onto the next page of the *old* filters. */
@@ -92,7 +119,11 @@ export function SearchScreen() {
     setResumeOnNextPage(false)
   }
 
+  /** Start playing the `index`-th loaded result, recording which search those
+   *  results came from so the page-ahead knows what playback is walking. US 25's
+   *  roll onto the next page records the same thing where it resumes. */
   function play(index: number) {
+    setPlayingQuery(JSON.stringify(pageQuery))
     dispatch(
       playResults({
         results,
@@ -102,6 +133,40 @@ export function SearchScreen() {
       }),
     )
   }
+
+  // Page-ahead (#32). The page boundary is the only transition that costs a
+  // search *and* a cold audio fetch, so it is the one a listener notices — and
+  // #14's prefetch stopped exactly there, because `selectNextCall` can only see
+  // the loaded page. Asking for the next page as a *second subscription* is what
+  // makes it free: this is the same cache key `offset + PAGE_SIZE` will use, so
+  // when playback rolls on, RTK Query already holds the answer and the roll-on
+  // effect below resumes without a round trip. `skip` keeps it to the cases that
+  // want it — nothing while the live feed owns the audio (the selector's job),
+  // nothing when there is no page to fetch, and nothing while what is playing
+  // belongs to a set the filters have since replaced.
+  const pagingAhead =
+    walkingThisPage && nearingPageEnd && page?.hasMore === true
+  const { data: nextPage } = useSearchCallsQuery(
+    { ...pageQuery, offset: offset + PAGE_SIZE },
+    { skip: !pagingAhead },
+  )
+
+  // ...and warm the first Call of it, which is the audio playback arrives at.
+  //
+  // `pagingAhead` is a dependency, and not for tidiness: RTK Query **keeps its
+  // `data` when `skip` flips to true**, so `nextPage` holds its identity when
+  // the page-ahead stands down. Without this the effect would never re-run,
+  // the cleanup would never fire, and an audio warm nobody wants any more would
+  // run to completion. Depending on the decision rather than only on its result
+  // is what makes the abort reach the case it exists for.
+  useEffect(() => {
+    if (!pagingAhead) return
+    const first = nextPage?.results[0]
+    if (!first) return
+    const controller = new AbortController()
+    void prefetchAudio(first.audioUrl, controller.signal)
+    return () => controller.abort()
+  }, [pagingAhead, nextPage?.results])
 
   // Playback ran off the end of the loaded page. US 25 asks for sequential
   // playback through the *filtered results*, not through one page of them, so
@@ -116,10 +181,13 @@ export function SearchScreen() {
     dispatch(stop())
   }, [exhausted, page?.hasMore, dispatch])
 
-  // ...and pick up at the top of that page once it lands.
+  // ...and pick up at the top of that page once it lands — which re-arms the
+  // page-ahead against the page now playing, so a long run keeps warming each
+  // boundary rather than only the first.
   useEffect(() => {
     if (!resumeOnNextPage || isFetching || results.length === 0) return
     setResumeOnNextPage(false)
+    setPlayingQuery(JSON.stringify(pageQuery))
     dispatch(
       playResults({
         results,
@@ -128,7 +196,15 @@ export function SearchScreen() {
         total: page?.count ?? results.length,
       }),
     )
-  }, [resumeOnNextPage, isFetching, results, page?.offset, page?.count, dispatch])
+  }, [
+    resumeOnNextPage,
+    isFetching,
+    results,
+    pageQuery,
+    page?.offset,
+    page?.count,
+    dispatch,
+  ])
 
   return (
     <Screen

@@ -193,6 +193,40 @@ export const selectHasPrevious = (state: WithPlayback): boolean =>
 export const selectNextCall = (state: WithPlayback): Call | null =>
   selectHasNext(state) ? state.playback.results[state.playback.index + 1] : null
 
+/** How many Calls still follow the current one on the loaded page — the lead
+ *  #14's prefetch has left to work with before it runs out of page. */
+export const selectRemainingInPage = (state: WithPlayback): number =>
+  state.playback.index < 0
+    ? 0
+    : state.playback.results.length - 1 - state.playback.index
+
+/**
+ * How few Calls may be left before the *next page* is worth fetching (#32).
+ *
+ * Two, so there is a Call still playing plus one behind it while the search and
+ * the first audio file of the next page are on the wire — the boundary is the
+ * one transition that costs both, and the only one a listener notices. Fewer
+ * would leave a two-second kerchunk as the whole lead; more would pull a page
+ * (and an audio file) for every listener who wanders off mid-page.
+ */
+export const PAGE_AHEAD_WITHIN = 2
+
+/**
+ * Whether playback is close enough to the end of the loaded page that the next
+ * one should already be on its way (#32).
+ *
+ * False for an **interruption**, which is a single Call over the live feed with
+ * no run to page through, and false in live-feed mode generally: there is no
+ * result set there, so there is no boundary to cross. Whether a next page
+ * actually exists is the screen's to know — this only says the lead has run
+ * short.
+ */
+export const selectIsNearingPageEnd = (state: WithPlayback): boolean =>
+  state.playback.mode === 'playback' &&
+  !state.playback.interrupting &&
+  state.playback.index >= 0 &&
+  selectRemainingInPage(state) <= PAGE_AHEAD_WITHIN
+
 /** Where playback sits in the whole filtered set — the "3 of 421" readout.
  *  `index` counts from the start of the archive, not of the loaded page. */
 export const selectPlaybackPosition = (

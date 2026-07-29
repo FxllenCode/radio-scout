@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
 import { beforeEach, describe, expect, it } from 'vitest'
 
@@ -11,18 +11,48 @@ import { renderApp } from '@/test/utils'
 /** Every `/api/calls` query string the screen sent, in order. */
 let searches: string[] = []
 
+/** Every audio path fetched — by the player *or* by a prefetch (#14, #32).
+ *  Which of the two it was is not the point: what matters is that the bytes
+ *  were pulled before playback needed them. */
+let audioRequests: string[] = []
+
 beforeEach(() => {
   searches = []
+  audioRequests = []
   server.use(
     http.get(`${ORIGIN}/api/calls`, ({ request }) => {
       const url = new URL(request.url)
       searches.push(url.search)
       return HttpResponse.json(archivePage(url))
     }),
+    http.get(`${ORIGIN}/api/call/:id/audio`, ({ request }) => {
+      audioRequests.push(new URL(request.url).pathname)
+      return new HttpResponse('audio-bytes', {
+        headers: { 'content-type': 'audio/mpeg' },
+      })
+    }),
   )
 })
 
 const lastSearch = () => new URLSearchParams(searches.at(-1))
+
+/** An archive of `total` Calls — 51 by default, one past a full page, so there
+ *  are exactly two pages and a boundary to cross. */
+function pagedArchive(total = 51) {
+  const rows = Array.from({ length: total }, (_, index) => ({
+    ...ARCHIVE[0],
+    id: 1000 + index,
+    audioUrl: `/api/call/${1000 + index}/audio`,
+  }))
+  server.use(
+    http.get(`${ORIGIN}/api/calls`, ({ request }) => {
+      const url = new URL(request.url)
+      searches.push(url.search)
+      return HttpResponse.json(archivePage(url, rows))
+    }),
+  )
+  return { rows }
+}
 
 /** The result rows, once the first page has landed. */
 async function resultRows() {
@@ -337,6 +367,277 @@ describe('SearchScreen', () => {
         ).not.toBeInTheDocument(),
       )
       expect(lastSearch().get('offset')).toBe('50')
+    })
+
+    /**
+     * The page boundary is the one transition that costs a search *and* a cold
+     * audio fetch, so it is the one a listener notices — and #14's prefetch
+     * stopped at the edge of the loaded page, which is exactly where it was
+     * needed. Warm across it (#32): with two Calls left, fetch the next page and
+     * warm its first Call's audio, so neither is being waited on when playback
+     * arrives.
+     */
+    it('fetches the next page and warms its first Call before reaching it', async () => {
+      const user = userEvent.setup()
+      const { rows: many } = pagedArchive()
+      renderApp('/search')
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+
+      // Two Calls left on the page (48 and 49 of 50) — the point the page-ahead
+      // is armed. Nothing has been asked for beyond page one until now.
+      expect(searches.filter((search) => search.includes('offset=50'))).toEqual(
+        [],
+      )
+      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+
+      // The next page is requested before playback needs it...
+      await waitFor(() =>
+        expect(
+          searches.filter((search) => search.includes('offset=50')),
+        ).toHaveLength(1),
+      )
+      // ...and its first Call's audio is warmed, so arriving there is a cache
+      // hit rather than a download.
+      await waitFor(() =>
+        expect(audioRequests).toContain(`/api/call/${many[50].id}/audio`),
+      )
+    })
+
+    /** A page-ahead is decided from playback's index, and that index counts into
+     *  the result set playback was *started* from. Once a filter changes, it
+     *  says nothing about the results now loaded — so the page-ahead has to
+     *  stand down rather than fetch page two of a set whose page one the
+     *  listener has not even seen yet. */
+    it('stands the page-ahead down when the filters change', async () => {
+      const user = userEvent.setup()
+      pagedArchive()
+      renderApp('/search')
+      await filtersLoaded()
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await waitFor(() =>
+        expect(
+          searches.filter((search) => search.includes('offset=50')),
+        ).toHaveLength(1),
+      )
+
+      await user.selectOptions(screen.getByLabelText('Tag'), 'Fire')
+
+      // Back to page one of the new filters...
+      await waitFor(() => expect(lastSearch().get('tag')).toBe('Fire'))
+      expect(lastSearch().get('offset')).toBe('0')
+      // ...and no page-ahead was issued for them. The one page-ahead in the log
+      // is still the pre-filter one, whose subscription and audio prefetch were
+      // both dropped when its cache key stopped being current.
+      expect(
+        searches.filter((search) => search.includes('offset=50')),
+      ).toHaveLength(1)
+      expect(
+        searches.filter(
+          (search) => search.includes('offset=50') && search.includes('tag='),
+        ),
+      ).toEqual([])
+    })
+
+    /** Standing down is not enough on its own: the audio warm already on the
+     *  wire has to be *dropped*, or the listener pays for bytes belonging to a
+     *  result set that no longer exists.
+     *
+     *  This is the case RTK Query makes easy to get wrong — it **keeps its
+     *  `data` when `skip` flips to true**, so the next page's results hold their
+     *  identity and an effect depending only on them never re-runs, never
+     *  cleans up, and never aborts. */
+    it('aborts the audio warm already in flight when the filters change', async () => {
+      const user = userEvent.setup()
+      const { rows: many } = pagedArchive()
+      const aborted: string[] = []
+      server.use(
+        http.get(`${ORIGIN}/api/call/:id/audio`, async ({ request }) => {
+          const path = new URL(request.url).pathname
+          audioRequests.push(path)
+          request.signal.addEventListener('abort', () => aborted.push(path))
+          // Long enough that the filter change below lands mid-flight.
+          await delay(3000)
+          return new HttpResponse('audio-bytes', {
+            headers: { 'content-type': 'audio/mpeg' },
+          })
+        }),
+      )
+      renderApp('/search')
+      await filtersLoaded()
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+
+      const warmed = `/api/call/${many[50].id}/audio`
+      await waitFor(() => expect(audioRequests).toContain(warmed))
+
+      await user.selectOptions(screen.getByLabelText('Tag'), 'Fire')
+
+      await waitFor(() => expect(aborted).toContain(warmed))
+    })
+
+    /** The payoff, end to end: crossing the boundary must not re-search. The
+     *  page-ahead subscribes with the *same* cache key the roll-on will use, so
+     *  when playback runs off the end RTK Query already holds page two and US
+     *  25's resume is immediate rather than a round trip. If the two keys ever
+     *  drifted apart, the page-ahead would be pure waste and this would catch
+     *  it by counting the searches. */
+    it('crosses the boundary without searching for the page again', async () => {
+      const user = userEvent.setup()
+      pagedArchive()
+      renderApp('/search')
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await waitFor(() =>
+        expect(
+          searches.filter((search) => search.includes('offset=50')),
+        ).toHaveLength(1),
+      )
+
+      // Walk off the end of page one: 48, 49, then over the edge.
+      for (let step = 0; step < 3; step += 1) {
+        screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
+      }
+
+      expect(await screen.findByText('51 of 51')).toBeInTheDocument()
+      expect(
+        searches.filter((search) => search.includes('offset=50')),
+      ).toHaveLength(1)
+    })
+
+    /** Every boundary, not just the first. Rolling onto a page has to re-arm the
+     *  page-ahead against the page now playing, or a long run is warm across one
+     *  boundary and cold across every one after it — and the second is the point
+     *  at which a listener would conclude the feature does not work. */
+    it('keeps warming each boundary across a long run', async () => {
+      const user = userEvent.setup()
+      const { rows: many } = pagedArchive(101) // three pages
+      renderApp('/search')
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await waitFor(() =>
+        expect(
+          searches.filter((search) => search.includes('offset=50')),
+        ).toHaveLength(1),
+      )
+
+      // Over the first boundary: 48, 49, then off the end onto page two.
+      for (let step = 0; step < 3; step += 1) {
+        screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
+      }
+      expect(await screen.findByText('51 of 101')).toBeInTheDocument()
+
+      // Walk page two down to its last two Calls.
+      for (let step = 0; step < 47; step += 1) {
+        screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
+      }
+      expect(await screen.findByText('98 of 101')).toBeInTheDocument()
+
+      // Page three was fetched, and its first Call warmed, exactly as page two
+      // was — which only happens if rolling on re-armed the page-ahead.
+      await waitFor(() =>
+        expect(
+          searches.filter((search) => search.includes('offset=100')),
+        ).toHaveLength(1),
+      )
+      await waitFor(() =>
+        expect(audioRequests).toContain(`/api/call/${many[100].id}/audio`),
+      )
+    })
+
+    /** The paging buttons move the loaded window out from under a run that is
+     *  still playing — the same desync a filter change causes, by a different
+     *  route. Playback's index would still read "nearly at the end", so a
+     *  page-ahead decided from it would fetch a boundary nobody is near. */
+    it('stands the page-ahead down when the listener pages by hand', async () => {
+      const user = userEvent.setup()
+      pagedArchive(120)
+      renderApp('/search')
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await waitFor(() =>
+        expect(
+          searches.filter((search) => search.includes('offset=50')),
+        ).toHaveLength(1),
+      )
+
+      await user.click(screen.getByRole('button', { name: 'Next page' }))
+      await waitFor(() => expect(lastSearch().get('offset')).toBe('50'))
+
+      // Page two is on screen and page three was never asked for: the run still
+      // playing belongs to page one.
+      expect(searches.filter((search) => search.includes('offset=100'))).toEqual(
+        [],
+      )
+    })
+
+    /** No next page, nothing to fetch. The last page must not ask for a
+     *  fifty-first result that does not exist. */
+    it('asks for nothing beyond the last page', async () => {
+      const user = userEvent.setup()
+      renderApp('/search')
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+      // The default archive is three Calls on one page, so playing the first
+      // already leaves fewer than two behind it.
+      await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
+
+      await waitFor(() => expect(screen.getByText('1 of 3')).toBeInTheDocument())
+      expect(searches.filter((search) => search.includes('offset=3'))).toEqual(
+        [],
+      )
+      expect(searches.filter((search) => search.includes('offset=50'))).toEqual(
+        [],
+      )
+    })
+
+    /** Live feed on means the archive Call *interrupts* — one Call, no run to
+     *  page through, so a page-ahead would be a request for nothing. */
+    it('never pages ahead while the live feed owns the audio', async () => {
+      const user = userEvent.setup()
+      pagedArchive()
+      renderApp('/search')
+
+      const rows = await resultRows()
+      // No Playback-mode click: the live feed still owns the audio.
+      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+
+      await waitFor(() =>
+        expect(screen.getByTestId('call-player')).toHaveAttribute(
+          'src',
+          expect.stringContaining('/api/call/'),
+        ),
+      )
+      expect(searches.filter((search) => search.includes('offset=50'))).toEqual(
+        [],
+      )
     })
 
     it('steps back and forth through the result set', async () => {

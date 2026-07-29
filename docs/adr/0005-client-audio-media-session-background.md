@@ -53,7 +53,7 @@ The player half of this decision shipped in #14 (`client/src/components/CallPlay
 - **Artwork is generated, not an asset.** The LED color is the app's one meaningful color and the only glanceable signal on a lock screen, so artwork is a per-talkgroup-colored indexed PNG encoded at runtime (`client/src/lib/artwork.ts` over `client/src/lib/png.ts`), published at the small sizes research §4 names (96, 128). Research says iOS renders *small raster* artwork reliably and SVG unreliably, which rules out a data-URL SVG; a static asset per palette entry per size is the alternative if the encoder ever becomes a burden. Whether iOS actually paints it stays on the real-device manual gate.
 - **Prefetch is `fetch`, not a second `<audio preload>`.** iOS ignores `preload` and won't buffer media without a user gesture, so a hidden element would prefetch on every platform except the one that needs it. A plain GET does run, and `GET /api/call/{id}/audio` now answers `Cache-Control: private, max-age=604800, immutable` (the bytes behind a Call id never change) so the element's later — ranged — request is a cache hit.
 
-Two known limits of that prefetch were recorded here when #14 shipped:
+Two known limits of that prefetch were recorded here when #14 shipped. **Both are now closed:**
 
 - ~~**It only pays off on the filesystem blob backend.**~~ **Closed by #31**, and it took two changes rather than one, because a stable URL is necessary and not sufficient.
 
@@ -68,7 +68,19 @@ Two known limits of that prefetch were recorded here when #14 shipped:
   - The cache is capped at 1024 entries, evicting whatever expires soonest. Expired entries are pruned on the way past, so in practice it holds only what has been served in the last five minutes.
   - Objects written *before* #31 carry no `Cache-Control`, so a pre-existing archive keeps revalidating until those Calls age out of retention. New Calls are correct from the first one.
   - A cached redirect outlives a retention delete by up to its `max-age`: a client that fetches it in that window gets a 404 from the store rather than from Radio-Scout. Bounded and accepted — nothing invalidates the cache on delete.
-- **It stops at the loaded page.** `selectNextCall` only sees the Calls the archive screen has loaded, so the last result on a page — the transition that costs the most, since it needs a search *and* a cold audio fetch — is the one not warmed. Open: #32.
+- ~~**It stops at the loaded page.**~~ **Closed by #32.** `selectNextCall` only sees the Calls the archive screen has loaded, so the last result on a page — the transition that costs the most, since it needs a search *and* a cold audio fetch — was the one not warmed.
+
+  Now, with **two Calls left** on the page (`PAGE_AHEAD_WITHIN`, `store/playback.ts`), the screen subscribes to the next page and warms its first Call's audio. Two Calls of lead so something is still playing while both are on the wire; fewer would leave a two-second kerchunk as the whole budget, more would pull a page and an audio file for every listener who wanders off mid-page.
+
+  The page-ahead is a **second `useSearchCallsQuery` subscription**, not a bespoke fetch, and that is what makes it nearly free: it uses the same cache key the roll-on will use, so when playback crosses the boundary RTK Query already holds that page and US 25's resume needs no round trip. A test crosses the boundary and asserts the page was searched for exactly **once** — if the two keys ever drifted apart the page-ahead would be pure waste, and counting searches is what notices.
+
+  Three things switch it off, each a case where the request would be for nothing: the live feed owning the audio (an interruption is one Call, with no run to page through — `selectIsNearingPageEnd`), no next page to fetch, and **the loaded page no longer being the one playback is walking**.
+
+  That last one is the subtle one, and it has two routes in: changing a filter replaces the result set, and the paging buttons move the window out from under a run that is still playing. Either way playback's index — which counts into the set it was *started* from — keeps reporting "nearly at the end" of a page nobody is on. So the screen records the *search* the playing run came from (`playingQuery`) rather than a flag, which makes both cases one comparison; a boolean caught the filter case and missed the paging one entirely.
+
+  **What "cancel" means here, precisely.** The audio warm — the expensive half — is genuinely aborted, and the effect depends on the page-ahead *decision* rather than only on its result to make that true: RTK Query **keeps its `data` when `skip` flips to true**, so depending on the results alone meant the effect never re-ran, never cleaned up, and let a warm nobody wanted run to completion. A test delays the response, changes a filter mid-flight, and asserts the abort reached the server. The same cleanup also fires on a *successful* crossing, which is harmless — an element's ranged GET could not have shared an in-flight full one anyway — and each re-arm re-issues the warm, so paging away and back costs the head twice.
+
+  The **search** request is not aborted; RTK Query owns that lifecycle. It completes and populates a cache entry under the abandoned key, which ages out on `keepUnusedDataFor`. That is one JSON page, and accepted.
 
 The layer this did **not** add is Vitest Browser Mode, which [ADR-0010](0010-coverage-policy-and-test-tooling.md) names for exactly this component ("real-browser component tests for the audio player + Media-Session wiring"). The wiring is covered in jsdom against a fake Media Session, with the real-browser and real-device layers still owed — Browser Mode belongs with #15, which brings the browser tooling in for PWA install/offline anyway.
 

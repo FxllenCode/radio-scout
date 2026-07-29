@@ -14,9 +14,11 @@ import {
   selectHasPrevious,
   selectIsExhausted,
   selectIsInterrupting,
+  selectIsNearingPageEnd,
   selectNextCall,
   selectPlaybackMode,
   selectPlaybackPosition,
+  selectRemainingInPage,
   stop,
   type PlaybackState,
 } from './playback'
@@ -259,6 +261,49 @@ describe('playback slice', () => {
 
       expect(selectNextCall(rootState(state))).toBeNull()
     })
+  })
+
+  /** #32: the boundary between pages is the one transition costing a search
+   *  *and* a cold audio fetch, so the screen needs telling before playback gets
+   *  there. This selector is only the "the lead has run short" half — whether a
+   *  next page exists at all is the screen's to know. */
+  describe('nearing the end of the loaded page', () => {
+    /** A page with room to spare either side of the threshold. */
+    const page = Array.from({ length: 10 }, (_, index) => call(index + 1))
+
+    it.each([
+      [6, 3, false],
+      [7, 2, true],
+      [8, 1, true],
+      [9, 0, true],
+    ])(
+      'at index %i, %i Calls remain -> %s',
+      (index, remaining, expected) => {
+        const state = reduce(
+          enterPlaybackMode(),
+          playResults({ results: page, index }),
+        )
+
+        expect(selectRemainingInPage(rootState(state))).toBe(remaining)
+        expect(selectIsNearingPageEnd(rootState(state))).toBe(expected)
+      },
+    )
+
+    it('is false while nothing is playing', () => {
+      const idle = reduce(enterPlaybackMode())
+
+      expect(selectRemainingInPage(rootState(idle))).toBe(0)
+      expect(selectIsNearingPageEnd(rootState(idle))).toBe(false)
+    })
+
+    /** Live feed on means the archived Call *interrupts* — one Call, no run to
+     *  page through, so fetching a next page would be a request for nothing. */
+    it('is false during an interruption, however short the run looks', () => {
+      const state = reduce(playResults({ results, index: 0 }))
+
+      expect(selectIsNearingPageEnd(rootState(state))).toBe(false)
+    })
+
   })
 
   describe('switching modes', () => {

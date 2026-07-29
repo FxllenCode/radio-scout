@@ -85,17 +85,20 @@ export const CATALOG: Catalog = {
   ],
 }
 
-/** One page of `ARCHIVE`, honoring `limit`/`offset` so pagination is real. */
-export function archivePage(url: URL) {
+/** One page of an archive, honoring `limit`/`offset` so pagination is real.
+ *
+ *  Defaults to `ARCHIVE`; a test about crossing page *boundaries* (#32) passes
+ *  its own longer archive rather than restating the slicing. */
+export function archivePage(url: URL, rows: Call[] = ARCHIVE) {
   const limit = Number(url.searchParams.get('limit') ?? 100)
   const offset = Number(url.searchParams.get('offset') ?? 0)
-  const results = ARCHIVE.slice(offset, offset + limit)
+  const results = rows.slice(offset, offset + limit)
   return {
     results,
-    count: ARCHIVE.length,
+    count: rows.length,
     limit,
     offset,
-    hasMore: offset + results.length < ARCHIVE.length,
+    hasMore: offset + results.length < rows.length,
   }
 }
 
