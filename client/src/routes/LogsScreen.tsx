@@ -39,17 +39,49 @@ export function LogsScreen() {
 
   const [filters, setFilters] = useState<LogQuery>({})
   const [offset, setOffset] = useState(0)
+  /** The instant paging was started from — see [`pageForward`]. */
+  const [pinned, setPinned] = useState<number | undefined>(undefined)
+
   const page = useGetLogsQuery(
-    { ...filters, limit: PAGE_SIZE, offset },
+    { ...filters, before: filters.before ?? pinned, limit: PAGE_SIZE, offset },
     { skip: !signedIn },
   )
 
   const [logout] = useAdminLogoutMutation()
 
-  /** Any filter change invalidates the page window we were on. */
+  /** Any filter change invalidates the page window we were on — and the pin,
+   *  because a new question deserves a window of its own. */
   function updateFilters(patch: Partial<LogQuery>) {
     setFilters((current) => ({ ...current, ...patch }))
     setOffset(0)
+    setPinned(undefined)
+  }
+
+  /** Move to the next page, **pinning the window on the way out**.
+   *
+   *  Offset paging assumes the rows below the offset do not move, and here
+   *  they do: reading this page is itself an admin request, which the server
+   *  logs — so between rendering page 1 and pressing this, at least one new
+   *  event has landed at the head, and a raw `offset` would show page 1's last
+   *  rows again. Pinning `before` to the newest event we have already seen
+   *  freezes the window; the pin lasts until a filter changes or paging
+   *  returns to the top. (The archive search does not need this: Calls arrive
+   *  from a recorder, not from the act of looking at them.)
+   */
+  function pageForward(newest: number | undefined) {
+    if (pinned === undefined && newest !== undefined) {
+      // Exclusive upper bound, so the event it was taken from is still in.
+      setPinned(newest + 1)
+    }
+    setOffset(offset + PAGE_SIZE)
+  }
+
+  /** ...and back. Returning to the top releases the pin, so the first page is
+   *  live again — which is the page an operator watching a problem wants. */
+  function pageBack() {
+    const previous = Math.max(0, offset - PAGE_SIZE)
+    setOffset(previous)
+    if (previous === 0) setPinned(undefined)
   }
 
   if (!signedIn) {
@@ -108,10 +140,7 @@ export function LogsScreen() {
             aria-live="polite"
             className="font-mono text-xs text-muted-foreground"
           >
-            {pageSummary(offset, results.length, page.data?.count ?? 0).replace(
-              'No calls',
-              'No events',
-            )}
+            {pageSummary(offset, results.length, page.data?.count ?? 0, 'events')}
           </p>
         </Field>
 
@@ -161,7 +190,7 @@ export function LogsScreen() {
           variant="outline"
           size="sm"
           disabled={offset === 0}
-          onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+          onClick={pageBack}
         >
           Previous page
         </Button>
@@ -169,7 +198,7 @@ export function LogsScreen() {
           variant="outline"
           size="sm"
           disabled={!page.data?.hasMore}
-          onClick={() => setOffset(offset + PAGE_SIZE)}
+          onClick={() => pageForward(results[0]?.atMs)}
         >
           Next page
         </Button>

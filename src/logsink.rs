@@ -264,6 +264,10 @@ impl LogWriter {
     }
 
     /// Say how many events the queue had no room for, and forget them.
+    ///
+    /// Once per drained batch rather than once per loss — the count is the
+    /// news, and a line per dropped event would be exactly the hot loop rule 8
+    /// forbids at the moment the process is least able to afford one.
     fn report_dropped(&self) {
         let dropped = self.dropped.swap(0, Ordering::Relaxed);
         if dropped > 0 {

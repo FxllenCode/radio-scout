@@ -345,6 +345,19 @@ impl TestApp {
 
     // -- Synthetic Calls ----------------------------------------------------
 
+    /// `GET path` as a reverse proxy would relay it, claiming in
+    /// `X-Forwarded-For` to be speaking for `client` — [`TestApp::upload_via_proxy`]
+    /// for the read surfaces, where the question is what a *listener's* address
+    /// does to the log (ADR-0011 rule 5) rather than a recorder's.
+    pub async fn get_via_proxy(&self, path: &str, client: &str) -> reqwest::Response {
+        self.client
+            .get(self.url(path))
+            .header(FORWARDED_FOR, client)
+            .send()
+            .await
+            .expect("GET via proxy")
+    }
+
     /// POST a synthetic Call as a reverse proxy would relay it, claiming in
     /// `X-Forwarded-For` to be speaking for `client`. Whether that claim is
     /// believed is `trusted_proxies`' answer (#17).
@@ -352,7 +365,7 @@ impl TestApp {
         let resp = self
             .client
             .post(self.url("/api/call-upload"))
-            .header("x-forwarded-for", client)
+            .header(FORWARDED_FOR, client)
             .multipart(call.into_form())
             .send()
             .await
@@ -532,7 +545,7 @@ impl TestApp {
     /// Hold the returned guard for the life of the test: dropping it puts the
     /// thread's subscriber back. Events land through the real `tracing` layer,
     /// so what a test reads back is what an operator would.
-    pub async fn store_logs(&self) -> logs::LogCapture {
+    pub fn store_logs(&self) -> logs::LogCapture {
         logs::LogCapture::storing(&self.db, radio_scout::logsink::LogSinkConfig::default())
     }
 
@@ -737,6 +750,10 @@ pub struct TestAppBuilder {
 /// that isn't there. Its opposite number for the store seam is
 /// [`faults::INJECTED_IO`].
 pub const INJECTED_WRITE: &str = "injected write failure";
+
+/// The header a reverse proxy names the original client in — what
+/// `[server] trusted_proxies` decides whether to believe (#17, #28).
+pub const FORWARDED_FOR: &str = "x-forwarded-for";
 
 /// The admin password every spawned app is gated by (#19), so any test can log
 /// in without configuring one. A test *about* provisioning takes

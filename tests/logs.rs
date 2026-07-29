@@ -10,6 +10,7 @@ mod common;
 use common::logs::LogCapture;
 use common::{ADMIN_PASSWORD, CallUpload, TestApp, request_id_of};
 use radio_scout::db::repo::{NewCall, NewLogEvent};
+use rstest::rstest;
 
 /// A stored event, as the sink would have written one.
 fn event(at_ms: i64, level: &str, message: &str) -> NewLogEvent {
@@ -177,23 +178,25 @@ async fn a_long_log_is_paginated() {
 /// Bad input is named, not silently coerced — the archive search's rule (#13),
 /// and the opposite of rdio-scanner, which takes what it can parse and ignores
 /// the rest so a typo quietly returns the wrong thing.
+#[rstest]
+#[case::level("level=chatty", "level")]
+#[case::after("after=yesterday", "after")]
+#[case::before("before=soon", "before")]
+#[case::limit("limit=lots", "limit")]
+#[case::offset("offset=-1", "offset")]
 #[tokio::test]
-async fn a_malformed_filter_says_which_parameter_was_wrong() {
+async fn a_malformed_filter_says_which_parameter_was_wrong(
+    #[case] query: &str,
+    #[case] parameter: &str,
+) {
     let app = TestApp::spawn().await;
     app.login().await;
 
-    for (query, parameter) in [
-        ("level=chatty", "level"),
-        ("after=yesterday", "after"),
-        ("before=soon", "before"),
-        ("limit=lots", "limit"),
-        ("offset=-1", "offset"),
-    ] {
-        let response = app.get(&format!("/api/admin/logs?{query}")).await;
-        assert_eq!(response.status(), 400, "{query}");
-        let body = response.text().await.expect("a body");
-        assert!(body.contains(parameter), "{query} -> {body}");
-    }
+    let response = app.get(&format!("/api/admin/logs?{query}")).await;
+
+    assert_eq!(response.status(), 400);
+    let body = response.text().await.expect("a body");
+    assert!(body.contains(parameter), "{query} -> {body}");
 }
 
 /// A session that has been logged out cannot read the log either — the guard
@@ -221,7 +224,7 @@ async fn a_logged_out_session_can_no_longer_read_the_log() {
 #[tokio::test]
 async fn a_real_request_becomes_a_readable_event() {
     let app = TestApp::with_key("k").await;
-    let _sink = app.store_logs().await;
+    let _sink = app.store_logs();
 
     app.upload_ok(CallUpload::new().key("k")).await;
     let page = app.await_logged("request").await;
@@ -262,7 +265,7 @@ async fn a_listener_leaves_no_address_in_the_stored_log() {
         .trusted_proxies("127.0.0.1")
         .spawn()
         .await;
-    let console = app.store_logs().await;
+    let console = app.store_logs();
     let listener = "203.0.113.42";
 
     // A Call whose audio really plays, so the request that fetches it is a
@@ -285,13 +288,7 @@ async fn a_listener_leaves_no_address_in_the_stored_log() {
         "/api/calls",
         &format!("/api/call/{id}/audio"),
     ] {
-        let response = app
-            .client()
-            .get(app.url(path))
-            .header("x-forwarded-for", listener)
-            .send()
-            .await
-            .expect("GET");
+        let response = app.get_via_proxy(path, listener).await;
         assert!(response.status().is_success(), "{path}");
     }
     app.await_logged("request").await;
@@ -311,13 +308,63 @@ async fn a_listener_leaves_no_address_in_the_stored_log() {
     );
 }
 
+/// **The other side of rule 5, and the reason the floor is a floor rather than
+/// a ban.** The two addresses ADR-0011 *permits* are stored, deliberately:
+/// "which host stopped uploading" and "somebody is guessing my password, from
+/// here" are the two questions an operator with no shell most needs answered,
+/// and neither is a record of who listened. A ban would have taken both.
+#[rstest]
+// A recorder, on an ingest line at INFO (rule 5's standing exemption).
+#[case::a_recorder("198.51.100.7", true)]
+// ...and a refused admin login's source at WARN (#19's amendment to it).
+#[case::a_guesser("198.51.100.8", false)]
+#[tokio::test]
+async fn the_addresses_rule_5_permits_are_the_ones_stored(
+    #[case] address: &str,
+    #[case] uploads: bool,
+) {
+    let app = TestApp::builder()
+        .trusted_proxies("127.0.0.1")
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+    let _sink = app.store_logs();
+
+    if uploads {
+        let (status, _) = app
+            .upload_via_proxy(CallUpload::new().key("k"), address)
+            .await;
+        assert_eq!(status, 200);
+    } else {
+        let refused = app
+            .login_request("not-the-password")
+            .header("x-forwarded-for", address)
+            .send()
+            .await
+            .expect("login");
+        assert_eq!(refused.status(), 401);
+    }
+    app.await_logged(if uploads {
+        "call stored"
+    } else {
+        "admin login refused"
+    })
+    .await;
+
+    let page = app.get_json("/api/admin/logs?limit=500").await;
+    assert!(
+        page.to_string().contains(address),
+        "an operator cannot firewall an address they cannot see: {page}"
+    );
+}
+
 /// **The property a request depends on.** A sink that cannot write must not be
 /// noticeable from outside: the upload still succeeds, the recorder still gets
 /// its wire-contract string, and the console still has every line.
 #[tokio::test]
 async fn a_broken_log_table_never_reaches_the_request() {
     let app = TestApp::with_key("k").await;
-    let _sink = app.store_logs().await;
+    let _sink = app.store_logs();
     app.break_table("logs").await;
 
     app.upload_ok(CallUpload::new().key("k")).await;

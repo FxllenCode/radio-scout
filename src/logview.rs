@@ -30,9 +30,9 @@ use serde::Serialize;
 use tracing::Level;
 
 use crate::AppState;
-use crate::archive::{bad_request, parse_time_ms};
 use crate::db::repo::{self, LogSearch};
 use crate::failure::ServerError;
+use crate::query::{Page, Params, bad_request};
 
 /// Page size when the client asks for none — a screenful and then some.
 const DEFAULT_LIMIT: u64 = 100;
@@ -50,18 +50,10 @@ const MAX_LIMIT: u64 = 500;
 /// operator a control that does nothing.
 const STORED_LEVELS: [Level; 3] = [Level::ERROR, Level::WARN, Level::INFO];
 
-/// One page of the operator log.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogPage {
-    pub results: Vec<LogView>,
-    /// Total events matching the filters, ignoring the page window.
-    pub count: u64,
-    pub limit: u64,
-    pub offset: u64,
-    /// Whether another page follows — saves the client doing the arithmetic.
-    pub has_more: bool,
-}
+/// One page of the operator log — the same shape the archive search answers
+/// with (`crate::query::Page`), so a client that has learned one has learned
+/// both.
+pub type LogPage = Page<LogView>;
 
 /// One stored event, as the Logs view reads it.
 #[derive(Debug, Clone, Serialize)]
@@ -128,51 +120,20 @@ async fn load_page(
         .collect();
     let count = repo::count_log_events(db, search).await?;
 
-    Ok(LogPage {
-        has_more: search.offset + (results.len() as u64) < count,
-        count,
-        limit: search.limit,
-        offset: search.offset,
-        results,
-    })
+    Ok(Page::new(results, count, search.limit, search.offset))
 }
 
 /// Read the filters out of a query string, or say which parameter was wrong.
+/// Blank is absent and bad input is named — [`crate::query`]'s conventions,
+/// which the archive search follows too.
 fn parse_search(params: &HashMap<String, String>) -> Result<LogSearch, String> {
-    // Blank values are the "unset" the client's own form produces.
-    let raw = |key: &str| {
-        params
-            .get(key)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-    };
-    let time = |key: &str| -> Result<Option<i64>, String> {
-        raw(key)
-            .map(|value| {
-                parse_time_ms(value)
-                    .ok_or_else(|| format!("{key} must be unix milliseconds or an RFC3339 time"))
-            })
-            .transpose()
-    };
-    let count = |key: &str| -> Result<Option<u64>, String> {
-        raw(key)
-            .map(|value| {
-                value
-                    .parse::<u64>()
-                    .map_err(|_| format!("{key} must be a non-negative integer"))
-            })
-            .transpose()
-    };
-
+    let params = Params::new(params);
     Ok(LogSearch {
-        after_ms: time("after")?,
-        before_ms: time("before")?,
-        levels: raw("level").map(levels_from).transpose()?,
-        limit: count("limit")?
-            .filter(|limit| *limit > 0)
-            .unwrap_or(DEFAULT_LIMIT)
-            .min(MAX_LIMIT),
-        offset: count("offset")?.unwrap_or(0),
+        after_ms: params.time("after")?,
+        before_ms: params.time("before")?,
+        levels: params.raw("level").map(levels_from).transpose()?,
+        limit: params.limit(DEFAULT_LIMIT, MAX_LIMIT)?,
+        offset: params.offset()?,
     })
 }
 
@@ -180,6 +141,13 @@ fn parse_search(params: &HashMap<String, String>) -> Result<LogSearch, String> {
 ///
 /// A floor rather than a match, because "show me warnings" never means "and
 /// hide the errors".
+///
+/// Case-insensitive, unlike the *configuration* spelling of the same levels
+/// (`LogSinkConfig::level_from_str`, which takes one spelling so a file, a flag
+/// and an environment variable cannot drift). The difference is deliberate and
+/// follows #13: a query parameter is typed into a URL bar as often as it is
+/// generated, and the archive search already accepts `newest`/`desc` for the
+/// same reason. Configuration is strict; a read surface is forgiving.
 fn levels_from(floor: &str) -> Result<Vec<String>, String> {
     let floor = STORED_LEVELS
         .into_iter()
@@ -231,6 +199,20 @@ mod tests {
         #[case] expected: &[&str],
     ) {
         assert_eq!(levels_from(floor).expect("a level"), expected);
+    }
+
+    /// The filter's vocabulary is exactly the sink's, minus the `off` that
+    /// stores nothing. Two lists in two modules can drift; this is what stops
+    /// a level the sink starts storing from being unfilterable, or a filter
+    /// from offering a level no row can have.
+    #[test]
+    fn the_filterable_levels_are_the_storable_ones() {
+        let storable: Vec<Level> = crate::logsink::LogSinkConfig::LEVELS
+            .into_iter()
+            .filter_map(|(_, level)| level)
+            .collect();
+
+        assert_eq!(STORED_LEVELS.to_vec(), storable);
     }
 
     /// A level the sink cannot store is not a filter — offering it would offer

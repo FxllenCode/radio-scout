@@ -49,12 +49,14 @@ export function formatCallTime(ms: number | undefined): string {
 }
 
 /** The `1–100 of 421` readout under a result list. `count` is the true total,
- *  so it stays honest across pages. */
+ *  so it stays honest across pages. `noun` names what is being counted, since
+ *  the operator log (#30) pages the same way over something that isn't Calls. */
 export function pageSummary(
   offset: number,
   shown: number,
   count: number,
+  noun = 'calls',
 ): string {
-  if (count === 0 || shown === 0) return 'No calls'
+  if (count === 0 || shown === 0) return `No ${noun}`
   return `${offset + 1}–${offset + shown} of ${count}`
 }

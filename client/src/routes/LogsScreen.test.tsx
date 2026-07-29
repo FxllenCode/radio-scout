@@ -294,6 +294,89 @@ describe('the log itself (#30)', () => {
     )
   })
 
+  // **Reading the log writes to it**: `GET /api/admin/logs` is itself a request
+  // the server logs at INFO, so by the time "Next page" is pressed the head of
+  // the table has moved and a raw `offset` would show page 1's tail again. The
+  // window is pinned to the newest event of the page paging started from.
+  it('pins the window when paging, so new events cannot shift it', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/admin/logs`, ({ request }) => {
+        const url = new URL(request.url)
+        asked.push(url)
+        return HttpResponse.json({ ...logPage(url), count: 500, hasMore: true })
+      }),
+    )
+    renderScreen()
+    await shownMessages()
+    expect(lastQuery().searchParams.get('before')).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: /next page/i }))
+
+    await waitFor(() =>
+      expect(lastQuery().searchParams.get('before')).toBe(
+        // Exclusive, so the newest event on the first page is itself included.
+        String(LOG_EVENTS[0].atMs + 1),
+      ),
+    )
+  })
+
+  it('keeps one pin however deep the paging goes, and drops it at the top', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/admin/logs`, ({ request }) => {
+        const url = new URL(request.url)
+        asked.push(url)
+        return HttpResponse.json({ ...logPage(url), count: 500, hasMore: true })
+      }),
+    )
+    renderScreen()
+    await shownMessages()
+    const next = () => screen.getByRole('button', { name: /next page/i })
+    const back = () => screen.getByRole('button', { name: /previous page/i })
+    const pin = String(LOG_EVENTS[0].atMs + 1)
+
+    await userEvent.click(next())
+    await waitFor(() => expect(lastQuery().searchParams.get('before')).toBe(pin))
+    await userEvent.click(next())
+
+    // The window was pinned to where paging *started*, not re-pinned to each
+    // page's head — which would let it drift forward one page at a time.
+    await waitFor(() => expect(lastQuery().searchParams.get('offset')).toBe('200'))
+    expect(lastQuery().searchParams.get('before')).toBe(pin)
+
+    // Walking back is asserted on the screen rather than on requests: those
+    // pages are already in RTK Query's cache, and serving them from it instead
+    // of asking twice is what the cache is for.
+    await userEvent.click(back())
+    await userEvent.click(back())
+
+    await waitFor(() =>
+      expect(screen.getByText('1–3 of 500')).toBeInTheDocument(),
+    )
+    expect(back()).toBeDisabled()
+  })
+
+  it('unpins the window when the filters change', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/admin/logs`, ({ request }) => {
+        const url = new URL(request.url)
+        asked.push(url)
+        return HttpResponse.json({ ...logPage(url), count: 500, hasMore: true })
+      }),
+    )
+    renderScreen()
+    await shownMessages()
+    await userEvent.click(screen.getByRole('button', { name: /next page/i }))
+    await waitFor(() => expect(lastQuery().searchParams.get('before')).not.toBeNull())
+
+    await userEvent.selectOptions(screen.getByLabelText(/level/i), 'warn')
+
+    // A new question deserves a new window — and page 0 of it.
+    await waitFor(() => {
+      expect(lastQuery().searchParams.get('before')).toBeNull()
+      expect(lastQuery().searchParams.get('offset')).toBe('0')
+    })
+  })
+
   it('says when nothing matches rather than showing an empty box', async () => {
     server.use(
       http.get(`${ORIGIN}/api/admin/logs`, () =>

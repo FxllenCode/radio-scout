@@ -16,12 +16,12 @@ use std::collections::HashMap;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
 
 use crate::AppState;
 use crate::call::{CallId, StoredCall};
 use crate::db::repo::{self, CallSearch, CallSort};
 use crate::failure::ServerError;
+use crate::query::{Page, Params, bad_request};
 
 // The cascading filter-option view types live in `crate::call` beside
 // `StoredCall`, so the data layer can build them without depending on this one.
@@ -35,68 +35,21 @@ const DEFAULT_LIMIT: u64 = 100;
 /// reports the limit actually applied.
 const MAX_LIMIT: u64 = 500;
 
-/// One page of archive-search results.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchPage {
-    /// The Calls on this page, fully denormalized (no N+1 follow-up fetches).
-    pub results: Vec<StoredCall>,
-    /// Total Calls matching the filters, ignoring the page window.
-    pub count: u64,
-    pub limit: u64,
-    pub offset: u64,
-    /// Whether another page follows — saves the client doing the arithmetic.
-    pub has_more: bool,
-}
+/// One page of archive-search results: the Calls, fully denormalized (no N+1
+/// follow-up fetches), and the window they came from.
+pub type SearchPage = Page<StoredCall>;
 
 // ---------------------------------------------------------------------------
 // Query parsing
 // ---------------------------------------------------------------------------
 
 /// Read the archive-search filters out of a query string, or say which
-/// parameter was wrong.
-///
-/// Two deliberate departures from rdio-scanner, which coerces whatever it can
-/// and silently ignores the rest (so a typo quietly returns the wrong Calls):
-/// - **Bad input is an error**, named by parameter, not a silent default.
-/// - **Blank is absent.** A client builds this query from form state where "no
-///   filter" is the empty string, so `?system=` means every System.
+/// parameter was wrong. Blank is absent and bad input is named — see
+/// [`crate::query`], which both read surfaces share.
 fn parse_search(params: &HashMap<String, String>) -> Result<CallSearch, String> {
-    // Blank values are the "unset" the client's own form produces.
-    let raw = |key: &str| {
-        params
-            .get(key)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-    };
-    let number = |key: &str| -> Result<Option<i64>, String> {
-        raw(key)
-            .map(|value| {
-                value
-                    .parse::<i64>()
-                    .map_err(|_| format!("{key} must be an integer"))
-            })
-            .transpose()
-    };
-    let time = |key: &str| -> Result<Option<i64>, String> {
-        raw(key)
-            .map(|value| {
-                parse_time_ms(value)
-                    .ok_or_else(|| format!("{key} must be unix milliseconds or an RFC3339 time"))
-            })
-            .transpose()
-    };
-    let count = |key: &str| -> Result<Option<u64>, String> {
-        raw(key)
-            .map(|value| {
-                value
-                    .parse::<u64>()
-                    .map_err(|_| format!("{key} must be a non-negative integer"))
-            })
-            .transpose()
-    };
+    let params = Params::new(params);
 
-    let sort = match raw("sort") {
+    let sort = match params.raw("sort") {
         None | Some("newest") | Some("desc") => CallSort::Newest,
         Some("oldest") | Some("asc") => CallSort::Oldest,
         Some(other) => {
@@ -107,33 +60,16 @@ fn parse_search(params: &HashMap<String, String>) -> Result<CallSearch, String> 
     };
 
     Ok(CallSearch {
-        after_ms: time("after")?,
-        before_ms: time("before")?,
-        system_ref: number("system")?,
-        talkgroup_ref: number("talkgroup")?,
-        group_name: raw("group").map(str::to_owned),
-        tag_name: raw("tag").map(str::to_owned),
+        after_ms: params.time("after")?,
+        before_ms: params.time("before")?,
+        system_ref: params.number("system")?,
+        talkgroup_ref: params.number("talkgroup")?,
+        group_name: params.raw("group").map(str::to_owned),
+        tag_name: params.raw("tag").map(str::to_owned),
         sort,
-        limit: count("limit")?
-            .filter(|limit| *limit > 0)
-            .unwrap_or(DEFAULT_LIMIT)
-            .min(MAX_LIMIT),
-        offset: count("offset")?.unwrap_or(0),
+        limit: params.limit(DEFAULT_LIMIT, MAX_LIMIT)?,
+        offset: params.offset()?,
     })
-}
-
-/// A search boundary as unix milliseconds (what we store) or an RFC3339 time
-/// (so a human or a script can hand-write a query — the client sends ms, since
-/// only it knows the listener's timezone).
-pub(crate) fn parse_time_ms(raw: &str) -> Option<i64> {
-    if let Ok(ms) = raw.parse::<i64>() {
-        return Some(ms);
-    }
-    use time::OffsetDateTime;
-    use time::format_description::well_known::Rfc3339;
-    OffsetDateTime::parse(raw, &Rfc3339)
-        .ok()
-        .map(|dt| (dt.unix_timestamp_nanos() / 1_000_000) as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -166,13 +102,7 @@ async fn load_page(
     let results = repo::stored_calls(db, &rows).await?;
     let count = repo::count_calls(db, search).await?;
 
-    Ok(SearchPage {
-        has_more: search.offset + (results.len() as u64) < count,
-        count,
-        limit: search.limit,
-        offset: search.offset,
-        results,
-    })
+    Ok(Page::new(results, count, search.limit, search.offset))
 }
 
 /// `GET /api/calls/filters` — the cascading filter options for the filters
@@ -260,10 +190,6 @@ async fn load_call(
 /// real path, not a formality.
 fn header_value(raw: &str, fallback: &'static str) -> HeaderValue {
     HeaderValue::from_str(raw).unwrap_or(HeaderValue::from_static(fallback))
-}
-
-pub(crate) fn bad_request(message: &str) -> Response {
-    (StatusCode::BAD_REQUEST, format!("{message}\n")).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -486,19 +412,8 @@ mod tests {
         );
     }
 
-    #[rstest]
-    #[case("0", Some(0))]
-    #[case("1669740338000", Some(1_669_740_338_000))]
-    #[case("-1000", Some(-1000))] // before the epoch is still a time
-    #[case("2022-11-29T18:05:38Z", Some(1_669_745_138_000))]
-    #[case("2022-11-29T13:05:38-05:00", Some(1_669_745_138_000))] // offsets honored
-    #[case("2022-11-29", None)] // date-only is ambiguous without a timezone
-    #[case("18:05:38", None)]
-    #[case("", None)]
-    #[case("nonsense", None)]
-    fn time_parsing(#[case] raw: &str, #[case] expected: Option<i64>) {
-        assert_eq!(parse_time_ms(raw), expected);
-    }
+    // `parse_time_ms`'s own cases live with it in `crate::query`, which both
+    // read surfaces share.
 
     fn call() -> StoredCall {
         StoredCall {

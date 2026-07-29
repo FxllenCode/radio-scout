@@ -22,6 +22,7 @@ pub mod logsink;
 pub mod logview;
 pub mod observability;
 pub mod push;
+pub mod query;
 pub mod retention;
 pub mod selection;
 pub mod service;
