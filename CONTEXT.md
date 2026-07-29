@@ -45,6 +45,10 @@ _Avoid_: radio, source, subscriber.
 **Site**:
 A physical tower/receiver site within a system that a call was heard on.
 
+**Patch**:
+A temporary, console-made union of talkgroups whose traffic reaches any listener subscribed to a member. A property calls carry, not an entity of its own — patches churn (some systems mint a fresh TGID per patch event), so Radio-Scout deduplicates and routes patched traffic rather than modelling patches as subscribable things.
+_Avoid_: supergroup, simulselect, regroup (each is one vendor's word).
+
 ### Identity
 
 **Ref**:
@@ -53,6 +57,13 @@ _Avoid_: external id, radio id (in code identifiers).
 
 **Id**:
 Radio-Scout's internal database primary key for an entity. Never sent by recorders; never shown to users. **Ref and Id are distinct** — conflating them breaks joins.
+
+**Member Ref**:
+One of the external Refs a **Talkgroup** or **Unit** answers to. Every entity has exactly one **primary Ref** (the one displayed and exported) and may own additional member Refs — a patch-minted dynamic TGID, a per-site duplicate, a second radio carried by the same apparatus — resolved to the owning entity at ingest, so the archive and the panel see one channel where the radio network sees several numbers.
+_Avoid_: alias (SDRTrunk's word for the owning entity, not the id), secondary ref, merged id.
+
+**Range**:
+A contiguous span of Refs owned as member Refs (`unitFrom..unitTo`). Mostly a Unit affair — fleets number their radios in blocks.
 
 ### Listening experience
 
@@ -91,6 +102,40 @@ _Avoid_: notification subscription, device token, registration.
 The rule that bounds notifications: at most one per **talkgroup** per push subscription per configured window, each carrying a count of the calls it stands for. A busy system must never storm a phone, and nothing is silently dropped for it.
 _Avoid_: throttling, rate limiting, batching, debouncing.
 
+**Priority**:
+A **Listener's** per-talkgroup preference that makes its calls jump the **listening queue** instead of waiting their turn. Queue order, not selection — a priority talkgroup still has to be selected to be heard.
+_Avoid_: preempt (SDRTrunk's stronger notion — interrupting the playing call — which this is not), favorite.
+
+**Pin**:
+Keeping a talkgroup at the top of the Talkgroups panel. A panel-ordering affordance only; pins change nothing about what plays.
+_Avoid_: favorite, star (a **Star** marks a Call).
+
+**Catch-up**:
+Draining the **listening queue** faster than real time — silence trimmed, playback rate raised — until the feed is live again.
+_Avoid_: fast-forward, smart speed (a product's trademark), time compression.
+
+**DVR**:
+The archive surface that plays one talkgroup (or a **Selection**) gaplessly across a time range, scrubbable on a call-density timeline. Oldest-first by construction — a DVR that plays backwards is a search result, not a DVR.
+_Avoid_: time machine, rewind mode, tape.
+
+**Station stream**:
+A continuous audio stream of a **Selection** — calls in order, silence-filled — for players that can't run the app (smart speakers, stream URLs, car radios).
+_Avoid_: radio mode, icecast feed (the mechanism), broadcast.
+
+### Alerting
+
+**Alert**:
+A notification fired by something a call's *metadata or signal* proves — an emergency flag, a **tone profile** match — delivered by **Web Push** and **Webhooks**. Never fired by speech content: transcription is banned ([ADR-0013](docs/adr/0013-no-transcription.md)).
+_Avoid_: notification (the delivery, not the occurrence), alarm.
+
+**Tone profile**:
+The per-talkgroup definition of a paging tone sequence (two-tone/Quick Call) that tone-out detection matches against a call's audio. Signal processing, not speech recognition.
+_Avoid_: tone set, page definition.
+
+**Webhook**:
+An **Operator**-configured URL that receives **Alert** payloads (optionally Discord-shaped). The automation escape hatch; delivery is retried and never blocks anything.
+_Avoid_: integration, callback.
+
 ### Ingest & distribution
 
 **Recorder**:
@@ -104,6 +149,18 @@ _Avoid_: upload, import (except in user-facing recorder docs).
 **Auto-populate**:
 Automatically creating an unknown system/talkgroup/unit the first time a call for it is ingested, so the archive is usable with zero manual configuration.
 _Avoid_: auto-create, discovery.
+
+**Downstream**:
+Another instance this **Instance** forwards matching **Calls** to, speaking the rdio upload dialect, scoped per System/Talkgroup. Forwarding only — *receiving* a peer's downstream is just **Ingest** with an API key.
+_Avoid_: relay, mirror, federation, upstream.
+
+**Dirwatch**:
+Ingesting **Calls** from a watched directory instead of an HTTP upload — recorder drop folders, DSDPlus, filename masks.
+_Avoid_: file ingest, folder watch, hot folder.
+
+**Delay**:
+Per-System/Talkgroup policy that publishes a **Call** to **Listeners** only after a configured interval — stored on arrival, emitted late, flagged as delayed, surviving restarts. Officer-safety policy, not a buffer.
+_Avoid_: delayer (rdio's noun for the mechanism), embargo, hold-back.
 
 **Access code**:
 A listener-facing PIN that grants scoped viewing access to specific systems/talkgroups (with optional expiry and concurrent-connection limits). Distinct from an **API key**.
@@ -167,8 +224,16 @@ Every **Call** an **Instance** currently holds — what a **Listener** searches 
 _Avoid_: history, library, database, back catalogue.
 
 **Retention**:
-The policy that bounds the **Archive**: an age window (in days) plus an optional cap on total stored audio. Expressed as configuration; enforced by sweeps.
+The policy that bounds the **Archive**: an age window (in days) plus an optional cap on total stored audio, overridable per System/Talkgroup (unset inherits). Expressed as configuration; enforced by sweeps. **Starred** calls and **Event** members are exempt.
 _Avoid_: expiry, TTL, cleanup.
+
+**Star**:
+A **Listener's** per-browser mark on a **Call**, filterable in search and exempt from **Retention** where the **Operator** allows.
+_Avoid_: favorite, bookmark, like.
+
+**Event**:
+A named, curated collection of **Calls** — an incident assembled by hand — frozen against **Retention**, shareable by link, exportable as audio. The one thing in the **Archive** that is meant to outlive it.
+_Avoid_: incident (the real-world happening, not the collection), playlist, compilation.
 
 **Sweep**:
 One pass of the retention policy over the archive — age out, then enforce the size cap, then reclaim orphans. Runs at startup and on an interval.

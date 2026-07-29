@@ -29,6 +29,8 @@ Three readers, and a document is written for exactly one of them. Keeping a fact
 
 ## Hard constraints
 
+- **No transcription. Banned, permanently.** Radio-Scout does not transcribe audio — no speech-to-text in any form: no local model, no cloud API, no plugin hook, no "experimental" flag. Features must never depend on transcripts existing (so no keyword alerts, no transcript search, no transcript-derived geolocation). This is a maintainer decision (2026-07-29), made knowing transcription is the community's top-requested feature — do not re-propose it. Non-speech audio DSP (enhancement, tone detection) is a separate question and not covered by this ban.
+
 - **All development is Test-Driven Development, under a quantified coverage policy** — see [Testing & coverage policy](#testing--coverage-policy) below ([ADR-0009](docs/adr/0009-testing-strategy.md) + [ADR-0010](docs/adr/0010-coverage-policy-and-test-tooling.md)). CI is used heavily and is essential for deployment across targets (PC, Mac, Raspberry Pi); dev/testing happens on Mac, the target scanner runs on a Raspberry Pi 5. Red-green-refactor on **native tests** — Rust `cargo nextest` (unit + the in-process HTTP/WS integration harness) and Vitest + React Testing Library (frontend). Every PR must hold **100% patch/diff coverage** (every new/changed line tested) over a **ratcheting project floor**, with quality enforced by **mutation testing** (`cargo-mutants` + `proptest`) — *not* by a 100%-total gate. Reserve Playwright for browser-only flows; iOS background audio / lock-screen controls are a **real-device manual gate**.
 - **Performance is first-class.** The app must be fast and performant on hardware as low as a Raspberry Pi.
 - **Simple install.** A one-command install that just works.
