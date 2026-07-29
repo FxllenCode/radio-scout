@@ -57,6 +57,14 @@ pub struct RetentionConfig {
     /// Optional cap on total stored audio; the oldest Calls are pruned until
     /// the archive fits. `None` means no size cap.
     pub max_size_bytes: Option<u64>,
+    /// Prune stored log events (#30) older than this many days. `0` keeps them
+    /// forever, matching [`RetentionConfig::days`]'s reading.
+    ///
+    /// A window of its own rather than the archive's, because the two are
+    /// different sizes of problem: a month of log lines is a few megabytes,
+    /// a month of audio is not — and an operator keeping Calls forever
+    /// (`days = 0`) must still not accumulate an unbounded logs table.
+    pub log_days: u32,
     /// How often [`spawn`]'s background task runs a [`sweep`]. Zero is read as
     /// "unset" and falls back to the default cadence.
     pub interval: Duration,
@@ -76,6 +84,10 @@ impl Default for RetentionConfig {
             // unbounded archive fills a Pi's SD card.
             days: 7,
             max_size_bytes: None,
+            // Longer than the archive's week on purpose: logs are small, and
+            // the question they answer ("when did my recorder stop?") is often
+            // asked about a period whose audio has already been pruned.
+            log_days: 30,
             interval: DEFAULT_INTERVAL,
             batch_size: 500,
             orphan_grace: Duration::from_secs(3600),
@@ -87,13 +99,12 @@ impl RetentionConfig {
     /// The `call_at_ms` below which a Call has aged out, or `None` when
     /// age-based pruning is disabled (`days == 0`).
     pub fn cutoff_ms(&self, now_ms: i64) -> Option<i64> {
-        if self.days == 0 {
-            return None;
-        }
-        // `u32::MAX` days is ~3.7e17 ms, comfortably inside i64; only a clock
-        // near i64::MIN could underflow, and saturating there is still "nothing
-        // is old enough", which is the safe direction.
-        Some(now_ms.saturating_sub(i64::from(self.days) * MS_PER_DAY))
+        cutoff_for(self.days, now_ms)
+    }
+
+    /// The same, for stored log events and [`RetentionConfig::log_days`] (#30).
+    pub fn log_cutoff_ms(&self, now_ms: i64) -> Option<i64> {
+        cutoff_for(self.log_days, now_ms)
     }
 
     /// The cadence [`spawn`] will actually sweep on. A zero interval is read as
@@ -117,6 +128,7 @@ impl RetentionConfig {
         info!(
             days = self.days,
             max_size_bytes = ?self.max_size_bytes,
+            log_days = self.log_days,
             interval_secs,
             batch_size = self.batch_size,
             "retention policy"
@@ -129,6 +141,19 @@ impl RetentionConfig {
         self.max_size_bytes = (gb.is_finite() && gb > 0.0).then_some((gb * BYTES_PER_GB) as u64);
         self
     }
+}
+
+/// The timestamp below which something `days` old has aged out, or `None` when
+/// the window is `0` — rdio-scanner's `pruneDays` semantics, which both windows
+/// share so an operator only has to learn them once.
+fn cutoff_for(days: u32, now_ms: i64) -> Option<i64> {
+    if days == 0 {
+        return None;
+    }
+    // `u32::MAX` days is ~3.7e17 ms, comfortably inside i64; only a clock near
+    // i64::MIN could underflow, and saturating there is still "nothing is old
+    // enough", which is the safe direction.
+    Some(now_ms.saturating_sub(i64::from(days) * MS_PER_DAY))
 }
 
 /// What one [`sweep`] did. Zero everywhere means the archive was already within
@@ -144,6 +169,8 @@ pub struct SweepReport {
     /// Bytes of audio reclaimed, summed over both prune policies and the
     /// orphan-GC pass.
     pub bytes_freed: u64,
+    /// Stored log events pruned for being older than the log window (#30).
+    pub logs_pruned: u64,
     /// Objects whose delete failed. The row is already gone, so the Call is
     /// pruned as far as listeners are concerned; the object is now an orphan and
     /// a later sweep retries it. Counted rather than fatal so one unhappy object
@@ -245,6 +272,18 @@ pub async fn sweep(
         }
     }
 
+    // The operator log surface (#30). Its own window, and no object store to
+    // reconcile with — a log event is only ever a row.
+    if let Some(cutoff_ms) = config.log_cutoff_ms(now_ms) {
+        loop {
+            let pruned = repo::delete_logs_older_than(db, cutoff_ms, config.batch_size).await?;
+            if pruned == 0 {
+                break;
+            }
+            report.logs_pruned += pruned;
+        }
+    }
+
     // Orphan-GC last, so it also picks up any object this sweep's own
     // row-then-object deletes failed to remove. It lists the whole store, which
     // is why it rides the retention interval rather than running more often.
@@ -302,6 +341,7 @@ fn log_sweep(outcome: &Result<SweepReport, SweepError>) {
                 over_cap = report.over_cap,
                 orphans = report.orphans,
                 bytes_freed = report.bytes_freed,
+                logs_pruned = report.logs_pruned,
                 // Not zero means audio is still on disk that nothing points at;
                 // a later sweep retries it, but an operator should know.
                 object_errors = report.object_errors,
@@ -547,8 +587,95 @@ mod tests {
     #[case(SweepReport { orphans: 1, ..SweepReport::default() }, false)]
     #[case(SweepReport { bytes_freed: 1, ..SweepReport::default() }, false)]
     #[case(SweepReport { object_errors: 1, ..SweepReport::default() }, false)]
+    #[case(SweepReport { logs_pruned: 1, ..SweepReport::default() }, false)]
     fn only_an_empty_report_is_a_noop(#[case] report: SweepReport, #[case] expected: bool) {
         assert_eq!(report.is_noop(), expected);
+    }
+
+    /// Store `count` log events dated `at_ms`, as the sink would have.
+    async fn add_log_events(db: &DatabaseConnection, at_ms: i64, count: usize) {
+        let events: Vec<repo::NewLogEvent> = (0..count)
+            .map(|n| repo::NewLogEvent {
+                at_ms,
+                level: "INFO".into(),
+                target: "radio_scout::ingest".into(),
+                message: format!("event {n}"),
+                ..Default::default()
+            })
+            .collect();
+        repo::insert_log_events(db, &events)
+            .await
+            .expect("store log events");
+    }
+
+    /// How many log events are stored.
+    async fn stored_log_count(db: &DatabaseConnection) -> u64 {
+        crate::db::entities::log_event::Entity::find()
+            .count(db)
+            .await
+            .expect("count log events")
+    }
+
+    /// The operator log surface is bounded by the same sweeper the archive is
+    /// (#30) — an unattended Pi must not fill its SD card with its own logging.
+    /// The window is the logs' own, so it can outlive the audio it describes.
+    #[tokio::test]
+    async fn stored_logs_are_pruned_by_their_own_age_window() {
+        let (db, store, _tmp) = empty_archive().await;
+        let now = NOW;
+        // One event a fortnight old, one from an hour ago.
+        add_log_events(&db, now - 14 * MS_PER_DAY, 1).await;
+        add_log_events(&db, now - 3_600_000, 1).await;
+        let config = RetentionConfig {
+            days: 0,
+            log_days: 7,
+            ..Default::default()
+        };
+
+        let report = sweep(&db, &store, &config, now).await.expect("sweep");
+
+        assert_eq!(report.logs_pruned, 1);
+        assert_eq!(stored_log_count(&db).await, 1, "the recent event survives");
+    }
+
+    /// `log_days = 0` is "keep forever", the reading `days` already has — so an
+    /// operator who wants an unbounded log has a way to say so, and nobody
+    /// reads a zero as "drop everything".
+    #[tokio::test]
+    async fn a_zero_log_window_keeps_every_event() {
+        let (db, store, _tmp) = empty_archive().await;
+        add_log_events(&db, 0, 3).await;
+        let config = RetentionConfig {
+            log_days: 0,
+            ..Default::default()
+        };
+
+        let report = sweep(&db, &store, &config, NOW).await.expect("sweep");
+
+        assert_eq!(report.logs_pruned, 0);
+        assert_eq!(stored_log_count(&db).await, 3);
+    }
+
+    /// Pruning is batched like the archive's, so a Pi that has been logging for
+    /// a month never holds one write lock for the whole delete.
+    #[tokio::test]
+    async fn a_long_backlog_of_logs_is_pruned_in_batches() {
+        let (db, store, _tmp) = empty_archive().await;
+        add_log_events(&db, 0, 7).await;
+        let config = RetentionConfig {
+            days: 0,
+            log_days: 1,
+            batch_size: 2,
+            ..Default::default()
+        };
+
+        let report = tokio::time::timeout(WAIT, sweep(&db, &store, &config, NOW))
+            .await
+            .expect("the sweep terminates")
+            .expect("sweep");
+
+        assert_eq!(report.logs_pruned, 7);
+        assert_eq!(stored_log_count(&db).await, 0);
     }
 
     /// An archive already within policy is the steady state — every hour, for
@@ -575,6 +702,7 @@ mod tests {
             orphans: 3,
             bytes_freed: 40,
             object_errors: 2,
+            logs_pruned: 9,
         }));
 
         let logged = capture.text();
@@ -586,6 +714,7 @@ mod tests {
             "orphans=3",
             "bytes_freed=40",
             "object_errors=2",
+            "logs_pruned=9",
         ] {
             assert!(logged.contains(field), "{field} missing from:\n{logged}");
         }
@@ -656,7 +785,7 @@ mod tests {
     /// operator who reads `days=0` should never find Calls missing, and one who
     /// reads `days=7` should never be surprised that they are.
     #[rstest]
-    #[case(7, None, 3600, &["days=7", "max_size_bytes=None", "interval_secs=3600"])]
+    #[case(7, None, 3600, &["days=7", "max_size_bytes=None", "interval_secs=3600", "log_days=30"])]
     // `days=0` is rdio's "keep forever", not "drop everything".
     #[case(0, None, 3600, &["days=0", "max_size_bytes=None"])]
     #[case(0, Some(1024), 60, &["days=0", "max_size_bytes=Some(1024)", "interval_secs=60"])]

@@ -105,10 +105,12 @@ recorder stops too. Two independent bounds, and you can use either or both:
 [retention]
 days = 7          # 0 keeps them forever
 max_size_gb = 10  # omit entirely for no cap
+log_days = 30     # stored log events, on their own window
 ```
 
 A **sweep** runs at startup and on an interval: age Calls out, then prune oldest-first until
-the size cap is met, then reclaim audio no Call points at.
+the size cap is met, then prune stored log events past `log_days`, then reclaim audio no Call
+points at.
 
 Two details that matter in practice:
 
@@ -231,6 +233,42 @@ What you can rely on:
 
 A filter the logger cannot parse **refuses to boot** and names the layer it came from — an
 operator who asked for TRACE and silently got INFO debugs the wrong log.
+
+### Reading the log without a shell
+
+Radio-Scout also keeps what it said in the database, and **Settings → Logs** shows it: newest
+first, filtered by level and date, behind the admin password. If you run it as a service on a
+box you do not have a terminal on, this is how you answer *why did my recorder's Calls stop
+arriving?*
+
+```toml
+[log]
+database_level = "info"   # "off", "error", "warn" or "info"
+
+[retention]
+log_days = 30             # 0 keeps them forever
+```
+
+Four things worth knowing about it:
+
+- **It is a second sink, not the first.** The console still gets everything; the database gets
+  a copy, written by a background task through a queue. A database that is slow, broken or not
+  there yet cannot slow down or fail the request that produced the line — if it cannot keep up
+  it drops events and says so on the console, and if it cannot write at all it says that once
+  and carries on.
+- **`database_level` is independent of `directives`.** Turning the console up to chase a
+  problem does not change what is stored, and turning it down does not empty the Logs view.
+- **There is deliberately no `debug`.** DEBUG is where a listener's IP address can appear, and a
+  public instance must not accumulate a database of who listened and when. Asking for it
+  **refuses to boot** rather than quietly storing it. (It is also what stops a Pi writing a row
+  per audio range request.)
+- **Stored logs are pruned by the same sweep that prunes Calls**, on their own window — so
+  `days = 0` (keep every Call forever) does not also mean an unbounded logs table.
+
+An event is stored as its **parts** — level, time, target, message, its structured fields, and
+the request id — so the Logs view can filter and you can search it. That request id is the same
+one in an `internal error (ref: …)` a listener reads out to you, which is what makes the ref
+useful when you have no shell to grep.
 
 ## Behind a reverse proxy
 

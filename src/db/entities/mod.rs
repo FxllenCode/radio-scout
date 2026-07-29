@@ -11,6 +11,7 @@ pub mod call_frequency;
 pub mod call_patch;
 pub mod call_unit;
 pub mod group;
+pub mod log_event;
 pub mod push_subscription;
 pub mod site;
 pub mod system;

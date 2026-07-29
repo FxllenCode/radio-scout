@@ -1,6 +1,6 @@
 import { http, HttpResponse, ws } from 'msw'
 
-import type { Call, Catalog, FilterOptions } from '@/types'
+import type { Call, Catalog, FilterOptions, LogEvent, LogPage } from '@/types'
 
 /** Same-origin base our relative RTK Query calls resolve to under jsdom (the
  *  Request shim in setup.ts rewrites `/foo` → `http://localhost/foo`). Handlers
@@ -99,6 +99,69 @@ export function archivePage(url: URL) {
   }
 }
 
+/** What the operator log surface serves (#30), newest first — one event of
+ *  each level, with the structured fields and the correlation ref that make an
+ *  event more than a sentence. */
+export const LOG_EVENTS: LogEvent[] = [
+  {
+    id: 3,
+    atMs: Date.parse('2026-07-25T14:32:05'),
+    level: 'WARN',
+    target: 'radio_scout::ingest',
+    message: 'ingest rejected',
+    fields: { reason: 'duplicate' },
+    requestId: '0123456789abcdef',
+  },
+  {
+    id: 2,
+    atMs: Date.parse('2026-07-25T14:30:00'),
+    level: 'ERROR',
+    target: 'radio_scout::http_log',
+    message: 'request failed',
+    fields: { stage: 'store-call' },
+    requestId: 'fedcba9876543210',
+  },
+  {
+    id: 1,
+    atMs: Date.parse('2026-07-25T14:00:00'),
+    level: 'INFO',
+    target: 'radio_scout::ingest',
+    message: 'call stored',
+  },
+]
+
+/** The levels a `level=` floor admits, mirroring `src/logview.rs`. */
+const LEVELS_AT_OR_ABOVE: Record<string, string[]> = {
+  error: ['ERROR'],
+  warn: ['ERROR', 'WARN'],
+  info: ['ERROR', 'WARN', 'INFO'],
+}
+
+/** One page of `LOG_EVENTS`, honoring `level`/`after`/`before`/`limit`/`offset`
+ *  so a filter test asserts against a server that actually filters. */
+export function logPage(url: URL): LogPage {
+  const level = url.searchParams.get('level')
+  const after = url.searchParams.get('after')
+  const before = url.searchParams.get('before')
+  const limit = Number(url.searchParams.get('limit') ?? 100)
+  const offset = Number(url.searchParams.get('offset') ?? 0)
+
+  const matched = LOG_EVENTS.filter(
+    (event) =>
+      (!level || (LEVELS_AT_OR_ABOVE[level] ?? []).includes(event.level)) &&
+      (!after || event.atMs >= Number(after)) &&
+      (!before || event.atMs < Number(before)),
+  )
+  const results = matched.slice(offset, offset + limit)
+  return {
+    results,
+    count: matched.length,
+    limit,
+    offset,
+    hasMore: offset + results.length < matched.length,
+  }
+}
+
 /** The server's VAPID public key in tests — RFC 8291's application-server key,
  *  the same constant the Rust harness uses, so the two halves of #16 are
  *  described by one value. */
@@ -125,6 +188,17 @@ export const handlers = [
     HttpResponse.json(FILTER_OPTIONS),
   ),
   http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(CATALOG)),
+  // The admin surface (#19) as an unauthenticated browser sees it: no session,
+  // so the Logs view (#30) asks for a password. Tests that sign in override
+  // these through `server.use(...)`.
+  http.get(
+    `${ORIGIN}/api/admin/session`,
+    () => new HttpResponse('admin session required\n', { status: 401 }),
+  ),
+  http.get(
+    `${ORIGIN}/api/admin/logs`,
+    () => new HttpResponse('admin session required\n', { status: 401 }),
+  ),
   // Web Push (#16). A server that has an identity, takes subscriptions, and
   // forgets them on request — the shape every screen mounts against.
   http.get(`${ORIGIN}/api/push/key`, () =>

@@ -125,7 +125,7 @@ fn parse_search(params: &HashMap<String, String>) -> Result<CallSearch, String> 
 /// A search boundary as unix milliseconds (what we store) or an RFC3339 time
 /// (so a human or a script can hand-write a query — the client sends ms, since
 /// only it knows the listener's timezone).
-fn parse_time_ms(raw: &str) -> Option<i64> {
+pub(crate) fn parse_time_ms(raw: &str) -> Option<i64> {
     if let Ok(ms) = raw.parse::<i64>() {
         return Some(ms);
     }
@@ -262,7 +262,7 @@ fn header_value(raw: &str, fallback: &'static str) -> HeaderValue {
     HeaderValue::from_str(raw).unwrap_or(HeaderValue::from_static(fallback))
 }
 
-fn bad_request(message: &str) -> Response {
+pub(crate) fn bad_request(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, format!("{message}\n")).into_response()
 }
 

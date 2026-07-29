@@ -30,11 +30,14 @@ use std::io;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
+use radio_scout::logsink::{LogSink, LogSinkConfig};
+use sea_orm::DatabaseConnection;
 use tracing::level_filters::LevelFilter;
 use tracing::subscriber::{DefaultGuard, Interest};
 use tracing::{Event, Metadata, Subscriber, span};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
 
 /// A global subscriber that records nothing and is interested in everything, so
 /// no callsite is ever cached as uninteresting.
@@ -133,15 +136,37 @@ impl LogCapture {
     /// test client — which would make "this IP appears nowhere" (ADR-0011 rule
     /// 5) pass or fail on somebody else's log line.
     pub fn start() -> Self {
+        Self::install(None)
+    }
+
+    /// Capture the console **and** store events in `db`, the way a running
+    /// instance does once the operator log surface is on (#30).
+    ///
+    /// The sink is a second layer beside the capture, exactly as
+    /// `observability::subscriber` wires it beside stdout — so a test drives a
+    /// real request and then reads the result back through
+    /// `GET /api/admin/logs`, which is the only place an operator sees it. The
+    /// writer task rides the same current-thread runtime as the server, and the
+    /// guard keeps both installed for as long as the test holds it.
+    pub fn storing(db: &DatabaseConnection, config: LogSinkConfig) -> Self {
+        let (sink, writer) = radio_scout::logsink::channel(config).expect("an enabled sink");
+        writer.spawn(db.clone());
+        Self::install(Some(sink))
+    }
+
+    fn install(sink: Option<LogSink>) -> Self {
         ask_every_time();
         let writer = CaptureWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::new("radio_scout=trace"))
-            .with_writer(writer.clone())
-            // Plain text, so an assertion can look for `status=404` without
-            // escape sequences landing in the middle of it.
-            .with_ansi(false)
-            .finish();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer.clone())
+                    // Plain text, so an assertion can look for `status=404`
+                    // without escape sequences landing in the middle of it.
+                    .with_ansi(false)
+                    .with_filter(EnvFilter::new("radio_scout=trace")),
+            )
+            .with(sink);
         LogCapture {
             writer,
             _subscriber: tracing::subscriber::set_default(subscriber),

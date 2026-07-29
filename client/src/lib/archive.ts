@@ -1,12 +1,16 @@
 /** Helpers the archive screen shares with the RTK Query layer: turning filters
  *  into a request, and turning a Call into something a listener can read.
  *  Mirrors the backend's `src/archive.rs`. */
-import type { SearchQuery } from '@/types'
+import type { LogQuery, SearchQuery } from '@/types'
 
-/** Serialize archive-search filters into a query string, dropping anything
- *  unset. Keys are sorted so the same filters always produce the same URL —
- *  stable to assert on, and friendly to HTTP caches. */
-export function searchParams(query: SearchQuery): string {
+/** Serialize filters into a query string, dropping anything unset. Keys are
+ *  sorted so the same filters always produce the same URL — stable to assert
+ *  on, friendly to HTTP caches, and (since RTK Query keys its cache by the URL)
+ *  what keeps two orderings of the same filters one cache entry.
+ *
+ *  Shared by the archive search (#13) and the operator log (#30): both back
+ *  ends read a blank value as "no filter", so both fronts may drop it. */
+export function searchParams(query: LogQuery | SearchQuery): string {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {
     if (value === undefined || value === null || value === '') continue

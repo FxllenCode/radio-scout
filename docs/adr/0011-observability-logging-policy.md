@@ -71,9 +71,19 @@ The shape rules 3 and 4 take in the code (#29):
 
 The live feed's own subsystem lines: the subscribe at DEBUG (protocol detail — a listener re-subscribes on every Talkgroup toggle, and the line carries the *shape* of the selection, never its contents), a lagging listener and a reaped half-open connection at WARN (a listener that stopped hearing things is a symptom, and rdio leaves both silent), and one DEBUG line per reconnect catch-up carrying `sent` and `truncated` — never one per backfilled Call.
 
-### The operator log surface (later)
+### The operator log surface (amended by #30 — shipped)
 
 A `Layer` writing to a `logs` table, retention in days, and a searchable Settings → Logs view behind admin auth (#19). rdio parity, with the console remaining first-class rather than an afterthought, parameterised inserts rather than interpolated SQL, and rule 5 applying to what gets stored.
+
+**What #30 built, and the three decisions that are not obvious from that sentence:**
+
+**Rule 5 is enforced by a floor, not by redaction.** `[log] database_level` accepts `off`, `error`, `warn` and `info` — and **refuses to boot** on `debug` or `trace`, naming this rule. A listener's address rides only lines that are already DEBUG (the request log, above), so flooring the sink puts them out of reach *by construction*: there is no configuration in which a stored row can carry one, and no redaction pass that has to be right about which field is an address. The alternative — store everything, strip what looks like an address — was rejected as a second mechanism that fails silently when it is wrong. The floor pays a second dividend rule 8 would have asked for anyway: a Pi never writes a database row per range request.
+
+**The two sinks are filtered independently.** The console's `EnvFilter` is attached to the console *layer* rather than to the subscriber, so `--log warn` on a noisy Pi does not also empty the Logs view, and `--log debug` while chasing a problem does not start recording DEBUG lines in a database. One control surface each, and neither can silence the other.
+
+**Two targets are never stored, because storing them is recursive.** The sink's own (`radio_scout::logsink` — a line about a failed write, queued for the database that failed) and **`sqlx::query`**, which logs a line per statement *including the sink's own `INSERT INTO logs`*: storing one produces another to store, without end. The console keeps both; the default directives already demote `sqlx::query` there, and rule 7 puts per-statement detail at DEBUG. This is the same judgement applied where a level filter alone cannot make it.
+
+The rest follows from "the console is primary": an event is offered to the sink with `try_send` on a bounded queue, so a log call never waits on a database; a full queue drops and reports the count once (rule 8) rather than a line per loss; a failing write says so once and again when it recovers; and a sink failure is never propagated, because the console already has every one of those lines. An event is stored as its **parts** — level, target, message, the fields rule 6 insists on, and #28's request id — so the Logs view can filter on them and the `internal error (ref: …)` a listener reads out is findable by an operator with no shell, which is what that ref is for. Stored events are pruned by the retention sweeper (#10) on a window of their own (`[retention] log_days`), because `days = 0` — rdio's "keep Calls forever" — must not also mean an unbounded logs table.
 
 ## Considered and rejected
 
@@ -81,6 +91,7 @@ A `Layer` writing to a `logs` table, retention in days, and a searchable Setting
 - **A rotating file sink** (`tracing-appender`) — duplicates what journald and Docker already do for every deployment we ship, and adds a second disk-space policy to a device where retention is already rationing the disk.
 - **JSON output now** — trivial to add later (tracing-subscriber ships the formatter); nobody is shipping logs to an aggregator yet.
 - **rdio's DB-first logging** — putting a database write in the path of every log line on a Pi, and losing the console as the primary surface. Inverted here: console first, DB as an additional sink.
+- **Storing every level and redacting addresses on the way in** (#30) — more flexible, and the flexibility is the problem: it makes rule 5 depend on a matcher being right about every field name any future line might carry a listener's address in, and a matcher that is wrong fails silently into exactly the database this rule exists to prevent. The level floor cannot be wrong that way, and the only thing it costs is a DEBUG line an operator could not read from the browser — which the console still has.
 - **Trusting `X-Forwarded-For` for the client address** — rdio-scanner does, unconditionally (`main.go:265`), and it is what makes the address useful behind nginx or Docker's bridge, where the peer is the proxy. But the header is attacker-controlled: on a public instance anyone could forge a recorder's address into the operator's log, which corrupts the one field the request log exists to make trustworthy. Honouring it needs an explicit list of proxies that may be believed, which belongs with the real configuration, not with an implicit "looks like a private address" heuristic. **Resolved by #17:** `[server] trusted_proxies` ([ADR-0012](0012-configuration-model.md)) names the hops whose header is believed, and the address taken is the rightmost entry that isn't itself a trusted proxy. With the list empty — what ships — the header is still never read.
 - **Reusing an inbound `X-Request-Id`** — nice for tracing through a proxy, and the same problem: a value a client chooses, landing in every line about the request.
 - **Keeping error detail in the response body** — convenient for an operator who only reads their recorder's log, but it means internals travel to clients by design, and the correlation ref recovers the convenience without the leak.
@@ -90,6 +101,7 @@ A `Layer` writing to a `logs` table, retention in days, and a searchable Setting
 ## Consequences
 
 - Three crates and some compile time on a Pi; `tracing`'s cost when a level is disabled is a static check.
+- **The operator log surface costs a table and a background task** (#30). Its worst case is bounded on purpose: a queue that fills drops rather than waits, and a level below INFO cannot be configured — so the write rate is bounded by the INFO line rate, which is roughly one per request plus one per Call.
 - Every future subsystem owes instrumentation as it is written, not afterwards — the `println!` escape hatch is gone by lint.
 - The operator log surface inherits rule 5, so what the console declines to record cannot appear in the database either.
 - `RUST_LOG` is one layer of the control surface: #17 added `[log] directives` (what survives a reboot) and `--log` (what wins for one run), all validated at boot ([ADR-0012](0012-configuration-model.md)).

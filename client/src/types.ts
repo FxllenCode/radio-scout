@@ -101,3 +101,51 @@ export interface FilterOptions {
   dateStartMs?: number
   dateStopMs?: number
 }
+
+/** One stored log event (#30, ADR-0011), as `GET /api/admin/logs` serves it.
+ *
+ *  Its *parts*, never a rendered sentence: `fields` is the structured half rule
+ *  6 insists on, and `requestId` is #28's correlation ref — the value in an
+ *  `internal error (ref: …)` a listener read out, so an operator with no shell
+ *  can still find the cause. */
+export interface LogEvent {
+  id: number
+  /** When it was recorded, unix milliseconds. */
+  atMs: number
+  /** `ERROR`, `WARN` or `INFO` — the sink stores nothing quieter (rule 5). */
+  level: string
+  /** The module it came from, e.g. `radio_scout::ingest`. */
+  target: string
+  message: string
+  fields?: Record<string, unknown>
+  requestId?: string
+}
+
+/** One page of `GET /api/admin/logs`, newest first. */
+export interface LogPage {
+  results: LogEvent[]
+  /** Total events matching the filters, ignoring the page window. */
+  count: number
+  limit: number
+  offset: number
+  hasMore: boolean
+}
+
+/** What the Logs view filters on. Blank means "no filter", which is what the
+ *  form's own empty state produces. */
+export interface LogQuery {
+  /** A severity **floor**: `warn` means warnings and errors. */
+  level?: string
+  after?: number
+  before?: number
+  limit?: number
+  offset?: number
+}
+
+/** `GET /api/admin/session` / `POST /api/admin/login` (#19) — a live admin
+ *  session. The CSRF token is held in memory, never in a cookie: it is a
+ *  synchronizer token, which is what a sibling subdomain cannot forge. */
+export interface AdminSession {
+  csrf_token: string
+  expires_in_secs: number
+}

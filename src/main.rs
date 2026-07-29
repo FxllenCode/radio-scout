@@ -22,6 +22,7 @@ use radio_scout::admin::AdminAuth;
 use radio_scout::config::{self, Cli, Config};
 use radio_scout::db;
 use radio_scout::enhance::Enhancer;
+use radio_scout::logsink;
 use radio_scout::push::Push;
 use radio_scout::retention;
 use radio_scout::service;
@@ -49,7 +50,7 @@ async fn main() -> ExitCode {
     let env_file = dotenvy::dotenv();
 
     if let Some(path) = &cli.write_config {
-        observability::init(observability::DEFAULT_DIRECTIVES);
+        observability::init(observability::DEFAULT_DIRECTIVES, None);
         return match config::write_template(path) {
             Ok(()) => {
                 info!(path = %path.display(), "wrote a configuration file with every setting at its default");
@@ -69,13 +70,22 @@ async fn main() -> ExitCode {
             // Nothing is configured yet, including logging — so bring it up on
             // the defaults rather than saying why we are stopping through a
             // channel ADR-0011 forbids.
-            observability::init(observability::DEFAULT_DIRECTIVES);
+            observability::init(observability::DEFAULT_DIRECTIVES, None);
             error!(%error, "invalid configuration");
             return ExitCode::from(EXIT_MISCONFIGURED);
         }
     };
 
-    observability::init(&loaded.config.log.directives);
+    // The operator log surface (#30). The sink is built *before* the subscriber
+    // and drained *after* the database opens, because logging starts first: the
+    // migration lines an operator most wants to read back are written before
+    // anything could have stored them, and they wait in the queue until `serve`
+    // hands the writer a database.
+    let (sink, log_writer) = match logsink::channel(loaded.config.log_sink()) {
+        Some((sink, writer)) => (Some(sink), Some(writer)),
+        None => (None, None),
+    };
+    observability::init(&loaded.config.log.directives, sink);
 
     // `service …` (#23) is configured exactly like a boot — it bakes the
     // settings just resolved into the definition it writes — but it never
@@ -90,7 +100,7 @@ async fn main() -> ExitCode {
     }
     loaded.log_summary();
 
-    match serve(loaded.config, env_file.ok()).await {
+    match serve(loaded.config, env_file.ok(), log_writer).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             error!(%error, "radio-scout stopped");
@@ -139,11 +149,18 @@ fn service_command(
 async fn serve(
     config: Config,
     env_file: Option<PathBuf>,
+    log_writer: Option<logsink::LogWriter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let base_dir = config.server.base_dir.clone();
     std::fs::create_dir_all(&base_dir)?;
 
     let db = db::connect(&config.database_url()).await?;
+
+    // Now there is somewhere to put them, everything logged since boot — the
+    // migrations included — is written out, and the sink keeps up from here.
+    if let Some(writer) = log_writer {
+        writer.spawn(db.clone());
+    }
 
     // The ingest key (ADR-0008). A configured one — `RADIO_SCOUT_API_KEY`, from
     // the environment or `.env` — is registered on every boot, so a recorder's

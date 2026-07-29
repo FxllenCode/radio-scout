@@ -83,7 +83,7 @@ use std::time::Duration;
 use radio_scout::admin::{AdminAuth, AdminConfig, CSRF_HEADER};
 use radio_scout::config::TrustedProxies;
 use radio_scout::db::entities::{call, system, tag, talkgroup};
-use radio_scout::db::repo::{self, NewCall};
+use radio_scout::db::repo::{self, NewCall, NewLogEvent};
 use radio_scout::db::{self};
 use radio_scout::enhance::{EnhancementConfig, Enhancer};
 use radio_scout::live::LiveFeed;
@@ -513,6 +513,56 @@ impl TestApp {
             .await
             .expect("seed call")
             .id
+    }
+
+    // -- The operator log surface (#30) --------------------------------------
+
+    /// Store a log event directly, for the tests about the *read* surface —
+    /// filters, ordering, paging — which care about rows rather than how they
+    /// were logged.
+    pub async fn seed_log(&self, event: NewLogEvent) {
+        repo::insert_log_events(&self.db, std::slice::from_ref(&event))
+            .await
+            .expect("seed log event");
+    }
+
+    /// Send this thread's logging into this app's database as well as the
+    /// console, the way a running instance does.
+    ///
+    /// Hold the returned guard for the life of the test: dropping it puts the
+    /// thread's subscriber back. Events land through the real `tracing` layer,
+    /// so what a test reads back is what an operator would.
+    pub async fn store_logs(&self) -> logs::LogCapture {
+        logs::LogCapture::storing(&self.db, radio_scout::logsink::LogSinkConfig::default())
+    }
+
+    /// Wait until the Logs view has an event whose message is `needle`, and
+    /// hand back the page it appeared on (logged in as admin on the way past).
+    ///
+    /// Polling, because the sink is deliberately asynchronous: there is no
+    /// completion for a test to await from the outside, which is the whole
+    /// point of a log call that never waits on a database.
+    pub async fn await_logged(&self, needle: &str) -> serde_json::Value {
+        if self.session.lock().expect("session").is_none() {
+            self.login().await;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let page = self.get_json("/api/admin/logs?limit=500").await;
+            let found = page["results"]
+                .as_array()
+                .expect("a results array")
+                .iter()
+                .any(|event| event["message"] == needle);
+            if found {
+                return page;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no stored log event said {needle:?} within 20s; the page holds {page:#}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     /// Insert a System row with an explicit ingest policy. No admin surface sets

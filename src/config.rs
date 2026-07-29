@@ -46,6 +46,7 @@ use crate::admin::AdminConfig;
 use crate::blob::{S3Config, StorageConfig};
 use crate::enhance::{EnhancementConfig, Mode, Output};
 use crate::ingest::IngestConfig;
+use crate::logsink::LogSinkConfig;
 use crate::observability;
 use crate::push::PushConfig;
 use crate::retention::RetentionConfig;
@@ -447,6 +448,7 @@ impl Config {
         let config = RetentionConfig {
             days: self.retention.days,
             max_size_bytes: None,
+            log_days: self.retention.log_days,
             interval: Duration::from_secs(self.retention.interval_secs),
             batch_size: self.retention.batch_size,
             orphan_grace: Duration::from_secs(self.retention.orphan_grace_secs),
@@ -454,6 +456,18 @@ impl Config {
         match self.retention.max_size_gb {
             Some(gb) => config.with_max_size_gb(gb),
             None => config,
+        }
+    }
+
+    /// The operator log surface's sink (#30), or a sink that is off.
+    ///
+    /// The level has already been validated ([`Config::validate`]), so an
+    /// unparseable one here can only mean a `Config` assembled in code rather
+    /// than resolved — which reads as "off", the setting that stores nothing.
+    pub fn log_sink(&self) -> LogSinkConfig {
+        LogSinkConfig {
+            level: LogSinkConfig::level_from_str(&self.log.database_level).unwrap_or(None),
+            ..LogSinkConfig::default()
         }
     }
 
@@ -593,6 +607,15 @@ impl Config {
             ));
         }
         validate_directives("log.directives", &self.log.directives)?;
+        // Rule 5, enforced where an operator can be told about it: the sink has
+        // no setting that reaches a level a listener's address may ride on.
+        if LogSinkConfig::level_from_str(&self.log.database_level).is_none() {
+            return Err(ConfigError::invalid_key(
+                "log.database_level",
+                &self.log.database_level,
+                EXPECTED_DATABASE_LEVEL,
+            ));
+        }
         if self.ingest.dedup_window_ms < 0 {
             return Err(ConfigError::invalid_key(
                 "ingest.dedup_window_ms",
@@ -714,6 +737,10 @@ pub struct Retention {
     /// no cap.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_size_gb: Option<f64>,
+    /// Prune stored log events (#30) older than this many days. `0` keeps them
+    /// forever, the same reading `days` has — and its own setting, because a
+    /// scanner keeping Calls forever must still bound its logs.
+    pub log_days: u32,
     /// How often the sweeper runs.
     pub interval_secs: u64,
     /// Calls deleted per batch, bounding how long a write lock is held.
@@ -731,6 +758,7 @@ impl Default for Retention {
         Retention {
             days: default.days,
             max_size_gb: None,
+            log_days: default.log_days,
             interval_secs: default.interval.as_secs(),
             batch_size: default.batch_size,
             orphan_grace_secs: default.orphan_grace.as_secs(),
@@ -893,15 +921,29 @@ pub struct Log {
     /// (`warn,radio_scout::ingest=trace`). `RUST_LOG` overrides this for one
     /// invocation; this is what survives a reboot.
     pub directives: String,
+    /// What the operator log surface stores (#30): `off`, `error`, `warn` or
+    /// `info`. Independent of `directives`, which is the console's — turning
+    /// one up or down never moves the other.
+    pub database_level: String,
 }
 
 impl Default for Log {
     fn default() -> Self {
         Log {
             directives: observability::DEFAULT_DIRECTIVES.to_string(),
+            database_level: LogSinkConfig::level_name(LogSinkConfig::default().level).to_string(),
         }
     }
 }
+
+/// What an unusable `[log] database_level` is told it should have been.
+///
+/// Spelled out rather than built from [`LogSinkConfig::LEVELS`], because
+/// [`ConfigError::Invalid`] carries a `&'static str`; a test holds it to naming
+/// every level the sink accepts. The *reason* rides along because "why can't I
+/// have debug?" is otherwise a mystery an operator would read as a typo.
+const EXPECTED_DATABASE_LEVEL: &str = "\"off\", \"error\", \"warn\" or \"info\" — \
+     DEBUG and below can carry a listener's address, which is never stored (ADR-0011 rule 5)";
 
 /// `[storage.s3]` — credentials for the S3-compatible backend.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -1178,9 +1220,14 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # until the archive fits. No key at all means no cap.
 #   max_size_gb = 10
 
+# Prune stored log events (the Settings -> Logs view) older than this many days.
+# 0 keeps them forever. Its own window, not the one above: logs are small, and
+# the question they answer is often about a day whose audio has already gone.
+# log_days = 30
+
 # How often the sweeper runs, how many Calls it deletes per batch (a small
 # batch keeps each write-lock short on a Pi), and how long an audio object with
-# no Call row is left alone before it is reclaimed.
+# no Call row is left alone before it is reclaimed. The same sweep prunes logs.
 # interval_secs = 3600
 # batch_size = 500
 # orphan_grace_secs = 3600
@@ -1285,6 +1332,16 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # single run.
 #   directives = "warn,radio_scout::ingest=trace"
 # directives = "info,sqlx::query=warn,sea_orm_migration=warn"
+
+# What the Settings -> Logs view keeps, for an operator with no shell to read
+# `journalctl` from: "off", "error", "warn" or "info". Independent of the
+# directives above — turning the console up to chase a problem does not change
+# what is stored, and turning it down does not empty the Logs view.
+#
+# There is deliberately no "debug": those are the lines that can carry a
+# listener's IP address, and a public instance must never accumulate a database
+# of who listened and when. The console still has them.
+# database_level = "info"
 "##;
 
 /// Write [`TEMPLATE`] to `path`, refusing to overwrite anything already there.
@@ -1474,6 +1531,9 @@ pub fn resolve(
     )? {
         config.retention.max_size_gb = Some(gb);
     }
+    if let Some(days) = parsed_env(&env, "RADIO_SCOUT_RETENTION_LOG_DAYS", "a number of days")? {
+        config.retention.log_days = days;
+    }
     if let Some(secs) = parsed_env(
         &env,
         "RADIO_SCOUT_RETENTION_INTERVAL_SECS",
@@ -1577,6 +1637,18 @@ pub fn resolve(
         validate_directives("RUST_LOG", &directives)?;
         config.log.directives = directives;
     }
+    // ...whereas the operator log surface's level is ours, so it takes the
+    // prefix every other setting does (#30).
+    if let Some(level) = set_env(&env, "RADIO_SCOUT_LOG_DATABASE_LEVEL") {
+        if LogSinkConfig::level_from_str(&level).is_none() {
+            return Err(ConfigError::invalid_env(
+                "RADIO_SCOUT_LOG_DATABASE_LEVEL",
+                &level,
+                EXPECTED_DATABASE_LEVEL,
+            ));
+        }
+        config.log.database_level = level;
+    }
 
     // The command line, over everything.
     if let Some(port) = cli.port {
@@ -1677,6 +1749,7 @@ mod tests {
     use crate::testing::LogCapture;
     use rstest::rstest;
     use std::time::Duration;
+    use tracing::Level;
 
     /// A config file as an operator would have written it.
     fn file(text: &str) -> ConfigFile {
@@ -2464,6 +2537,88 @@ mod tests {
         assert!(error.to_string().contains(source), "{error}");
     }
 
+    /// The operator log surface's level is its **own** setting (#30) — the one
+    /// an operator turns down to keep a Pi's database small, independent of how
+    /// chatty the console is.
+    #[rstest]
+    #[case(&[], None, Some(Level::INFO))]
+    #[case(&[], Some("[log]\ndatabase_level = \"warn\"\n"), Some(Level::WARN))]
+    #[case(&[], Some("[log]\ndatabase_level = \"error\"\n"), Some(Level::ERROR))]
+    #[case(&[], Some("[log]\ndatabase_level = \"off\"\n"), None)]
+    #[case(&[("RADIO_SCOUT_LOG_DATABASE_LEVEL", "off")], None, None)]
+    // The environment is louder than the file, like every other setting.
+    #[case(&[("RADIO_SCOUT_LOG_DATABASE_LEVEL", "error")], Some("[log]\ndatabase_level = \"info\"\n"), Some(Level::ERROR))]
+    fn the_stored_log_level_comes_from_its_own_setting(
+        #[case] vars: &[(&str, &str)],
+        #[case] text: Option<&str>,
+        #[case] expected: Option<Level>,
+    ) {
+        let file = text.map(file);
+        let config = resolve(&cli(&[]), env(vars), file.as_ref()).expect("resolve");
+
+        assert_eq!(config.log_sink().level, expected);
+    }
+
+    /// **ADR-0011 rule 5 as a boot error.** DEBUG and TRACE are the levels a
+    /// listener's address may ride on, so the sink has no setting that reaches
+    /// them — and an operator who asks is *told*, rather than silently getting
+    /// something else. rdio-scanner would have stored them and logged every
+    /// listener's IP besides.
+    #[rstest]
+    #[case(&[], Some("[log]\ndatabase_level = \"debug\"\n"), "log.database_level")]
+    #[case(&[], Some("[log]\ndatabase_level = \"trace\"\n"), "log.database_level")]
+    #[case(&[], Some("[log]\ndatabase_level = \"verbose\"\n"), "log.database_level")]
+    #[case(&[("RADIO_SCOUT_LOG_DATABASE_LEVEL", "debug")], None, "RADIO_SCOUT_LOG_DATABASE_LEVEL")]
+    fn a_stored_log_level_that_could_carry_a_listener_refuses_to_boot(
+        #[case] vars: &[(&str, &str)],
+        #[case] text: Option<&str>,
+        #[case] source: &str,
+    ) {
+        let file = text.map(file);
+        let error = resolve(&cli(&[]), env(vars), file.as_ref()).expect_err("a refused level");
+
+        let error = error.to_string();
+        assert!(error.contains(source), "{error}");
+        // What it should have been, and enough of why to stop the operator
+        // going looking for a typo.
+        assert!(error.contains("\"warn\""), "{error}");
+        assert!(error.contains("rule 5"), "{error}");
+    }
+
+    /// The refusal names every level that *is* accepted — spelled out as a
+    /// `&'static str`, so nothing but a test keeps it honest as levels change.
+    #[test]
+    fn the_refused_level_names_every_level_that_works() {
+        for (name, _) in LogSinkConfig::LEVELS {
+            assert!(
+                EXPECTED_DATABASE_LEVEL.contains(name),
+                "{name} missing from {EXPECTED_DATABASE_LEVEL:?}"
+            );
+        }
+    }
+
+    /// Stored logs are bounded like the archive is (#30) — their own window,
+    /// because `days = 0` (rdio's "keep Calls forever") must not also mean an
+    /// unbounded logs table on a Pi.
+    #[rstest]
+    #[case(&[], None, 30)]
+    #[case(&[], Some("[retention]\nlog_days = 3\n"), 3)]
+    // 0 is "keep forever", the same reading `days` has.
+    #[case(&[], Some("[retention]\nlog_days = 0\n"), 0)]
+    #[case(&[("RADIO_SCOUT_RETENTION_LOG_DAYS", "5")], Some("[retention]\nlog_days = 3\n"), 5)]
+    fn stored_logs_have_a_retention_window_of_their_own(
+        #[case] vars: &[(&str, &str)],
+        #[case] text: Option<&str>,
+        #[case] expected: u32,
+    ) {
+        let file = text.map(file);
+        let config = resolve(&cli(&[]), env(vars), file.as_ref()).expect("resolve");
+
+        assert_eq!(config.retention().log_days, expected);
+        // ...and it is genuinely separate from the archive's window.
+        assert_eq!(config.retention().days, Retention::default().days);
+    }
+
     /// Who may be believed when they forward (#28's deferred setting). Bare
     /// addresses and CIDR blocks both, because Docker's bridge is a subnet and
     /// naming its one gateway address is guesswork an operator shouldn't have
@@ -2734,12 +2889,14 @@ mod tests {
             dedup in 0i64..10_000,
             auto_populate in proptest::bool::ANY,
             directives in "(info|debug|warn|trace)",
+            log_days in 0u32..4000,
+            database_level in "(off|error|warn|info)",
         ) {
             let config = Config {
                 server: Server { port, ..Default::default() },
-                retention: Retention { days, max_size_gb: gb, ..Default::default() },
+                retention: Retention { days, max_size_gb: gb, log_days, ..Default::default() },
                 ingest: Ingest { dedup_window_ms: dedup, auto_populate },
-                log: Log { directives },
+                log: Log { directives, database_level },
                 ..Default::default()
             };
 

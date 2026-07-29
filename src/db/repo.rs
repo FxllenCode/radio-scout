@@ -24,8 +24,8 @@ use sea_orm::{
 use crate::call::{CallId, FilterOptions, StoredCall, SystemOption, TalkgroupOption};
 use crate::catalog::{Catalog, CatalogSystem, CatalogTalkgroup, display_order};
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, group, push_subscription, system, tag,
-    talkgroup, talkgroup_group, unit,
+    api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
+    system, tag, talkgroup, talkgroup_group, unit,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -1555,10 +1555,162 @@ pub async fn push_subscriptions<C: ConnectionTrait>(
         .await
 }
 
+// ---------------------------------------------------------------------------
+// The operator log surface (#30)
+// ---------------------------------------------------------------------------
+
+/// Store a batch of log events ([`crate::logsink`]).
+///
+/// One statement per batch, **parameterised** — which is the whole difference
+/// from rdio-scanner, whose `log.go` builds its insert with an interpolated
+/// `fmt.Sprintf`, so a log message containing an apostrophe corrupts the row it
+/// was supposed to become. Nothing here escapes anything: the values travel as
+/// bind parameters, so a message is stored as whatever bytes it was.
+pub async fn insert_log_events<C: ConnectionTrait>(
+    db: &C,
+    events: &[NewLogEvent],
+) -> Result<(), DbErr> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    log_event::Entity::insert_many(events.iter().map(|event| log_event::ActiveModel {
+        at_ms: Set(event.at_ms),
+        level: Set(event.level.clone()),
+        target: Set(event.target.clone()),
+        message: Set(event.message.clone()),
+        fields: Set(event.fields.clone()),
+        request_id: Set(event.request_id.clone()),
+        ..Default::default()
+    }))
+    .exec(db)
+    .await?;
+    Ok(())
+}
+
+/// What the Logs view is asking for (#30).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogSearch {
+    /// Only events at or after this instant.
+    pub after_ms: Option<i64>,
+    /// Only events strictly before it.
+    pub before_ms: Option<i64>,
+    /// The stored level names to include — a severity floor, already expanded
+    /// by [`crate::logview`]. `None` is every level.
+    pub levels: Option<Vec<String>>,
+    pub limit: u64,
+    pub offset: u64,
+}
+
+/// One page of stored log events, **newest first** — the order an operator
+/// opens the page wanting.
+pub async fn search_log_events<C: ConnectionTrait>(
+    db: &C,
+    search: &LogSearch,
+) -> Result<Vec<log_event::Model>, DbErr> {
+    filtered_logs(search)
+        // By id as well as time: events written in the same millisecond — a
+        // burst is exactly that — would otherwise page unstably, showing one
+        // twice and another never.
+        .order_by_desc(log_event::Column::AtMs)
+        .order_by_desc(log_event::Column::Id)
+        .limit(search.limit)
+        .offset(search.offset)
+        .all(db)
+        .await
+}
+
+/// How many events match, ignoring the page window.
+pub async fn count_log_events<C: ConnectionTrait>(
+    db: &C,
+    search: &LogSearch,
+) -> Result<u64, DbErr> {
+    filtered_logs(search).count(db).await
+}
+
+/// The filters both of the above share, so a page and its total can never
+/// disagree about what was asked for.
+fn filtered_logs(search: &LogSearch) -> sea_orm::Select<log_event::Entity> {
+    let mut query = log_event::Entity::find();
+    if let Some(after_ms) = search.after_ms {
+        query = query.filter(log_event::Column::AtMs.gte(after_ms));
+    }
+    if let Some(before_ms) = search.before_ms {
+        query = query.filter(log_event::Column::AtMs.lt(before_ms));
+    }
+    if let Some(levels) = &search.levels {
+        query = query.filter(log_event::Column::Level.is_in(levels.iter().map(String::as_str)));
+    }
+    query
+}
+
+/// Delete up to `limit` stored log events older than `cutoff_ms`, returning how
+/// many went — one page of retention's log prune (#30).
+///
+/// Paged for the same reason the archive's prune is: an instance that has been
+/// logging for a month has a lot of rows, and one unbounded `DELETE` holds a
+/// SQLite write lock for all of them. `limit = 0` deletes nothing and reports
+/// nothing, which is what stops a mis-typed `batch_size` from spinning.
+pub async fn delete_logs_older_than<C: ConnectionTrait>(
+    db: &C,
+    cutoff_ms: i64,
+    limit: u64,
+) -> Result<u64, DbErr> {
+    let ids: Vec<i64> = log_event::Entity::find()
+        .select_only()
+        .column(log_event::Column::Id)
+        .filter(log_event::Column::AtMs.lt(cutoff_ms))
+        .order_by_asc(log_event::Column::Id)
+        .limit(limit)
+        .into_tuple::<i64>()
+        .all(db)
+        .await?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    Ok(log_event::Entity::delete_many()
+        .filter(log_event::Column::Id.is_in(ids))
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// One event on its way to the `logs` table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NewLogEvent {
+    pub at_ms: i64,
+    pub level: String,
+    pub target: String,
+    pub message: String,
+    pub fields: Option<String>,
+    pub request_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    /// An empty batch is a no-op, not a statement. [`crate::logsink`]'s writer
+    /// never sends one — it batches at least the event it woke up for — but an
+    /// `INSERT` with no rows is a SQL error rather than an empty result, so
+    /// the guard is the difference between "nothing to do" and a failed sink.
+    #[tokio::test]
+    async fn storing_no_log_events_is_not_a_statement() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
+
+        insert_log_events(&db, &[]).await.expect("an empty batch");
+
+        assert_eq!(
+            log_event::Entity::find()
+                .count(&db)
+                .await
+                .expect("count log events"),
+            0
+        );
+    }
 
     #[rstest]
     // Present in the list (whitespace tolerated).

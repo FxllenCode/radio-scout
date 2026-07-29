@@ -18,6 +18,8 @@ pub mod http_log;
 pub mod import;
 pub mod ingest;
 pub mod live;
+pub mod logsink;
+pub mod logview;
 pub mod observability;
 pub mod push;
 pub mod retention;
@@ -147,6 +149,9 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
     Router::new()
         .route("/api/admin/session", get(admin::session))
         .route("/api/admin/logout", post(admin::logout))
+        // The operator log surface (#30): what the server has been saying, for
+        // an operator who has no shell to read `journalctl` from.
+        .route("/api/admin/logs", get(logview::search))
         .route(
             "/api/admin/talkgroups/import",
             post(import::import_talkgroups),

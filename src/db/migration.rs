@@ -7,8 +7,8 @@ use sea_orm::Schema;
 use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, group, push_subscription, site, system,
-    tag, talkgroup, talkgroup_group, unit,
+    api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
+    site, system, tag, talkgroup, talkgroup_group, unit,
 };
 
 pub struct Migrator;
@@ -23,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0004_system_auto_populate::Migration),
             Box::new(m0005_push_subscriptions::Migration),
             Box::new(m0006_enhancement::Migration),
+            Box::new(m0007_logs::Migration),
         ]
     }
 }
@@ -464,6 +465,60 @@ mod m0006_enhancement {
                         .drop_column(talkgroup::Column::Enhancement)
                         .to_owned(),
                 )
+                .await
+        }
+    }
+}
+
+/// The operator log surface (#30) needs somewhere to keep what the server said.
+/// A new table rather than a column, so the entity-derived-DDL tax m0003 and
+/// m0004 pay does not apply — nothing already exists to diverge from.
+///
+/// Two indexes, because the Logs view only ever asks two questions: the newest
+/// events (optionally within a date range), and the same thing narrowed to a
+/// severity. Both are also what retention's own `DELETE … WHERE at_ms <` walks.
+mod m0007_logs {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0007_logs"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(log_event::Entity))
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_logs_time")
+                        .table(log_event::Entity)
+                        .col(log_event::Column::AtMs)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_logs_level_time")
+                        .table(log_event::Entity)
+                        .col(log_event::Column::Level)
+                        .col(log_event::Column::AtMs)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(log_event::Entity).to_owned())
                 .await
         }
     }

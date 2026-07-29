@@ -35,6 +35,18 @@ describe('SettingsScreen', () => {
     // Synchronous first paint, before the query settles.
     expect(screen.getByText('checking…')).toBeInTheDocument()
   })
+
+  // The way in to the operator log (#30). It is a link rather than a section
+  // here because the log is admin-only, and asking for a password is that
+  // screen's job, not this one's.
+  it('offers the operator log', () => {
+    renderScreen()
+
+    expect(screen.getByRole('link', { name: /logs/i })).toHaveAttribute(
+      'href',
+      '/settings/logs',
+    )
+  })
 })
 
 describe('the notifications switch (#16)', () => {

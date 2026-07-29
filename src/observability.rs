@@ -27,7 +27,10 @@ use std::io::{self, IsTerminal};
 use tracing::Subscriber;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
+
+use crate::logsink::LogSink;
 
 /// The filter used when `RUST_LOG` says nothing: everything at INFO, with
 /// sqlx's per-statement log and sea-orm's migration narration demoted to the
@@ -57,39 +60,60 @@ pub fn directives_are_valid(directives: &str) -> bool {
 }
 
 /// Install the global subscriber, filtered by `directives` (#17 resolves those
-/// from `[log]`, `RUST_LOG` and `--log`).
+/// from `[log]`, `RUST_LOG` and `--log`), with `sink` as a second destination
+/// when the operator log surface is on (#30).
 ///
 /// Returns whether this call is the one that installed it; a second call is a
 /// no-op rather than a panic, so an embedded or test use can't bring the process
 /// down over logging.
-pub fn init(directives: &str) -> bool {
+pub fn init(directives: &str, sink: Option<LogSink>) -> bool {
     // Colour only when a human is actually watching. Every way we ship captures
     // stdout into something that stores it verbatim (journald, Docker, a log
     // file an operator pipes to), where escape sequences are just noise in a
     // pasted excerpt.
     let ansi = io::stdout().is_terminal();
-    subscriber(directives, io::stdout, ansi).try_init().is_ok()
+    subscriber(directives, io::stdout, ansi, sink)
+        .try_init()
+        .is_ok()
 }
 
 /// Build the subscriber `init` installs: `directives` (or
-/// [`DEFAULT_DIRECTIVES`]) over `writer`.
+/// [`DEFAULT_DIRECTIVES`]) over `writer`, plus the database sink if there is
+/// one.
+///
+/// The console's filter is attached to the **console layer**, not to the
+/// subscriber, so the two destinations are filtered independently (#30): `[log]
+/// directives` is what an operator sees on stdout and `[log] database_level` is
+/// what the Logs view holds, and neither can silence the other. A subscriber-
+/// wide filter would make `--log warn` empty the operator log surface as a side
+/// effect.
 ///
 /// Invalid directives fall back to the default rather than refusing to boot.
 /// Configuration validates them first (`config::validate_directives`), so this
 /// is the last resort behind that: a subscriber that failed to build would
 /// leave us with the silence this module replaces.
-fn subscriber<W>(directives: &str, writer: W, ansi: bool) -> impl Subscriber + Send + Sync
+fn subscriber<W>(
+    directives: &str,
+    writer: W,
+    ansi: bool,
+    sink: Option<LogSink>,
+) -> impl Subscriber + Send + Sync
 where
     W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
 {
     let directives = filter_directives(directives);
     let filter =
         EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new(DEFAULT_DIRECTIVES));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(writer)
-        .with_ansi(ansi)
-        .finish()
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(ansi)
+                .with_filter(filter),
+        )
+        // The sink carries its own level (`LogSinkConfig`), so it needs no
+        // filter here — and must not be given the console's.
+        .with(sink)
 }
 
 #[cfg(test)]
@@ -105,7 +129,7 @@ mod tests {
         let capture = CaptureWriter::default();
         {
             let _installed =
-                ScopedSubscriber::install(subscriber(directives, capture.clone(), false));
+                ScopedSubscriber::install(subscriber(directives, capture.clone(), false, None));
             debug!("a-debug-event");
             info!("an-info-event");
             warn!("a-warn-event");
@@ -177,8 +201,12 @@ mod tests {
     fn colour_is_the_caller_s_choice(#[case] ansi: bool) {
         let capture = CaptureWriter::default();
         {
-            let _installed =
-                ScopedSubscriber::install(subscriber(DEFAULT_DIRECTIVES, capture.clone(), ansi));
+            let _installed = ScopedSubscriber::install(subscriber(
+                DEFAULT_DIRECTIVES,
+                capture.clone(),
+                ansi,
+                None,
+            ));
             info!("an-info-event");
         }
         assert_eq!(
@@ -221,6 +249,46 @@ mod tests {
         assert_eq!(directives_are_valid(directives), expected, "{directives:?}");
     }
 
+    /// **The two sinks are filtered independently (#30).** An operator who
+    /// quiets the console — a Pi writing to an SD card — must not thereby quiet
+    /// the Logs view an operator with no shell reads; and one who turns the
+    /// console up to chase a problem must not start recording DEBUG lines in a
+    /// database. Per-layer filters, not one filter over both.
+    #[tokio::test]
+    async fn the_console_filter_and_the_database_level_do_not_govern_each_other() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
+        let (sink, writer) = crate::logsink::channel(crate::logsink::LogSinkConfig::default())
+            .expect("an enabled sink");
+        let draining = writer.spawn(db.clone());
+
+        let capture = CaptureWriter::default();
+        {
+            // The console turned down to WARN, the database left at INFO.
+            let _installed =
+                ScopedSubscriber::install(subscriber("warn", capture.clone(), false, Some(sink)));
+            info!("an-info-event");
+            warn!("a-warn-event");
+        }
+        draining.await.expect("the writer drains");
+
+        let console = capture.text();
+        assert!(!console.contains("an-info-event"), "{console}");
+        assert!(console.contains("a-warn-event"), "{console}");
+
+        use sea_orm::EntityTrait;
+        let stored: Vec<String> = crate::db::entities::log_event::Entity::find()
+            .all(&db)
+            .await
+            .expect("read stored events")
+            .into_iter()
+            .map(|event| event.message)
+            .collect();
+        assert_eq!(stored, ["an-info-event", "a-warn-event"]);
+    }
+
     /// Installing must never panic and must never displace a subscriber that is
     /// already there: the binary calls this once, but a test binary or an
     /// embedded use may not, and logging is never worth a crash.
@@ -230,11 +298,11 @@ mod tests {
         // exactly the situation being asserted about.
         crate::testing::ask_every_time();
         assert!(
-            !init(DEFAULT_DIRECTIVES),
+            !init(DEFAULT_DIRECTIVES, None),
             "init must not replace an installed subscriber"
         );
         assert!(
-            !init(DEFAULT_DIRECTIVES),
+            !init(DEFAULT_DIRECTIVES, None),
             "...however many times it is called"
         );
     }
