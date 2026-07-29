@@ -709,6 +709,11 @@ fn parse_groups(single: Option<String>, multiple: Option<String>) -> Vec<String>
 }
 
 /// Parse the `patches` / `patched_talkgroups` array (numbers or numeric strings).
+///
+/// Every entry, verbatim — which of them are Talkgroup Refs is not decidable
+/// here. SDRTrunk appends a patch group's radio IDs behind its talkgroups in the
+/// same array with nothing marking the boundary, so membership is settled
+/// against the System's Talkgroups in [`repo::insert_call`] (#81).
 fn parse_patches(raw: Option<&str>) -> Vec<i64> {
     let Some(raw) = raw else { return Vec::new() };
     let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {

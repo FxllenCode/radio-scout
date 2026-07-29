@@ -47,6 +47,7 @@ A physical tower/receiver site within a system that a call was heard on.
 
 **Patch**:
 A temporary, console-made union of talkgroups whose traffic reaches any listener subscribed to a member. A property calls carry, not an entity of its own — patches churn (some systems mint a fresh TGID per patch event), so Radio-Scout deduplicates and routes patched traffic rather than modelling patches as subscribable things.
+**A patch's members are Talkgroups, only ever Talkgroups.** A console can patch individual radios into the union too, and SDRTrunk appends those radio IDs behind the talkgroups in the same flat `patches` array with nothing marking the boundary — so a ref is a member only when its System has a Talkgroup for it, and one it doesn't recognize is dropped rather than guessed at (#81, rdio-scanner's own rule).
 _Avoid_: supergroup, simulselect, regroup (each is one vendor's word).
 
 ### Identity

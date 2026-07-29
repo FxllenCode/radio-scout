@@ -175,6 +175,14 @@ async fn resolve_or_create_is_idempotent_and_scoped() {
 async fn insert_call_persists_call_with_children() {
     let (db, _dir) = sqlite().await;
 
+    // A patch ref is stored only when its System has a Talkgroup for it (#81),
+    // so the patched Talkgroups have to be ones this System already knows.
+    let sys = repo::resolve_or_create_system(&db, 11, Some("Alpha".into()), NOW)
+        .await
+        .unwrap();
+    seed_talkgroup(&db, sys.id, 200).await;
+    seed_talkgroup(&db, sys.id, 300).await;
+
     let new = repo::NewCall {
         system_ref: 11,
         system_label: Some("Alpha".into()),
@@ -1251,6 +1259,12 @@ async fn assert_batched_call_view(db: &DatabaseConnection) {
 async fn stored_calls_attaches_patches_to_the_right_call() {
     let (db, _dir) = sqlite().await;
     let plain = seed_call(&db, 100, "Alpha", 1, "Fire", &["Emergency"], 1000, "a").await;
+    // Patch members must be Talkgroups the System knows (#81).
+    let sys = repo::resolve_or_create_system(&db, 100, None, NOW)
+        .await
+        .unwrap();
+    seed_talkgroup(&db, sys.id, 9001).await;
+    seed_talkgroup(&db, sys.id, 9002).await;
     let patched = repo::insert_call(
         &db,
         &repo::NewCall {

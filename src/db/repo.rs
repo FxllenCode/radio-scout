@@ -255,10 +255,39 @@ pub async fn insert_call<C: ConnectionTrait>(
     .insert(db)
     .await?;
 
-    for patch in &new.patches {
+    // Patch members (#81). A patch ref is kept only when this System has a
+    // Talkgroup for it. SDRTrunk builds one unseparated array as
+    // `[<patchgroup>, <talkgroup>…, <radio>…]` — the patched *radio IDs* ride
+    // behind the talkgroups with nothing marking the boundary
+    // (`RdioScannerBroadcaster.java:546-574`) — and sends it under the same
+    // field name Trunk Recorder's uploader uses, so the wire cannot say which
+    // entries are Talkgroup Refs. Resolving against what the System knows is
+    // what rdio-scanner does (`call.go:572-582`, `if !talkgroupId.Valid`), and
+    // it is the only answer that never records a radio as a Talkgroup or fans a
+    // Call out to a listener subscribed to that number. An unrecognised ref is
+    // skipped rather than ending the list: order is SDRTrunk's alone, and Trunk
+    // Recorder's `patched_talkgroups` carries no radios to cut at.
+    //
+    // One query for the whole array rather than one per ref: this runs inside
+    // the transaction that already holds the audio write (ADR-0001), and on a
+    // Postgres backend every extra statement is a round-trip a Pi pays for.
+    let members = patch_members(db, sys.id, &new.patches).await?;
+    if members.len() < new.patches.len() {
+        // Expected on every SDRTrunk patch — the radio tail is always dropped —
+        // so DEBUG, not the WARN of rule 7: this is protocol detail, not
+        // something an operator must act on. It is per-Call, which rule 8
+        // allows, and it is what answers "why is my patch not fanning out?".
+        tracing::debug!(
+            dropped = new.patches.len() - members.len(),
+            kept = members.len(),
+            %new.system_ref,
+            "patch refs with no Talkgroup on this System dropped"
+        );
+    }
+    for patch in members {
         call_patch::ActiveModel {
             call_id: Set(stored.id),
-            talkgroup_ref: Set(*patch),
+            talkgroup_ref: Set(patch),
             ..Default::default()
         }
         .insert(db)
@@ -303,6 +332,40 @@ pub async fn insert_call<C: ConnectionTrait>(
     }
 
     Ok(stored)
+}
+
+/// Which of `refs` are Talkgroups this System has — the patch members (#81), in
+/// the order the recorder sent them, duplicates and all.
+///
+/// The rest are dropped. A recorder's `patches` array is not a list of Talkgroup
+/// Refs and cannot be read as one: SDRTrunk appends the patch group's radio IDs
+/// behind its talkgroups in the same flat array, under the same field name Trunk
+/// Recorder's uploader uses, with nothing between them
+/// (`RdioScannerBroadcaster.java:546-574`). What the System knows is the only
+/// discriminator there is, and it is the one rdio-scanner uses
+/// (`call.go:572-582`).
+///
+/// One statement for the whole array — the empty case, which is almost every
+/// Call, costs none at all.
+async fn patch_members<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    refs: &[i64],
+) -> Result<Vec<i64>, DbErr> {
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let known: std::collections::HashSet<i64> = talkgroup::Entity::find()
+        .filter(talkgroup::Column::SystemId.eq(system_id))
+        .filter(talkgroup::Column::Ref.is_in(refs.iter().copied()))
+        .select_only()
+        .column(talkgroup::Column::Ref)
+        .into_tuple::<i64>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(refs.iter().copied().filter(|r| known.contains(r)).collect())
 }
 
 /// Find a Talkgroup by (System, Ref). A Ref is unique only within its System.

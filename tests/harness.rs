@@ -193,6 +193,9 @@ async fn upload_tr_drives_the_trunk_recorder_native_endpoint() {
 #[tokio::test]
 async fn count_reads_any_entity() {
     let app = TestApp::with_key("k").await;
+    // Patch rows exist only for Talkgroups the System knows (#81).
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 200).await;
 
     app.upload_ok(CallUpload::new().set("patches", "[100, 200]"))
         .await;
@@ -285,6 +288,34 @@ async fn a_system_can_be_seeded_with_its_ingest_policy() {
         app.count::<call::Entity>().await,
         1,
         "the blacklisted talkgroup was dropped, the other was not"
+    );
+}
+
+/// A Talkgroup can be seeded so a test can say what a System already knows —
+/// which is what decides patch membership (#81) — without minting a Call to
+/// teach it, and `patch_refs` reads back the members that survived.
+///
+/// Seeding is deliberately invisible to the Call under test: the System it
+/// creates carries the same label ingest would have defaulted to, so an upload
+/// that arrives afterwards behaves exactly as it would have without the seed.
+#[tokio::test]
+async fn a_talkgroup_can_be_seeded_and_its_patch_members_read_back() {
+    let app = TestApp::with_key("k").await;
+    app.seed_talkgroup(11, 300).await;
+
+    app.upload_ok(CallUpload::new().set("patches", "[300, 1610092]"))
+        .await;
+
+    let call = app.the_call().await;
+    assert_eq!(
+        app.patch_refs(call.id).await,
+        vec![300],
+        "the seeded Talkgroup is a member; the unknown Ref is not"
+    );
+    assert_eq!(
+        app.system_of(&call).await.label.as_deref(),
+        Some("System 11"),
+        "seeding left the System exactly as the upload would have created it"
     );
 }
 

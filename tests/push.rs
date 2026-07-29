@@ -205,6 +205,8 @@ async fn a_patched_call_notifies_through_the_watched_talkgroup() {
     )
     .await;
 
+    // 300 is a Talkgroup the System knows, so the patch names a real member (#81).
+    app.seed_talkgroup(11, 300).await;
     app.upload_ok(CallUpload::new().talkgroup(100).set("patches", "[300]"))
         .await;
 

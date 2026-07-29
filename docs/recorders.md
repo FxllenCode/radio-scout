@@ -148,6 +148,16 @@ base URL.
 the recorder sent a Talkgroup it had no name for. Import a talkgroup CSV to fix the names in
 one shot — see [operating.md](operating.md#tidying-up-talkgroup-names).
 
+**A patched call doesn't reach everyone you expected.** A patch reaches listeners through its
+member Talkgroups, and Radio-Scout counts a member only when the System already has that
+Talkgroup. It has to: SDRTrunk lists the radios patched into a group in the same field as the
+talkgroups, with nothing separating them, so a number it has never seen could be either — and
+guessing wrong would push audio to whoever selected that channel. Two things follow. Radios
+patched into a group are ignored, which is what you want. And a Talkgroup that has never
+carried a call of its own is not yet known, so it is skipped on the first patch and included
+from then on. Importing a talkgroup CSV up front makes every member known immediately — see
+[operating.md](operating.md#tidying-up-talkgroup-names).
+
 ## A note on the Trunk-Recorder-native endpoint
 
 Radio-Scout also serves `POST /api/trunk-recorder-call-upload`, which takes Trunk Recorder's

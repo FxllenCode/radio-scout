@@ -196,12 +196,78 @@ async fn golden_sdrtrunk_upload() {
     assert_eq!(app.count::<call_patch::Entity>().await, 0);
 }
 
+/// SDRTrunk broadcasting a Call on a **patch group** (#81).
+///
+/// `getPatches()` (`RdioScannerBroadcaster.java:546-574`) concatenates the patch
+/// group, then every patched Talkgroup, then every patched **radio**, into one
+/// flat array with no separator and no type marker — and sends it under the same
+/// `patches` field name Trunk Recorder's uploader uses. Nothing on the wire says
+/// where the talkgroups stop, so the split is recovered the way rdio-scanner
+/// recovers it (`call.go:572-582`): a ref is a patch member only if the System
+/// has a Talkgroup for it. The radios trailing behind are dropped — never stored
+/// as Talkgroup Refs, and never fanned out to a listener who selected that
+/// number.
+#[tokio::test]
+async fn golden_sdrtrunk_patched_upload_drops_the_trailing_radio_ids() {
+    let app = TestApp::spawn().await;
+    app.create_api_key_for_system("sdrtrunk-key", 11).await;
+    // What the System knows: 54241 and 54242 are channels it has heard. 54000 is
+    // the patch group itself — this Call's own Talkgroup, which auto-populate
+    // creates on the way past. 1610051 and 1610092 are radios and stay unknown.
+    // The System is created here rather than by the upload, so it is created
+    // with the `systemLabel` the fixture sends.
+    repo::resolve_or_create_system(&app.db, 11, Some("metropd".into()), 0)
+        .await
+        .expect("seed the fixture's system");
+    app.seed_talkgroup(11, 54241).await;
+    app.seed_talkgroup(11, 54242).await;
+
+    let (status, body) = post_raw(
+        &app,
+        "/api/call-upload",
+        "multipart/form-data; boundary=--sdrtrunk-sdrtrunk-sdrtrunk",
+        "sdrtrunk",
+        fixture("sdrtrunk-call-upload-patched.multipart"),
+    )
+    .await;
+
+    // The wire contract is untouched by the classification.
+    assert_eq!(status, 200, "{body:?}");
+    assert_eq!(body, "Call imported successfully.\n");
+
+    let call = app.the_call().await;
+    assert_eq!(
+        app.talkgroup_of(&call).await.r#ref,
+        54000,
+        "the Call rides on the patch group"
+    );
+    assert_eq!(
+        app.system_of(&call).await.label.as_deref(),
+        Some("metropd"),
+        "seeding the System did not displace the fixture's systemLabel"
+    );
+    assert_eq!(
+        app.patch_refs(call.id).await,
+        vec![54000, 54241, 54242],
+        "the patch group and its Talkgroups; 1610051 and 1610092 are radios"
+    );
+}
+
 // ---- Trunk Recorder native (.wav + .json meta) -> trunk-recorder-call-upload
 
 #[tokio::test]
 async fn golden_trunk_recorder_native_meta_upload() {
     // Native TR has no numeric system id (short_name only) -> global key.
     let app = TestApp::with_key("tr-native-key").await;
+    // The meta's `patched_talkgroups` are `[54155, 54156]`, and a patch ref is
+    // stored only for a Talkgroup its System has (#81). 54155 is this Call's own
+    // Talkgroup, which auto-populate creates on the way past — so only 54156 has
+    // to be seeded. Native TR has no numeric System Ref, so the upload finds its
+    // System by matching `short_name` against the label; seed that System first.
+    repo::resolve_or_create_system(&app.db, 1, Some("butco".into()), 0)
+        .await
+        .expect("seed the short_name's system");
+    app.seed_talkgroup(1, 54156).await;
 
     let (status, body) = post_raw(
         &app,

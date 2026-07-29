@@ -76,6 +76,9 @@ async fn duplicate_calls_within_the_window_are_rejected() {
 #[tokio::test]
 async fn ingest_persists_the_full_field_set() {
     let app = TestApp::with_key("k").await;
+    // Patch refs persist only for Talkgroups the System knows (#81).
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 200).await;
 
     app.upload_ok(
         CallUpload::new()
@@ -114,6 +117,13 @@ async fn ingest_records_the_audio_byte_size() {
 #[tokio::test]
 async fn trunk_recorder_upload_persists_call_and_maps_meta() {
     let app = TestApp::with_key("k").await;
+    // Native TR finds its System by matching `short_name` against the label, so
+    // the patched Talkgroups (#81) are seeded under that System.
+    repo::resolve_or_create_system(&app.db, 1, Some("butco".into()), 0)
+        .await
+        .expect("seed the short_name's system");
+    app.seed_talkgroup(1, 100).await;
+    app.seed_talkgroup(1, 200).await;
 
     let meta = r#"{
       "short_name":"butco","talkgroup":54241,
@@ -327,12 +337,109 @@ async fn trunk_recorder_without_meta_is_incomplete() {
     );
 }
 
+/// A patch ref the System has no Talkgroup for is dropped, never stored (#81).
+///
+/// SDRTrunk builds one unseparated `patches` array as
+/// `[<patchgroup>, <talkgroup>…, <radio>…]` — the patched **radio IDs** ride
+/// behind the talkgroups with no marker between them
+/// (`RdioScannerBroadcaster.java:546-574`), and it sends them under the same
+/// field name Trunk Recorder's uploader uses, so neither the field nor the
+/// values can say where the talkgroups end. rdio-scanner resolves every patch
+/// ref against that System's Talkgroups and skips what does not resolve
+/// (`call.go:572-582`); we do the same, so a radio ID is never recorded as a
+/// Talkgroup Ref and never routes a Call to a listener subscribed to that
+/// number.
+#[tokio::test]
+async fn patch_refs_the_system_has_no_talkgroup_for_are_dropped() {
+    let app = TestApp::with_key("k").await;
+    // The System knows 54241 (this Call's own talkgroup, auto-populated on
+    // insert) and 54242; 1610051 and 1610092 are radios it has never rostered.
+    app.seed_talkgroup(11, 54242).await;
+
+    app.upload_ok(CallUpload::new().set("patches", "[54241, 54242, 1610051, 1610092]"))
+        .await;
+
+    let call = app.the_call().await;
+    assert_eq!(
+        app.patch_refs(call.id).await,
+        vec![54241, 54242],
+        "the radio IDs trailing the talkgroups are not patch members"
+    );
+}
+
+/// The honest cost of resolving membership against what the System knows: a
+/// patched Talkgroup that has never carried a Call of its own is not yet a
+/// Talkgroup, so it is dropped too — rdio-scanner drops it for the same reason
+/// (`call.go:572-582`). Auto-populate closes the gap the first time that
+/// Talkgroup is heard on its own.
+#[tokio::test]
+async fn a_patched_talkgroup_the_system_has_never_heard_is_dropped_until_it_is() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(CallUpload::new().set("patches", "[54242]"))
+        .await;
+    assert!(
+        app.patch_refs(app.the_call().await.id).await.is_empty(),
+        "an unheard Talkgroup is indistinguishable from a radio id"
+    );
+
+    // 54242 carries its own Call, so the System now has a Talkgroup for it...
+    app.upload_ok(CallUpload::new().talkgroup(54242).at(2000))
+        .await;
+    // ...and the next patched Call keeps it.
+    app.upload_ok(CallUpload::new().at(3000).set("patches", "[54242]"))
+        .await;
+
+    let latest = app.calls().await.pop().expect("the third Call");
+    assert_eq!(app.patch_refs(latest.id).await, vec![54242]);
+}
+
+/// Membership resolution is one rule for every dialect, and this pins it on
+/// Trunk Recorder's side (#81).
+///
+/// TR's `patched_talkgroups` really are all talkgroups, so it would be possible
+/// to trust that list and only classify SDRTrunk's. We deliberately do not:
+/// TR's own uploader puts the array in a field literally named `patches`
+/// (`rdioscanner_uploader.cc:364`), so on the generic endpoint the two
+/// recorders are indistinguishable, and rdio-scanner does not branch by
+/// recorder either (`call.go:572-582`). One rule is the only one that can be
+/// applied consistently — and the cost lands only on a patched Talkgroup the
+/// instance has never heard, which auto-populate then fixes for good.
+#[tokio::test]
+async fn the_trunk_recorder_patched_talkgroups_path_follows_the_same_rule() {
+    let app = TestApp::with_key("k").await;
+    repo::resolve_or_create_system(&app.db, 1, Some("butco".into()), 0)
+        .await
+        .expect("seed the short_name's system");
+    app.seed_talkgroup(1, 100).await;
+
+    let (status, body) = app
+        .upload_tr(CallUpload::tr(
+            r#"{"short_name":"butco","talkgroup":54241,"start_time":1669740338,
+                "patched_talkgroups":[100,200]}"#,
+        ))
+        .await;
+
+    assert_eq!(status, 200, "{body:?}");
+    assert_eq!(
+        body, "Call imported successfully.\n",
+        "the wire contract is untouched"
+    );
+    assert_eq!(
+        app.patch_refs(app.the_call().await.id).await,
+        vec![100],
+        "100 is a Talkgroup this System has; 200 is not, on this dialect too"
+    );
+}
+
 /// The rdio-compatible field aliases are honored: `patched_talkgroups` (== the
 /// `patches` array) and `audioType`/`audioName` (the MIME + filename carried as
 /// form fields rather than on the audio part).
 #[tokio::test]
 async fn field_aliases_are_accepted() {
     let app = TestApp::with_key("k").await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 200).await;
 
     // Audio part carries neither filename nor MIME; the fields supply both.
     // Order matches real recorders (Trunk Recorder): the audio part comes first,

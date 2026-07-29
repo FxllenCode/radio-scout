@@ -82,7 +82,7 @@ use std::time::Duration;
 
 use radio_scout::admin::{AdminAuth, AdminConfig, CSRF_HEADER};
 use radio_scout::config::TrustedProxies;
-use radio_scout::db::entities::{call, system, tag, talkgroup};
+use radio_scout::db::entities::{call, call_patch, system, tag, talkgroup};
 use radio_scout::db::repo::{self, NewCall, NewLogEvent};
 use radio_scout::db::{self};
 use radio_scout::enhance::{EnhancementConfig, Enhancer};
@@ -91,8 +91,8 @@ use radio_scout::push::{Push, PushConfig};
 use radio_scout::webpush::VapidKey;
 use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
 use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryOrder,
-    Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
 
 /// A running Radio-Scout, and everything needed to observe it.
@@ -593,6 +593,56 @@ impl TestApp {
         .insert(&self.db)
         .await
         .expect("seed system");
+    }
+
+    /// Insert a Talkgroup row under a System, so a test can say "this System
+    /// already knows this Ref" without minting a Call to teach it.
+    ///
+    /// Patch membership is the case that needs this (#81): a patch ref is kept
+    /// only when the System has a Talkgroup for it, so a test about patches has
+    /// to establish what the System knows *before* the patched Call arrives —
+    /// and teaching it with an extra upload would leave an extra Call in every
+    /// row assertion.
+    ///
+    /// The System is created if absent, carrying the same `System <ref>` label
+    /// ingest itself would default to — seeding must not change what the Call
+    /// under test would otherwise have produced. A label is only applied on
+    /// create, so a test whose recorder *names* its System (`systemLabel`, or
+    /// native Trunk Recorder's `short_name`) has to create that System with its
+    /// label first, and this will then find it.
+    pub async fn seed_talkgroup(&self, system_ref: i64, talkgroup_ref: i64) {
+        let system = repo::resolve_or_create_system(
+            &self.db,
+            system_ref,
+            Some(format!("System {system_ref}")),
+            0,
+        )
+        .await
+        .expect("seed talkgroup's system");
+        talkgroup::ActiveModel {
+            system_id: Set(system.id),
+            r#ref: Set(talkgroup_ref),
+            created_at_ms: Set(0),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await
+        .expect("seed talkgroup");
+    }
+
+    /// The Talkgroup Refs a Call is patched to, ascending — the `call_patches`
+    /// rows that survived membership resolution (#81).
+    pub async fn patch_refs(&self, call_id: i64) -> Vec<i64> {
+        let mut refs: Vec<i64> = call_patch::Entity::find()
+            .filter(call_patch::Column::CallId.eq(call_id))
+            .all(&self.db)
+            .await
+            .expect("read call patches")
+            .into_iter()
+            .map(|patch| patch.talkgroup_ref)
+            .collect();
+        refs.sort_unstable();
+        refs
     }
 
     /// Take a table out from under the running app, the way a half-applied

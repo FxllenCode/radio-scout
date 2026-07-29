@@ -320,6 +320,9 @@ async fn fresh_subscription_without_cursor_does_not_replay() {
 #[tokio::test]
 async fn patched_call_reaches_a_subscriber_of_the_patched_talkgroup() {
     let app = feed_app().await;
+    // A patch names a Talkgroup only if the System has one (#81) — a listener
+    // can select 300 precisely because it is a channel this System knows.
+    app.seed_talkgroup(11, 300).await;
     let mut ws = app.connect_ws().await;
 
     // Subscribed to 300 only — NOT the call's own talkgroup 100.
@@ -330,4 +333,31 @@ async fn patched_call_reaches_a_subscriber_of_the_patched_talkgroup() {
     let call = received(&mut ws).await.expect("patched call delivered");
     assert_eq!(call["call"]["talkgroupRef"], 100);
     assert_eq!(call["call"]["patches"], serde_json::json!([300]));
+}
+
+/// The other half of patch fanout (#81): a number that is *not* a Talkgroup on
+/// this System never reaches the listener who selected it.
+///
+/// SDRTrunk appends a patch group's radio IDs after its talkgroups in the same
+/// `patches` array with nothing between them
+/// (`RdioScannerBroadcaster.java:546-574`). Treating those trailing entries as
+/// Talkgroup Refs pushed the Call to anyone subscribed to a *radio* id that
+/// collided with a channel number they had selected — audio arriving on a
+/// talkgroup that never carried it.
+#[tokio::test]
+async fn a_radio_id_trailing_the_patched_talkgroups_does_not_fan_out() {
+    let app = feed_app().await;
+    // 300 is a Talkgroup; 1610092 is a radio, and this System has no Talkgroup
+    // for it — which is the only thing that tells the two apart on the wire.
+    app.seed_talkgroup(11, 300).await;
+    let mut ws = app.connect_ws().await;
+
+    subscribe(&mut ws, r#"{"t":"sub","sel":{"11":{"1610092":true}}}"#).await;
+
+    post_call_with_patches(&app, 11, 100, "[300, 1610092]").await;
+
+    assert!(
+        received(&mut ws).await.is_none(),
+        "a trailing radio id is not a patch member, so it fans out to nobody"
+    );
 }

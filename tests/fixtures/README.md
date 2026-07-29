@@ -41,6 +41,19 @@ do too), `talkgroupLabel`, `talkgroupGroup`, `systemLabel`, `patches`, `audio`
 `Content-Type` on any part**; the audio part writes `filename` **before** `name`
 (`RdioScannerBuilder.java:122-124`); MP3 audio. `User-Agent: sdrtrunk`.
 
+## `sdrtrunk-call-upload-patched.multipart` → `POST /api/call-upload`
+
+The same SDRTrunk body, broadcasting a call on a **patch group** (#81). Source:
+`RdioScannerBroadcaster.java:546-574` (`getPatches()`), which builds one flat
+array — `"[" + patchGroup + ("," + patchedTalkgroup)* + ("," + patchedRadio)* +
+"]"` — with **no separator and no type marker** between the talkgroups and the
+radios, under the same `patches` field name Trunk Recorder's uploader uses. The
+fixture carries patch group `54000` (also the `talkgroup`), patched talkgroups
+`54241`/`54242`, then patched radios `1610051`/`1610092`. Nothing on the wire
+says where the talkgroups stop, so the split is recovered as rdio-scanner
+recovers it (`call.go:572-582`): a ref is a patch member only if the System has
+a Talkgroup for it.
+
 ## `trunk-recorder-native-meta.multipart` → `POST /api/trunk-recorder-call-upload`
 
 Trunk Recorder's native `.wav`+`.json` upload: metadata rides as one JSON `meta`

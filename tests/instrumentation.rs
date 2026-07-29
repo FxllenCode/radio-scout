@@ -341,6 +341,58 @@ async fn one_upload_is_one_span_carrying_system_talkgroup_and_call_id() {
     assert!(!rejected.contains("call_id"), "no row, no id: {rejected}");
 }
 
+/// Dropping a patch ref leaves a line saying how many went (#81), so "why isn't
+/// my patch fanning out?" is answerable from the log rather than by reading the
+/// `call_patches` table.
+///
+/// It is DEBUG, not the WARN rule 7 gives a drop: every SDRTrunk patch upload
+/// drops its trailing radio ids, so this is protocol detail on the normal path,
+/// and a WARN on every patched Call would be crying wolf. One aggregated line
+/// per Call, never one per ref (rule 8).
+#[tokio::test]
+async fn dropped_patch_refs_leave_one_line_saying_how_many() {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+    app.seed_talkgroup(11, 300).await;
+
+    // Two of the four refs are Talkgroups this System has: 54241 (the Call's
+    // own, auto-populated on the way past) and the seeded 300.
+    assert_eq!(
+        app.upload(
+            form(RECORDER_KEY, 11, 54241, 1000).set("patches", "[54241,300,1610051,1610092]")
+        )
+        .await
+        .0,
+        200
+    );
+
+    let line = capture.only_line_containing("patch refs with no Talkgroup");
+    assert!(line.contains(" DEBUG "), "{line}");
+    assert!(line.contains("dropped=2"), "{line}");
+    assert!(line.contains("kept=2"), "{line}");
+    assert!(line.contains("system_ref=11"), "{line}");
+}
+
+/// The other side of it: a Call whose patch refs all resolve says nothing at
+/// all. A line on every patched Call would drown the one that means something.
+#[tokio::test]
+async fn a_patch_that_loses_nothing_logs_nothing() {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+    app.seed_talkgroup(11, 300).await;
+
+    assert_eq!(
+        app.upload(form(RECORDER_KEY, 11, 54241, 1000).set("patches", "[300]"))
+            .await
+            .0,
+        200
+    );
+    // ...and neither does a Call with no patches at all.
+    assert_eq!(app.upload(form(RECORDER_KEY, 11, 54241, 9000)).await.0, 200);
+
+    capture.assert_never_logged("patch refs with no Talkgroup");
+}
+
 /// A body too malformed to yield a System and a Talkgroup is rejected before the
 /// upload has an identity, so its line carries the request id and nothing else —
 /// which is the whole of what is known about it. Naming that here keeps it a

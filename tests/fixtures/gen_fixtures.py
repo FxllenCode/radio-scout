@@ -94,7 +94,11 @@ def tr_generic() -> tuple[bytes, str]:
     return body, ct
 
 
-def sdrtrunk() -> tuple[bytes, str]:
+def sdrtrunk(
+    talkgroup: str = "54241",
+    patches: str = "[]",
+    date_time: str = "1763216122",
+) -> tuple[bytes, str]:
     """SDRTrunk RdioScannerBuilder -> POST /api/call-upload.
 
     Header boundary is the 2-dash '--sdrtrunk-sdrtrunk-sdrtrunk'; body delimiters
@@ -107,15 +111,15 @@ def sdrtrunk() -> tuple[bytes, str]:
     parts = []
     parts.append(text_part(boundary, "key", "sdrtrunk-key"))
     parts.append(text_part(boundary, "system", "11"))
-    parts.append(text_part(boundary, "dateTime", "1763216122"))
-    parts.append(text_part(boundary, "talkgroup", "54241"))
+    parts.append(text_part(boundary, "dateTime", date_time))
+    parts.append(text_part(boundary, "talkgroup", talkgroup))
     parts.append(text_part(boundary, "source", "1610092"))
     parts.append(text_part(boundary, "frequency", "851000000"))
     parts.append(text_part(boundary, "talkerAlias", ""))
     parts.append(text_part(boundary, "talkgroupLabel", "PD Disp"))
     parts.append(text_part(boundary, "talkgroupGroup", "Law Dispatch"))
     parts.append(text_part(boundary, "systemLabel", "metropd"))
-    parts.append(text_part(boundary, "patches", "[]"))
+    parts.append(text_part(boundary, "patches", patches))
     # audio (file) last: filename before name, no Content-Type
     parts.append(
         b"--" + boundary + CRLF
@@ -126,6 +130,28 @@ def sdrtrunk() -> tuple[bytes, str]:
     body = b"".join(parts) + b"--" + boundary + b"--" + CRLF
     ct = "multipart/form-data; boundary=" + boundary.decode()
     return body, ct
+
+
+def sdrtrunk_patched() -> tuple[bytes, str]:
+    """SDRTrunk broadcasting a call on a PATCH GROUP -> POST /api/call-upload.
+
+    Same 12 parts as sdrtrunk(), but `talkgroup` is the patch group's own value
+    and `patches` carries what getPatches() builds for a PatchGroupIdentifier
+    (RdioScannerBroadcaster.java:546-574):
+
+        "[" + patchGroup + ("," + eachPatchedTalkgroup)* + ("," + eachPatchedRadio)* + "]"
+
+    One flat array, no separator and no type marker between the talkgroups and
+    the radios — so the wire itself cannot say where one ends and the other
+    begins. Here: patch group 54000, patched talkgroups 54241 and 54242, then
+    patched radios 1610051 and 1610092 (24-bit APCO25 radio ids, which is what
+    PatchGroup.getPatchedRadioIdentifiers() holds).
+    """
+    return sdrtrunk(
+        talkgroup="54000",
+        patches="[54000,54241,54242,1610051,1610092]",
+        date_time="1763216200",
+    )
 
 
 def tr_native() -> tuple[bytes, str]:
@@ -175,6 +201,7 @@ def main():
     for name, (body, ct) in {
         "trunk-recorder-call-upload.multipart": tr_generic(),
         "sdrtrunk-call-upload.multipart": sdrtrunk(),
+        "sdrtrunk-call-upload-patched.multipart": sdrtrunk_patched(),
         "trunk-recorder-native-meta.multipart": tr_native(),
     }.items():
         path = os.path.join(OUT, name)
