@@ -194,4 +194,83 @@ async fn the_presigned_redirect_is_followable_to_the_real_audio() {
         ranged.bytes().await.unwrap(),
         Bytes::from_static(b"0123456789")
     );
+
+    // ...and the *reused* signature is one the store still accepts (#31). This
+    // is what makes prefetch worth anything here: the second request hands back
+    // the URL the first one minted — byte-identical, so the client's cache hits
+    // — and a store has to honour it, which nothing offline can prove. A cache
+    // that quietly served a signature the store rejects would look exactly like
+    // this until something fetched it.
+    // A second apart: SigV4 stamps `X-Amz-Date` to the second, so signing twice
+    // inside one second would match whether or not anything was cached.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let again = app
+        .get_without_redirects(&format!("/api/call/{id}/audio"))
+        .await;
+    assert_eq!(
+        header_of(&again, "location"),
+        Some(location.as_str()),
+        "the same signature, so the element's request is a cache hit"
+    );
+    let reused = app
+        .client()
+        .get(&location)
+        .send()
+        .await
+        .expect("follow the reused presigned URL");
+    assert_eq!(
+        reused.status(),
+        200,
+        "the store honoured the reused signature"
+    );
+    assert_eq!(
+        header_of(&reused, "cache-control"),
+        Some("private, max-age=604800, immutable"),
+        "the store's own response carries the caching promise"
+    );
+    assert_eq!(reused.bytes().await.unwrap(), audio);
+}
+
+/// The other half of making prefetch pay off on S3 (#31): the **object** carries
+/// the caching promise, not just the redirect to it.
+///
+/// A stable signed URL is necessary and not sufficient. With a presigned
+/// redirect the store answers the client directly, so the `Cache-Control`
+/// `serve_audio` puts on its own responses is never seen — and a browser given
+/// no freshness information falls back to a heuristic, which for an object
+/// written moments ago is zero. The element would then revalidate every
+/// prefetched Call rather than playing it from cache, and all the stable URL
+/// would have bought is a 304 instead of silence.
+///
+/// Only a real store can show this: the attribute is set on the way in and read
+/// back off the store's own response, and neither end of that exists offline.
+#[tokio::test]
+async fn a_stored_object_carries_the_cache_control_a_prefetch_needs() {
+    let Some(store) = common::s3::test_bucket().await else {
+        return;
+    };
+    let app = TestApp::builder().store(store).spawn().await;
+    app.create_api_key("k").await;
+    app.upload_ok(CallUpload::new().audio_named(b"RIFF....WAVE", "a.wav", "audio/x-wav"))
+        .await;
+    let call = app.the_call().await;
+
+    let redirect = app
+        .get_without_redirects(&format!("/api/call/{}/audio", call.id))
+        .await;
+    let location = header_of(&redirect, "location").expect("a Location header");
+
+    let direct = app
+        .client()
+        .get(location)
+        .send()
+        .await
+        .expect("follow the presigned URL");
+
+    assert_eq!(direct.status(), 200);
+    assert_eq!(
+        header_of(&direct, "cache-control"),
+        Some("private, max-age=604800, immutable"),
+        "an ingested Call's object is as cacheable as the proxied path says it is"
+    );
 }

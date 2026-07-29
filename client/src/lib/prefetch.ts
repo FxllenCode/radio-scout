@@ -9,6 +9,14 @@
  * immutable`, which is what makes the element's later request a cache hit
  * (including the ranged one a media element actually sends).
  *
+ * On the S3 blob backend the route answers a 307 to a presigned URL instead of
+ * the bytes, and `fetch` follows it — so two things have to be cacheable for
+ * this to pay off, and since #31 both are: the redirect carries a `max-age`
+ * bounded by what the signature has left, and the *object* carries the same
+ * `immutable` promise the proxied path sets. The element's later request then
+ * hits the cached redirect and the cached bytes behind it. Nothing here has to
+ * know which backend is in use.
+ *
  * A Call is seconds of audio, so this is tens of kilobytes, and it only ever
  * runs for the single Call queued behind the current one.
  */

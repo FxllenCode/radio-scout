@@ -38,7 +38,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use sea_orm::DatabaseConnection;
 
@@ -171,7 +171,7 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
 /// proxies, since listening will become access-scoped (ADR-0008). A week is long
 /// enough for the client's next-Call prefetch (#14) and for re-listening within
 /// a session, without pinning audio that retention has since pruned.
-const AUDIO_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
+pub(crate) const AUDIO_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
 
 /// ...and how long it may keep audio that is **queued for enhancement** (#20).
 ///
@@ -183,6 +183,27 @@ const AUDIO_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
 /// `no-store`, because the Call still has to play now — and a range request
 /// mid-playback should not re-fetch the whole object.
 const PENDING_AUDIO_CACHE_CONTROL: &str = "private, max-age=30";
+
+/// ...as a number, because the S3 backend's redirect has to take the smaller of
+/// this and what its signature has left (#31).
+const PENDING_AUDIO_MAX_AGE_SECS: u64 = 30;
+
+/// How long a *redirect* to this Call's audio may be cached: the signature's
+/// budget, but never past the point the object key itself may change (#31).
+///
+/// The two limits are unrelated and both bind. `signature_budget` is how long
+/// the presigned URL stays usable — exceed it and the listener gets a 403. The
+/// enhancement state is about the row: a pending Call is one the worker is about
+/// to point at a *different object*, so a redirect cached for the signature's
+/// full life would keep sending the listener to the un-levelled audio long after
+/// the levelled version existed. A settled Call has no second limit, because the
+/// key behind it never changes again.
+fn redirect_max_age(enhancement: &str, signature_budget: u64) -> u64 {
+    match enhancement == db::entities::call::EnhancementState::PENDING {
+        true => signature_budget.min(PENDING_AUDIO_MAX_AGE_SECS),
+        false => signature_budget,
+    }
+}
 
 /// The `Cache-Control` a Call's audio is served with, given its enhancement
 /// state.
@@ -213,7 +234,17 @@ async fn serve_audio(
     let object_key = audio.object_key;
     if state.audio.is_presigning() {
         match state.audio.presigned_get_url(&object_key).await {
-            Some(Ok(url)) => return Redirect::temporary(&url).into_response(),
+            Some(Ok(signed)) => {
+                let max_age = redirect_max_age(&audio.enhancement, signed.max_age_secs);
+                return (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [
+                        (header::LOCATION, signed.url),
+                        (header::CACHE_CONTROL, format!("private, max-age={max_age}")),
+                    ],
+                )
+                    .into_response();
+            }
             Some(Err(err)) => return ServerError::new("sign-audio-url", err).into_response(),
             None => {}
         }
@@ -360,6 +391,19 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use rstest::rstest;
+
+    /// The pending Call's ceiling is written twice — once as a header string
+    /// for the proxied response, once as a number the S3 redirect takes the
+    /// minimum against (#31) — so they are held to being the same number.
+    /// Letting them drift would leave the two serving paths promising different
+    /// things about the same Call, with nothing to notice.
+    #[test]
+    fn the_two_spellings_of_the_pending_ceiling_agree() {
+        assert_eq!(
+            PENDING_AUDIO_CACHE_CONTROL,
+            format!("private, max-age={PENDING_AUDIO_MAX_AGE_SECS}")
+        );
+    }
 
     fn parse(header: &str, size: u64) -> RangeOutcome {
         parse_range_header(Some(&HeaderValue::from_str(header).unwrap()), size)

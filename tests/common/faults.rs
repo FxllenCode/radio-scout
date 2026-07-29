@@ -77,6 +77,16 @@ struct Script {
     parked: watch::Sender<usize>,
     /// Bumped by [`Faults::release`]; every parked read is waiting on a change.
     released: watch::Sender<u64>,
+    /// The [`PutOptions`] of every write that reached the decorator, newest last
+    /// — recorded *before* any injected failure, so what a caller asked for is
+    /// observable even when the write is made to fail.
+    ///
+    /// This is the only way to see what `BlobStore::put` asks a store to record
+    /// against an object without a store that answers (#31): the `Cache-Control`
+    /// an S3-backed store stamps is invisible to a filesystem round trip, and
+    /// `tests/s3.rs` — which reads it back off a real store — skips wherever one
+    /// is not running, which is the everyday loop.
+    puts: std::sync::Mutex<Vec<PutOptions>>,
 }
 
 impl Default for Script {
@@ -87,6 +97,7 @@ impl Default for Script {
             stall_reads: AtomicBool::new(false),
             parked: watch::Sender::new(0),
             released: watch::Sender::new(0),
+            puts: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -144,6 +155,18 @@ impl Faults {
     /// Refuse every write from now on.
     pub fn fail_puts(&self) {
         self.0.fail_puts.store(true, Ordering::SeqCst);
+    }
+
+    /// Wrap an arbitrary store, for the case where what is under test is not a
+    /// filesystem one — an **S3-backed** store, whose `put` stamps attributes a
+    /// filesystem store never would (#31).
+    pub fn wrapping(store: BlobStore) -> (BlobStore, Faults) {
+        Self::wrap(store)
+    }
+
+    /// The [`PutOptions`] every write has carried, newest last.
+    pub fn puts(&self) -> Vec<PutOptions> {
+        self.0.puts.lock().expect("recorded puts").clone()
     }
 
     /// Refuse every read of an object's *bytes* from now on.
@@ -214,6 +237,14 @@ impl ObjectStore for FaultyStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> Result<PutResult> {
+        // Recorded before the failure check, so a test can arm `fail_puts` to
+        // stop the write reaching a backend it cannot talk to and still assert
+        // on what the write asked for.
+        self.script
+            .puts
+            .lock()
+            .expect("recorded puts")
+            .push(opts.clone());
         self.script.check(&self.script.fail_puts, "put")?;
         self.inner.put_opts(location, payload, opts).await
     }

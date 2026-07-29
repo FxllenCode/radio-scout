@@ -161,14 +161,83 @@ async fn s3_backend_presigns_get_urls_offline() {
 
     assert!(store.is_presigning());
 
-    let url = store
+    let signed = store
         .presigned_get_url("ab/call.m4a")
         .await
         .expect("s3 presigns")
         .expect("signed url");
+    let url = signed.url;
     assert!(url.contains("radio-scout"), "url names the bucket: {url}");
     assert!(url.contains("ab/call.m4a"), "url names the key: {url}");
     assert!(url.contains("X-Amz-Signature"), "url is signed: {url}");
+    // ...and it says how long a redirect to it may be cached (#31): the
+    // signature's 300s life, less the margin never given away.
+    assert_eq!(signed.max_age_secs, 240);
+}
+
+/// **What a write asks a store to remember about an object** (#31).
+///
+/// With a presigned redirect the store answers the listener directly, so the
+/// `Cache-Control` `serve_audio` puts on its own responses is never seen — and a
+/// browser given no freshness information revalidates, which is what the whole
+/// prefetch is trying to avoid. The header therefore has to be stored *on the
+/// object*, at write time.
+///
+/// `tests/s3.rs` reads it back off a store that answers, which is the real proof
+/// and the one that skips wherever no store is running — i.e. the everyday loop
+/// and every contributor without Docker. This is the half that runs everywhere:
+/// the write is intercepted, so what it asked for is observable without anything
+/// to ask. The put is armed to fail precisely because there is no store behind
+/// this endpoint to talk to; the recording happens first.
+#[tokio::test]
+async fn an_s3_write_asks_the_store_to_store_the_cache_control() {
+    let (store, faults) = common::Faults::wrapping(
+        BlobStore::s3(&S3Config {
+            bucket: "radio-scout".into(),
+            region: "us-east-1".into(),
+            endpoint: Some("http://localhost:3900".into()),
+            access_key_id: "GKtestaccesskey".into(),
+            secret_access_key: "testsecretkey".into(),
+            allow_http: true,
+        })
+        .expect("build s3 store"),
+    );
+    faults.fail_puts();
+
+    let _ = store.put("ab/call.m4a", Bytes::from_static(b"audio")).await;
+
+    let asked = faults.puts();
+    assert_eq!(asked.len(), 1, "one write reached the store");
+    assert_eq!(
+        asked[0]
+            .attributes
+            .get(&object_store::Attribute::CacheControl),
+        Some(&object_store::AttributeValue::from(
+            "private, max-age=604800, immutable"
+        )),
+        "an object a client fetches directly carries its own caching promise"
+    );
+}
+
+/// ...and the filesystem backend asks for nothing, which is not an optimisation:
+/// `object_store` specifies that a backend which cannot honour an attribute
+/// returns an error, and `LocalFileSystem` cannot store one. It needs none —
+/// nothing fetches a local object directly.
+#[tokio::test]
+async fn a_filesystem_write_asks_for_no_attributes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (store, faults) =
+        common::Faults::wrapping(BlobStore::filesystem(dir.path()).expect("fs store"));
+
+    store
+        .put("ab/call.wav", Bytes::from_static(b"audio"))
+        .await
+        .expect("a filesystem write succeeds");
+
+    assert!(
+        faults.puts()[0].attributes.is_empty(),
+        "nothing a LocalFileSystem would refuse"
+    );
 }
 
 /// **A store having a blip is ridden out, not given up on** (#39).
