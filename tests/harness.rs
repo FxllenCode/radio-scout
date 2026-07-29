@@ -16,6 +16,7 @@ use common::{CallUpload, TestApp, frame_within, next_json, no_frame_within, subs
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use rstest::rstest;
 
 use radio_scout::IngestConfig;
@@ -431,6 +432,112 @@ async fn the_builder_accepts_a_caller_supplied_store() {
         resp.status(),
         307,
         "the S3 backend presigns rather than proxying"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fault injection (#37): a store, and a table, that can be made to fail.
+// ---------------------------------------------------------------------------
+
+/// **The store seam.** Every worker that writes audio has an error arm that is
+/// unreachable while the only store in the suite is a filesystem that works —
+/// so the handling of a refused write is shipped untested. A store that fails
+/// when told is what makes those arms ordinary tests.
+#[tokio::test]
+async fn a_store_can_be_told_to_fail_its_writes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, faults) = common::faulty_store(tmp.path());
+
+    store
+        .put("aa/1.wav", Bytes::from_static(b"before"))
+        .await
+        .expect("a healthy store takes a write");
+    faults.fail_puts();
+    let refused = store.put("aa/2.wav", Bytes::from_static(b"after")).await;
+
+    assert!(refused.is_err(), "a store told to fail must refuse");
+    assert_eq!(
+        store.list_keys().await.expect("list"),
+        ["aa/1.wav"],
+        "and must not have written the object it refused"
+    );
+}
+
+/// **The stall.** Several arms worth reaching are not "an operation failed" but
+/// "a failure landed *between* two statements" — a Call pruned after its row was
+/// read, a table dropped after the queue was filled. Parking the caller inside
+/// its read is what turns provoking those from a race against a sleep into a
+/// place a test can stand: while it is parked, the test owns the world.
+#[tokio::test]
+async fn a_store_can_hold_a_read_still_until_it_is_released() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, faults) = common::faulty_store(tmp.path());
+    store
+        .put("aa/1.wav", Bytes::from_static(b"bytes"))
+        .await
+        .expect("write");
+    let store = std::sync::Arc::new(store);
+
+    faults.stall_reads();
+    let reader = tokio::spawn({
+        let store = store.clone();
+        async move { store.get("aa/1.wav").await }
+    });
+    faults.stalled(1).await;
+
+    assert!(
+        !reader.is_finished(),
+        "a stalled read is parked, not merely slow"
+    );
+
+    faults.release();
+    let bytes = reader
+        .await
+        .expect("join")
+        .expect("read")
+        .expect("the object");
+    assert_eq!(
+        &bytes[..],
+        b"bytes",
+        "and a released read returns the real bytes, not an error"
+    );
+}
+
+/// **The table seam**, and why `break_table` was not enough. Taking a table away
+/// breaks the *first* statement that touches it — but every failure worth
+/// reaching on the write side happens after a read of the same table has already
+/// succeeded, so a dropped table always fails the wrong one. Refusing writes
+/// while reads and inserts still work is what puts the failure where it belongs.
+#[tokio::test]
+async fn a_table_can_be_told_to_refuse_its_updates() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(CallUpload::new()).await;
+    let stored = app.the_call().await;
+
+    app.fail_writes_to("calls").await;
+
+    // Reads are untouched...
+    assert_eq!(app.the_call().await.id, stored.id, "reads still work");
+    // ...and so are inserts, or nothing could be arranged before the failure.
+    app.upload_ok(CallUpload::new().at(2_000)).await;
+    assert_eq!(app.count::<call::Entity>().await, 2, "inserts still work");
+
+    let refused = radio_scout::db::repo::mark_enhancement(
+        &app.db,
+        stored.id,
+        call::EnhancementState::SKIPPED,
+    )
+    .await;
+
+    let error = refused.expect_err("an update must be refused").to_string();
+    assert!(
+        error.contains(common::INJECTED_WRITE),
+        "the refusal must say it was injected, on either dialect: {error}"
+    );
+    assert_eq!(
+        app.calls().await[0].enhancement,
+        call::EnhancementState::NONE,
+        "and must leave the row it refused alone"
     );
 }
 

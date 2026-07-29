@@ -50,6 +50,7 @@
 //! The harness's own tests are `tests/harness.rs`.
 #![allow(dead_code)]
 
+mod faults;
 pub mod logs;
 mod push;
 pub mod s3;
@@ -59,6 +60,8 @@ mod ws;
 // Each binary uses a subset of these, so in most of them most are unused. The
 // allow is scoped to the re-exports alone — the module's own `use` statements
 // below stay checked.
+#[allow(unused_imports)]
+pub use faults::{Faults, INJECTED_IO, faulty_store};
 #[allow(unused_imports)]
 pub use push::{
     PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRIBER_PUBLIC, VAPID_PRIVATE_KEY,
@@ -548,6 +551,48 @@ impl TestApp {
             .unwrap_or_else(|err| panic!("break table {table}: {err}"));
     }
 
+    /// Make every **update** to `table` fail, while reads and inserts go on
+    /// working (#37).
+    ///
+    /// [`TestApp::break_table`]'s companion, and the thing it cannot do. A
+    /// dropped table fails the *first* statement that touches it, but the
+    /// failures worth reaching on the write side all happen after a read of the
+    /// same table has already succeeded — the enhancement worker updates a Call
+    /// row it has just read, ingest marks a Call pending after inserting it. So
+    /// a dropped table always breaks the wrong statement, which is exactly why
+    /// #20 shipped those arms uncovered.
+    ///
+    /// A trigger is how the failure is aimed at one statement kind. The DDL is
+    /// **dialect-specific** — Postgres has no trigger body without a function to
+    /// call, SQLite has no function to call — so it lives here beside
+    /// `break_table` rather than in five test files. Both raise
+    /// [`INJECTED_WRITE`], so an assertion about the cause reads the same on
+    /// either dialect.
+    pub async fn fail_writes_to(&self, table: &str) {
+        let statements = match self.db.get_database_backend() {
+            db::DbBackend::Postgres => vec![
+                format!(
+                    "CREATE OR REPLACE FUNCTION rs_fail_write() RETURNS trigger \
+                     LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION '{INJECTED_WRITE}'; END $$"
+                ),
+                format!(
+                    "CREATE TRIGGER rs_fail_write_{table} BEFORE UPDATE ON {table} \
+                     FOR EACH ROW EXECUTE FUNCTION rs_fail_write()"
+                ),
+            ],
+            _ => vec![format!(
+                "CREATE TRIGGER rs_fail_write_{table} BEFORE UPDATE ON {table} \
+                 BEGIN SELECT RAISE(ABORT, '{INJECTED_WRITE}'); END"
+            )],
+        };
+        for statement in statements {
+            self.db
+                .execute_unprepared(&statement)
+                .await
+                .unwrap_or_else(|err| panic!("fail writes to {table}: {err}"));
+        }
+    }
+
     /// How **this** dialect words "that table isn't there" — SQLite says
     /// `no such table: calls`, Postgres says `relation "calls" does not exist`.
     ///
@@ -635,6 +680,13 @@ pub struct TestAppBuilder {
     push: Option<Push>,
     enhancement: Option<EnhancementConfig>,
 }
+
+/// What [`TestApp::fail_writes_to`] raises, on either dialect — so a test can
+/// assert that the driver's own explanation of an injected failure reached the
+/// operator's log, the way [`TestApp::missing_table_cause`] does for a table
+/// that isn't there. Its opposite number for the store seam is
+/// [`faults::INJECTED_IO`].
+pub const INJECTED_WRITE: &str = "injected write failure";
 
 /// The admin password every spawned app is gated by (#19), so any test can log
 /// in without configuring one. A test *about* provisioning takes

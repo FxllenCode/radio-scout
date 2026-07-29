@@ -109,6 +109,12 @@ reqwest = { version = "0.13", default-features = false, features = ["multipart",
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tempfile = "3"
+# The fault-injecting blob store (#37) implements `ObjectStore` itself, so the
+# test crates name the trait and its (`async_trait`-shaped) signatures directly.
+# Both are already in the dependency graph via the library — pinned to the same
+# majors so cargo unifies rather than linking two copies of the trait.
+object_store = { version = "0.14", features = ["aws"] }
+async-trait = "0.1"
 # Test-hardening tooling (ADR-0010): property-based edge-case generation,
 # parametrized case tables, and wire-format snapshots. cargo-nextest /
 # cargo-llvm-cov / cargo-mutants are external binaries, not deps.

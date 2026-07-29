@@ -2637,6 +2637,7 @@ version = "0.1.0-rc.2"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "async-trait",
  "audioadapter-buffers",
  "axum",
  "base64",

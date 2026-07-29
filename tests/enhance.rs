@@ -14,10 +14,12 @@
 
 mod common;
 
+use common::logs::LogCapture;
 use common::s3::unreachable_store;
 use common::{CallUpload, TestApp};
-use radio_scout::db::entities::call::EnhancementState;
+use radio_scout::db::entities::call::{self as call_entity, EnhancementState};
 use radio_scout::enhance::{EnhancementConfig, Mode};
+use sea_orm::EntityTrait;
 
 /// The bytes a recorder would send: two seconds of 16 kHz tone, deliberately
 /// quiet, so that "it was levelled" is visible in the result.
@@ -648,4 +650,287 @@ async fn a_sweep_that_overflows_the_queue_leaves_nothing_pending() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// The I/O failure arms (#37). Each of these is a real thing an operator's
+// instance does — a full disk, a Garage node refusing writes, a database that
+// goes away mid-Call — and each was unreachable until the harness could make a
+// specific operation fail (`common::Faults`, `TestApp::fail_writes_to`).
+//
+// What they all assert is the same promise: **enhancement is a convenience, and
+// nothing about it failing may cost a listener the Call**. The audio a recorder
+// uploaded stays served, the process keeps taking uploads, and the operator gets
+// a line saying which step gave up.
+// ---------------------------------------------------------------------------
+
+/// An object store that takes reads but refuses writes — a disk that filled up
+/// between one Call and the next, which on a Pi is the ordinary way this fails.
+///
+/// The enhanced audio has nowhere to go, so the Call must keep the object it
+/// arrived with and settle. Leaving it `pending` would be worse than doing
+/// nothing at all: a pending Call is deliberately served without `immutable`
+/// (`crate::audio_cache_control`), so it would stay permanently uncacheable
+/// *and* be re-queued by every subsequent boot.
+#[tokio::test]
+async fn a_store_that_cannot_be_written_leaves_the_call_on_its_original_audio() {
+    let capture = LogCapture::start();
+    let shared = tempfile::tempdir().expect("tempdir");
+    let url = shared_database_url(&shared).await;
+
+    let before = TestApp::builder()
+        .database_url(url.clone())
+        .store(radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("store"))
+        .spawn()
+        .await;
+    before.create_api_key("k").await;
+    before.upload_ok(call()).await;
+    let stored = before.the_call().await;
+    radio_scout::db::repo::mark_enhancement(&before.db, stored.id, EnhancementState::PENDING)
+        .await
+        .expect("queue it");
+
+    // The same archive, now behind a store that will take no more writes. Armed
+    // before the app is spawned, so the very first thing the worker tries to
+    // write fails — no timing, no race.
+    let (store, faults) = common::faulty_store(shared.path());
+    faults.fail_puts();
+    let after = TestApp::builder()
+        .database_url(url)
+        .store(store)
+        .enhancement(normalizing())
+        .spawn()
+        .await;
+
+    let settled = after.await_enhancement(stored.id).await;
+    assert_eq!(
+        settled.enhancement,
+        EnhancementState::SKIPPED,
+        "a Call whose enhanced audio cannot be stored must settle, not re-queue forever"
+    );
+    assert_eq!(
+        settled.object_key, stored.object_key,
+        "and must still point at the audio the recorder uploaded"
+    );
+    assert_eq!(
+        after.object_keys().await,
+        [stored.object_key],
+        "nothing was written, so there is no orphan for #10's sweep to find"
+    );
+
+    let line = capture.wait_for("enhancement skipped").await;
+    assert!(line.contains("reason=store-audio"), "{line}");
+    assert_eq!(
+        after.get("/healthz").await.status(),
+        200,
+        "the process must still be serving"
+    );
+}
+
+/// A database that stops taking writes part-way through — a disk that filled, a
+/// replica promoted read-only — with the reads that got the worker there still
+/// working. This is the failure `break_table` could never stage: the worker
+/// updates a Call row it has *already read*, so taking the table away breaks the
+/// read and the update is never attempted.
+///
+/// Two arms have to hold at once, and the second is the one that matters. The
+/// Call the worker was enhancing cannot be pointed at its new audio, so the
+/// object it just wrote is an orphan and #10's sweep owns it. And the Calls the
+/// sweep could not fit in the queue cannot be recorded as `skipped` either — so
+/// the process must still say so rather than silently leaving them, because a
+/// Call stuck `pending` is re-queued by every subsequent boot and stays
+/// permanently uncacheable.
+#[tokio::test]
+async fn a_database_that_stops_taking_writes_says_so_for_every_call_it_loses() {
+    let capture = LogCapture::start();
+    let shared = tempfile::tempdir().expect("tempdir");
+    let url = shared_database_url(&shared).await;
+    let store =
+        || radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("shared store");
+
+    let before = TestApp::builder()
+        .database_url(url.clone())
+        .store(store())
+        .spawn()
+        .await;
+    before.create_api_key("k").await;
+    for n in 0..8 {
+        before
+            .upload_ok(call().talkgroup(100 + n).at(1_000 + n))
+            .await;
+    }
+    for stored in before.calls().await {
+        radio_scout::db::repo::mark_enhancement(&before.db, stored.id, EnhancementState::PENDING)
+            .await
+            .expect("interrupt it");
+    }
+    // Only now: everything above is the arrangement, and it is all writes.
+    before.fail_writes_to("calls").await;
+
+    // A queue one Call deep, so the sweep both *runs* one Call to its failing
+    // update and *refuses* the other seven to their failing update.
+    let after = TestApp::builder()
+        .database_url(url)
+        .store(store())
+        .enhancement(EnhancementConfig {
+            queue_depth: 1,
+            ..normalizing()
+        })
+        .spawn()
+        .await;
+
+    let skipped = capture.wait_for("reason=store-call").await;
+    assert!(
+        skipped.contains(common::INJECTED_WRITE),
+        "the operator is told why the update failed: {skipped}"
+    );
+    // Pinned on the message rather than the `reason` slug, unusually: both
+    // sites log `reason=mark-skipped-failed`, and the point of this test is that
+    // *both* of them fired. The messages are Radio-Scout's own — no driver
+    // phrasing, so nothing here differs by dialect.
+    capture
+        .wait_for("could not record that enhancement was skipped")
+        .await;
+    capture
+        .wait_for("a refused Call is still marked pending")
+        .await;
+
+    assert_eq!(
+        after.get("/healthz").await.status(),
+        200,
+        "a database that will not take writes must not take the scanner down"
+    );
+}
+
+/// **A table that goes away while the worker is holding a Call.** The worker had
+/// already read its row, so the failure lands on the *update* — and the Call
+/// behind it in the queue never gets a row read at all.
+///
+/// Both arms are reached in one pass because the store is holding the first Call
+/// still: while it is parked inside its `get`, the second Call is provably
+/// queued and nothing has read it yet, so the table can be taken away knowing
+/// exactly which statements have run. Racing a sleep against a background worker
+/// would reach the same lines and fail on a loaded CI runner instead.
+#[tokio::test]
+async fn a_table_that_vanishes_mid_call_is_survived_by_the_worker() {
+    let capture = LogCapture::start();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, faults) = common::faulty_store(tmp.path());
+    faults.stall_reads();
+
+    let app = TestApp::builder()
+        .store(store)
+        .enhancement(normalizing())
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+
+    // The first Call: the worker reads its row, then parks reading its audio.
+    app.upload_ok(call()).await;
+    faults.stalled(1).await;
+    // The second: queued behind the parked one, its row not yet read.
+    app.upload_ok(call().talkgroup(200).at(2_000)).await;
+
+    app.break_table("calls").await;
+    faults.release();
+
+    let missing = app.missing_table_cause("calls");
+    let update = capture.wait_for("reason=store-call").await;
+    assert!(
+        update.contains(&missing),
+        "the Call that was already read fails on its update: {update}"
+    );
+    let lookup = capture.wait_for("reason=look-up-call").await;
+    assert!(
+        lookup.contains(&missing),
+        "the Call behind it fails on its row: {lookup}"
+    );
+
+    assert_eq!(
+        app.get("/healthz").await.status(),
+        200,
+        "the process must still be serving — a worker that unwinds takes every \
+         later Call's enhancement with it"
+    );
+}
+
+/// A Call pruned between being queued and being reached. Retention is entitled
+/// to do exactly this — the archive is bounded and the queue is deep — so it is
+/// ordinary, not exotic, and it is **not a failure**: there is nothing to say
+/// and nothing to settle, because the row saying `pending` is itself gone.
+///
+/// What must survive is the worker. The Call queued behind the pruned one has to
+/// be enhanced, or a busy instance would lose everything after the first prune.
+#[tokio::test]
+async fn a_call_pruned_before_the_worker_reaches_it_is_passed_over_in_silence() {
+    let capture = LogCapture::start();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, faults) = common::faulty_store(tmp.path());
+    faults.stall_reads();
+
+    let app = TestApp::builder()
+        .store(store)
+        .enhancement(normalizing())
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+
+    app.upload_ok(call()).await;
+    faults.stalled(1).await;
+    app.upload_ok(call().talkgroup(200).at(2_000)).await;
+    app.upload_ok(call().talkgroup(300).at(3_000)).await;
+    let queued = app.calls().await;
+    let (first, pruned, behind) = (&queued[0], &queued[1], &queued[2]);
+
+    call_entity::Entity::delete_by_id(pruned.id)
+        .exec(&app.db)
+        .await
+        .expect("prune the queued Call");
+    faults.release();
+
+    assert_eq!(
+        app.await_enhancement(first.id).await.enhancement,
+        EnhancementState::DONE
+    );
+    assert_eq!(
+        app.await_enhancement(behind.id).await.enhancement,
+        EnhancementState::DONE,
+        "the Call queued behind a pruned one must still be enhanced"
+    );
+    capture.assert_never_logged("enhancement skipped");
+}
+
+/// The ingest side of the same failure. A Call is marked `pending` *before* it
+/// is offered to the queue, so that a process killed between the two finds it
+/// again at the next boot — which means the mark is a write that can fail while
+/// everything around it works.
+///
+/// It must cost the recorder nothing. The Call is already stored, already
+/// answered and already on the live feed by this point, so a failure here costs
+/// only the levelling — and ingest that started returning 500s over an optional
+/// convenience would be a far worse bug than the one it reported.
+#[tokio::test]
+async fn a_call_that_cannot_be_marked_pending_still_lands_and_still_plays() {
+    let capture = LogCapture::start();
+    let app = TestApp::builder().enhancement(normalizing()).spawn().await;
+    app.create_api_key("k").await;
+    app.fail_writes_to("calls").await;
+
+    app.upload_ok(call()).await;
+
+    let stored = app.the_call().await;
+    assert_eq!(
+        stored.enhancement,
+        EnhancementState::NONE,
+        "the mark never landed, which is the whole point"
+    );
+    assert_eq!(
+        app.get(&format!("/api/call/{}/audio", stored.id))
+            .await
+            .status(),
+        200,
+        "the Call the recorder uploaded must still play"
+    );
+    let line = capture.wait_for("reason=mark-pending-failed").await;
+    assert!(line.contains(common::INJECTED_WRITE), "{line}");
 }

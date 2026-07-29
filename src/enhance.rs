@@ -776,11 +776,11 @@ async fn run(state: &AppState, config: &EnhancementConfig, call_id: CallId) {
         // milliseconds of solid arithmetic, and holding a Tokio worker thread
         // for that long stalls every request scheduled behind it.
         let config = config.clone();
-        let enhanced = match tokio::task::spawn_blocking(move || enhance(&original, &config)).await
-        {
-            Ok(Ok(enhanced)) => enhanced,
-            Ok(Err(error)) => return skipped(state, call_id, error.reason(), &error).await,
-            Err(error) => return skipped(state, call_id, "enhance-panicked", &error).await,
+        let enhanced = match enhanced_or_reason(
+            tokio::task::spawn_blocking(move || enhance(&original, &config)).await,
+        ) {
+            Ok(enhanced) => enhanced,
+            Err((reason, cause)) => return skipped(state, call_id, reason, &cause).await,
         };
 
         // A new key, never the old one: ADR-0002's ordering rests on objects
@@ -818,6 +818,28 @@ async fn run(state: &AppState, config: &EnhancementConfig, call_id: CallId) {
     }
     .instrument(span)
     .await
+}
+
+/// What a finished blocking stage produced, or the `(reason, cause)` to give up
+/// under.
+///
+/// Extracted from [`run`] because the interesting case is the one [`run`] cannot
+/// be made to produce on demand: a stage that *unwound* rather than refusing.
+/// `spawn_blocking` reports that as a `JoinError`, and nothing a test can put in
+/// the store makes real DSP panic — bytes crafted to do it would be testing a
+/// bug rather than a behavior (#37). As a function taking the join result, it is
+/// handed a genuine `JoinError` from a task that genuinely panicked.
+///
+/// The distinction is worth keeping sharp: `undecodable` is a Call that was not
+/// audio and needs no action, `enhance-panicked` is a defect in Radio-Scout.
+fn enhanced_or_reason(
+    result: Result<Result<Enhanced, EnhanceError>, tokio::task::JoinError>,
+) -> Result<Enhanced, (&'static str, String)> {
+    match result {
+        Ok(Ok(enhanced)) => Ok(enhanced),
+        Ok(Err(error)) => Err((error.reason(), error.to_string())),
+        Err(error) => Err(("enhance-panicked", error.to_string())),
+    }
 }
 
 /// Give up on enhancing a Call, saying why, and leave it playable.
@@ -1453,5 +1475,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A blocking stage that **unwound** is the one outcome the worker cannot
+    /// see the inside of: `spawn_blocking` hands back a `JoinError`, not the
+    /// panic. It has to be told apart from an orderly refusal, because the two
+    /// mean opposite things to an operator — `undecodable` is a Call that was
+    /// not audio, `enhance-panicked` is a bug in Radio-Scout.
+    ///
+    /// A real `JoinError`, from a task that really panicked: a hand-made stand-in
+    /// would prove only that the match arm compiles.
+    #[tokio::test]
+    async fn a_stage_that_unwinds_is_told_apart_from_one_that_refuses() {
+        let panicked = tokio::spawn(async { panic!("a decoder came apart") })
+            .await
+            .expect_err("the task panicked");
+
+        assert_eq!(
+            enhanced_or_reason(Err(panicked))
+                .expect_err("a panic is not a result")
+                .0,
+            "enhance-panicked"
+        );
+        assert_eq!(
+            enhanced_or_reason(Ok(Err(EnhanceError::Undecodable)))
+                .expect_err("a refusal is not a result")
+                .0,
+            "undecodable",
+            "an orderly refusal keeps its own slug"
+        );
+        assert_eq!(
+            enhanced_or_reason(Ok(Ok(Enhanced {
+                bytes: vec![1, 2, 3],
+                mime: "audio/wav",
+                extension: "wav",
+                duration_ms: 42,
+            })))
+            .expect("audio is audio")
+            .bytes,
+            vec![1, 2, 3]
+        );
     }
 }

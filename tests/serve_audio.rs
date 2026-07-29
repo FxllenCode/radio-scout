@@ -7,6 +7,8 @@
 mod common;
 use common::{TestApp, header_of};
 
+use rstest::rstest;
+
 use radio_scout::db::repo::NewCall;
 use radio_scout::{BlobStore, S3Config};
 
@@ -128,4 +130,84 @@ async fn s3_backend_redirects_to_a_presigned_url() {
         header_of(&resp, "cache-control").is_none(),
         "the presigned redirect itself must not be cached"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The store failing underneath a listener (#37).
+//
+// These are the arms that separate "gone" from "broken". A 404 tells a client
+// to stop asking; a 500 with a ref tells it to try again and tells the operator
+// where to look. Getting that backwards is how a transient Garage outage turns
+// into every client quietly deciding the archive is empty.
+// ---------------------------------------------------------------------------
+
+/// A store that stats an object happily and then refuses to hand over its
+/// bytes — a Garage node shedding load, a disk throwing read errors.
+///
+/// Both halves of the audio contract have to answer the same way: the whole-body
+/// GET a desktop makes, and the ranged GET iOS `<audio>` makes (ADR-0002). They
+/// are separate code paths and separate stages in the log, so they are asserted
+/// separately.
+#[rstest]
+#[case::whole_body(None, "read-audio")]
+#[case::ranged(Some("bytes=0-3"), "read-audio-range")]
+#[tokio::test]
+async fn a_store_that_refuses_to_read_is_a_server_error_not_a_missing_call(
+    #[case] range: Option<&str>,
+    #[case] stage: &str,
+) {
+    let capture = common::logs::LogCapture::start();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, faults) = common::faulty_store(tmp.path());
+    let app = TestApp::builder().store(store).spawn().await;
+    let id = insert_call(&app, "aa/1.wav", Some("audio/wav")).await;
+    app.put_object("aa/1.wav", b"audio-bytes").await;
+
+    faults.fail_reads();
+    let resp = match range {
+        Some(range) => app.get_range(&audio(id), range).await,
+        None => app.get(&audio(id)).await,
+    };
+
+    assert_eq!(resp.status(), 500, "a broken store is not a missing Call");
+    let request_id = common::request_id_of(&resp);
+    let body = resp.text().await.expect("body");
+    assert_eq!(body, format!("internal error (ref: {request_id})\n"));
+
+    let line = capture.only_line_containing("server error");
+    assert!(line.contains(&format!("stage={stage}")), "{line}");
+    assert!(
+        line.contains(common::INJECTED_IO),
+        "the cause travels: {line}"
+    );
+}
+
+/// The object pruned between the stat that sized it and the read that would
+/// have served it. Retention and orphan-GC both run while listeners are
+/// listening, so this window is ordinary rather than exotic.
+///
+/// It is a **404**, not a 500: the object really is gone, the client should stop
+/// asking, and nothing needs an operator's attention. Reaching it at all needs
+/// the read held still while the prune happens — the two are one `await` apart.
+#[tokio::test]
+async fn audio_pruned_between_the_stat_and_the_read_is_a_404() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, faults) = common::faulty_store(tmp.path());
+    let app = std::sync::Arc::new(TestApp::builder().store(store).spawn().await);
+    let id = insert_call(&app, "aa/1.wav", Some("audio/wav")).await;
+    app.put_object("aa/1.wav", b"audio-bytes").await;
+
+    faults.stall_reads();
+    let listener = tokio::spawn({
+        let app = app.clone();
+        async move { app.get(&audio(id)).await }
+    });
+    // Parked *after* the stat, which is what makes this the window it claims.
+    faults.stalled(1).await;
+    app.store.delete("aa/1.wav").await.expect("prune");
+    faults.release();
+
+    let resp = listener.await.expect("join");
+    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.text().await.expect("body"), "audio not found\n");
 }

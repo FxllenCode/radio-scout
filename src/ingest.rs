@@ -815,6 +815,7 @@ fn parse_units(units: Option<&str>, sources: Option<&str>, unit: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::ConnectionTrait;
 
     #[test]
     fn call_time_prefers_timestamp_millis() {
@@ -926,5 +927,91 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(tr_call_time(&meta), Some(1669740999000));
+    }
+
+    // -- `queue_for_enhancement`'s own failure arms (#37) --------------------
+    //
+    // Tested here rather than over ingest's HTTP boundary because they cannot be
+    // reached from there: every table the scope read touches is one the insert
+    // *before* it has already used, so taking any of them away fails the upload
+    // long before the decision is reached. There is no seam in between — the
+    // window holds no I/O to park in and no statement a trigger can fire on.
+    // What is asserted is the same as everywhere else: the operator's log line,
+    // and that nothing panicked.
+
+    /// A Call, its System and its Talkgroup, in a database of this test's own.
+    async fn one_stored_call() -> (AppState, crate::call::CallId, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
+        let store = Arc::new(crate::BlobStore::filesystem(tmp.path().join("audio")).expect("blob"));
+        let call = repo::insert_call(
+            &db,
+            &NewCall {
+                system_ref: 11,
+                talkgroup_ref: 54241,
+                call_at_ms: 1_000,
+                object_key: "aa/1.wav".into(),
+                ..Default::default()
+            },
+            true,
+            0,
+        )
+        .await
+        .expect("store a call");
+
+        let mut state = AppState::new(store, db, IngestConfig::default());
+        state.enhancer = crate::enhance::Enhancer::from_config(crate::enhance::EnhancementConfig {
+            mode: crate::enhance::Mode::Normalize,
+            ..Default::default()
+        });
+        (state, call.id, tmp)
+    }
+
+    /// The scope read fails — a half-applied migration, a table taken out from
+    /// under a running process.
+    ///
+    /// It must cost the recorder nothing. By the time this runs the Call is
+    /// stored, answered and already on the live feed, so the only thing at stake
+    /// is the levelling — and ingest that started failing over an optional
+    /// convenience would be a far worse bug than the one it reported.
+    #[tokio::test]
+    async fn a_scope_that_cannot_be_read_leaves_the_call_alone_and_says_why() {
+        let capture = crate::testing::LogCapture::start();
+        let (state, call_id, _tmp) = one_stored_call().await;
+        // A column rather than the table: a Call row references its System, so
+        // dropping the table is refused outright — and a half-applied migration
+        // is what this actually looks like in the field anyway.
+        state
+            .db
+            .execute_unprepared("ALTER TABLE systems DROP COLUMN enhancement")
+            .await
+            .expect("take the column away");
+
+        queue_for_enhancement(&state, call_id).await;
+
+        let logged = capture.text();
+        assert!(
+            logged.contains("reason=scope-unreadable"),
+            "the operator must be told the decision could not be made: {logged}"
+        );
+        assert!(
+            logged.contains("no such column: systems.enhancement"),
+            "...and why: {logged}"
+        );
+    }
+
+    /// The Call was pruned between its insert and this decision, which retention
+    /// is entitled to do. There is nothing to enhance and nothing to say — the
+    /// row that would have recorded a complaint is itself gone.
+    #[tokio::test]
+    async fn a_call_pruned_before_the_decision_is_passed_over_in_silence() {
+        let capture = crate::testing::LogCapture::start();
+        let (state, _, _tmp) = one_stored_call().await;
+
+        queue_for_enhancement(&state, 999_999).await;
+
+        capture.assert_never_logged("reason=");
     }
 }

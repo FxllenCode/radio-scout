@@ -47,6 +47,13 @@ Everything found so far, so a new failure can be recognised as a new class rathe
   reaches the operator's log and never the client's body, so they ask
   `TestApp::missing_table_cause("calls")` rather than pinning one dialect's phrasing — a pinned
   phrase keeps asserting on one dialect and quietly asserts nothing on the other.
+- **Trigger bodies** — Postgres has no trigger body without a function to call
+  (`CREATE FUNCTION … LANGUAGE plpgsql` + `EXECUTE FUNCTION`); SQLite has no function to call and
+  raises inline (`SELECT RAISE(ABORT, …)`). `TestApp::fail_writes_to` ([#37](https://github.com/FxllenCode/radio-scout/issues/37))
+  needs one, because a *dropped* table fails the first statement that touches it and the write arms
+  worth reaching all happen after a read of the same table has already succeeded. Both dialects raise
+  the one string `common::INJECTED_WRITE`, so the assertion about the cause is dialect-blind the way
+  `missing_table_cause` makes the one above it.
 - **`SUM(bigint)`** — Postgres widens it to `numeric`, SQLite keeps it an integer, so
   `repo::total_audio_bytes` casts. Guarded by `tests/db.rs`.
 - **Text collation** — the two order text differently, which is why the selection catalog sorts in

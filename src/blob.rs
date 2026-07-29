@@ -160,6 +160,32 @@ impl BlobStore {
         self.signer.is_some()
     }
 
+    /// This store with its backend wrapped by `decorate`, which is handed the
+    /// current backend and returns the one to use in its place.
+    ///
+    /// **The seam a test harness makes I/O fail through (#37).** Every worker
+    /// that reads or writes audio has an error arm — the enhancement worker
+    /// settling a Call as `skipped`, ingest answering a recorder 500 — and while
+    /// the only store in the suite is a filesystem that works, not one of them
+    /// is reachable. They shipped untested until a store could be *told* to
+    /// fail. Composing rather than constructing is what lets that decoration sit
+    /// over a real filesystem store, or a real S3 one, without the harness
+    /// reimplementing either.
+    ///
+    /// The presigning half is deliberately left pointing at the undecorated S3
+    /// client: a decorator has no credentials and cannot sign, and silently
+    /// dropping the signer would turn an S3-backed store into a proxying one
+    /// halfway through a test.
+    pub fn decorated(
+        self,
+        decorate: impl FnOnce(Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore>,
+    ) -> Self {
+        Self {
+            store: decorate(self.store),
+            signer: self.signer,
+        }
+    }
+
     /// Store `bytes` under `key`.
     pub async fn put(&self, key: &str, bytes: Bytes) -> Result<(), ObjectError> {
         self.store
