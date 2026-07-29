@@ -75,6 +75,14 @@ export interface LiveState {
   /** Calls the listener will not hear: dropped by the server's `lagged` notice
    *  or by the queue cap. The display admits them rather than hiding them. */
   missed: number
+  /** The listener has switched the live feed **off** (CONTEXT.md **Feed off**,
+   *  #80) — a hard off, not a pause.
+   *
+   *  Deliberately not a fourth `status`: `status` is what the *socket* is doing
+   *  and `offline` already means the network went, which is the thing CONTEXT.md
+   *  says not to confuse this with. Held here so it persists beside the
+   *  Selection, and so nothing arriving can override a choice. */
+  feedOff: boolean
 }
 
 /** The state a listener who has never touched anything starts from. Exported
@@ -90,6 +98,9 @@ export const initialLiveState: LiveState = {
   hold: null,
   avoided: {},
   missed: 0,
+  // On. A Listener who has never touched the toggle gets audio playing, which
+  // is what the app is for.
+  feedOff: false,
 }
 
 const avoidKey = (systemRef: number, talkgroupRef: number) =>
@@ -236,11 +247,46 @@ const liveSlice = createSlice({
       state.status = 'offline'
     },
 
+    /**
+     * Switch the live feed off (#80) — the master off rdio's LIVE FEED button
+     * has and Pause is not.
+     *
+     * A **hard** off, per CONTEXT.md: the Call playing stops, the queue clears,
+     * and the cursor goes so that coming back starts from now rather than
+     * replaying the silence. Closing the socket is `LiveFeedLink`'s half — that
+     * is what drops bandwidth and battery to zero, and what hands the listener
+     * back to Web Push, whose "an open socket means someone is listening" rule
+     * now tells the truth.
+     *
+     * `missed` is untouched on purpose. It admits traffic the listener *wanted*
+     * and did not get; silence they chose is not a gap they missed.
+     */
+    turnFeedOff(state) {
+      state.feedOff = true
+      state.queue = []
+      // `play(…, null)` rather than clearing `current`, so the Call being cut
+      // off is filed under history: switched off is not the same as never heard,
+      // and it should be there to replay once the feed is back.
+      play(state, null)
+      state.since = undefined
+    },
+
+    /** Back on. The socket reconnects and subscribes fresh — with no cursor,
+     *  there is nothing to backfill. The Selection, the hold and the avoids are
+     *  all as the listener left them. */
+    turnFeedOn(state) {
+      state.feedOff = false
+    },
+
     /** A Call arrived over the feed: play it if the feed is quiet, else queue
      *  it. `catchup` Calls (ADR-0004 reconnect backfill) arrive the same way —
      *  a listener coming back wants to hear what they missed. */
     received(state, action: PayloadAction<{ call: Call; catchup?: boolean }>) {
       const { call } = action.payload
+      // Off means off (#80). A Call still in flight when the socket closed, or
+      // one the server sent before it noticed, is not played and not counted:
+      // the listener asked for silence, and this is what that costs.
+      if (state.feedOff) return
       // Catch-up is at-least-once (ADR-0004): a Call ingested in the window
       // between connect and the backfill query arrives twice, and hearing it
       // twice is the listener's problem to be spared.
@@ -274,6 +320,12 @@ const liveSlice = createSlice({
     /** Play a Call again — the one playing, or one from the history (spec
      *  US 13). The queue behind it is untouched. */
     replay(state, action: PayloadAction<number>) {
+      // Nothing plays while the feed is off (#80). The Replay control is
+      // disabled there, but replay is reachable from the RECENT list and from
+      // the lock screen's previous button (`previousCall`), and a Call started
+      // from either would be audio playing under a FEED OFF header with the
+      // socket shut.
+      if (state.feedOff) return
       const again =
         state.current?.id === action.payload
           ? state.current
@@ -345,6 +397,11 @@ const liveSlice = createSlice({
 
     /** The server told us a slow connection cost us Calls (ADR-0004 `lagged`). */
     lagged(state, action: PayloadAction<number>) {
+      // Same promise `turnFeedOff` keeps (#80): `missed` admits traffic the
+      // listener *wanted* and did not get. A notice buffered on the socket, or
+      // in flight while it closes, arrives after the switch — and charging them
+      // for silence they chose would make the counter a lie.
+      if (state.feedOff) return
       state.missed += action.payload
     },
   },
@@ -379,6 +436,8 @@ export const {
   replay,
   toggleHoldSystem,
   toggleHoldTalkgroup,
+  turnFeedOff,
+  turnFeedOn,
 } = liveSlice.actions
 
 export const liveReducer = liveSlice.reducer
@@ -411,6 +470,10 @@ export const selectAvoidedCount = (state: WithLive): number =>
 export const selectSince = (state: WithLive): number | undefined => state.live.since
 
 export const selectMissed = (state: WithLive): number => state.live.missed
+
+/** Whether the listener has switched the live feed off (#80). Distinct from
+ *  `status === 'offline'`, which is the network's answer rather than theirs. */
+export const selectIsFeedOff = (state: WithLive): boolean => state.live.feedOff
 
 export const selectIsAvoided = (
   state: WithLive,

@@ -3,7 +3,13 @@ import { describe, expect, it } from 'vitest'
 import { ARCHIVE } from '@/test/handlers'
 import type { Call } from '@/types'
 
-import { advance, received, selectLiveCall, selectHistory } from './live'
+import {
+  advance,
+  received,
+  selectLiveCall,
+  selectHistory,
+  turnFeedOff,
+} from './live'
 import { enterPlaybackMode, playResults, selectCurrentCall } from './playback'
 import { makeStore, type AppStore } from './store'
 import {
@@ -234,6 +240,21 @@ describe('transport', () => {
       const store = inTheGap()
 
       store.dispatch(pause())
+
+      expect(selectIsBridging(store.getState())).toBe(false)
+    })
+
+    /** Feed off is silence the listener *asked for* (#80), not a gap to be held
+     *  open across. Bridging there would keep the audio session alive — blocking
+     *  the very suspension that saves the battery — for someone who switched the
+     *  feed off. It is the same reasoning as `paused`, and a stronger case:
+     *  with the feed off the socket is gone too, so there is nothing coming that
+     *  the held session could deliver. */
+    it('does not bridge once the feed has been switched off', () => {
+      const store = inTheGap()
+      expect(selectIsBridging(store.getState())).toBe(true)
+
+      store.dispatch(turnFeedOff())
 
       expect(selectIsBridging(store.getState())).toBe(false)
     })

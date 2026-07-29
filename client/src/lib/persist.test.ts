@@ -4,8 +4,11 @@ import { fakeStorage, hostileStorage } from '@/test/storage'
 
 import { EVERYTHING, setTalkgroups } from './selection'
 import {
+  feedOffKey,
+  loadFeedOff,
   loadSelection,
   namespaceOf,
+  saveFeedOff,
   saveSelection,
   selectionKey,
 } from './persist'
@@ -87,5 +90,59 @@ describe('persisting the selection', () => {
   it('degrades to an unremembered scanner when storage is denied', () => {
     expect(loadSelection(hostileStorage, 'default')).toBeUndefined()
     expect(() => saveSelection(hostileStorage, 'default', NARROWED)).not.toThrow()
+  })
+})
+
+/** The feed-off switch (#80), remembered beside the Selection so a Listener who
+ *  chose silence is not blasted with audio by a reload. */
+describe('persisting the feed-off switch', () => {
+  it('survives a reload, both ways round', () => {
+    const storage = fakeStorage()
+
+    saveFeedOff(storage, 'default', true)
+    expect(loadFeedOff(storage, 'default')).toBe(true)
+
+    saveFeedOff(storage, 'default', false)
+    expect(loadFeedOff(storage, 'default')).toBe(false)
+  })
+
+  /**
+   * Three answers, not two: `true`, `false`, and **never said**.
+   *
+   * The third is why this returns an optional rather than defaulting to `false`
+   * itself. "Switched on deliberately" and "never touched" happen to lead to the
+   * same place today, and collapsing them here would make that a coincidence the
+   * caller could not undo — a future default-off Instance, say, could no longer
+   * tell which it was looking at.
+   */
+  it('tells a remembered `false` apart from never having been told', () => {
+    expect(
+      loadFeedOff(fakeStorage({ [feedOffKey('default')]: 'false' }), 'default'),
+    ).toBe(false)
+    expect(loadFeedOff(fakeStorage(), 'default')).toBeUndefined()
+  })
+
+  /** A hand-edited or half-written value is not a boolean, and guessing at one
+   *  would be worse than admitting we do not know. */
+  it('has nothing to say about a value it did not write', () => {
+    for (const junk of ['maybe', '1', 'TRUE', '', '{}']) {
+      expect(
+        loadFeedOff(fakeStorage({ [feedOffKey('default')]: junk }), 'default'),
+      ).toBeUndefined()
+    }
+  })
+
+  it('is independent per Profile', () => {
+    const storage = fakeStorage()
+
+    saveFeedOff(storage, 'truck', true)
+
+    expect(loadFeedOff(storage, 'truck')).toBe(true)
+    expect(loadFeedOff(storage, 'desk')).toBeUndefined()
+  })
+
+  it('degrades to an unremembered Profile when storage is denied', () => {
+    expect(loadFeedOff(hostileStorage, 'default')).toBeUndefined()
+    expect(() => saveFeedOff(hostileStorage, 'default', true)).not.toThrow()
   })
 })

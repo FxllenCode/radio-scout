@@ -287,6 +287,131 @@ describe('LiveScreen', () => {
     expect(await screen.findByText(/no link to the server/i)).toBeInTheDocument()
   })
 
+  /**
+   * The LIVE FEED master toggle (#80) — rdio parity, and the one control the
+   * app was missing. Pause is transport-only: the subscription keeps
+   * streaming and the queue keeps filling behind it. This is the hard off.
+   */
+  describe('the live feed toggle (#80)', () => {
+    const toggle = () => screen.getByRole('button', { name: 'Live feed' })
+
+    it('reads as on, and says the feed is live', async () => {
+      renderApp('/')
+
+      expect(await screen.findByText(/^connected$/i)).toBeInTheDocument()
+      expect(toggle()).toHaveAttribute('aria-pressed', 'true')
+    })
+
+    it('stops the Call and empties the queue when switched off', async () => {
+      const user = userEvent.setup()
+      const store = listening(call({ id: 1 }), call({ id: 2 }))
+      expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
+      expect(selectQueueDepth(store.getState())).toBe(1)
+
+      await user.click(toggle())
+
+      expect(selectQueueDepth(store.getState())).toBe(0)
+      expect(
+        screen.queryByRole('region', { name: 'Scanner display' }),
+      ).not.toBeInTheDocument()
+      expect(toggle()).toHaveAttribute('aria-pressed', 'false')
+    })
+
+    /** A deliberate off is not a gap: the missed counter admits traffic the
+     *  listener wanted and did not get, and silence they chose is not that. */
+    it('does not count the silence as missed', async () => {
+      const user = userEvent.setup()
+      const store = listening(call())
+      act(() => void store.dispatch(lagged(3)))
+
+      await user.click(toggle())
+
+      expect(screen.getByText(/3 missed/i)).toBeInTheDocument()
+    })
+
+    /** Its own state, distinct from both the green connected dot and NO LINK —
+     *  a listener must be able to tell "I turned this off" from "the server went
+     *  away", because only one of them is theirs to fix. */
+    it('says FEED OFF, which is neither connected nor NO LINK', async () => {
+      const user = userEvent.setup()
+      renderApp('/')
+      await screen.findByText(/^connected$/i)
+
+      await user.click(toggle())
+
+      expect(screen.getByText('FEED OFF')).toBeInTheDocument()
+      expect(screen.queryByText(/^connected$/i)).not.toBeInTheDocument()
+      expect(screen.queryByText('NO LINK')).not.toBeInTheDocument()
+      expect(screen.getByText(/switched off/i)).toBeInTheDocument()
+    })
+
+    /** Nothing that acts on a Call makes sense with no feed and no Call — and a
+     *  control that looks available but does nothing is worse than one that is
+     *  plainly out of reach. */
+    it('disables the feed-dependent controls while off', async () => {
+      const user = userEvent.setup()
+      listening(call())
+      expect(screen.getByRole('button', { name: 'Skip' })).toBeEnabled()
+
+      await user.click(toggle())
+
+      // Every control that acts on a live Call — enumerated, because adding one
+      // and forgetting to gate it is exactly the mistake this catches.
+      for (const name of [
+        'Hold system',
+        'Hold talkgroup',
+        'Skip',
+        'Replay',
+        'Pause',
+        'Avoid',
+        'Avoid for 30 minutes',
+        'Avoid for 60 minutes',
+        'Avoid for 120 minutes',
+      ]) {
+        expect(screen.getByRole('button', { name })).toBeDisabled()
+      }
+      // ...and the toggle itself stays reachable, or there is no way back.
+      expect(toggle()).toBeEnabled()
+    })
+
+    /** The RECENT list replays a Call, so it is a feed-dependent control too —
+     *  and the one most likely to be missed, because it is generated rather than
+     *  written out. Switching off files the Call it cut off into history, so the
+     *  list is *guaranteed* non-empty right afterwards: a row that looked
+     *  clickable and did nothing would be the common case, not a corner. */
+    it('puts the RECENT rows out of reach too, rather than letting them do nothing', async () => {
+      const user = userEvent.setup()
+      listening(call({ id: 1, talkgroupLabel: 'FD Dispatch' }))
+
+      await user.click(toggle())
+
+      const recent = screen.getByRole('list', { name: 'Recent calls' })
+      const rows = within(recent).getAllByRole('button')
+      expect(rows.length).toBeGreaterThan(0)
+      for (const row of rows) expect(row).toBeDisabled()
+    })
+
+    it('comes back on and plays what arrives next', async () => {
+      const user = userEvent.setup()
+      const store = listening(call())
+      await user.click(toggle())
+
+      await user.click(toggle())
+
+      expect(toggle()).toHaveAttribute('aria-pressed', 'true')
+      act(() => void store.dispatch(received({ call: call({ id: 9 }) })))
+      expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
+    })
+
+    it('has no accessibility violations while off', async () => {
+      const user = userEvent.setup()
+      const { container } = renderApp('/')
+      await user.click(toggle())
+
+      expect(await axe(container)).toHaveNoViolations()
+    })
+  })
+
   describe('replay (spec US 13)', () => {
     /** US 13 asks for "current, previous, and back through the last five". The
      *  button covers the first two; the list below it reaches further back. */

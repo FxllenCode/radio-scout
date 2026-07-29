@@ -28,6 +28,7 @@ just played, so you can catch what you missed.
 
 | Control | What it does |
 | --- | --- |
+| **LIVE FEED** | The master switch. See below — it is not the same as Pause. |
 | **HOLD SYS** | Play only this System until you release it. Your previous selection comes back when you do. |
 | **HOLD TG** | The same, narrowed to just this Talkgroup — for following one incident. |
 | **SKIP** | Abandon the current Call and jump to the next in the queue. |
@@ -35,6 +36,30 @@ just played, so you can catch what you missed.
 | **PAUSE** / **RESUME** | Stop and restart playback. Calls keep arriving and queueing while paused. |
 | **AVOID** | Mute this Talkgroup so it stops interrupting. |
 | **30 / 60 / 120 MIN** | Avoid this Talkgroup, then bring it back automatically after that long. |
+
+### Turning the feed off, versus pausing it
+
+**Pause** stops the sound. Everything else carries on: Calls keep arriving, the queue keeps
+filling, and when you resume you are behind by however long you paused.
+
+**LIVE FEED off** stops everything. The Call playing stops, the queue empties, and the
+connection to the server closes — so an off feed costs no data and no battery, which matters on
+a phone. The header reads **FEED OFF** with an amber dot, so you can always tell "I switched
+this off" from **NO LINK**, which means the server went away.
+
+Two things follow from it being a real off:
+
+- **Turning it back on starts from now.** The traffic you missed is not replayed — that silence
+  was the point. Whatever is happening when you switch back on is what you hear, and the archive
+  under **Search** still has the rest.
+- **If you have notifications turned on, they start arriving.** Radio-Scout does not notify you
+  about Calls while your feed is open, because you are already hearing them. With the feed off
+  you are not, so your phone takes over — which makes the toggle the way to put Radio-Scout in
+  your pocket without missing the Talkgroups you care about.
+
+Your choice is remembered per **Profile** (the `?id=` in the URL), so reloading the page does
+not blast you with audio you switched off. Anyone who never touches the toggle gets the feed
+live and playing, as before.
 
 **Hold and Avoid are opposites, and both are temporary.** Hold means "only this"; Avoid means
 "anything but this". A timed Avoid is the one to reach for when a Talkgroup is having a busy

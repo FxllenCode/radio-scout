@@ -145,8 +145,14 @@ async fn a_listener_with_a_live_socket_is_not_notified() {
     service.expect_nothing().await;
 }
 
-/// And the moment that socket goes — a closed tab, or the heartbeat reaping a
-/// phone iOS suspended — notifications take over.
+/// And the moment that socket goes — a closed tab, the heartbeat reaping a phone
+/// iOS suspended, or the listener switching the **live feed off** (#80) —
+/// notifications take over.
+///
+/// That last case is why #80 needed no server change: a deliberately closed
+/// socket is indistinguishable from a dropped one on the wire, so the suppression
+/// rule above starts telling the truth about a listener who stopped listening the
+/// moment the client stops holding the connection. This is the assertion for it.
 #[tokio::test]
 async fn a_dropped_socket_hands_the_listener_back_to_push() {
     let service = PushService::start().await;

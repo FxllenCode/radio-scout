@@ -2,6 +2,7 @@ import {
   Ban,
   Pause,
   Play,
+  Power,
   Radio,
   RotateCcw,
   SkipForward,
@@ -27,12 +28,15 @@ import {
   selectAvoidedCount,
   selectHistory,
   selectHold,
+  selectIsFeedOff,
   selectLiveCall,
   selectLiveStatus,
   selectMissed,
   selectQueueDepth,
   toggleHoldSystem,
   toggleHoldTalkgroup,
+  turnFeedOff,
+  turnFeedOn,
 } from '@/store/live'
 import type { LiveStatus } from '@/lib/liveFeed'
 import {
@@ -56,6 +60,42 @@ const LINK_LABEL = {
 } as const
 
 /**
+ * How the header reads when the listener has switched the feed off (#80).
+ *
+ * Its own state, deliberately: not the pulsing green of a live feed, and not the
+ * red of NO LINK. A listener has to be able to tell "I turned this off" from
+ * "the server went away", because only one of those is theirs to fix. Amber
+ * reads as standing by, and it does not pulse — the pulse means traffic, and
+ * there is none.
+ */
+const FEED_OFF_LINK = { label: 'FEED OFF', color: 'orange', pulse: false } as const
+
+/** The dot and the word for it. One place decides all three of colour, pulse and
+ *  label, so a state cannot end up amber but pulsing, or lit green under the
+ *  words FEED OFF. */
+function LinkState({
+  feedOff,
+  status,
+}: {
+  feedOff: boolean
+  status: LiveStatus
+}) {
+  const link = feedOff
+    ? FEED_OFF_LINK
+    : {
+        label: LINK_LABEL[status],
+        color: status === 'connected' ? ('green' as const) : ('red' as const),
+        pulse: status !== 'offline',
+      }
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <StatusLed color={link.color} size={8} pulse={link.pulse} />
+      {link.label}
+    </span>
+  )
+}
+
+/**
  * Live scanner (home) — the hero screen (#11, spec US 9–17).
  *
  * The display reads out the Call playing now; the controls narrow, skip,
@@ -74,6 +114,7 @@ export function LiveScreen() {
   const hold = useAppSelector(selectHold)
   const avoiding = useAppSelector(selectAvoidedCount)
   const paused = useAppSelector(selectIsPaused)
+  const feedOff = useAppSelector(selectIsFeedOff)
   // The live feed's own progress — an archived Call interrupting it (US 26) is
   // on the element instead, and its position isn't this display's to draw.
   const progress = useAppSelector((state) =>
@@ -92,28 +133,41 @@ export function LiveScreen() {
           >
             Q {queued}
           </span>
-          <span className="inline-flex items-center gap-1.5">
-            <StatusLed
-              color={status === 'connected' ? 'green' : 'red'}
-              size={8}
-              pulse={status !== 'offline'}
-            />
-            {LINK_LABEL[status]}
-          </span>
+          <LinkState feedOff={feedOff} status={status} />
         </span>
       }
     >
       {call ? (
         <Display call={call} progress={progress} paused={paused} missed={missed} />
       ) : (
-        <Idle status={status} missed={missed} />
+        <Idle status={status} missed={missed} feedOff={feedOff} />
       )}
 
-      <div className="mt-4 grid grid-cols-3 gap-2">
+      {/* The master switch (#80). First, and its own row, because it governs
+          everything below it — and because a listener reaching for silence
+          should not have to find it among the per-Call controls. */}
+      <div className="mt-4">
+        <Control
+          label="Live feed"
+          pressed={!feedOff}
+          onClick={() => dispatch(feedOff ? turnFeedOn() : turnFeedOff())}
+          icon={
+            feedOff ? (
+              <Power className="size-3.5" aria-hidden />
+            ) : (
+              <Radio className="size-3.5" aria-hidden />
+            )
+          }
+        >
+          {feedOff ? 'Feed off — turn on' : 'Live feed on'}
+        </Control>
+      </div>
+
+      <div className="mt-2 grid grid-cols-3 gap-2">
         <Control
           label="Hold system"
           pressed={isSystemHold(hold)}
-          disabled={!call && !hold}
+          disabled={feedOff || (!call && !hold)}
           onClick={() => dispatch(toggleHoldSystem())}
         >
           Hold sys
@@ -121,14 +175,14 @@ export function LiveScreen() {
         <Control
           label="Hold talkgroup"
           pressed={isTalkgroupHold(hold)}
-          disabled={!call && !hold}
+          disabled={feedOff || (!call && !hold)}
           onClick={() => dispatch(toggleHoldTalkgroup())}
         >
           Hold TG
         </Control>
         <Control
           label="Skip"
-          disabled={!call}
+          disabled={feedOff || !call}
           onClick={() => dispatch(advance())}
           icon={<SkipForward className="size-3.5" aria-hidden />}
         >
@@ -137,7 +191,7 @@ export function LiveScreen() {
 
         <Control
           label="Replay"
-          disabled={!call && history.length === 0}
+          disabled={feedOff || (!call && history.length === 0)}
           // US 13 is "current, previous, and back through the last five": the
           // Call playing starts over, and with none playing the last one
           // returns. The list below reaches further back.
@@ -148,7 +202,7 @@ export function LiveScreen() {
         </Control>
         <Control
           label={paused ? 'Resume' : 'Pause'}
-          disabled={!call}
+          disabled={feedOff || !call}
           onClick={() => dispatch(togglePause())}
           icon={
             paused ? (
@@ -162,7 +216,7 @@ export function LiveScreen() {
         </Control>
         <Control
           label="Avoid"
-          disabled={!call}
+          disabled={feedOff || !call}
           onClick={() => dispatch(avoid({ until: 0 }))}
           icon={<Ban className="size-3.5" aria-hidden />}
         >
@@ -178,7 +232,7 @@ export function LiveScreen() {
           <Control
             key={minutes}
             label={`Avoid for ${minutes} minutes`}
-            disabled={!call}
+            disabled={feedOff || !call}
             onClick={() => dispatch(avoid({ until: Date.now() + minutes * 60_000 }))}
           >
             {minutes} min
@@ -197,7 +251,11 @@ export function LiveScreen() {
         </div>
       )}
 
-      <History calls={history} onReplay={(id) => dispatch(replay(id))} />
+      <History
+        calls={history}
+        disabled={feedOff}
+        onReplay={(id) => dispatch(replay(id))}
+      />
     </Screen>
   )
 }
@@ -273,18 +331,31 @@ function Display({
 }
 
 /** Zero-config first run, and every lull after it. */
-function Idle({ status, missed }: { status: LiveStatus; missed: number }) {
+function Idle({
+  status,
+  missed,
+  feedOff,
+}: {
+  status: LiveStatus
+  missed: number
+  /** The listener switched the feed off (#80) — said plainly, because a silent
+   *  silence someone chose looks exactly like a fault they didn't. */
+  feedOff: boolean
+}) {
   return (
     <div className="flex flex-col items-center gap-3 rounded-xl border border-border bg-card px-6 py-12 text-center">
       <Radio className="size-6 text-muted-foreground" aria-hidden />
       <p className="font-mono text-sm text-muted-foreground">
-        {status === 'offline'
-          ? 'No link to the server.'
-          : 'Waiting for the first call…'}
+        {feedOff
+          ? 'The live feed is switched off.'
+          : status === 'offline'
+            ? 'No link to the server.'
+            : 'Waiting for the first call…'}
       </p>
       <p className="max-w-xs text-xs text-muted-foreground/70">
-        Point a Trunk Recorder or SDRTrunk instance at this server and calls for
-        your selected talkgroups will play here automatically.
+        {feedOff
+          ? 'Nothing is being streamed or queued. Turn the feed back on to listen — it will start from whatever is happening then.'
+          : 'Point a Trunk Recorder or SDRTrunk instance at this server and calls for your selected talkgroups will play here automatically.'}
       </p>
       {missed > 0 && <Missed count={missed} />}
     </div>
@@ -361,9 +432,16 @@ function Control({
 function History({
   calls,
   onReplay,
+  disabled,
 }: {
   calls: Call[]
   onReplay: (id: number) => void
+  /** The feed is off (#80), so replay does nothing — say so in the rows rather
+   *  than letting them look clickable. Switching off files the Call it cut short
+   *  into history, so this list is guaranteed to have something in it right when
+   *  the feed goes off: a row that silently did nothing would be the common
+   *  case, not a corner. */
+  disabled: boolean
 }) {
   if (calls.length === 0) return null
 
@@ -380,8 +458,9 @@ function History({
           <li key={`${call.id}`}>
             <button
               type="button"
+              disabled={disabled}
               onClick={() => onReplay(call.id)}
-              className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/40"
+              className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 disabled:opacity-40"
             >
               <StatusLed
                 color={ledForCall(call)}

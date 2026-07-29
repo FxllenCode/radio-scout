@@ -1,7 +1,13 @@
 import { configureStore } from '@reduxjs/toolkit'
 import { setupListeners } from '@reduxjs/toolkit/query'
 
-import { loadSelection, namespaceOf, saveSelection } from '@/lib/persist'
+import {
+  loadFeedOff,
+  loadSelection,
+  namespaceOf,
+  saveFeedOff,
+  saveSelection,
+} from '@/lib/persist'
 
 import { api } from './api'
 import { initialLiveState, liveReducer } from './live'
@@ -35,6 +41,11 @@ export function makeStore(options: StoreOptions = {}) {
   const storage = 'storage' in options ? options.storage : globalThis.localStorage
   const namespace = options.namespace ?? namespaceOf()
   const remembered = storage && loadSelection(storage, namespace)
+  const rememberedFeedOff = storage && loadFeedOff(storage, namespace)
+  const hydrated = {
+    ...(remembered ? { selection: remembered } : {}),
+    ...(rememberedFeedOff === undefined ? {} : { feedOff: rememberedFeedOff }),
+  }
   const store = configureStore({
     reducer: {
       [api.reducerPath]: api.reducer,
@@ -44,20 +55,29 @@ export function makeStore(options: StoreOptions = {}) {
     },
     middleware: (getDefaultMiddleware) =>
       getDefaultMiddleware().concat(api.middleware),
-    preloadedState: remembered
-      ? { live: { ...initialLiveState, selection: remembered } }
-      : undefined,
+    // Spread unconditionally: with nothing remembered `hydrated` is empty and
+    // this is `initialLiveState`, which is what no preloaded state would have
+    // given anyway.
+    preloadedState: { live: { ...initialLiveState, ...hydrated } },
   })
   // Enables refetchOnFocus / refetchOnReconnect behavior.
   setupListeners(store.dispatch)
 
   if (storage) {
     let last = store.getState().live.selection
+    let lastFeedOff = store.getState().live.feedOff
     store.subscribe(() => {
-      const selection = store.getState().live.selection
-      if (selection === last) return
-      last = selection
-      saveSelection(storage, namespace, selection)
+      const { selection, feedOff } = store.getState().live
+      if (selection !== last) {
+        last = selection
+        saveSelection(storage, namespace, selection)
+      }
+      // Written on the switch, not on every Call — same reason as above, and a
+      // listener flips this once in a session at most.
+      if (feedOff !== lastFeedOff) {
+        lastFeedOff = feedOff
+        saveFeedOff(storage, namespace, feedOff)
+      }
     })
   }
   return store

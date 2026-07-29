@@ -15,6 +15,7 @@ import {
   expireAvoids,
   lagged,
   received,
+  selectIsFeedOff,
   selectSince,
 } from '@/store/live'
 import { selectSubscription } from '@/store/transport'
@@ -51,22 +52,52 @@ export function LiveFeedLink() {
   const matrix = useAppSelector((state) =>
     JSON.stringify(selectSubscription(state)),
   )
+  const feedOff = useAppSelector(selectIsFeedOff)
 
   useEffect(() => {
+    // Feed off is a **hard** off (#80): no socket at all, so bandwidth and
+    // battery go to zero and Web Push takes over — the server's "an open socket
+    // means someone is listening" rule then tells the truth about a listener who
+    // stopped listening. Not merely an empty subscription, which is what
+    // playback mode sends and which keeps the connection up.
+    //
+    // Guarded here rather than by closing after connecting, so a listener whose
+    // browser remembered the choice never opens one: no round trip, and no
+    // burst of catch-up audio arriving before the choice is applied.
+    if (feedOff) {
+      // Nothing is connected, and the display must not keep saying otherwise.
+      dispatch(disconnected())
+      return
+    }
     const handle = connectLiveFeed({
       onStatus: (status) => dispatch(STATUS_ACTION[status]()),
       onCall: (call, catchup) => dispatch(received({ call, catchup })),
       onLagged: (skipped) => dispatch(lagged(skipped)),
       // Read at send time, not subscribe time: the cursor moves with every Call
-      // and only matters when the socket comes back (ADR-0004).
+      // and only matters when the socket comes back (ADR-0004). Turning the feed
+      // off clears it, so coming back subscribes from now.
       since: () => selectSince(store.getState()),
       // Read at send time: notifications can be switched on while this socket
       // is already open, and the next `sub` frame is what tells the server.
       pushToken: () => push?.token,
     })
     feed.current = handle
-    return () => handle.close()
-  }, [dispatch, store, push])
+    // Tell it what to send *here*, not only from the matrix effect below.
+    //
+    // A handle starts with no subscription and `connectLiveFeed` sends nothing
+    // until it has one, so whoever creates a handle owns subscribing it. That
+    // used to be free — one handle per mount, paired with the matrix effect's
+    // first run — but a handle is now created again whenever the feed comes back
+    // on (#80), and `turnFeedOn` changes neither the matrix nor the push token,
+    // so the matrix effect does not re-run. Without this the listener would get
+    // a connected socket the server has nothing selected on: a green light and
+    // permanent silence until they next touched the Selection.
+    handle.subscribe(selectSubscription(store.getState()))
+    return () => {
+      feed.current = null
+      handle.close()
+    }
+  }, [dispatch, store, push, feedOff])
 
   // Re-sent on both counts: when the listener changes what they hear, and when
   // a push subscription appears or goes while this socket is already open —

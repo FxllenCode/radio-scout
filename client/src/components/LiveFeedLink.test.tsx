@@ -2,11 +2,14 @@ import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { feedOffKey } from '@/lib/persist'
 import {
   avoid,
   chooseTalkgroups,
   received,
   selectLiveMatrix,
+  turnFeedOff,
+  turnFeedOn,
 } from '@/store/live'
 import { makeStore } from '@/store/store'
 import { enterPlaybackMode } from '@/store/playback'
@@ -21,9 +24,10 @@ import type { Call } from '@/types'
 interface Recorded {
   subscriptions: Record<string, unknown>[]
   connections: number
+  closes: number
 }
 
-let feed: Recorded = { subscriptions: [], connections: 0 }
+let feed: Recorded = { subscriptions: [], connections: 0, closes: 0 }
 /** What the server pushes as soon as a client connects. */
 let greeting: unknown[] = []
 
@@ -36,11 +40,14 @@ beforeEach(() => {
   // closes over its own arrays rather than over the bindings above, so a late
   // frame is recorded against the test that caused it and nothing leaks
   // forward.
-  const mine: Recorded = { subscriptions: [], connections: 0 }
+  const mine: Recorded = { subscriptions: [], connections: 0, closes: 0 }
   feed = mine
   server.use(
     liveFeed.addEventListener('connection', ({ client }) => {
       mine.connections += 1
+      client.addEventListener('close', () => {
+        mine.closes += 1
+      })
       client.addEventListener('message', (event) => {
         mine.subscriptions.push(JSON.parse(String(event.data)))
       })
@@ -62,6 +69,21 @@ const call: Call = {
 async function lastSubscription() {
   await waitFor(() => expect(feed.subscriptions.length).toBeGreaterThan(0))
   return feed.subscriptions.at(-1)
+}
+
+/** A browser that remembers this listener switched the feed off (#80). */
+function offStorage(): Storage {
+  const map = new Map([[feedOffKey('default'), 'true']])
+  return {
+    get length() {
+      return map.size
+    },
+    clear: () => map.clear(),
+    getItem: (key) => map.get(key) ?? null,
+    key: (index) => [...map.keys()][index] ?? null,
+    removeItem: (key) => void map.delete(key),
+    setItem: (key, value) => void map.set(key, value),
+  }
 }
 
 describe('the live-feed link and Web Push (#16)', () => {
@@ -214,6 +236,88 @@ describe('the live-feed link', () => {
 
     // Moving between tabs must not drop the feed — or the queue behind it.
     expect(feed.connections).toBe(1)
+  })
+
+  /**
+   * Feed off is a **hard** off (#80, CONTEXT.md **Feed off**), and the socket is
+   * where that becomes true. Playback mode narrows the subscription to nothing —
+   * the connection stays up because the listener is still here. Off closes it,
+   * so bandwidth and battery go to zero, and so Web Push takes over: the
+   * server's "an open socket means someone is listening" rule then tells the
+   * truth about a listener who stopped listening.
+   */
+  describe('feed off (#80)', () => {
+    it('closes the socket and opens no other', async () => {
+      const store = makeStore()
+      renderApp('/', store)
+      await waitFor(() => expect(feed.connections).toBe(1))
+
+      act(() => {
+        store.dispatch(turnFeedOff())
+      })
+
+      await waitFor(() => expect(feed.closes).toBe(1))
+      // Nothing reconnects behind it — that is the difference between off and a
+      // dropped connection, which `connectLiveFeed` retries by design.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(feed.connections).toBe(1)
+    })
+
+    /**
+     * Coming back **subscribes**, and subscribes from now.
+     *
+     * Both halves matter and the first is the one that bit: a handle sends
+     * nothing until it is given a matrix, and `turnFeedOn` changes neither the
+     * matrix nor the push token — so the effect that normally subscribes does not
+     * re-run. Left to that, the listener got a connected socket with nothing
+     * selected on the server: a green light and permanent silence.
+     *
+     * Counted **per connection** for exactly that reason. Asserting on the last
+     * frame overall passes while the new socket says nothing at all, because the
+     * frame from before the feed went off is still the most recent one.
+     */
+    it('reconnects and subscribes afresh, never backfilling the silence', async () => {
+      greeting = [{ t: 'call', call }]
+      const store = makeStore()
+      renderApp('/', store)
+      // A Call arrives first, so there *is* a cursor to have dropped.
+      await waitFor(() => expect(feed.subscriptions.length).toBeGreaterThan(0))
+      await screen.findByText('FD Dispatch')
+
+      act(() => {
+        store.dispatch(turnFeedOff())
+      })
+      await waitFor(() => expect(feed.closes).toBe(1))
+      const beforeOn = feed.subscriptions.length
+
+      act(() => {
+        store.dispatch(turnFeedOn())
+      })
+
+      await waitFor(() => expect(feed.connections).toBe(2))
+      await waitFor(() =>
+        expect(feed.subscriptions.length).toBeGreaterThan(beforeOn),
+      )
+      // What the new socket was told: the listener's matrix, and no cursor.
+      const afterOn = feed.subscriptions.slice(beforeOn)
+      for (const frame of afterOn) {
+        expect(frame).toMatchObject({ t: 'sub', all: true })
+        expect(frame.since).toBeUndefined()
+      }
+    })
+
+    /** A listener who left the feed off and reloaded gets silence, not a socket:
+     *  the choice is honoured before anything connects, so their phone does not
+     *  spend a round trip and a burst of audio learning what they already
+     *  chose. */
+    it('never opens a socket at all when the feed starts off', async () => {
+      renderApp('/', makeStore({ storage: offStorage(), namespace: 'default' }))
+
+      // Give it as long as a connection would have taken.
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(feed.connections).toBe(0)
+      expect(await screen.findByText('FEED OFF')).toBeInTheDocument()
+    })
   })
 
   /** CONTEXT.md: the live feed and playback mode are mutually exclusive, and

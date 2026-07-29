@@ -31,10 +31,13 @@ import {
   selectMissed,
   selectPlayId,
   selectQueueDepth,
+  selectIsFeedOff,
   selectSelection,
   selectSince,
   toggleHoldSystem,
   toggleHoldTalkgroup,
+  turnFeedOff,
+  turnFeedOn,
   type LiveState,
 } from './live'
 
@@ -97,6 +100,118 @@ describe('live slice', () => {
       const state = reduce(lagged(12), lagged(3))
 
       expect(selectMissed(rootState(state))).toBe(15)
+    })
+  })
+
+  /**
+   * Feed off (#80) — the hard off rdio's LIVE FEED button has and Pause is not.
+   *
+   * Pause is transport-only: the subscription keeps streaming and the queue
+   * keeps filling. Off means off (CONTEXT.md **Feed off**): the Call playing
+   * stops, the queue clears, the socket closes, and rejoining starts from now.
+   */
+  describe('feed off (#80)', () => {
+    it('is on until the listener says otherwise, so nobody has to opt in', () => {
+      const state = reduce({ type: '@@INIT' })
+
+      expect(selectIsFeedOff(rootState(state))).toBe(false)
+    })
+
+    /** A deliberate off is not "missed". The counter admits traffic the listener
+     *  *wanted* and did not get — dropped by a lagged notice or the queue cap —
+     *  so charging them for silence they chose would make it a lie. */
+    it('stops the Call and clears the queue without counting it missed', () => {
+      const listening = reduce(...arrive(call(1), call(2), call(3)), lagged(4))
+      expect(selectQueueDepth(rootState(listening))).toBe(2)
+
+      const off = liveReducer(listening, turnFeedOff())
+
+      expect(selectIsFeedOff(rootState(off))).toBe(true)
+      expect(selectLiveCall(rootState(off))).toBeNull()
+      expect(selectQueueDepth(rootState(off))).toBe(0)
+      expect(selectMissed(rootState(off))).toBe(4)
+    })
+
+    /** Rejoining starts from **now**. Keeping the cursor would make turning the
+     *  feed back on replay the silence the listener asked for — the opposite of
+     *  what they chose, and a burst of stale audio on a phone. */
+    it('drops the catch-up cursor, so coming back never backfills the silence', () => {
+      const state = reduce(...arrive(call(7), call(9)), turnFeedOff())
+
+      expect(selectSince(rootState(state))).toBeUndefined()
+    })
+
+    /** Nothing arriving is playable while off — a Call in flight when the socket
+     *  closed, or one the server sent before it noticed. */
+    it('ignores a Call that arrives anyway', () => {
+      const state = reduce(turnFeedOff(), ...arrive(call(1)))
+
+      expect(selectLiveCall(rootState(state))).toBeNull()
+      expect(selectQueueDepth(rootState(state))).toBe(0)
+      expect(selectMissed(rootState(state))).toBe(0)
+    })
+
+    it('comes back on, and the feed can fill again', () => {
+      let state = reduce(...arrive(call(1)), turnFeedOff())
+      state = liveReducer(state, turnFeedOn())
+
+      expect(selectIsFeedOff(rootState(state))).toBe(false)
+      state = liveReducer(state, received({ call: call(5) }))
+      expect(selectLiveCall(rootState(state))).toEqual(call(5))
+    })
+
+    /** Nothing plays while off, by any route. Replay is reachable from three
+     *  places the disabled button does not cover — the RECENT list, the
+     *  lock-screen previous button (`previousCall`), and Control Center — and a
+     *  Call started from any of them would be audio playing under a FEED OFF
+     *  header with the socket shut. */
+    it('will not replay a Call from history while off', () => {
+      let state = reduce(...arrive(call(1), call(2)), advance())
+      expect(selectHistory(rootState(state))).toEqual([call(1)])
+
+      state = liveReducer(state, turnFeedOff())
+      state = liveReducer(state, replay(1))
+
+      expect(selectLiveCall(rootState(state))).toBeNull()
+    })
+
+    /** The Call cut off is still filed under history, so it is there to replay
+     *  once the feed is back on — being switched off is not the same as never
+     *  having heard it. */
+    it('keeps what it cut off replayable for when the feed returns', () => {
+      let state = reduce(...arrive(call(1)), turnFeedOff())
+      expect(selectHistory(rootState(state))).toEqual([call(1)])
+
+      state = liveReducer(state, turnFeedOn())
+      state = liveReducer(state, replay(1))
+
+      expect(selectLiveCall(rootState(state))).toEqual(call(1))
+    })
+
+    /** `missed` is a promise about traffic the listener wanted. A `lagged` notice
+     *  can land after the switch — buffered on the socket, or in flight while it
+     *  closes — and charging them for it would break that promise by the same
+     *  reasoning that keeps the counter untouched by the switch itself. */
+    it('does not count a lagged notice that lands after the switch', () => {
+      const state = reduce(turnFeedOff(), lagged(9))
+
+      expect(selectMissed(rootState(state))).toBe(0)
+    })
+
+    /** The Selection survives it. Off is a switch, not a reset — a Listener who
+     *  spent time narrowing their Profile must not have to do it again. */
+    it('leaves the Selection alone', () => {
+      const chosen = reduce(
+        chooseTalkgroups({
+          keys: [{ systemRef: 11, talkgroupRef: 100 }],
+          on: false,
+        }),
+      )
+      const before = selectSelection(rootState(chosen))
+
+      const state = liveReducer(chosen, turnFeedOff())
+
+      expect(selectSelection(rootState(state))).toEqual(before)
     })
   })
 

@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { selectionKey } from '@/lib/persist'
+import { feedOffKey, selectionKey } from '@/lib/persist'
 import { EVERYTHING, setTalkgroups } from '@/lib/selection'
 
-import { chooseTalkgroups, received, selectSelection } from './live'
+import {
+  chooseTalkgroups,
+  received,
+  selectIsFeedOff,
+  selectSelection,
+  turnFeedOff,
+  turnFeedOn,
+} from './live'
 import { makeStore } from './store'
 
 /** An in-memory `Storage` that also counts what was written, so a test can say
@@ -113,5 +120,69 @@ describe('makeStore', () => {
 
   it('defaults to this browser and this tab’s scanner', () => {
     expect(selectSelection(makeStore().getState())).toEqual(EVERYTHING)
+  })
+
+  /** Feed off is remembered beside the Selection (#80). A listener who switched
+   *  the feed off and reloaded must not be blasted with audio for having done
+   *  so — the choice outlives the tab, exactly as their Selection does. */
+  describe('the feed-off choice (#80)', () => {
+    it('starts on, so a Listener who never touched it hears the feed', () => {
+      const { storage } = fakeStorage()
+
+      const store = makeStore({ storage, namespace: 'default' })
+
+      expect(selectIsFeedOff(store.getState())).toBe(false)
+    })
+
+    it('remembers being switched off, and being switched back on', () => {
+      const { storage } = fakeStorage()
+      const store = makeStore({ storage, namespace: 'truck' })
+
+      store.dispatch(turnFeedOff())
+      expect(storage.getItem(feedOffKey('truck'))).toBe('true')
+
+      store.dispatch(turnFeedOn())
+      expect(storage.getItem(feedOffKey('truck'))).toBe('false')
+    })
+
+    it('starts off when that is what this browser last chose', () => {
+      const { storage } = fakeStorage({ [feedOffKey('default')]: 'true' })
+
+      const store = makeStore({ storage, namespace: 'default' })
+
+      expect(selectIsFeedOff(store.getState())).toBe(true)
+    })
+
+    /** Two Profiles in one browser (`?id=`) are two independent choices, the
+     *  same way their Selections are. */
+    it('is remembered per Profile', () => {
+      const { storage } = fakeStorage({ [feedOffKey('truck')]: 'true' })
+
+      expect(
+        selectIsFeedOff(makeStore({ storage, namespace: 'default' }).getState()),
+      ).toBe(false)
+      expect(
+        selectIsFeedOff(makeStore({ storage, namespace: 'truck' }).getState()),
+      ).toBe(true)
+    })
+
+    /** A hand-edited or half-written value costs the listener nothing: the feed
+     *  comes up on, which is the state the app is for. */
+    it('ignores a stored value that is not a boolean', () => {
+      const { storage } = fakeStorage({ [feedOffKey('default')]: 'maybe' })
+
+      const store = makeStore({ storage, namespace: 'default' })
+
+      expect(selectIsFeedOff(store.getState())).toBe(false)
+    })
+
+    it('runs unremembered when the browser has no storage', () => {
+      const store = makeStore({ storage: undefined, namespace: 'default' })
+
+      store.dispatch(turnFeedOff())
+
+      expect(selectIsFeedOff(store.getState())).toBe(true)
+      expect(ambient.writes).toEqual([])
+    })
   })
 })

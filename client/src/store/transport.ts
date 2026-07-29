@@ -9,6 +9,7 @@ import {
   received,
   replay,
   selectHistory,
+  selectIsFeedOff,
   selectLiveCall,
   selectLiveMatrix,
   selectPlayId,
@@ -165,17 +166,25 @@ export const KEEP_ALIVE_LIMIT_MS = 5 * 60_000
 /**
  * Is there a keep-alive for a finishing Call to hand over to? (spec US 31)
  *
- * Two things can mean no. **Playback mode**: the archive is a finite list the
+ * Three things can mean no. **Playback mode**: the archive is a finite list the
  * listener is walking, and reaching its end is an ending, not a gap. **A spent
  * budget**: the lull outlasted [`KEEP_ALIVE_LIMIT_MS`] and we have stopped
- * fighting the OS for this one.
+ * fighting the OS for this one. **Feed off** (#80): the silence was asked for,
+ * and the socket that would have ended it is closed — holding the audio session
+ * open there blocks the suspension that saves the battery, for a listener who
+ * switched the feed off to save it.
  *
  * Asked separately from [`selectIsBridging`] because the player needs it while
  * a Call is still *playing* — it is what decides whether the last Call hands
- * over early or plays all the way out.
+ * over early or plays all the way out. Feed off belongs *here* rather than only
+ * in the bridging test so both callers are right by construction: today a Call
+ * cannot be playing with the feed off (switching off stops it), and this does
+ * not depend on that staying true.
  */
 export const selectHasKeepAlive = (state: TransportRoot): boolean =>
-  selectPlaybackMode(state) === 'live' && !state.transport.keepAliveSpent
+  selectPlaybackMode(state) === 'live' &&
+  !selectIsFeedOff(state) &&
+  !state.transport.keepAliveSpent
 
 /**
  * Should the element be playing the keep-alive loop right now?
@@ -195,6 +204,8 @@ export const selectHasKeepAlive = (state: TransportRoot): boolean =>
  *   here would simply be refused.
  * - **Nothing is playing and nothing is paused.** A Call playing needs no
  *   bridge; a listener who paused is not listening.
+ *
+ * Feed off (#80) is covered by the first of those — see [`selectHasKeepAlive`].
  */
 export const selectIsBridging = (state: TransportRoot): boolean =>
   selectHasKeepAlive(state) &&

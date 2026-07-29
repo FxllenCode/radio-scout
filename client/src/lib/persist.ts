@@ -65,6 +65,39 @@ export function selectionKey(namespace: string): string {
   return `${KEY_PREFIX}:${namespace}`
 }
 
+/** Where a namespace's feed-off choice is stored (#80).
+ *
+ *  Its own key rather than a field inside the stored Selection: they are
+ *  different things with different lifetimes, and folding the switch into the
+ *  matrix would mean an older build reading a shape it validates against and
+ *  rejecting the listener's Selection along with it. */
+export function feedOffKey(namespace: string): string {
+  return `${KEY_PREFIX}:${namespace}:feed-off`
+}
+
+/** Whether this browser last left the live feed off, or `undefined` if it has
+ *  never said — which is not the same as `false`, and is why the caller decides
+ *  the default rather than this. */
+export function loadFeedOff(
+  storage: Storage,
+  namespace: string,
+): boolean | undefined {
+  const stored = readStored(storage, feedOffKey(namespace))
+  if (stored === 'true') return true
+  if (stored === 'false') return false
+  // Absent, or something we didn't write. Either way we know nothing.
+  return undefined
+}
+
+/** Remember the feed-off choice for `namespace`. */
+export function saveFeedOff(
+  storage: Storage,
+  namespace: string,
+  feedOff: boolean,
+): void {
+  writeStored(storage, feedOffKey(namespace), String(feedOff))
+}
+
 /** The remembered selection, or `undefined` if there isn't a usable one. */
 export function loadSelection(
   storage: Storage,
