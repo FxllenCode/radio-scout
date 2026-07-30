@@ -1009,6 +1009,33 @@ mod tests {
         assert!(!value_in(&env_file, VAPID_KEY_VAR).is_empty(), "{text}");
     }
 
+    /// A path that cannot be *read* is reported as the read failure it is —
+    /// only a genuinely absent file is created (#83).
+    ///
+    /// The distinction is the whole content of the `NotFound` guard, and it is
+    /// what an operator is shown: `persist`'s error goes straight into the WARN
+    /// that says no credential was saved. Told "File exists" about a path that
+    /// is really a directory — or that they have no permission to read — they
+    /// debug the wrong thing, on the one boot where nothing else works either.
+    #[test]
+    fn a_path_that_cannot_be_read_reports_the_read_failure_not_a_create_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("env-is-a-directory");
+        std::fs::create_dir(&path).expect("directory");
+
+        let error = persist(&path, INGEST_KEY_VAR, SECRET).expect_err("a directory is not a file");
+
+        assert_eq!(
+            error.kind(),
+            ErrorKind::IsADirectory,
+            "the read's own error, not `create_new`'s AlreadyExists: {error}"
+        );
+        assert!(
+            path.is_dir(),
+            "nothing was written over the operator's path"
+        );
+    }
+
     proptest::proptest! {
         /// However odd the file, the rewrite leaves exactly one uncommented
         /// assignment of the key, and never loses a line the operator wrote.

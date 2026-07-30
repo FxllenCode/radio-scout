@@ -820,6 +820,7 @@ fn parse_units(units: Option<&str>, sources: Option<&str>, unit: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use sea_orm::ConnectionTrait;
 
     #[test]
@@ -848,11 +849,15 @@ mod tests {
 
     #[test]
     fn frequencies_parse_from_json() {
+        // `pos` deliberately non-zero: at 0.0 every arithmetic mutation of the
+        // seconds -> ms conversion still lands on 0, so the assertion below
+        // would hold whatever the code did (#83).
         let f = parse_frequencies(Some(
-            r#"[{"freq":774031250,"pos":0.0,"len":1.5,"dbm":-50,"errorCount":2,"spikeCount":1}]"#,
+            r#"[{"freq":774031250,"pos":0.25,"len":1.5,"dbm":-50,"errorCount":2,"spikeCount":1}]"#,
         ));
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].freq, 774031250);
+        assert_eq!(f[0].pos_ms, Some(250), "seconds -> ms");
         assert_eq!(f[0].len_ms, Some(1500));
         assert_eq!(f[0].error_count, Some(2));
         assert_eq!(f[0].dbm, Some(-50.0));
@@ -869,10 +874,17 @@ mod tests {
         assert_eq!(from_units[0].label.as_deref(), Some("Engine 1"));
         assert_eq!(from_units[0].offset_ms, Some(500));
 
-        let from_sources =
-            parse_units(None, Some(r#"[{"src":123,"pos":1.0,"tag":"Medic"}]"#), None);
+        // `pos` is seconds and the column is milliseconds. Asserted on a value
+        // where the conversion is the only arithmetic that produces it: 1.75 s
+        // is 1750 ms, which neither `+ 1000` nor `/ 1000` can reach (#83).
+        let from_sources = parse_units(
+            None,
+            Some(r#"[{"src":123,"pos":1.75,"tag":"Medic"}]"#),
+            None,
+        );
         assert_eq!(from_sources[0].unit_ref, 123);
         assert_eq!(from_sources[0].label.as_deref(), Some("Medic"));
+        assert_eq!(from_sources[0].offset_ms, Some(1750), "seconds -> ms");
 
         let from_singular = parse_units(None, None, Some("999"));
         assert_eq!(from_singular.len(), 1);
@@ -912,6 +924,23 @@ mod tests {
         assert_eq!(audio_extension(&Some("call.m4a".into())), "m4a");
         assert_eq!(audio_extension(&Some("weird".into())), "wav");
         assert_eq!(audio_extension(&None), "wav");
+    }
+
+    /// Both halves of the extension guard, because the extension becomes an
+    /// object key: a trailing dot yields an *empty* extension (which `all()`
+    /// answers vacuously true for), and anything non-alphanumeric is a filename
+    /// we will not echo into the store (#83).
+    #[rstest]
+    #[case::trailing_dot("call.", "wav")]
+    #[case::path_separator_in_extension("call.wav/../../etc", "wav")]
+    #[case::space("call.w v", "wav")]
+    #[case::uppercased("CALL.WAV", "wav")]
+    #[case::alphanumeric_is_kept("call.mp3", "mp3")]
+    fn audio_extension_refuses_anything_but_an_alphanumeric_suffix(
+        #[case] name: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(audio_extension(&Some(name.into())), expected, "for {name}");
     }
 
     #[test]

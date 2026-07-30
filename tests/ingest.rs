@@ -166,8 +166,8 @@ async fn trunk_recorder_upload_persists_call_and_maps_meta() {
       "talkgroup_tag":"TDB A1","talkgroup_description":"Fire Dispatch A1",
       "talkgroup_group":"Fire","talkgroup_group_tag":"Fire Dispatch",
       "start_time":1669740338,"freq":774031250,
-      "freqList":[{"freq":774031250,"pos":0,"len":1.5,"error_count":1,"spike_count":0}],
-      "srcList":[{"src":4424000,"pos":0,"tag":"Engine 1"}],
+      "freqList":[{"freq":774031250,"pos":0.25,"len":1.5,"error_count":1,"spike_count":0}],
+      "srcList":[{"src":4424000,"pos":0.75,"tag":"Engine 1"},{"src":0,"pos":1.5,"tag":""}],
       "patched_talkgroups":[100,200]
     }"#;
 
@@ -197,16 +197,38 @@ async fn trunk_recorder_upload_persists_call_and_maps_meta() {
     // System resolved from short_name.
     assert_eq!(app.system_of(&stored).await.label.as_deref(), Some("butco"));
 
-    // Child rows from freqList / srcList / patched_talkgroups.
+    // Child rows from freqList / srcList / patched_talkgroups. TR reports
+    // `pos`/`len` in **seconds**; the columns are milliseconds, and the values
+    // are chosen so the conversion is the only arithmetic that reaches them
+    // (#83) — the timeline the Archive draws is wrong by three orders of
+    // magnitude if this drifts.
     assert_eq!(app.count::<call_frequency::Entity>().await, 1);
-    assert_eq!(app.count::<call_patch::Entity>().await, 2);
-    let unit = call_unit::Entity::find()
+    let freq = call_frequency::Entity::find()
         .one(&app.db)
         .await
         .unwrap()
-        .unwrap();
-    assert_eq!(unit.unit_ref, 4424000);
-    assert_eq!(unit.label.as_deref(), Some("Engine 1"));
+        .expect("the freqList row");
+    assert_eq!(freq.pos_ms, Some(250), "pos 0.25 s -> ms");
+    assert_eq!(freq.len_ms, Some(1500), "len 1.5 s -> ms");
+
+    assert_eq!(app.count::<call_patch::Entity>().await, 2);
+    // `src: 0` is TR's "no source known for this slice", not a radio: it must
+    // not become a Unit on the Call.
+    let units = units_of(&app, stored.id).await;
+    assert_eq!(units.len(), 1, "a zero src is padding, not a radio");
+    assert_eq!(units[0].unit_ref, 4424000);
+    assert_eq!(units[0].label.as_deref(), Some("Engine 1"));
+    assert_eq!(units[0].offset_ms, Some(750), "pos 0.75 s -> ms");
+}
+
+/// The Unit rows recorded against one Call, in a file that now asserts them from
+/// three directions (the TR roster and each of the two generic aliases).
+async fn units_of(app: &TestApp, call_id: i64) -> Vec<call_unit::Model> {
+    call_unit::Entity::find()
+        .filter(call_unit::Column::CallId.eq(call_id))
+        .all(&app.db)
+        .await
+        .expect("units")
 }
 
 #[tokio::test]
@@ -468,6 +490,39 @@ async fn the_trunk_recorder_patched_talkgroups_path_follows_the_same_rule() {
     );
 }
 
+/// A zero in Trunk Recorder's `patched_talkgroups` is padding, and stays
+/// padding even where the System happens to have a Talkgroup it would resolve
+/// against (#83).
+///
+/// Membership resolution would hide this on any realistic System — nobody has a
+/// Talkgroup 0 — which is exactly why the guard needs its own test: the filter
+/// says a non-positive entry is *not a Talkgroup Ref at all*, independently of
+/// what the System knows, and that is the only rule under which a recorder's
+/// padding can never route a Call to a listener.
+#[tokio::test]
+async fn a_zero_patch_ref_is_padding_even_when_a_talkgroup_would_match_it() {
+    let app = TestApp::with_key("k").await;
+    repo::resolve_or_create_system(&app.db, 1, Some("butco".into()), 0)
+        .await
+        .expect("seed the short_name's system");
+    app.seed_talkgroup(1, 100).await;
+    app.seed_talkgroup(1, 0).await;
+
+    let (status, body) = app
+        .upload_tr(CallUpload::tr(
+            r#"{"short_name":"butco","talkgroup":54241,"start_time":1669740338,
+                "patched_talkgroups":[100,0]}"#,
+        ))
+        .await;
+
+    assert_eq!(status, 200, "{body:?}");
+    assert_eq!(
+        app.patch_refs(app.the_call().await.id).await,
+        vec![100],
+        "0 never becomes a patch member"
+    );
+}
+
 /// The rdio-compatible field aliases are honored: `patched_talkgroups` (== the
 /// `patches` array) and `audioType`/`audioName` (the MIME + filename carried as
 /// form fields rather than on the audio part).
@@ -502,6 +557,64 @@ async fn field_aliases_are_accepted() {
         "audioType"
     );
     assert_eq!(stored.audio_name.as_deref(), Some("clip.mp3"), "audioName");
+}
+
+/// `talkgroupGroups` — the comma-separated plural — is a field of its own, not
+/// a spelling of `talkgroupGroup` (#83).
+///
+/// rdio accepts both and a recorder may send either; the plural is the one no
+/// other test exercises, so dropping it would show up as Talkgroups that
+/// quietly stop appearing under their category in the Talkgroups panel.
+#[tokio::test]
+async fn the_plural_talkgroup_groups_field_lands() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(
+        CallUpload::new()
+            .remove("talkgroupGroup")
+            .set("talkgroupGroups", "Fire, Law"),
+    )
+    .await;
+
+    let tg = app.talkgroup_of(&app.the_call().await).await;
+    let mut groups = repo::groups_for_talkgroup(&app.db, tg.id)
+        .await
+        .expect("groups");
+    groups.sort();
+    assert_eq!(groups, vec!["Fire".to_string(), "Law".to_string()]);
+}
+
+/// `units` — the JSON roster — carries a Ref, a label and an offset per Unit.
+#[tokio::test]
+async fn the_units_roster_alias_lands_with_labels_and_offsets() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(CallUpload::new().set(
+        "units",
+        r#"[{"id":4424000,"label":"Engine 1","offset":1.25}]"#,
+    ))
+    .await;
+
+    let units = units_of(&app, app.the_call().await.id).await;
+    assert_eq!(units.len(), 1, "the units roster is read");
+    assert_eq!(units[0].unit_ref, 4424000);
+    assert_eq!(units[0].label.as_deref(), Some("Engine 1"));
+    assert_eq!(units[0].offset_ms, Some(1250), "offset 1.25 s -> ms");
+}
+
+/// `unit` — the singular Ref a recorder sends when it knows who keyed up but
+/// nothing else — is the last of the three roster spellings.
+#[tokio::test]
+async fn the_singular_unit_alias_lands() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(CallUpload::new().set("unit", "4424001"))
+        .await;
+
+    let units = units_of(&app, app.the_call().await.id).await;
+    assert_eq!(units.len(), 1, "the singular unit is read");
+    assert_eq!(units[0].unit_ref, 4424001);
+    assert_eq!(units[0].offset_ms, None, "no offset was sent");
 }
 
 // ---------------------------------------------------------------------------

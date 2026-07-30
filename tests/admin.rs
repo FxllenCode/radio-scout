@@ -284,6 +284,28 @@ async fn a_forged_forwarded_for_does_not_buy_a_fresh_budget() {
     );
 }
 
+/// The ledger only says it is full when it is (#83).
+///
+/// `Lockout::forget_spent` ends with an unconditional WARN, reached only when
+/// the early return above it did not fire — that is, only after the trim loop
+/// actually evicted something. The guard and the warning are therefore one
+/// mechanism, and #83's inventory got this wrong: it filed the guard's `<` as a
+/// "known equivalent, do not chase", when flipping it makes an ordinary ledger
+/// fall straight through to the warning and cry full on **every failed login**.
+///
+/// A WARN is where ADR-0011 rule 7 puts "an operator must act", so a false one
+/// on the admin surface is the kind that teaches an operator to ignore the log
+/// — and the log is the only place a real password-guessing attempt shows up.
+#[tokio::test]
+async fn an_ordinary_failed_login_does_not_claim_the_ledger_is_full() {
+    let app = app_locking_after_three().await;
+    let capture = LogCapture::start();
+
+    assert_eq!(app.login_as("wrong").await.status(), 401);
+
+    capture.assert_never_logged("ledger is full");
+}
+
 /// Getting in clears the address's record. rdio clears the *whole* ledger on any
 /// successful login (`admin.go:454`), so one operator logging in hands every
 /// attacker a fresh budget.

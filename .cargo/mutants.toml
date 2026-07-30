@@ -25,3 +25,45 @@ exclude_globs = [
     # mutant here breaks the tests that use it, which proves nothing.
     "src/testing.rs",
 ]
+
+# Individually-named **equivalent mutants** (#83): mutations that provably cannot
+# change behavior, so no test can kill them and chasing them would mean writing
+# assertions that are true by construction. Each is excluded one mutant at a
+# time — never a whole function — with the proof written beside it.
+#
+# Entries are regexes matched against the names `cargo mutants --list` prints
+# (`path:line:col: <change>`). They name only as much as it takes to be
+# unambiguous: the mutations below are unique by their text alone, so none is
+# anchored to a line — an anchor that drifts is a stale exclusion, and the text
+# is what carries the meaning. Either way the failure mode is the same and it is
+# the one we want: an entry that stops matching stops excluding, and the mutant
+# reappears in the nightly report rather than vanishing quietly.
+#
+# **The bar is a proof, not a plausible argument.** #83's own inventory listed
+# `Lockout::forget_spent`'s `<` -> `>` early return as "known equivalent, do not
+# chase"; it is not. The function ends with an unconditional `tracing::warn!`
+# *after* the trim loop, so the mutant makes an ordinary ledger fall through to
+# it and cry "ledger is full" on every failed login. It is killed by
+# `tests/admin.rs::an_ordinary_failed_login_does_not_claim_the_ledger_is_full`.
+exclude_re = [
+    # `Push` and `Enhancer` are both `#[derive(Default)]` newtypes over
+    # `Option<Arc<Inner>>`, and `Option::default()` is `None` — so
+    # `Default::default()` *is* the value `disabled()` returns. The mutation
+    # rewrites the constructor into a different spelling of itself.
+    "replace Push::disabled -> Self with Default::default\\(\\)",
+    "replace Enhancer::disabled -> Self with Default::default\\(\\)",
+
+    # `spa_is_embedded` reports whether `client/dist` was embedded at compile
+    # time, so its value is a **build input**: whichever constant matches the
+    # tree the sweep ran against is equivalent by construction, and no test can
+    # tell it from the real thing. `.github/workflows/nightly.yml` runs
+    # `npm run build` before the sweep (as does `ci.yml`, via the `client-dist`
+    # artifact), so there the SPA is embedded and `true` is the equivalent one.
+    # `false` is deliberately NOT excluded — it is killable, and
+    # `tests/frontend.rs::serves_frontend_at_root` kills it by asserting that
+    # the backend fallback is not the SPA shell. The one place this exclusion
+    # hides something real is a hand-run sweep in a checkout where the SPA was
+    # never built: there the two constants swap roles. Build the client first,
+    # which is what CI does and what `cargo build` wants anyway.
+    "replace spa_is_embedded -> bool with true",
+]

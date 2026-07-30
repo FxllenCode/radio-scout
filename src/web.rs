@@ -147,3 +147,46 @@ const FALLBACK_HTML: &str = r#"<!doctype html>
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    /// Every extension the SPA build emits, pinned to the type a browser needs
+    /// to see (#83).
+    ///
+    /// Nothing else in the suite can reach most of these arms: the integration
+    /// tests serve whatever `client/dist` happens to contain, so an arm for a
+    /// file this build didn't emit — or any arm at all in a checkout where the
+    /// SPA was never built — runs unasserted. A stylesheet handed over as
+    /// `application/octet-stream` is a blank page in a browser, and a worker or
+    /// manifest with the wrong type is silently ignored, so these are the
+    /// values, not merely "some string".
+    #[rstest]
+    #[case::html("index.html", "text/html; charset=utf-8")]
+    #[case::js("assets/index-D4f9.js", "text/javascript; charset=utf-8")]
+    #[case::mjs("assets/worker.mjs", "text/javascript; charset=utf-8")]
+    #[case::css("assets/index-B1c2.css", "text/css; charset=utf-8")]
+    #[case::svg("favicon.svg", "image/svg+xml")]
+    #[case::json("assets/data.json", "application/json")]
+    #[case::webmanifest("manifest.webmanifest", "application/manifest+json")]
+    #[case::woff2("assets/geist.woff2", "font/woff2")]
+    #[case::woff("assets/geist.woff", "font/woff")]
+    #[case::png("icon-192.png", "image/png")]
+    #[case::ico("favicon.ico", "image/x-icon")]
+    #[case::source_map("assets/index-D4f9.js.map", "application/json")]
+    #[case::txt("robots.txt", "text/plain; charset=utf-8")]
+    fn content_type_is_pinned_per_extension(#[case] path: &str, #[case] expected: &str) {
+        assert_eq!(content_type_for(path), expected, "for {path}");
+    }
+
+    /// An extension we don't model, and a file with none at all, both fall back
+    /// to the byte-stream type rather than guessing.
+    #[rstest]
+    #[case::unmodelled("archive.tar.gz", "application/octet-stream")]
+    #[case::no_extension("LICENSE", "application/octet-stream")]
+    fn unknown_extensions_fall_back_to_octet_stream(#[case] path: &str, #[case] expected: &str) {
+        assert_eq!(content_type_for(path), expected, "for {path}");
+    }
+}

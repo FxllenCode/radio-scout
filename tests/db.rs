@@ -29,6 +29,55 @@ async fn sqlite() -> (DatabaseConnection, tempfile::TempDir) {
     (db, dir)
 }
 
+/// `db::connect` leaves a SQLite database in the mode the app is designed
+/// around (#83).
+///
+/// **WAL is the assertion that bites.** Nothing else in the suite notices the
+/// `get_database_backend() == Sqlite` arm not firing, and the only symptom
+/// would be a Pi whose archive queries start blocking behind every upload —
+/// slowness on hardware, and nothing at all in a test run.
+///
+/// `foreign_keys` is checked beside it as a statement of the contract, not as a
+/// guard on that arm: sqlx turns foreign keys on for every SQLite connection it
+/// opens, so this passes with the explicit `PRAGMA` removed. The pragma is kept
+/// because the guarantee should not rest on a driver default — but a test
+/// cannot prove that, and pretending otherwise is the kind of assertion this
+/// ticket is about.
+#[tokio::test]
+async fn connect_puts_sqlite_in_wal_with_foreign_keys_on() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let (db, _dir) = sqlite().await;
+
+    let mode = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA journal_mode;",
+        ))
+        .await
+        .expect("journal_mode")
+        .expect("a row");
+    assert_eq!(
+        mode.try_get::<String>("", "journal_mode").unwrap(),
+        "wal",
+        "a reader must not block the ingest writer"
+    );
+
+    let foreign_keys = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_keys;",
+        ))
+        .await
+        .expect("foreign_keys")
+        .expect("a row");
+    assert_eq!(
+        foreign_keys.try_get::<i32>("", "foreign_keys").unwrap(),
+        1,
+        "a child row must not outlive its parent"
+    );
+}
+
 #[tokio::test]
 async fn migrations_apply_and_tables_are_queryable() {
     let (db, _dir) = sqlite().await;
@@ -93,6 +142,16 @@ async fn ensure_api_key_registers_once_and_stays_authorized() {
         repo::authorize_ingest(&db, "from-dotenv", 11)
             .await
             .unwrap()
+    );
+
+    // The row says where the key came from. A key's secret is never logged and
+    // never re-readable (ADR-0011 rule 2), so the label is the only handle an
+    // operator has on which row is which — the id alone doesn't say whether a
+    // key came from `.env` or was generated (#83).
+    let registered = api_key::Entity::find().one(&db).await.unwrap().unwrap();
+    assert_eq!(
+        registered.label.as_deref(),
+        Some("configured (RADIO_SCOUT_API_KEY)")
     );
 
     // Restarting must not add a second row for the same secret.
@@ -196,15 +255,20 @@ async fn insert_call_persists_call_with_children() {
         object_key: "ab/abcd.wav".into(),
         audio_mime: Some("audio/x-wav".into()),
         audio_name: Some("audio.wav".into()),
+        duration_ms: Some(4_250),
         patches: vec![200, 300],
         units: vec![repo::NewCallUnit {
             unit_ref: 4_424_000,
             label: Some("Engine 1".into()),
-            offset_ms: Some(0),
+            offset_ms: Some(1_500),
         }],
         frequencies: vec![repo::NewCallFrequency {
             freq: 774_031_250,
-            ..Default::default()
+            pos_ms: Some(250),
+            len_ms: Some(1_500),
+            dbm: Some(-50.5),
+            error_count: Some(2),
+            spike_count: Some(1),
         }],
         ..Default::default()
     };
@@ -225,10 +289,30 @@ async fn insert_call_persists_call_with_children() {
     let groups = repo::groups_for_talkgroup(&db, tg.id).await.unwrap();
     assert_eq!(groups, vec!["Emergency".to_string(), "Public".to_string()]);
 
-    // Child rows.
+    // Child rows — asserted by column, not by count (#83). A count proves a row
+    // was written; it says nothing about a column that stopped being written,
+    // and every one of these is a column some screen reads: the Call's duration
+    // drives the archive's timeline, a Unit's offset is where in the recording
+    // that radio keyed up, and a frequency's position and signal level are the
+    // whole content of a Call that spans a control-channel handoff.
+    assert_eq!(stored.duration_ms, Some(4_250), "the Call's own duration");
+
     assert_eq!(call_patch::Entity::find().count(&db).await.unwrap(), 2);
-    assert_eq!(call_unit::Entity::find().count(&db).await.unwrap(), 1);
-    assert_eq!(call_frequency::Entity::find().count(&db).await.unwrap(), 1);
+
+    let units = call_unit::Entity::find().all(&db).await.unwrap();
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].unit_ref, 4_424_000);
+    assert_eq!(units[0].label.as_deref(), Some("Engine 1"));
+    assert_eq!(units[0].offset_ms, Some(1_500));
+
+    let frequencies = call_frequency::Entity::find().all(&db).await.unwrap();
+    assert_eq!(frequencies.len(), 1);
+    assert_eq!(frequencies[0].freq, 774_031_250);
+    assert_eq!(frequencies[0].pos_ms, Some(250));
+    assert_eq!(frequencies[0].len_ms, Some(1_500));
+    assert_eq!(frequencies[0].dbm, Some(-50.5));
+    assert_eq!(frequencies[0].error_count, Some(2));
+    assert_eq!(frequencies[0].spike_count, Some(1));
 
     // Patch archive helper.
     let patched = repo::calls_patched_to(&db, 200).await.unwrap();

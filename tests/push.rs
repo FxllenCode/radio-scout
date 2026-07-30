@@ -88,6 +88,7 @@ async fn the_vapid_public_key_is_served_to_the_client() {
 /// push service will carry it.
 #[tokio::test]
 async fn a_matching_call_notifies_the_subscribed_device() {
+    let capture = common::logs::LogCapture::start();
     let service = PushService::start().await;
     let app = TestApp::with_key("k").await;
     app.post_json(
@@ -119,6 +120,15 @@ async fn a_matching_call_notifies_the_subscribed_device() {
         app.the_call().await.id,
         "the Call to open on tap"
     );
+
+    // The service accepted it, and the log says so. Asserted because delivery
+    // and refusal are otherwise indistinguishable from outside this process:
+    // both leave the same request at the service and the same row in the
+    // database, so without this a push recorded as *failed* would arrive
+    // perfectly and nothing would notice (#83).
+    let line = capture.wait_for("web push sent").await;
+    assert!(line.contains(" DEBUG "), "{line}");
+    capture.assert_never_logged("web push refused");
 }
 
 /// A notification is for a listener who *isn't* listening. While the live-feed

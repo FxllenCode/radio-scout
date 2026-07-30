@@ -23,10 +23,20 @@ async fn serves_frontend_at_root() {
     );
 
     let body = resp.text().await.expect("body");
+    // Asserted both ways round, because the two pages are not otherwise
+    // distinguishable: the built shell's title carries "Radio-Scout" too, so a
+    // `spa_is_embedded` that reported the wrong thing would still have satisfied
+    // the fallback branch (#83). Whether the SPA is embedded decides which tests
+    // in this file assert anything at all — a predicate that lies quietly
+    // disables them.
     if web::spa_is_embedded() {
         assert!(body.contains("id=\"root\""), "SPA shell served at /");
     } else {
         assert!(body.contains("Radio-Scout"), "backend fallback served at /");
+        assert!(
+            !body.contains("id=\"root\""),
+            "the backend fallback is not the SPA shell"
+        );
     }
 }
 
@@ -64,6 +74,17 @@ async fn api_namespace_is_not_shadowed_by_spa_fallback() {
     assert!(
         !body.contains("id=\"root\""),
         "must not serve the SPA for /api/*"
+    );
+
+    // The namespace root itself, with no trailing slash: `/api` matches neither
+    // `api/` prefix nor any route, so it is the one path that reaches the guard
+    // through its middle arm (#83). Serving the shell here would tell a client
+    // whose base URL lost its path that the API is alive.
+    let root = app.get("/api").await;
+    assert_eq!(root.status(), 404, "/api is not a client-side route");
+    assert!(
+        !root.text().await.expect("body").contains("id=\"root\""),
+        "must not serve the SPA for /api"
     );
 
     assert_eq!(app.get("/api/call/999999/audio").await.status(), 404);
