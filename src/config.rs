@@ -603,7 +603,7 @@ impl Config {
             return Err(ConfigError::invalid_key(
                 "enhancement.output",
                 &self.enhancement.output.to_string(),
-                "\"wav\" — \"opus\" needs libopus, which lands with #23",
+                "\"wav\" — \"opus\" needs libopus, which lands with #100",
             ));
         }
         validate_directives("log.directives", &self.log.directives)?;
@@ -2380,7 +2380,7 @@ mod tests {
         assert!(message.contains("enhancement.output"), "{message}");
         assert!(message.contains("opus"), "{message}");
         assert!(
-            message.contains("#23"),
+            message.contains("#100"),
             "an operator must be told where it lands: {message}"
         );
     }

@@ -1,6 +1,8 @@
 # Optional, Rust-native audio enhancement pipeline; AAC/M4A output
 
 > **Amended by #20 (2026-07-27).** The gate moved from **build time to runtime**, the **AAC encoder was dropped entirely**, and the default enhanced output is **WAV at 8 kHz**, not AAC-LC/M4A. The original decision below is kept as the record of what was decided in July 2026 and why; read [the amendment](#amendment-20-2026-07-27--runtime-gate-no-aac-wav-default) for what is actually built.
+>
+> **Pointer corrected (2026-07-30).** Below, `output = "opus"` is said to "land with #23". #23 shipped without `libopus`, so it now lands with **#100**, which carries the reasoning — including that #23's own amendment removed cross-compilation from the release path, which is most of why Opus was deferred here. The refusal-at-boot is unchanged.
 
 ## Context
 
