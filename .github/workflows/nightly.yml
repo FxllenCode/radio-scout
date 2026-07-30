@@ -26,14 +26,31 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Sharded **eight** ways, not four.
+  #
+  # At four it stopped finishing: 1289 mutants over four shards is ~320 each, and
+  # at the ~50 s of wall clock a mutant costs here (a build plus the whole suite,
+  # two at a time) that is over five hours — GitHub's hard ceiling for a job. On
+  # 2026-07-29 one shard finished in 4 h and the other three were killed at the
+  # limit, so three quarters of the sweep reported nothing at all. Worse, it
+  # reported nothing *quietly*: the run failed either way, because a surviving
+  # mutant is also a non-zero exit, so the timeout looked like the signal working.
+  #
+  # Eight puts a shard at ~160 mutants, a bit over two hours, which leaves room
+  # for the sweep to keep growing with the codebase before this needs revisiting.
+  # The number to watch is the per-shard wall clock in the run summary; when it
+  # approaches three hours, double the shards again.
   mutants:
-    name: Mutants ${{ matrix.shard }}/4
+    name: Mutants ${{ matrix.shard }}/8
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    # Tighter than the 5 h ceiling on purpose. A shard should take ~2 h, so this
+    # is generous headroom — and a shard that is going to be killed anyway should
+    # be killed early rather than holding a runner for five hours to tell us so.
+    timeout-minutes: 210
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -55,7 +72,7 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
       - name: Mutate
-        run: cargo mutants --shard ${{ matrix.shard }}/4 --test-tool nextest -j 2 -- --locked
+        run: cargo mutants --shard ${{ matrix.shard }}/8 --test-tool nextest -j 2 -- --locked
       - uses: actions/upload-artifact@v7
         if: always()
         with:

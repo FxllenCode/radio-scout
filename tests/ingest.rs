@@ -73,6 +73,42 @@ async fn duplicate_calls_within_the_window_are_rejected() {
     assert!(body.contains("Call imported successfully."), "{body:?}");
 }
 
+/// The window is symmetric, and **both** sides of it have to be tested.
+///
+/// A recorder catching up after a network blip uploads older Calls after newer
+/// ones, so the Call already stored is routinely *later* than the one arriving —
+/// which is why the query bounds `call_at_ms` on both sides rather than only
+/// looking backwards. Only the backward side was covered, and the nightly
+/// mutation sweep found it: widening the forward bound (`call_at_ms + window`
+/// becoming `call_at_ms * window`) changed nothing any test could see, because no
+/// stored Call was ever ahead of an incoming one.
+///
+/// Under that mutation an out-of-order upload is swallowed as a duplicate of a
+/// Call minutes later, and the recorder is told "imported successfully" — the
+/// worst shape of bug this project has, since nothing retries and nothing warns.
+#[tokio::test]
+async fn a_call_arriving_out_of_order_is_not_a_duplicate_of_a_much_later_one() {
+    let app = TestApp::with_key("k").await;
+
+    // The recorder is caught up: a Call 100 seconds ahead lands first. The
+    // distance is chosen so it is outside `call_at_ms + window` (1.5 s) while
+    // being *inside* `call_at_ms * window` (500 s) — which is exactly the gap the
+    // surviving mutant lived in, and why a merely "much later" Call did not
+    // close it.
+    app.upload_ok(CallUpload::new().at(100_000)).await;
+
+    // Then it backfills one from earlier — same System and Talkgroup, far
+    // outside the window on the *forward* side.
+    let (status, body) = app.upload(CallUpload::new().at(1_000)).await;
+
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Call imported successfully."),
+        "an earlier Call is not a duplicate of a later one: {body:?}"
+    );
+    assert_eq!(app.calls().await.len(), 2, "both Calls stored");
+}
+
 #[tokio::test]
 async fn ingest_persists_the_full_field_set() {
     let app = TestApp::with_key("k").await;
