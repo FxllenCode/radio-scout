@@ -71,12 +71,6 @@ number and a reason.
 curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/install.sh | sh
 ```
 
-> **While 0.1.0 is a release candidate, pin it** — the installer resolves the *latest* release
-> and pre-releases are deliberately excluded from that:
-> ```sh
-> curl -fsSL https://raw.githubusercontent.com/FxllenCode/radio-scout/master/install.sh | sh -s -- --version v0.1.0-rc.2
-> ```
-
 It works out which binary your machine wants, verifies it against the release's published
 SHA-256, and installs to `/usr/local/bin` — or `~/.local/bin` when that isn't writable, so it
 needs no root. Piping a script into your shell should make you uncomfortable; read it first,
