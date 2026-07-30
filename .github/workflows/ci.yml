@@ -355,6 +355,39 @@ jobs:
           path: client/playwright-report/
           retention-days: 7
 
+  # The real-browser component layer ADR-0010 names for the audio player and its
+  # Media-Session wiring (#34) — the middle rung between jsdom and the real
+  # device. It is a *different question* from the `client` job's jsdom suite, not
+  # a second run of it: whether a real media stack accepts what we hand it.
+  #
+  # Deliberately not part of `client`. That job owns the one measured coverage
+  # profile the ratcheting floor and the patch gate read (the same reason #38's
+  # arm64 job does not measure coverage), and this layer asserts things a line
+  # counter cannot express.
+  #
+  # Advisory to begin with, on the same terms the PWA suite got: a browser in CI
+  # earns a required check by not flaking, and neither of these has a track
+  # record here yet.
+  browser-mode:
+    name: Audio player in a real browser (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      # The same Chromium the PWA job installs — which is the whole reason this
+      # layer costs a dev-dependency rather than a download.
+      - run: npx playwright install --with-deps chromium
+        working-directory: client
+      - run: npm run test:browser
+        working-directory: client
+
   # --------------------------------------------------------------------------
   # The pipeline checks itself: a malformed workflow is not a failing run, it is
   # a run that never happens.

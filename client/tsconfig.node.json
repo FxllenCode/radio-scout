@@ -19,5 +19,8 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts"]
+  /* Both Vitest configs: the jsdom one and the Browser Mode one (#34). A
+     config outside every project is a config `npm run typecheck` never
+     reads, which is how a broken one ships looking green. */
+  "include": ["vite.config.ts", "vitest.browser.config.ts"]
 }

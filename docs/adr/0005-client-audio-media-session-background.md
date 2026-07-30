@@ -82,7 +82,7 @@ Two known limits of that prefetch were recorded here when #14 shipped. **Both ar
 
   The **search** request is not aborted; RTK Query owns that lifecycle. It completes and populates a cache entry under the abandoned key, which ages out on `keepUnusedDataFor`. That is one JSON page, and accepted.
 
-The layer this did **not** add is Vitest Browser Mode, which [ADR-0010](0010-coverage-policy-and-test-tooling.md) names for exactly this component ("real-browser component tests for the audio player + Media-Session wiring"). The wiring is covered in jsdom against a fake Media Session, with the real-browser and real-device layers still owed — Browser Mode belongs with #15, which brings the browser tooling in for PWA install/offline anyway.
+The layer this did **not** add is Vitest Browser Mode, which [ADR-0010](0010-coverage-policy-and-test-tooling.md) names for exactly this component ("real-browser component tests for the audio player + Media-Session wiring"). The wiring shipped covered in jsdom against a fake Media Session; Browser Mode arrived with **#34** — see its notes below.
 
 ## Implementation notes (#15)
 
@@ -95,7 +95,18 @@ The gap-bridging half shipped in #15, alongside the PWA that makes it reachable 
 - **A deploy never reloads a listening session.** The worker installs and waits; `applyUpdate()` — a listener's tap — is the only thing that sends `SKIP_WAITING`, and the only `controllerchange` that reloads is the one we asked for (`client/src/lib/serviceWorker.ts`). This is why registration is ours rather than `vite-plugin-pwa`'s injected script.
 - **The worker never touches the server's namespace.** `/api/*`, `/healthz` and `/rdio-scanner` are denied the navigation fallback and given no runtime cache: a cached API response would be stale, a cached `/healthz` would lie about the server being up, and cached Call audio would fill a phone with an archive nobody asked for.
 
-Owed after this ticket: the **real-device gate** (research §14 — the mechanism is unproven on hardware until someone runs it), and **Vitest Browser Mode**, which [ADR-0010](0010-coverage-policy-and-test-tooling.md) names for the audio-player component. #15 brought Playwright in for the PWA/service-worker/offline layer that has no other home, but Browser Mode re-tests #14's component wiring rather than #15's features, so it stayed out.
+Owed after this ticket: the **real-device gate** (research §14 — the mechanism is unproven on hardware until someone runs it, closed by #33), and **Vitest Browser Mode**, which #15 left out because it re-tests #14's component wiring rather than #15's features. Closed by #34; its notes are below.
+
+## Implementation notes (#34)
+
+Browser Mode, the middle rung ADR-0010 names between jsdom and the real device: `client/vitest.browser.config.ts`, `src/**/*.browser.test.tsx`, `npm run test:browser`. Chromium, through the Playwright binaries #15 already installs.
+
+- **Its own config, not part of `npm run test`.** The jsdom suite stays a few seconds and keeps owning the one measured coverage profile — the same division as #38's arm64 job, which runs the Rust suite on the scanner's architecture without measuring coverage from it. What this layer asserts is not line reachability.
+- **Chromium's autoplay policy is left on**, which turned out to be worth two things rather than one convenience. A test that wants audio performs a real click first — faithful, because on a device the gesture that unlocks the session *is* the listener's first tap, and a Call arriving over the live feed brings none of its own. A test that wants `play()` **refused** simply doesn't click, so the rejection arm runs against a browser genuinely saying `NotAllowedError` instead of a mock. That one needs a file to itself: user activation belongs to the page, and Vitest gives each file its own.
+- **Not an `act` environment.** A decoder reaching `HAVE_CURRENT_DATA`, an autoplay refusal a tick later, `timeupdate` on the media clock — none of that is a React update waiting to be flushed. Tests poll for the observable outcome.
+- **What it actually reaches, measured rather than asserted.** Checked by mutation, and the honest answer is narrower than "catches what jsdom can't". Every mutation tried fails in *both* layers — a wrong RIFF length, a lying WAV format tag, a bad PNG chunk CRC, a missing rewind, a `setPositionState` pair the spec forbids — and a wrong zlib adler32 fails **only** in jsdom, because Chromium's PNG decoder is lenient. It is not a superset. What it changes is whose judgement is being asserted: the jsdom tests parse our own bytes and hold a fake `MediaSession` to what it was given, so they assert *our intent* and would survive the platform moving under us. This layer is what notices a Chromium release that stops accepting the hand-rolled indexed PNG, an autoplay rule that changes, or a decoder that tightens — and it takes the last mock out of the `play()`-rejection path.
+- **Two traps, both of which cost a rewrite.** Chromium accepts Media-Session artwork *without reading the bytes*, so `metadata.artwork` being non-empty proves nothing — the first version of that test passed with every PNG CRC corrupted, and it now decodes through `createImageBitmap`. And `setPositionState` is wrapped in a deliberate `catch` here, so a browser refusing the pair is invisible from outside — that test spies the real implementation and asserts the recorded result was not a throw.
+- **Still not iOS.** Chromium on a desktop is a real engine, not the platform whose background behaviour any of this exists for. The real-device gate (#33, research §14) is unchanged.
 
 ## Implementation notes (#16)
 
@@ -157,8 +168,9 @@ it with a decision lives in `lib/pushMessage.ts` at 100% coverage; the glue is
 proven by a Playwright spec that delivers a real push through CDP and asserts on
 what the worker asks the platform to show.
 
-Still owed, unchanged: the **real-device gate** (research §14), and Vitest
-Browser Mode. Deep-linking a tap to the specific Call that woke the listener is
+Owed at the time, both since closed: the **real-device gate** (research §14 —
+#33) and Vitest Browser Mode (#34). Deep-linking a tap to the specific Call that
+woke the listener is
 deliberately left open — the notification carries the Call id (`/?call=<id>`),
 and the app currently uses the tap to resume the feed rather than to open one
 Call.

@@ -80,9 +80,19 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    // The Playwright suite is a different runner against a different target
-    // (a real browser over a real build) — Vitest must not try to run it.
-    exclude: ['e2e/**', 'node_modules/**', 'dist/**'],
+    exclude: [
+      // The Playwright suite is a different runner against a different target
+      // (a real browser over a real build) — Vitest must not try to run it.
+      'e2e/**',
+      'node_modules/**',
+      'dist/**',
+      // ...and the Browser Mode layer (#34) is this runner against a real
+      // browser, `vitest.browser.config.ts`. Its whole premise is a media stack
+      // and a `MediaSession` that jsdom does not have, so running these here
+      // would fail on the first `play()` — and if they somehow passed, they
+      // would be proving nothing.
+      'src/**/*.browser.test.{ts,tsx}',
+    ],
     // One test origin for everything: the relative-URL shim in src/test/setup.ts
     // resolves fetches against `http://localhost`, and the live-feed socket
     // derives its URL from `location` — they have to agree for MSW to match
