@@ -76,12 +76,20 @@ _Avoid_: live mode, streaming.
 The live feed switched off by the **Listener** — a hard off, and not a pause: the playing call stops, the **listening queue** clears, the connection closes, and **Web Push** (if subscribed) takes over, because nothing is being listened to. Persists until switched back on; rejoining starts from now, never backfilling the silence.
 _Avoid_: offline (the network's state, not the listener's choice), disabled, standby.
 
+**Feed down**:
+The **live feed** not delivering because the connection isn't there — through no choice of the **Listener's**. The counterpart to **Feed off**, and the distinction is the whole point: Feed off is a decision and persists; Feed down is a condition and clears itself when the connection returns. A Listener is told which, because "nothing is happening" and "nothing is reaching you" call for different reactions.
+_Avoid_: offline, disconnected, dropped, stale.
+
 **Playback mode**:
 The mode where the listener plays archived calls from the searchable history instead of the live feed. Mutually exclusive with live feed.
 _Avoid_: archive mode, replay mode.
 
+**Run**:
+The ordered set of archived **Calls** a **Listener** is walking, and where they are within it — which **Call** is playing, what follows, and which page of the **Archive** has to be on hand for it. One concept with an ordering: walking search results newest-first, playing forward in time from a row, and a **DVR** across a time range are the same **Run** configured differently. A Run knows which search it belongs to, so a search that changes ends it rather than silently walking the wrong results.
+_Avoid_: session (the **Operator's** admin login), playlist, queue (the **listening queue** is a different set), walk.
+
 **Listening queue**:
-The ordered set of not-yet-played live calls waiting to play. Its depth is the `Q` count in the display.
+The ordered set of not-yet-played live calls waiting to play. Its depth is the `Q` count in the display. Bounded — and it truncates in the same order it plays: lowest **Priority** first, then stalest. A queue that plays by one order and drops by another can starve the one talkgroup the **Listener** said mattered.
 _Avoid_: buffer, backlog.
 
 **Hold**:
@@ -116,8 +124,12 @@ Keeping a talkgroup at the top of the Talkgroups panel. A panel-ordering afforda
 _Avoid_: favorite, star (a **Star** marks a Call).
 
 **Catch-up**:
-Draining the **listening queue** faster than real time — silence trimmed, playback rate raised — until the feed is live again.
-_Avoid_: fast-forward, smart speed (a product's trademark), time compression.
+Draining the **listening queue** faster than real time — silence trimmed, playback rate raised — until the feed is live again. A **Listener's** action on Calls they already have; distinct from a **Backfill**, which is how they got them.
+_Avoid_: fast-forward, smart speed (a product's trademark), time compression, backfill.
+
+**Backfill**:
+The **Calls** a **Listener** missed while **Feed down**, sent on reconnect so the **live feed** resumes without a hole. Ordered by when a Call was *emitted*, never by when it was stored — a **Delay**ed Call is stored early and emitted late, so a cursor over storage order would skip it silently. Bounded — past the bound the Listener is told their history has a gap only archive search can fill, because a silent truncation is indistinguishable from having missed nothing.
+_Avoid_: catch-up (the Listener draining a queue, not the server refilling one), replay, resync, history.
 
 **DVR**:
 The archive surface that plays one talkgroup (or a **Selection**) gaplessly across a time range, scrubbable on a call-density timeline. Oldest-first by construction — a DVR that plays backwards is a search result, not a DVR.
@@ -150,6 +162,10 @@ _Avoid_: source, uploader, feeder, scanner.
 **Ingest**:
 Accepting a **Call** from a **Recorder** into Radio-Scout (via the HTTP upload API or, later, directory watching).
 _Avoid_: upload, import (except in user-facing recorder docs).
+
+**Admission**:
+What **Ingest** decided about one **Call** — stored, duplicate, dropped for a named reason, or refused for an unauthorized **API key**. A *value*, not a response: **Ingest** resolves what the database knows, decides purely, then performs. The HTTP endpoints render an Admission into the rdio wire strings; **Dirwatch** logs one with no HTTP in reach. Its reason is a single closed vocabulary — the machine-readable slug and the recorder-facing detail derive from the same value, never two strings that can drift.
+_Avoid_: disposition (the narrower auto-populate/blacklist decision *inside* an Admission), verdict, result, outcome.
 
 **Auto-populate**:
 Automatically creating an unknown system/talkgroup/unit the first time a call for it is ingested, so the archive is usable with zero manual configuration.
