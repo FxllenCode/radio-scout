@@ -310,6 +310,129 @@ describe('live slice', () => {
       expect(selectLiveCall(rootState(state))).toEqual(call(1))
       expect(selectHistory(rootState(state))[0]).toEqual(call(2))
     })
+
+    /**
+     * A Call that is playing is not "recently played".
+     *
+     * Replaying one from RECENT filed the Call being interrupted into history —
+     * correctly — but never took the replayed Call *out* of it, so it sat in the
+     * list while it was the thing playing.
+     */
+    it('takes the replayed Call out of RECENT, because it is playing now', () => {
+      let state = reduce(...arrive(call(1), call(2)), advance())
+      expect(selectHistory(rootState(state))).toEqual([call(1)])
+
+      state = liveReducer(state, replay(1))
+
+      expect(selectLiveCall(rootState(state))).toEqual(call(1))
+      expect(selectHistory(rootState(state))).toEqual([call(2)])
+    })
+
+    /**
+     * ...and the duplicate that followed from it.
+     *
+     * Left in history while playing, the Call was unshifted a *second* time when
+     * it finished — so RECENT listed it twice, and `<li key={call.id}>` handed
+     * React two children with the same key.
+     */
+    it('never lists the same Call twice in RECENT', () => {
+      let state = reduce(...arrive(call(1), call(2)), advance(), replay(1))
+
+      // Call 1 finishes with nothing queued behind it.
+      state = liveReducer(state, advance())
+
+      const history = selectHistory(rootState(state))
+      expect(history.map((one) => one.id)).toEqual([1, 2])
+    })
+
+    /**
+     * ...including when the feed has fallen quiet, which is its own path.
+     *
+     * With nothing playing there is no Call to file, so `replay` used to set
+     * `current` directly and skip `play` altogether — and skip the invariant with
+     * it. This is the commonest way a listener replays: the feed goes silent and
+     * they reach for the last thing they heard.
+     */
+    it('takes it out of RECENT even with nothing playing', () => {
+      let state = reduce(...arrive(call(1), call(2)), advance(), advance())
+      expect(selectLiveCall(rootState(state))).toBeNull()
+      expect(selectHistory(rootState(state))).toEqual([call(2), call(1)])
+
+      state = liveReducer(state, replay(2))
+
+      expect(selectLiveCall(rootState(state))).toEqual(call(2))
+      expect(selectHistory(rootState(state))).toEqual([call(1)])
+
+      // ...and it comes back exactly once when it finishes.
+      state = liveReducer(state, advance())
+      expect(selectHistory(rootState(state)).map((one) => one.id)).toEqual([2, 1])
+    })
+
+    /** Walked repeatedly — a listener going back and forth through the RECENT
+     *  rows — the list stays exactly the Calls that are not playing, in the order
+     *  they were left. Asserting the whole list rather than just its uniqueness, because a
+     *  reordering would be a regression the set size cannot see. */
+    it('stays correct when replay is walked repeatedly', () => {
+      let state = reduce(...arrive(call(1), call(2), call(3)), advance(), advance())
+      expect(selectHistory(rootState(state))).toEqual([call(2), call(1)])
+
+      state = liveReducer(state, replay(1))
+      expect(selectHistory(rootState(state))).toEqual([call(3), call(2)])
+
+      state = liveReducer(state, replay(2))
+      expect(selectHistory(rootState(state))).toEqual([call(1), call(3)])
+
+      state = liveReducer(state, replay(1))
+      expect(selectHistory(rootState(state))).toEqual([call(2), call(3)])
+      expect(selectLiveCall(rootState(state))).toEqual(call(1))
+    })
+
+    /**
+     * The cap still binds, and removing the replayed Call must not cost a slot.
+     *
+     * This is where the order inside `play` shows: the Call now playing is
+     * filtered out *before* the list is trimmed. Trimming first would drop a
+     * Call the listener could still have reached.
+     */
+    it('keeps RECENT full when replaying out of a full list', () => {
+      // Seven Calls, six played: history is at its cap with a seventh playing.
+      const many = Array.from({ length: HISTORY_DEPTH + 2 }, (_, at) => call(at + 1))
+      let state = reduce(
+        ...arrive(...many),
+        ...Array.from({ length: HISTORY_DEPTH + 1 }, advance),
+      )
+      expect(selectHistory(rootState(state))).toHaveLength(HISTORY_DEPTH)
+      const playing = selectLiveCall(rootState(state))!
+      const oldest = selectHistory(rootState(state)).at(-1)!
+
+      state = liveReducer(state, replay(oldest.id))
+
+      expect(selectLiveCall(rootState(state))).toEqual(oldest)
+      const ids = selectHistory(rootState(state)).map((one) => one.id)
+      // Still full: the Call that was playing took the slot the replayed one
+      // vacated.
+      expect(ids).toHaveLength(HISTORY_DEPTH)
+      expect(ids).toContain(playing.id)
+      expect(ids).not.toContain(oldest.id)
+      expect(new Set(ids).size).toBe(ids.length)
+    })
+
+    /** With the feed already quiet there is no Call to take the freed slot, so
+     *  the list is one shorter — correct, and worth pinning so it is not read as
+     *  the cap failing. */
+    it('is one shorter when replaying with nothing playing', () => {
+      const many = Array.from({ length: HISTORY_DEPTH + 2 }, (_, at) => call(at + 1))
+      let state = reduce(
+        ...arrive(...many),
+        ...Array.from({ length: many.length }, advance),
+      )
+      expect(selectLiveCall(rootState(state))).toBeNull()
+      expect(selectHistory(rootState(state))).toHaveLength(HISTORY_DEPTH)
+
+      state = liveReducer(state, replay(selectHistory(rootState(state))[0].id))
+
+      expect(selectHistory(rootState(state))).toHaveLength(HISTORY_DEPTH - 1)
+    })
   })
 
   /** ADR-0004: catch-up delivery is *at-least-once*, so a Call ingested in the

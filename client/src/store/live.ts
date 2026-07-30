@@ -135,12 +135,29 @@ function wanted(state: LiveState, call: Call): boolean {
   return wants(matrixOf(state), call)
 }
 
-/** Start `call`, filing whatever was playing under history. */
+/**
+ * Start `call`, filing whatever was playing under history.
+ *
+ * **The Call playing is never also in the history** (#82). Replay reaches back
+ * into that list to choose what to play next, so without this the Call it picked
+ * stayed there while it played — visible in RECENT as something "recently
+ * played" that is in fact playing now — and was filed a *second* time when it
+ * finished, leaving the list holding it twice and `<li key={call.id}>` handing
+ * React two children with the same key.
+ *
+ * Enforced here rather than in `replay` because it is an invariant of the pair
+ * of fields, not a quirk of one caller: `next`, `purge` and the lock screen all
+ * arrive through this function, and any of them could reach for a Call the list
+ * is holding.
+ */
 function play(state: LiveState, call: Call | null) {
   if (state.current) {
     state.history.unshift(state.current)
-    state.history = state.history.slice(0, HISTORY_DEPTH)
   }
+  if (call) {
+    state.history = state.history.filter((one) => one.id !== call.id)
+  }
+  state.history = state.history.slice(0, HISTORY_DEPTH)
   state.current = call
   state.playId += 1
 }
@@ -332,14 +349,17 @@ const liveSlice = createSlice({
           : state.history.find((call) => call.id === action.payload)
       if (!again) return
 
-      // Reaching back past the Call that was playing files *it* under history
-      // too, so the listener can get back to what they interrupted.
-      if (state.current && state.current.id !== again.id) {
-        play(state, again)
-        return
-      }
-      state.current = again
-      state.playId += 1
+      // Every case goes through `play` — including replaying the Call already
+      // playing, where it files that Call and then filters it straight back out,
+      // leaving history untouched and bumping the `playId` the element needs to
+      // start over (`src` has not moved).
+      //
+      // Assigning `state.current` here instead is what let a Call be both
+      // playing and listed in RECENT (#82), and it did it twice over: once by
+      // leaving the replayed Call in the list, and once on the path where the
+      // feed was already quiet, which had no Call to file and so skipped the
+      // bookkeeping altogether.
+      play(state, again)
     },
 
     /** Narrow to the System that's talking, or let it go again. */

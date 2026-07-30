@@ -455,6 +455,37 @@ describe('LiveScreen', () => {
 
       expect(within(display()).getByText('One')).toBeInTheDocument()
     })
+
+    /**
+     * What the listener sees: replaying from RECENT put the Call back into
+     * RECENT, so the list held it twice.
+     *
+     * The store tests pin the mechanism; this pins the symptom, because the list
+     * is what anyone would actually notice — and `<li key={call.id}>` gave React
+     * two children with the same key while it was wrong.
+     */
+    it('does not put a replayed Call back into RECENT', async () => {
+      const user = userEvent.setup()
+      listening(
+        call({ id: 1, talkgroupLabel: 'One' }),
+        call({ id: 2, talkgroupLabel: 'Two' }),
+        call({ id: 3, talkgroupLabel: 'Three' }),
+      )
+      await user.click(screen.getByRole('button', { name: 'Skip' }))
+      await user.click(screen.getByRole('button', { name: 'Skip' }))
+
+      const history = screen.getByRole('list', { name: 'Recent calls' })
+      await user.click(within(history).getByRole('button', { name: /One/ }))
+
+      // One is playing, so it is not "recently played" any more. Matched on the
+      // rows' accessible names, which is what a listener reads.
+      expect(within(display()).getByText('One')).toBeInTheDocument()
+      expect(within(history).queryAllByRole('button', { name: /One/ })).toEqual([])
+
+      // ...and when it finishes, it comes back exactly once.
+      await user.click(screen.getByRole('button', { name: 'Skip' }))
+      expect(within(history).getAllByRole('button', { name: /One/ })).toHaveLength(1)
+    })
   })
 
   it('has no accessibility violations with a Call on the display', async () => {
