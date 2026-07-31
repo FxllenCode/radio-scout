@@ -172,7 +172,7 @@ _Avoid_: integration, callback.
 ### Ingest & distribution
 
 **Recorder**:
-The software that receives radio and uploads **Calls** to an **Instance** — Trunk Recorder or SDRTrunk. Authenticates with an **API key**. Both already speak the rdio-scanner upload dialect and need nothing installed to work, because that dialect is the compatibility contract. Trunk Recorder can do better than it, though: `radio-scout-upload.sh` (#43) is a shipped shell script for TR's own `uploadScript` hook that posts the recorder's whole `.json`, and it is the recommended TR setup.
+The software that receives radio and uploads **Calls** to an **Instance** — Trunk Recorder or SDRTrunk. Authenticates with an **API key**. Both already speak the rdio-scanner upload dialect and need nothing installed to work, because that dialect is the compatibility contract. Trunk Recorder can do better than it, though, and there are two shipped ways to: `radio-scout-upload.sh` (#43) is a shell script for TR's own `uploadScript` hook that posts the recorder's whole `.json`, and it is the recommended TR setup because it needs no rebuild; `plugins/trunk-recorder/` (#44) is a first-party TR plugin sending the same thing from inside the recorder's process, which costs a TR rebuild and buys TR's own retry-with-backoff on a failed upload — something the script deliberately cannot have, since a non-zero exit from `uploadScript` skips every other plugin on the recorder.
 _Avoid_: source, uploader, feeder, scanner.
 
 **Ingest**:

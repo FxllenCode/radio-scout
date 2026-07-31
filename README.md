@@ -136,8 +136,10 @@ carry. Unknown Systems, Talkgroups and Units are created the first time they're 
 there is nothing to configure before calls start landing, and a failed upload never disturbs
 an rdio-scanner feed running beside it.
 
-The `rdioscanner_uploader` plugin also works and needs nothing downloaded — it just carries
-less. That, SDRTrunk, `talkgroupAllow` globs, and how to read upload failures are in
+There is also a **first-party Trunk Recorder plugin** sending the same thing from inside the
+recorder's process, which costs a Trunk Recorder rebuild and buys retries on a failed upload;
+and the stock `rdioscanner_uploader` plugin works too, needing nothing downloaded — it just
+carries less. Those, SDRTrunk, `talkgroupAllow` globs, and how to read upload failures are in
 **[docs/recorders.md](docs/recorders.md)**.
 
 ## What you get

@@ -435,3 +435,64 @@ fn the_trunk_recorder_upload_script_is_executable() {
         "radio-scout-upload.sh is not executable (mode {mode:o})"
     );
 }
+
+/// The Trunk Recorder plugin (#44) ships as one tarball, for the same reason
+/// the uploadScript ships as one file: the recorder is usually not the machine
+/// Radio-Scout is installed on, so its pieces have to be fetchable on their own.
+///
+/// It is the *directory* that is packaged rather than a list of files. A plugin
+/// missing one of its sources does not fail here or in the release — it fails on
+/// a stranger's recorder, at the end of a Trunk Recorder build, hours later.
+#[test]
+fn the_trunk_recorder_plugin_ships_with_the_release() {
+    let dir = repo().join("plugins/trunk-recorder");
+    assert!(
+        dir.join("CMakeLists.txt").is_file(),
+        "a Trunk Recorder plugin is its CMakeLists — that is what the recorder globs"
+    );
+
+    let workflow = release_workflow();
+    let staged = workflow
+        .lines()
+        .find(|line| line.contains("plugins/trunk-recorder"))
+        .unwrap_or_else(|| {
+            panic!("the plugin is never packaged, so there is nothing to fetch onto a recorder")
+        });
+    assert!(
+        !staged.contains(".cc") && !staged.contains(".h"),
+        "the release names individual sources ({staged:?}) — package the directory instead, \
+         or the next file added to it is the one nobody remembers"
+    );
+    assert!(
+        workflow
+            .lines()
+            .any(|line| line.contains("radio-scout-tr-plugin") && line.contains("dist")),
+        "the plugin tarball never lands in dist/, which is what gets summed and uploaded"
+    );
+}
+
+/// ...and every source its CMakeLists compiles is really in that directory, so
+/// the packaged tarball is a plugin that builds rather than one that half does.
+#[test]
+fn the_plugin_packages_every_source_it_claims_to_build() {
+    let dir = repo().join("plugins/trunk-recorder");
+    let cmake = std::fs::read_to_string(dir.join("CMakeLists.txt")).expect("read the CMakeLists");
+
+    let sources: Vec<&str> = cmake
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(".cc") || line.ends_with(".h"))
+        .collect();
+    assert!(
+        !sources.is_empty(),
+        "the CMakeLists compiles nothing:\n{cmake}"
+    );
+
+    for source in sources {
+        assert!(
+            dir.join(source).is_file(),
+            "{source} is compiled by the CMakeLists and is not in {}",
+            dir.display()
+        );
+    }
+}

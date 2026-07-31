@@ -427,3 +427,47 @@ fn every_shell_script_the_project_ships_is_shellchecked() {
         );
     }
 }
+
+/// The Trunk Recorder plugin (#44) is the release's one non-Rust artifact, and
+/// nothing in `cargo nextest` can build it: it is a C++ shared object compiled
+/// against a recorder's headers, and `tests/trplugin.rs` deliberately drives
+/// only the half of it that has no Trunk Recorder in scope. So the job that
+/// compiles the other half — the `Call_Data_t` shim, and the CMakeLists an
+/// operator's own build reads — is the only thing standing between a rename in
+/// Trunk Recorder and a plugin that no longer builds on anybody's recorder.
+///
+/// Pinned to a **commit**, not a branch: a job tracking `master` turns somebody
+/// else's merge into our red build, and the failure it would report is the one
+/// thing this job must never cry wolf about.
+#[test]
+fn the_trunk_recorder_plugin_is_compiled_against_a_pinned_recorder() {
+    let ci = ci_workflow();
+    let (name, block) = jobs(&ci)
+        .into_iter()
+        .find(|(_, block)| block.contains("robotastic/trunk-recorder"))
+        .expect("no job builds the Trunk Recorder plugin, so nothing compiles its shim");
+
+    assert!(
+        block.contains("user_plugins"),
+        "{name} must build the plugin the way an operator does — from `user_plugins/`"
+    );
+    assert!(
+        block.contains("radio_scout_uploader"),
+        "{name} checks out the recorder but never builds our target"
+    );
+    let pinned = block
+        .lines()
+        .find(|line| line.contains("ref:"))
+        .unwrap_or_else(|| panic!("{name} does not pin a Trunk Recorder commit:\n{block}"));
+    let sha: String = pinned
+        .rsplit(':')
+        .next()
+        .expect("a ref")
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .into();
+    assert!(
+        sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "{name} pins {sha:?}, which is a branch or a tag rather than a commit"
+    );
+}

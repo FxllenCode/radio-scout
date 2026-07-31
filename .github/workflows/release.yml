@@ -193,6 +193,17 @@ jobs:
       # not to trust.
       - name: Stage the uploadScript
         run: install -m 0755 radio-scout-upload.sh dist/radio-scout-upload.sh
+      # The Trunk Recorder plugin (#44) travels the same way and for the same
+      # reason, as a tarball because it is a directory: an operator drops it
+      # whole into the recorder's `user_plugins/` and rebuilds. The archive is
+      # the directory rather than a list of its files — a plugin missing one
+      # source builds nothing, and would fail hours later at the end of somebody
+      # else's Trunk Recorder build.
+      - name: Stage the Trunk Recorder plugin
+        run: |
+          mkdir -p staging/radio-scout
+          cp -a plugins/trunk-recorder/. staging/radio-scout/
+          tar -czf dist/radio-scout-tr-plugin.tar.gz -C staging radio-scout
       # One file, one format, computed by one tool — `install.sh` reads it with
       # `awk` and refuses to install anything that does not match a line in it.
       - name: Checksums

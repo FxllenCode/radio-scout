@@ -6,7 +6,8 @@ build**: Trunk Recorder and SDRTrunk already know how to talk to it, and all you
 URL.
 
 Trunk Recorder can do better than that dialect, though, and the recommended setup below uses a
-small shipped script to send everything it knows. SDRTrunk has one way in, and it is the URL.
+small shipped script to send everything it knows. There is a first-party plugin that sends the
+same thing, for installs that would rather load one. SDRTrunk has one way in, and it is the URL.
 
 Every claim here about a recorder was read out of that recorder's source, not its docs, with
 line references so it can be re-checked when those projects move.
@@ -30,21 +31,30 @@ names afterwards with a [talkgroup CSV import](operating.md#tidying-up-talkgroup
 
 ## Trunk Recorder
 
-There are two ways in, and they differ in **how much of what your recorder knows survives the
-trip**.
+There are three ways in, and they differ in **how much of what your recorder knows survives the
+trip** — and in what it costs you to set up.
 
-| | `uploadScript` (recommended) | `rdioscanner_uploader` plugin |
-| --- | --- | --- |
-| Setup | One line in `config.json` + one shipped script | One block in `config.json`, no download |
-| Emergency / encrypted flags | ✅ | ❌ |
-| Exact call duration | ✅ | ❌ (measured from the audio instead) |
-| Per-frequency decode health | ✅ | partial (no timing) |
-| Over-the-air radio aliases | ✅ | ❌ |
-| Priority, audio type, stop time | ✅ | ❌ |
+| | `uploadScript` (recommended) | `radio_scout_uploader` plugin | `rdioscanner_uploader` plugin |
+| --- | --- | --- | --- |
+| Setup | One line in `config.json` + one shipped script | One block in `config.json` — **and a Trunk Recorder rebuild** | One block in `config.json`, no download |
+| Emergency / encrypted flags | ✅ | ✅ | ❌ |
+| Exact call duration | ✅ | ✅ | ❌ (measured from the audio instead) |
+| Per-frequency decode health | ✅ | ✅ | partial (no timing) |
+| Over-the-air radio aliases | ✅ | ✅ | ❌ |
+| Priority, audio type, stop time | ✅ | ✅ | ❌ |
+| Retries a failed upload | ❌ (never — see below) | ✅ (Trunk Recorder's, ~2 min then ~4) | ✅ |
+| Talkgroup allow/deny globs | ❌ | ✅ | ✅ |
 
-The plugin works, and if you are already running it nothing is broken. But the rdio-scanner
-dialect it speaks has no field for most of what Trunk Recorder writes down, so that half is
-discarded at the door. The `uploadScript` path sends the recorder's own `.json` untouched.
+The `rdioscanner_uploader` plugin works, and if you are already running it nothing is broken.
+But the rdio-scanner dialect it speaks has no field for most of what Trunk Recorder writes
+down, so that half is discarded at the door. The other two send the recorder's own `.json`
+untouched.
+
+**Start with `uploadScript`.** It is one line and needs no rebuild, and for almost everyone
+that is the end of it. The plugin is worth the rebuild for one reason: **it can retry.** A
+script cannot — a non-zero exit from `uploadScript` takes down every *other* plugin on the
+recorder (see below), so ours deliberately gives up on the first failure and the Call is gone.
+A plugin's failure is its own, so Radio-Scout being down for a restart costs you nothing.
 
 ### The recommended setup: `uploadScript`
 
@@ -113,6 +123,91 @@ Radio-Scout is down or restarting, this script complains loudly and exits **0**,
 existing rdio-scanner feed carries on untouched. It exits non-zero only when the *setup* is
 wrong — no key, no server, an unreadable file — which is something you want to find out on the
 first call rather than a week later.
+
+### The first-party plugin: `radio_scout_uploader`
+
+Sends exactly what the `uploadScript` does — Trunk Recorder's own call metadata, untouched —
+but from inside the recorder's process, so there is no shell and no `curl` per Call. What you
+get for the rebuild is **retries**: if the upload fails, Trunk Recorder keeps the call's files
+and tries this plugin again after roughly two minutes, then four, before giving up. Nothing
+else on the recorder is affected either way.
+
+Fetch it onto the **recorder**, into the Trunk Recorder source tree you built from:
+
+```bash
+cd /path/to/trunk-recorder
+curl -fsSLO https://github.com/FxllenCode/radio-scout/releases/latest/download/radio-scout-tr-plugin.tar.gz
+curl -fsSL  https://github.com/FxllenCode/radio-scout/releases/latest/download/SHA256SUMS \
+  | grep radio-scout-tr-plugin | sha256sum -c -
+mkdir -p user_plugins
+tar -xzf radio-scout-tr-plugin.tar.gz -C user_plugins
+```
+
+Then rebuild Trunk Recorder the way you built it the first time:
+
+```bash
+cmake -B build && cmake --build build -j"$(nproc)" && sudo cmake --install build
+```
+
+`user_plugins/*/CMakeLists.txt` is picked up automatically — the configure step prints
+`Added user plugin: radio-scout` when it has found it. If you don't see that line, the archive
+landed somewhere other than `user_plugins/`.
+
+Then the `plugins` entry in `config.json`:
+
+```jsonc
+"plugins": [
+  {
+    "name": "radio-scout",
+    "library": "libradio_scout_uploader.so",
+    "server": "http://<host>:3000",
+    "apiKey": "<the key from .env>",
+    // Optional. Default 60 — how long one upload may take before it is
+    // abandoned and left to the retry.
+    "timeoutSecs": 60,
+    // Optional, and only needed for per-system keys or filters. A system with
+    // no entry here uploads with the key above and sends everything.
+    "systems": [
+      {
+        "shortName": "<must match a system in your main config>",
+        "talkgroupAllow": ["54241", "5424*"],
+        "talkgroupDeny": ["54999"]
+      }
+    ]
+  }
+]
+```
+
+- **`server` is a bare base URL**, same as the rdio uploader's — the plugin appends
+  `/api/trunk-recorder-call-upload` itself.
+- **There is no `systemId`.** The native endpoint files a Call under the System it resolves
+  from the recorder's own `shortName`, creating it if it has never been seen.
+- **`talkgroupAllow` / `talkgroupDeny` take glob patterns** — `*` for any run of characters,
+  `?` for exactly one, and every other character means itself, so `5.155` matches a talkgroup
+  with a dot in it and nothing else. A non-empty allow list is exhaustive; deny then removes
+  from what is left.
+- **Failures name themselves in Trunk Recorder's log**, prefixed with the plugin's `name`:
+
+  ```
+  [radio-scout]	fulton TG 54155	upload failed: Failed to connect to scout.lan port 3000
+  [radio-scout]	fulton TG 54155	upload refused (HTTP 401): Invalid API key for system 0 talkgroup 54155.
+  ```
+
+  `upload failed` means nobody answered; `upload refused` means Radio-Scout did, and the rest
+  of the line is its own words. Neither ever contains the API key.
+
+> **A Call on an encrypted talkgroup is forwarded, not dropped.** The `rdioscanner_uploader`
+> plugin discards those (`rdioscanner_uploader.cc:171-173`), because the rdio dialect has no
+> field to say what they are. This one sends them, and Radio-Scout stores a flagged row with no
+> audio — so you keep the record that the channel was busy.
+>
+> Whether you ever see one is Trunk Recorder's decision, and it changed. **On 5.0.2** a plugin
+> gets an encrypted Call only when that system has `"monitorEncrypted": true` — otherwise
+> nothing is recorded to conclude. **On the current development branch** (post-5.0.2, what
+> `git clone` and the `latest` Docker image give you) it never gets one at all: `conclude_call`
+> writes the metadata and returns before any plugin or `uploadScript` runs
+> (`call_concluder.cc:1244-1252`). Nothing to configure either way — the plugin is simply
+> right when it is asked.
 
 ### The alternative: the rdio-scanner uploader plugin
 
@@ -275,7 +370,6 @@ Anything in the `.json` that Radio-Scout does not model — `freq_error`, `signa
 `color_code`, and the rest — is ignored rather than treated as an error, so a Trunk Recorder
 newer than your Radio-Scout still uploads fine.
 
-**The shipped `uploadScript` is the path to it**, and it is documented above as the recommended
-Trunk Recorder setup — there is nothing else to configure to get these fields. A first-party
-plugin speaking the same contract is still to come, for installs that prefer one; and this is
-the right target if you are writing something yourself.
+**The shipped `uploadScript` and the `radio_scout_uploader` plugin are both paths to it**, and
+both are documented above — there is nothing else to configure to get these fields. This is
+also the right target if you are writing something yourself.

@@ -139,6 +139,14 @@ jobs:
       - name: An object store that answers
         run: .github/scripts/object-store-up.sh minio
 
+      # `tests/trplugin.rs` compiles the Trunk Recorder plugin's upload core and
+      # drives it (#44), so it needs libcurl's *headers*, not the `curl` binary
+      # the runner already has. Without them the whole file skips — and a suite
+      # that skips in CI is a suite that says nothing, which is why those tests
+      # refuse to skip here and fail instead.
+      - name: libcurl headers, for the recorder plugin's upload core
+        run: sudo apt-get update -qq && sudo apt-get install -y libcurl4-openssl-dev
+
       # Both runs feed one coverage profile, so a line reached only on one
       # dialect still counts as reached — which means starting from an empty
       # one. `Swatinem/rust-cache` restores `target/`, and a `.profraw` left
@@ -244,6 +252,11 @@ jobs:
         with:
           name: client-dist
           path: client/dist
+      # As in `Backend`: `tests/trplugin.rs` builds C++ against libcurl, and on
+      # this architecture especially — the Pi's — a silently skipped suite is
+      # the one thing this job exists to prevent.
+      - name: libcurl headers, for the recorder plugin's upload core
+        run: sudo apt-get update -qq && sudo apt-get install -y libcurl4-openssl-dev
       # `--no-fail-fast`, like the x86 runs: one architecture-specific failure
       # should report every other one in the same push, not the first.
       - run: cargo nextest run --locked --no-fail-fast
@@ -389,6 +402,71 @@ jobs:
         working-directory: client
       - run: npm run test:browser
         working-directory: client
+
+  # The one artifact in this repository that is not Rust: a Trunk Recorder
+  # plugin (#44), a C++ shared object loaded by somebody else's recorder.
+  #
+  # `tests/trplugin.rs` drives its upload core against a real app, but that core
+  # is deliberately free of every Trunk Recorder header so it can be compiled
+  # without one. The half that reads a `Call_Data_t`, and the CMakeLists an
+  # operator's own build consumes, have no other proof than this job — a rename
+  # upstream would otherwise reach a recorder before it reached us.
+  #
+  # Built the way an operator builds it: dropped into `user_plugins/`, where the
+  # recorder's top-level CMakeLists globs it up (`CMakeLists.txt:393-403`).
+  # Pinned to a commit rather than `master`, because a job that tracks somebody
+  # else's branch turns their merge into our red build.
+  trunk-recorder-plugin:
+    name: Trunk Recorder plugin (advisory)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: radio-scout
+      - uses: actions/checkout@v7
+        with:
+          repository: robotastic/trunk-recorder
+          ref: ebe770d018d5590ac43417af7e3b33c25379f4f7
+          path: trunk-recorder
+      # The recorder's own Dockerfile installs these to build itself; the SDR
+      # driver packages it also installs are for hardware this never touches.
+      - name: Install the recorder's build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y \
+            build-essential cmake gnuradio-dev gr-osmosdr libosmosdr-dev \
+            libboost-all-dev libcurl4-openssl-dev libgmp-dev liborc-0.4-dev \
+            libsndfile1-dev libssl-dev libuhd-dev libusb-1.0-0-dev pkg-config
+      # `ccache` turns the recorder's own sources — which never change between
+      # runs, being pinned — into a cache hit, so this job costs roughly what
+      # compiling our two files costs after the first run.
+      - uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: trunk-recorder-plugin
+      # The whole directory, exactly as `release.yml` packages it and an
+      # operator unpacks it. Naming the sources one by one here would build a
+      # different plugin than the one that ships, and the file left off the list
+      # would be the one nobody remembers.
+      - name: Stage the plugin where a recorder would find it
+        run: |
+          mkdir -p trunk-recorder/user_plugins/radio-scout
+          cp -a radio-scout/plugins/trunk-recorder/. trunk-recorder/user_plugins/radio-scout/
+      - name: Build it
+        working-directory: trunk-recorder
+        run: |
+          cmake -B build -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build --target radio_scout_uploader -- -j"$(nproc)"
+      # A plugin Trunk Recorder cannot find the entry point in is a plugin that
+      # loads and does nothing. `create_plugin` is the symbol it imports by that
+      # exact name (`plugin_manager.cc:23-27`).
+      - name: The recorder's entry point is exported
+        working-directory: trunk-recorder
+        run: |
+          library=$(find build -name 'libradio_scout_uploader.so' -print -quit)
+          test -n "$library"
+          nm -D --defined-only "$library" | grep -q create_plugin
 
   # --------------------------------------------------------------------------
   # The pipeline checks itself: a malformed workflow is not a failing run, it is

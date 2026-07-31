@@ -35,6 +35,11 @@ const DOCS: &[&str] = &[
     "docs/using.md",
     "docs/recorders.md",
     "docs/migrating-from-rdio-scanner.md",
+    // Not under `docs/`, because it ships *inside* the Trunk Recorder plugin
+    // tarball (#44) — the one operator-facing document that travels away from
+    // this repository, and therefore the one whose links nobody would otherwise
+    // follow again.
+    "plugins/trunk-recorder/README.md",
 ];
 
 /// Every shipped file that *reads* a `RADIO_SCOUT_*` variable — the binary, and
