@@ -100,7 +100,9 @@ pub fn new_object_key(extension: &str) -> String {
 }
 
 /// S3-compatible backend configuration (Garage / MinIO / AWS).
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written, not derived — see the impl below.
+#[derive(Clone)]
 pub struct S3Config {
     pub bucket: String,
     pub region: String,
@@ -112,8 +114,37 @@ pub struct S3Config {
     pub allow_http: bool,
 }
 
+/// Debug, minus the secret (ADR-0011 rule 2), exactly as its configuration-layer
+/// twin [`crate::config::S3`] already does. This is the *resolved* form —
+/// [`StorageConfig`] derives `Debug` and so does everything that would carry one
+/// into a message, so a single `?storage` in a boot failure or an S3 incident
+/// would otherwise put the secret access key in a log line. Nothing prints it
+/// today; the point is that the type stops permitting it (#85).
+///
+/// Two impls rather than one shared newtype because the types are genuinely
+/// different — [`crate::config::S3`] is the serde shape an operator writes, this
+/// is what the store is opened from — and the pair is held together by them
+/// redacting the same field name. The access key *id* stays in both: it
+/// identifies which credential is loaded and is not itself a secret.
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field("allow_http", &self.allow_http)
+            .finish()
+    }
+}
+
 /// Which storage backend to use. Built from `[storage]` by
 /// [`crate::config::Config::storage`] (#17).
+///
+/// `Debug` is derived deliberately: it delegates to [`S3Config`]'s redacting
+/// impl, so the containing type is covered by construction rather than by a
+/// second hand-written impl that could drift from it.
 #[derive(Debug, Clone)]
 pub enum StorageConfig {
     Filesystem { root: PathBuf },
@@ -843,6 +874,41 @@ mod tests {
         );
         // The whole query string goes, not just the parts named above.
         assert!(shown.contains("<signature redacted>"), "{shown}");
+    }
+
+    /// The other credential this module holds, and the one an incident would
+    /// reach for: the S3 secret access key (#85). Asserted through
+    /// [`StorageConfig`] rather than [`S3Config`] because that is the type a
+    /// boot failure or an `?storage` would actually print — so this proves the
+    /// enum's *derived* `Debug` delegates to the redacting one, which is the
+    /// whole reason the containing type is left derived.
+    #[test]
+    fn debug_never_carries_the_s3_secret() {
+        let config = StorageConfig::S3(S3Config {
+            bucket: "radio-scout".into(),
+            region: "us-east-1".into(),
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            access_key_id: "GK1234".into(),
+            secret_access_key: "s3cr3t-do-not-print".into(),
+            allow_http: true,
+        });
+
+        let shown = format!("{config:?}");
+
+        assert!(
+            !shown.contains("s3cr3t-do-not-print"),
+            "the secret is redacted: {shown}"
+        );
+        // The access key *id* stays: it identifies which credential is loaded,
+        // is not itself a secret, and is what an operator debugging a 403 needs.
+        assert!(
+            shown.contains("GK1234"),
+            "still says which credential: {shown}"
+        );
+        // The rest of the configuration is untouched — this redacts one field,
+        // it does not blind the type.
+        assert!(shown.contains("radio-scout"), "{shown}");
+        assert!(shown.contains("127.0.0.1:9000"), "{shown}");
     }
 
     /// A URL with nothing to redact is passed through rather than mangled.
