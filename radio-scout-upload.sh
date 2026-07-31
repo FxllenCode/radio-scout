@@ -147,7 +147,12 @@ if [ -s "$M4A" ]; then
 	AUDIO_TYPE="audio/mp4"
 elif [ -s "$WAV" ]; then
 	AUDIO="$WAV"
-	AUDIO_TYPE="audio/x-wav"
+	# `audio/wav`, not the older `audio/x-wav`: it is what the plugin sends, what
+	# the enhancement pipeline writes when it re-encodes, and the spelling
+	# browsers expect. Radio-Scout accepts every variant, but this string is
+	# stored and handed back as the Content-Type, so the two shipped uploaders
+	# giving one Call two different types was a difference with no reason.
+	AUDIO_TYPE="audio/wav"
 else
 	die "no audio to upload: neither $M4A nor $WAV"
 fi

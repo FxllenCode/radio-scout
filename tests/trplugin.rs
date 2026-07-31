@@ -691,3 +691,133 @@ async fn an_unconfigured_plugin_asks_for_no_retry(#[case] args: &[&str]) {
         stdout_of(&output)
     );
 }
+
+// ---- The two shipped ways in must not drift apart -------------------------
+
+/// Is there a `curl` for the shipped `uploadScript` to use?
+fn curl_available() -> bool {
+    std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Run `radio-scout-upload.sh` exactly as Trunk Recorder runs it — the three
+/// paths appended, and nothing in the environment but what `sh` and `curl` need
+/// plus the two settings an operator configures.
+async fn run_upload_script(app: &TestApp, key: &str, files: &CallFiles) -> Output {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("radio-scout-upload.sh");
+    let mut command = Command::new(script);
+    command.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    command
+        .env("RADIO_SCOUT_URL", app.url(""))
+        .env("RADIO_SCOUT_API_KEY", key)
+        .arg(&files.wav)
+        .arg(&files.json)
+        .arg(&files.m4a);
+    command.output().await.expect("run the upload script")
+}
+
+/// Everything about an ingested Call that the *recorder* decided — with the
+/// three values that cannot match between two instances left out: the row id,
+/// the object key derived from it, and when the row was written.
+async fn as_ingested(app: &TestApp) -> String {
+    let call = app.the_call().await;
+    let system = app.system_of(&call).await;
+    let talkgroup = app.talkgroup_of(&call).await;
+    let mut freqs = call_frequency::Entity::find()
+        .filter(call_frequency::Column::CallId.eq(call.id))
+        .all(&app.db)
+        .await
+        .unwrap();
+    freqs.sort_by_key(|f| (f.freq, f.pos_ms));
+    let mut units = call_unit::Entity::find()
+        .filter(call_unit::Column::CallId.eq(call.id))
+        .all(&app.db)
+        .await
+        .unwrap();
+    units.sort_by_key(|u| (u.unit_ref, u.offset_ms));
+
+    let mut rendered = format!(
+        "system={} talkgroup={} at={} freq={:?} source={:?}\n\
+         audio: mime={:?} name={:?} size={:?}\n\
+         duration={:?} stop={:?} emergency={} encrypted={} priority={:?} \
+         audio_type={:?} site={:?}\n",
+        system.r#ref,
+        talkgroup.r#ref,
+        call.call_at_ms,
+        call.frequency,
+        call.source_ref,
+        call.audio_mime,
+        call.audio_name,
+        call.audio_size,
+        call.duration_ms,
+        call.stop_at_ms,
+        call.emergency,
+        call.encrypted,
+        call.priority,
+        call.audio_type,
+        call.site_id,
+    );
+    for f in &freqs {
+        rendered += &format!(
+            "freq: {} pos={:?} len={:?} dbm={:?} errors={:?} spikes={:?} at={:?}\n",
+            f.freq, f.pos_ms, f.len_ms, f.dbm, f.error_count, f.spike_count, f.at_ms
+        );
+    }
+    for u in &units {
+        rendered += &format!(
+            "unit: {} label={:?} offset={:?} ota={:?} emergency={} signal={:?} at={:?}\n",
+            u.unit_ref, u.label, u.offset_ms, u.tag_ota, u.emergency, u.signal_system, u.at_ms
+        );
+    }
+    rendered += &format!("patches: {:?}\n", app.patch_refs(call.id).await);
+    rendered
+}
+
+/// **The two shipped recorder-side paths must land the identical Call.**
+///
+/// `radio-scout-upload.sh` (#43) and this plugin (#44) are two programs, in two
+/// languages, posting the same contract — and a feature added to one and
+/// forgotten in the other is invisible from either side. It would surface as an
+/// operator's Calls quietly carrying less than their neighbour's, depending on
+/// which way in they happened to choose.
+///
+/// So neither is asserted against a list of fields that would have to be
+/// extended by hand. They are run against two instances over the same call
+/// files, and the rows compared whole: anything either one learns to send and
+/// the other does not fails here, including fields that do not exist yet.
+#[tokio::test]
+async fn the_upload_script_and_the_plugin_land_the_identical_call() {
+    needs_toolchain!();
+    if !curl_available() {
+        return skip("curl is not installed, so the uploadScript cannot run");
+    }
+    let files = CallFiles::write(&tr_meta("fulton"));
+
+    let by_script = TestApp::with_key("k").await;
+    let script = run_upload_script(&by_script, "k", &files).await;
+    assert!(
+        script.status.success(),
+        "the script: {}",
+        String::from_utf8_lossy(&script.stderr)
+    );
+
+    let by_plugin = TestApp::with_key("k").await;
+    let plugin = run_upload(&by_plugin, "k", &files, &[]).await;
+    assert!(
+        plugin.status.success(),
+        "the plugin: {}",
+        stdout_of(&plugin)
+    );
+
+    assert_eq!(
+        as_ingested(&by_script).await,
+        as_ingested(&by_plugin).await,
+        "the uploadScript and the plugin disagree about the same Call — whichever \
+         of the two learned something the other did not, teach it to both"
+    );
+}

@@ -259,7 +259,9 @@ async fn the_wav_is_sent_when_there_is_no_compressed_copy() {
     .await;
 
     let call = app.the_call().await;
-    assert_eq!(call.audio_mime.as_deref(), Some("audio/x-wav"));
+    // The same spelling the plugin sends, which `tests/trplugin.rs` holds the
+    // two of them to.
+    assert_eq!(call.audio_mime.as_deref(), Some("audio/wav"));
     assert_eq!(
         call.duration_ms,
         Some(5760),

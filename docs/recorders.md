@@ -39,11 +39,12 @@ trip** — and in what it costs you to set up.
 | Setup | One line in `config.json` + one shipped script | One block in `config.json` — **and a Trunk Recorder rebuild** | One block in `config.json`, no download |
 | Emergency / encrypted flags | ✅ | ✅ | ❌ |
 | Exact call duration | ✅ | ✅ | ❌ (measured from the audio instead) |
-| Per-frequency decode health | ✅ | ✅ | partial (no timing) |
-| Over-the-air radio aliases | ✅ | ✅ | ❌ |
+| Per-frequency decode health | ✅ | ✅ | error/spike counts yes, timing no |
+| Over-the-air radio aliases | ✅ | ✅ | ❌ (configured alias only) |
 | Priority, audio type, stop time | ✅ | ✅ | ❌ |
 | Retries a failed upload | ❌ (never — see below) | ✅ (Trunk Recorder's, ~2 min then ~4) | ✅ |
 | Talkgroup allow/deny globs | ❌ | ✅ | ✅ |
+| Needs a Trunk Recorder rebuild | ❌ | ✅ | ❌ |
 
 The `rdioscanner_uploader` plugin works, and if you are already running it nothing is broken.
 But the rdio-scanner dialect it speaks has no field for most of what Trunk Recorder writes
