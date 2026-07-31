@@ -16,8 +16,9 @@ Scanner audio from Trunk Recorder and SDRTrunk — one static binary, and a phon
 
 Point your recorder at it and calls start arriving. Radio-Scout speaks rdio-scanner's upload
 API exactly — same endpoint, same fields, same response strings — so **Trunk Recorder and
-SDRTrunk need no plugin and no patch**, just a different URL. Everything downstream of that
-upload is rebuilt.
+SDRTrunk need no plugin and no patch**, just a different URL. Trunk Recorder can send more
+than that dialect carries, with one shipped script and one line of config; both paths are in
+[the recorder guide](docs/recorders.md). Everything downstream of that upload is rebuilt.
 
 It is one file. The web app is compiled into the binary, the first run creates its own
 database and audio store, and there is nothing else to install — no runtime, no ffmpeg, no
@@ -49,6 +50,13 @@ half-open connection is detected and reconnected rather than silently delivering
 **Notifications that don't storm you.** Web Push to an installed phone app, coalesced to at
 most one notification per Talkgroup per device per window — each carrying a count of the calls
 it stands for, so a busy system never turns into 200 buzzes and nothing is silently dropped.
+
+**Nothing your recorder knows is thrown away.** Trunk Recorder writes the emergency and
+encrypted flags, the exact call length, priority, per-frequency decode and spike counts, and
+the aliases radios broadcast about themselves. rdio-scanner's parser reads past nearly all of
+it. Radio-Scout keeps it: emergency and encrypted badges on the display and in the archive, a
+duration on every Call with a filter to hide the kerchunks, and the signal detail available
+per Call — which is also what tells you a dongle is dying before your listeners do.
 
 **Talkgroup import that doesn't corrupt your data.** Same RadioReference CSV, parsed properly:
 a quoted `"Fire, EMS"` stays one field, re-importing updates rather than duplicating, a blank
@@ -102,25 +110,34 @@ That's the whole thing. It creates `./radio-scout-data`, generates an ingest key
 password into `.env`, and serves on <http://localhost:3000>. Secrets are written to that file
 and never to the log, so `cat .env` is how you read them back after the scrollback is gone.
 
-Then point a recorder at it. For Trunk Recorder, add an entry to `plugins` in `config.json` —
-alongside any existing rdio-scanner entry, which keeps working untouched:
+Then point a recorder at it. For Trunk Recorder, put the uploader on the recorder:
+
+```sh
+curl -fsSLO https://github.com/FxllenCode/radio-scout/releases/latest/download/radio-scout-upload.sh
+chmod +x radio-scout-upload.sh && sudo mv radio-scout-upload.sh /opt/
+printf 'RADIO_SCOUT_URL=http://<your-scanner-host>:3000\nRADIO_SCOUT_API_KEY=<from .env>\n' \
+  | sudo tee /etc/radio-scout.env >/dev/null
+sudo chown root /etc/radio-scout.env && sudo chmod 0600 /etc/radio-scout.env
+```
+
+(That `chown` is whoever Trunk Recorder runs as — `root` on most installs. The script reads
+the file as that user, and a file it cannot read is treated as a broken install.)
+
+...and add one line to `config.json`, alongside anything already there:
 
 ```jsonc
 {
-  "name": "radio-scout",
-  "library": "librdioscanner_uploader.so",
-  "server": "http://<your-scanner-host>:3000",
-  "systems": [
-    { "shortName": "<from your systems config>", "apiKey": "<RADIO_SCOUT_API_KEY from .env>", "systemId": 411 }
-  ]
+  "uploadScript": "/opt/radio-scout-upload.sh --env-file /etc/radio-scout.env"
 }
 ```
 
-`server` is a **bare base URL** — the plugin appends the path itself. Unknown Systems,
-Talkgroups and Units are created the first time they're heard, so there is nothing to
-configure before calls start landing.
+That sends Trunk Recorder's whole call description, not just the part the rdio dialect can
+carry. Unknown Systems, Talkgroups and Units are created the first time they're heard, so
+there is nothing to configure before calls start landing, and a failed upload never disturbs
+an rdio-scanner feed running beside it.
 
-SDRTrunk, `talkgroupAllow` globs, and how to read upload failures are in
+The `rdioscanner_uploader` plugin also works and needs nothing downloaded — it just carries
+less. That, SDRTrunk, `talkgroupAllow` globs, and how to read upload failures are in
 **[docs/recorders.md](docs/recorders.md)**.
 
 ## What you get
