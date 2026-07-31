@@ -37,25 +37,63 @@ const DOCS: &[&str] = &[
     "docs/migrating-from-rdio-scanner.md",
 ];
 
-/// Every `RADIO_SCOUT_*` spelling the code actually reads.
+/// Every shipped file that *reads* a `RADIO_SCOUT_*` variable — the binary, and
+/// `radio-scout-upload.sh` (#43), which runs on the recorder, where the binary
+/// is usually not installed at all. A spelling documented for the script has to
+/// be true in exactly the way one documented for the binary does.
+///
+/// `install.sh` is deliberately absent: it reads none of these, and listing a
+/// file that contributes nothing would make the gate look broader than it is.
+const READERS: &[&str] = &["src", "radio-scout-upload.sh"];
+
+/// Every `RADIO_SCOUT_*` spelling something the project ships actually reads.
 ///
 /// Taken from the source rather than from `--write-config`'s output, because a
 /// variable the docs invent would not appear in either, and comparing the docs
 /// against the thing that reads the environment is the only comparison that
 /// answers "will this work if a reader types it".
+///
+/// A shell script is read through [`reads_in_shell`] rather than whole, because
+/// its `--help` text names the variables too — and a name that appeared only in
+/// help output would be a documented setting nothing reads, which is the exact
+/// failure this gate exists to catch, smuggled in through the back door.
 fn known_env_vars() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for entry in walk(&repo().join("src")) {
-        if entry.extension().is_none_or(|ext| ext != "rs") {
-            continue;
+    for reader in READERS {
+        let path = repo().join(reader);
+        let files = if path.is_dir() {
+            walk(&path)
+        } else {
+            vec![path]
+        };
+        for entry in files {
+            let Ok(text) = std::fs::read_to_string(&entry) else {
+                continue;
+            };
+            match entry.extension().and_then(|ext| ext.to_str()) {
+                Some("rs") => found.extend(env_vars_in(&text)),
+                Some("sh") => found.extend(reads_in_shell(&text)),
+                _ => {}
+            }
         }
-        let text = std::fs::read_to_string(&entry).expect("read source");
-        found.extend(env_vars_in(&text));
     }
     assert!(
         found.len() > 20,
-        "suspiciously few settings found in src/: {found:?}"
+        "suspiciously few settings found: {found:?}"
     );
+    found
+}
+
+/// The `RADIO_SCOUT_*` variables a shell script actually reads: the ones inside
+/// a `${…}` expansion. Prose that merely names one — usage text, a comment —
+/// does not count, which is the whole point.
+fn reads_in_shell(text: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("${RADIO_SCOUT_") {
+        rest = &rest[at + 2..];
+        found.extend(env_vars_in(&rest[..rest.find('}').unwrap_or(rest.len())]));
+    }
     found
 }
 
@@ -94,7 +132,7 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// A setting the docs tell an operator to set has to be one the binary reads.
+/// A setting the docs tell an operator to set has to be one something reads.
 ///
 /// The failure this catches is a rename: `config.rs` moves a variable, the code
 /// and its tests move with it, and the document telling somebody to export the
@@ -107,7 +145,7 @@ fn every_setting_the_docs_name_is_one_the_binary_reads() {
         for named in env_vars_in(&read(doc)) {
             assert!(
                 known.contains(&named),
-                "{doc} tells the reader to set `{named}`, which nothing in src/ reads"
+                "{doc} tells the reader to set `{named}`, which nothing in {READERS:?} reads"
             );
         }
     }

@@ -381,3 +381,57 @@ fn host_target(released: &[String]) -> String {
         .unwrap_or_else(|| panic!("no released target for this host: {released:?}"))
         .clone()
 }
+
+/// The uploadScript (#43) is a release asset too, and nothing at runtime says
+/// so: `release.yml` publishes it, `docs/recorders.md` tells an operator to
+/// fetch it, and the two agree only by having been written on the same day.
+///
+/// The same gap this file exists for, one asset along — so the same answer.
+/// Asserted against the workflow with its comments stripped, since the file
+/// explains itself at length and a test that read the prose would stay green
+/// after the step it describes was deleted.
+#[test]
+fn the_trunk_recorder_upload_script_ships_with_the_release() {
+    let name = "radio-scout-upload.sh";
+    assert!(
+        repo().join(name).is_file(),
+        "{name} should be at the repository root, beside install.sh"
+    );
+
+    let workflow = release_workflow();
+    assert!(
+        workflow.contains(name),
+        "{name} is never published, so `curl`ing it off a release 404s"
+    );
+
+    // It has to land in `dist/`, because that is the directory the checksum
+    // step sums and the `gh release create` step uploads. A step that copied it
+    // anywhere else would satisfy the assertion above and publish nothing.
+    let staged = workflow
+        .lines()
+        .any(|line| line.contains(name) && line.contains("dist"));
+    assert!(
+        staged,
+        "{name} is mentioned but never staged into dist/, which is what gets uploaded"
+    );
+}
+
+/// ...and it is executable in the repository, because a release asset is served
+/// as the bytes it is committed as. An operator who downloads a script without
+/// its executable bit gets "Permission denied" from Trunk Recorder's `execvp`
+/// and a call that never uploads.
+#[test]
+#[cfg(unix)]
+fn the_trunk_recorder_upload_script_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = repo().join("radio-scout-upload.sh");
+    let mode = std::fs::metadata(&path)
+        .expect("stat the script")
+        .permissions()
+        .mode();
+    assert!(
+        mode & 0o111 != 0,
+        "radio-scout-upload.sh is not executable (mode {mode:o})"
+    );
+}

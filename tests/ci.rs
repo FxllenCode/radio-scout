@@ -398,3 +398,32 @@ fn named_workflow(name: &str) -> String {
         .unwrap_or_else(|| panic!("`.github/workflows/{name}` is missing"))
         .1
 }
+
+/// Every piece of shell the project ships is linted.
+///
+/// `actionlint` reads `.github/workflows` only, so shell that lives anywhere
+/// else is shell nothing checks. Two files are shipped *to users* rather than
+/// merely run by CI — `install.sh`, which the README invites people to pipe
+/// into their shell, and `radio-scout-upload.sh` (#43), which runs on somebody
+/// else's recorder after every call — and both are named explicitly in the
+/// shellcheck step rather than swept up by a glob, so adding a third is a
+/// decision instead of an accident.
+#[test]
+fn every_shell_script_the_project_ships_is_shellchecked() {
+    let ci = workflows()
+        .into_iter()
+        .find(|(name, _)| name == "ci.yml")
+        .map(|(_, text)| text)
+        .expect("ci.yml");
+    let step = ci
+        .lines()
+        .find(|line| line.contains("shellcheck "))
+        .unwrap_or_else(|| panic!("ci.yml runs no shellcheck at all:\n{ci}"));
+
+    for script in ["install.sh", "radio-scout-upload.sh"] {
+        assert!(
+            step.contains(script),
+            "{script} is shipped to users and never linted: {step:?}"
+        );
+    }
+}

@@ -405,8 +405,10 @@ jobs:
             rhysd/actionlint:latest -color
       # actionlint reads `.github/workflows` only, so shell living in a
       # composite action is the one shell it never sees. That shell is a script
-      # precisely so this can read it — and `install.sh` (#23) is the one piece
-      # of shell users are invited to pipe into their own, which makes it the
-      # last thing that should go unlinted.
+      # precisely so this can read it — and the two files users are handed
+      # directly are named one by one rather than globbed: `install.sh` (#23) is
+      # piped into a stranger's shell, and `radio-scout-upload.sh` (#43) runs on
+      # somebody else's recorder after every call. Neither is a place to find
+      # out about a quoting bug in production.
       - name: shellcheck
-        run: shellcheck .github/scripts/*.sh install.sh
+        run: shellcheck .github/scripts/*.sh install.sh radio-scout-upload.sh

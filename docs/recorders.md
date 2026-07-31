@@ -1,9 +1,12 @@
 # Pointing a recorder at Radio-Scout
 
 Radio-Scout accepts uploads in **rdio-scanner's dialect**, exactly — same endpoint, same field
-names, same aliases, same response strings. So there is **no plugin to install and nothing to
-patch**: Trunk Recorder and SDRTrunk already know how to talk to it, and all you change is a
+names, same aliases, same response strings. So there is **nothing to patch and no plugin to
+build**: Trunk Recorder and SDRTrunk already know how to talk to it, and all you change is a
 URL.
+
+Trunk Recorder can do better than that dialect, though, and the recommended setup below uses a
+small shipped script to send everything it knows. SDRTrunk has one way in, and it is the URL.
 
 Every claim here about a recorder was read out of that recorder's source, not its docs, with
 line references so it can be re-checked when those projects move.
@@ -26,6 +29,92 @@ names afterwards with a [talkgroup CSV import](operating.md#tidying-up-talkgroup
 ---
 
 ## Trunk Recorder
+
+There are two ways in, and they differ in **how much of what your recorder knows survives the
+trip**.
+
+| | `uploadScript` (recommended) | `rdioscanner_uploader` plugin |
+| --- | --- | --- |
+| Setup | One line in `config.json` + one shipped script | One block in `config.json`, no download |
+| Emergency / encrypted flags | ✅ | ❌ |
+| Exact call duration | ✅ | ❌ (measured from the audio instead) |
+| Per-frequency decode health | ✅ | partial (no timing) |
+| Over-the-air radio aliases | ✅ | ❌ |
+| Priority, audio type, stop time | ✅ | ❌ |
+
+The plugin works, and if you are already running it nothing is broken. But the rdio-scanner
+dialect it speaks has no field for most of what Trunk Recorder writes down, so that half is
+discarded at the door. The `uploadScript` path sends the recorder's own `.json` untouched.
+
+### The recommended setup: `uploadScript`
+
+Fetch the script onto the **recorder** — not necessarily the machine running Radio-Scout. It is
+published with each release, alongside the `SHA256SUMS` that covers it:
+
+```bash
+curl -fsSLO https://github.com/FxllenCode/radio-scout/releases/latest/download/radio-scout-upload.sh
+curl -fsSL  https://github.com/FxllenCode/radio-scout/releases/latest/download/SHA256SUMS \
+  | grep radio-scout-upload.sh | sha256sum -c -
+chmod +x radio-scout-upload.sh
+sudo mv radio-scout-upload.sh /opt/
+```
+
+Put the address and the key in a file, and give it to the user Trunk Recorder runs as. The key
+must not go on a command line, because `ps` shows those to every user on the box:
+
+```bash
+sudo tee /etc/radio-scout.env >/dev/null <<'EOF'
+RADIO_SCOUT_URL=http://<host>:3000
+RADIO_SCOUT_API_KEY=<the key from .env>
+EOF
+sudo chown "$(id -un)" /etc/radio-scout.env   # ...or root, if TR runs as root
+sudo chmod 0600 /etc/radio-scout.env
+```
+
+> **Get the ownership right.** The file is *read by the script*, which runs as whoever Trunk
+> Recorder does. If TR cannot read it the script treats that as a broken install and exits
+> non-zero, which — see below — stops the other plugins too. `sudo -u <tr-user> cat
+> /etc/radio-scout.env` is the one-line check.
+
+The file is **sourced by the shell**, not parsed like systemd's `EnvironmentFile=`. In practice
+that means the same `KEY=value` lines work, but a value containing spaces needs quotes.
+
+Then one line in Trunk Recorder's `config.json`:
+
+```jsonc
+"uploadScript": "/opt/radio-scout-upload.sh --env-file /etc/radio-scout.env"
+```
+
+That is the whole of it. Trunk Recorder appends the call's `.wav`, `.json` and `.m4a` paths
+itself; the script picks the `.m4a` when `compressWav` made one (much smaller over a home
+uplink) and the `.wav` when it didn't.
+
+If you would rather keep the key in your service manager than in a file, drop `--env-file` and
+set the two variables in the environment Trunk Recorder runs with —
+`Environment=RADIO_SCOUT_API_KEY=…` in a systemd unit, or `-e` on a `docker run`. The script
+reads `RADIO_SCOUT_URL` and `RADIO_SCOUT_API_KEY` from wherever they come from, and `--server`
+overrides the address for a second recorder pointed somewhere else.
+
+**When something goes wrong it says so in Trunk Recorder's own log**, prefixed so it is
+greppable:
+
+```
+radio-scout: upload failed (curl 7): curl: (7) Failed to connect to scout.lan port 3000
+radio-scout: upload refused (HTTP 401): Invalid API key for system 0 talkgroup 54155.
+```
+
+`upload failed` means nobody answered; `upload refused` means Radio-Scout did, and the rest of
+the line is its own words. Neither ever contains the API key.
+
+**A failed upload never fails the call.** Trunk Recorder treats a non-zero exit from
+`uploadScript` as a fatal error for that call: it stops, and — this is the part that matters —
+it skips every *other* plugin too (`call_concluder.cc:981-987`), with no retry. So if
+Radio-Scout is down or restarting, this script complains loudly and exits **0**, and your
+existing rdio-scanner feed carries on untouched. It exits non-zero only when the *setup* is
+wrong — no key, no server, an unreadable file — which is something you want to find out on the
+first call rather than a week later.
+
+### The alternative: the rdio-scanner uploader plugin
 
 Add an entry to the `plugins` array in `config.json`:
 
@@ -186,5 +275,7 @@ Anything in the `.json` that Radio-Scout does not model — `freq_error`, `signa
 `color_code`, and the rest — is ignored rather than treated as an error, so a Trunk Recorder
 newer than your Radio-Scout still uploads fine.
 
-Two paths to this endpoint are coming: a shipped `uploadScript` you point TR's own hook at, and
-a first-party plugin. Until then it is the right target if you are writing something yourself.
+**The shipped `uploadScript` is the path to it**, and it is documented above as the recommended
+Trunk Recorder setup — there is nothing else to configure to get these fields. A first-party
+plugin speaking the same contract is still to come, for installs that prefer one; and this is
+the right target if you are writing something yourself.

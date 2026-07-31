@@ -38,7 +38,7 @@ A checksum that does not match stops the install with nothing written.
 
 ## 2. A prebuilt binary, by hand
 
-Every release publishes one archive per platform plus a `SHA256SUMS`:
+Every release publishes one archive per platform, the Trunk Recorder `radio-scout-upload.sh` ([recorders.md](recorders.md)), plus a `SHA256SUMS`:
 [github.com/FxllenCode/radio-scout/releases](https://github.com/FxllenCode/radio-scout/releases).
 
 | Platform | Asset |

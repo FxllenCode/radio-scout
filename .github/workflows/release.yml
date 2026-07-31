@@ -178,11 +178,21 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: asset-*
           path: dist
           merge-multiple: true
+      # The Trunk Recorder uploadScript (#43) ships as an asset of its own, not
+      # inside the tarballs: it runs on the *recorder*, which is usually not the
+      # machine Radio-Scout is installed on, so making somebody unpack a release
+      # to get one 4 KB script would be the wrong shape. Staged before the
+      # checksums so it is summed with everything else — `radio-scout-*` matches
+      # it, and an asset nobody can verify is one `install.sh`'s own rule says
+      # not to trust.
+      - name: Stage the uploadScript
+        run: install -m 0755 radio-scout-upload.sh dist/radio-scout-upload.sh
       # One file, one format, computed by one tool — `install.sh` reads it with
       # `awk` and refuses to install anything that does not match a line in it.
       - name: Checksums
