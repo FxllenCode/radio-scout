@@ -8,7 +8,7 @@ use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
-    site, system, tag, talkgroup, talkgroup_group, unit,
+    site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
 };
 
 pub struct Migrator;
@@ -25,6 +25,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0006_enhancement::Migration),
             Box::new(m0007_logs::Migration),
             Box::new(m0008_recorder_truth::Migration),
+            Box::new(m0009_channel_merge::Migration),
         ]
     }
 }
@@ -757,6 +758,132 @@ mod m0008_recorder_truth {
                     .await?;
             }
             Ok(())
+        }
+    }
+}
+
+/// Channel merge (#45, spec US 15–18): the member Refs a Talkgroup answers to,
+/// the Refs and Ranges a Unit owns, and the Ref each Call actually arrived
+/// under.
+///
+/// Two new tables and one new column, and the column is the load-bearing part.
+/// Resolution rewrites a Call's Talkgroup *before* it is stored, so without a
+/// record of what the recorder said, a fold is irreversible: unfolding would
+/// have no way to tell which of the owner's Calls used to be the folded
+/// channel's. `calls.talkgroup_ref` is that record, written on every Call rather
+/// than only merged ones — a Ref becomes a member Ref long after its Calls
+/// arrived, so a column filled in only when it already mattered would be empty
+/// exactly when it is needed.
+///
+/// It is deliberately a bare number, not a foreign key: it names what the radio
+/// network said, which may be a Ref no row has ever existed for.
+///
+/// The two tables need no guard (nothing exists to diverge from — the m0005
+/// precedent); the column does, for the reason m0003 wrote down.
+mod m0009_channel_merge {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0009_channel_merge"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(talkgroup_ref::Entity))
+                .await?;
+            manager
+                .create_table(schema.create_table_from_entity(unit_ref::Entity))
+                .await?;
+
+            // A member Ref is unique within its System, exactly as a primary Ref
+            // is (`idx_talkgroups_system_ref`). Without this a Ref could be owned
+            // by two Talkgroups at once and resolution would depend on row order
+            // — the one failure mode that would look like a flaky test.
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_talkgroup_refs_system_ref")
+                        .table(talkgroup_ref::Entity)
+                        .col(talkgroup_ref::Column::SystemId)
+                        .col(talkgroup_ref::Column::Ref)
+                        .unique()
+                        .to_owned(),
+                )
+                .await?;
+            // Ranges overlap in ways a unique index cannot express, so this one
+            // is an access path rather than a constraint: resolution asks "which
+            // Range on this System contains this Ref?" on every Call carrying a
+            // source, and overlap is refused when a Range is *written*
+            // (`repo::add_unit_range`) where the whole set is in hand.
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_unit_refs_system_span")
+                        .table(unit_ref::Entity)
+                        .col(unit_ref::Column::SystemId)
+                        .col(unit_ref::Column::RefFrom)
+                        .col(unit_ref::Column::RefTo)
+                        .to_owned(),
+                )
+                .await?;
+
+            if !manager.has_column("calls", "talkgroup_ref").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(
+                                ColumnDef::new(call::Column::TalkgroupRef)
+                                    .big_integer()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // Unfold's working set: "every Call on this Talkgroup that arrived
+            // under that Ref". Without the index that is a table scan of the
+            // archive, on the Pi, inside the transaction holding the fold.
+            if !manager
+                .has_index("calls", "idx_calls_talkgroup_arrived_as")
+                .await?
+            {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name("idx_calls_talkgroup_arrived_as")
+                            .table(call::Entity)
+                            .col(call::Column::TalkgroupId)
+                            .col(call::Column::TalkgroupRef)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(talkgroup_ref::Entity).to_owned())
+                .await?;
+            manager
+                .drop_table(Table::drop().table(unit_ref::Entity).to_owned())
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call::Entity)
+                        .drop_column(call::Column::TalkgroupRef)
+                        .to_owned(),
+                )
+                .await
         }
     }
 }

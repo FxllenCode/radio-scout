@@ -906,7 +906,8 @@ async fn disposition_unknown_system_follows_global_toggle() {
     assert_eq!(
         repo::ingest_disposition(&db, 99, 5, true).await.unwrap(),
         Disposition::Store {
-            auto_populate: true
+            auto_populate: true,
+            talkgroup_id: None,
         }
     );
     // Unknown system, global off -> dropped (nothing to attach to).
@@ -930,7 +931,8 @@ async fn disposition_blacklist_drops_even_with_auto_populate_on() {
     assert_eq!(
         repo::ingest_disposition(&db, 11, 6, true).await.unwrap(),
         Disposition::Store {
-            auto_populate: true
+            auto_populate: true,
+            talkgroup_id: None,
         }
     );
 }
@@ -943,7 +945,8 @@ async fn disposition_per_system_flag_populates_when_global_off() {
     assert_eq!(
         repo::ingest_disposition(&db, 11, 5, false).await.unwrap(),
         Disposition::Store {
-            auto_populate: true
+            auto_populate: true,
+            talkgroup_id: None,
         }
     );
 
@@ -956,11 +959,14 @@ async fn disposition_per_system_flag_populates_when_global_off() {
 
     // ...but a *known* talkgroup under the opted-out system is always stored,
     // with auto-populate off (no unit roster).
-    seed_talkgroup(&db, opted_out.id, 5).await;
+    let known = seed_talkgroup(&db, opted_out.id, 5).await;
     assert_eq!(
         repo::ingest_disposition(&db, 22, 5, false).await.unwrap(),
         Disposition::Store {
-            auto_populate: false
+            auto_populate: false,
+            // The channel it resolved to rides along, so dedup two statements
+            // later does not have to ask again (#45).
+            talkgroup_id: Some(known.id),
         }
     );
 }

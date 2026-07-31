@@ -143,6 +143,12 @@ pub struct TalkgroupEdit {
     /// the Talkgroup's Groups, so a CSV is the whole truth for the rows it names.
     pub groups: Vec<String>,
     pub led: Option<String>,
+    /// The member Refs this channel should answer to (#45). `None` is a blank
+    /// cell — say nothing — and `Some` **replaces** the set, which is how an
+    /// operator unmerges. `Some(vec![])` is the empty set, written `-`: a
+    /// set-valued column with no way to spell "none" could fold a Ref in and
+    /// never let it out again.
+    pub member_refs: Option<Vec<i64>>,
 }
 
 /// Why one row was not applied. `reason` is machine-readable and stable (the
@@ -226,7 +232,7 @@ impl std::fmt::Display for ParseError {
 /// talkgroup files, and the `ref,label,group,tag,led` shape the ticket names.
 /// Matching is done on a normalized name (lowercased, non-alphanumerics
 /// dropped), so `Alpha Tag`, `alpha_tag`, and `AlphaTag` are one thing.
-const COLUMN_ALIASES: [(Column, &[&str]); 7] = [
+const COLUMN_ALIASES: [(Column, &[&str]); 8] = [
     (
         Column::Ref,
         &["ref", "talkgroupref", "talkgroup", "tgid", "decimal", "dec"],
@@ -243,6 +249,10 @@ const COLUMN_ALIASES: [(Column, &[&str]); 7] = [
         Column::System,
         &["system", "systemref", "sys", "shortname", "sysid"],
     ),
+    (
+        Column::MemberRefs,
+        &["memberrefs", "memberref", "members", "mergedrefs", "merged"],
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -254,6 +264,10 @@ enum Column {
     Group,
     Led,
     System,
+    /// The other Refs this channel answers to (#45). No RadioReference export
+    /// has one, so it is a named-header column only — which is right: a merge is
+    /// this instance's curation, not something a third party's file knows about.
+    MemberRefs,
 }
 
 /// Field positions in the headerless RadioReference / Trunk Recorder export:
@@ -475,6 +489,31 @@ fn parse_row(
         })
         .unwrap_or_default();
 
+    // `-` is rdio's placeholder token, and here it is the one column where it
+    // is a *value*: "this channel answers to no other Refs". Everywhere else a
+    // placeholder means silence, and a blank cell still does mean silence here —
+    // the two are different sentences and an unmerge needs the first one.
+    let member_refs = match cell(Column::MemberRefs) {
+        None => None,
+        Some("-") => Some(Vec::new()),
+        Some(raw) => {
+            let mut refs = Vec::new();
+            for entry in raw.split(GROUP_SEPARATOR).map(str::trim) {
+                if entry.is_empty() {
+                    continue;
+                }
+                // A row that half-applies its merge is worse than one that does
+                // not apply at all: the operator would have to work out which of
+                // their Refs landed. Reject the row, name the cell.
+                let member = entry
+                    .parse::<i64>()
+                    .map_err(|_| RejectedRow::new(line, "member-ref-not-a-number", entry))?;
+                refs.push(member);
+            }
+            Some(refs)
+        }
+    };
+
     Ok(TalkgroupEdit {
         line,
         system,
@@ -484,6 +523,7 @@ fn parse_row(
         tag: cell(Column::Tag).map(str::to_owned),
         groups,
         led,
+        member_refs,
     })
 }
 
@@ -510,6 +550,15 @@ pub struct ImportReport {
     pub systems_created: u64,
     pub tags_created: u64,
     pub groups_created: u64,
+    /// Talkgroups that were folded into another and stopped existing in their
+    /// own right (#45).
+    pub talkgroups_folded: u64,
+    /// Member Refs that became Talkgroups again.
+    pub talkgroups_unfolded: u64,
+    /// Archived Calls whose owning Talkgroup a merge moved, in either direction.
+    /// The number a dry run exists to show before it is real: this is the one
+    /// curation act that rewrites history rather than configuration.
+    pub calls_repointed: u64,
     /// Every row that was not applied, in file order.
     pub rejected: Vec<RejectedRow>,
 }
@@ -580,6 +629,9 @@ async fn apply<C: ConnectionTrait>(
         systems_created: 0,
         tags_created: 0,
         groups_created: 0,
+        talkgroups_folded: 0,
+        talkgroups_unfolded: 0,
+        calls_repointed: 0,
         rejected: parsed.rejected.clone(),
     };
 
@@ -742,6 +794,14 @@ async fn apply_edit<C: ConnectionTrait>(
         .one(db)
         .await?;
 
+    // Both merge checks happen here, before a single field is written, because
+    // the alternative is a row that renamed a channel and then refused to move
+    // its Refs — an operator would have to work out which half landed.
+    if let Some(rejected) = merge_conflict(db, system_id, edit, existing.as_ref()).await? {
+        report.rejected.push(rejected);
+        return Ok(());
+    }
+
     // A Talkgroup this import *invents* must come out indistinguishable from one
     // the recorder would have auto-populated (#8), or it ends up with no Tag and
     // no Group — and since `insert_call` leaves an existing Talkgroup alone, the
@@ -826,14 +886,162 @@ async fn apply_edit<C: ConnectionTrait>(
         replace_groups(db, talkgroup_id, &groups, now_ms, resolver, report).await?
     };
 
+    // Member Refs are a set on the same terms (#45), and the same sentence: a
+    // non-empty cell is the whole truth for the row it names, so dropping a Ref
+    // from the list is how an operator unmerges. `-` is the empty set.
+    //
+    // Done last, because folding deletes the Talkgroup a Ref used to name and
+    // everything above wants the row it is curating to still be there.
+    let merged = match &edit.member_refs {
+        None => repo::MergeChange::default(),
+        Some(wanted) => {
+            let owner = talkgroup::Entity::find_by_id(talkgroup_id)
+                .one(db)
+                .await?
+                .ok_or_else(|| DbErr::Custom("the Talkgroup just upserted is gone".into()))?;
+            repo::set_member_refs(db, &owner, wanted, now_ms).await?
+        }
+    };
+    if !merged.is_empty() {
+        // A merge is the one curation act that rewrites the *archive* rather
+        // than the configuration, so it leaves a line an operator reading
+        // journald can find — the report only ever reaches whoever posted the
+        // CSV (ADR-0011 rule 7: a notable normal event is INFO).
+        tracing::info!(
+            talkgroup_ref = edit.talkgroup_ref,
+            folded = merged.folded,
+            unfolded = merged.unfolded,
+            calls_repointed = merged.calls_repointed,
+            dry_run = report.dry_run,
+            "talkgroup member Refs changed"
+        );
+    }
+    report.talkgroups_folded += merged.folded;
+    report.talkgroups_unfolded += merged.unfolded;
+    report.calls_repointed += merged.calls_repointed;
+
     if created {
         report.talkgroups_created += 1;
-    } else if fields_changed || groups_changed {
+    } else if fields_changed || groups_changed || !merged.is_empty() {
         report.talkgroups_updated += 1;
     } else {
         report.talkgroups_unchanged += 1;
     }
     Ok(())
+}
+
+/// Why this row's merge cannot be applied, if it cannot.
+///
+/// Two refusals, both of which exist because the quiet alternative is worse than
+/// a reported row:
+///
+/// - **The row's own Ref is somebody's member Ref.** A county export still
+///   listing a Ref an operator folded away would otherwise unfold it on the next
+///   re-import — undoing curation by accident, which is precisely the class of
+///   bug this importer was written to stop (#18). The operator is sent to the
+///   owner's row, where an unmerge is something they wrote down on purpose.
+/// - **A wanted member Ref belongs to another channel's member list.** Stealing
+///   it would silently break the other channel to fix this one. A Ref that is
+///   another Talkgroup's *primary* Ref is not a conflict at all — absorbing one
+///   is exactly what a fold is, and neither is one held by a channel this same
+///   row is absorbing, since it arrives here with it.
+/// - **A wanted Ref names a channel that owns member Refs the cell does not.**
+///   Carrying them across silently would leave the file no longer describing
+///   what it made, and re-importing it would read them as members the operator
+///   had removed. Refused, naming them, so the cell can say so.
+async fn merge_conflict<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    edit: &TalkgroupEdit,
+    existing: Option<&talkgroup::Model>,
+) -> Result<Option<RejectedRow>, DbErr> {
+    // Only worth asking when the Ref names no Talkgroup: primary and member Refs
+    // are disjoint, so a Ref that is one cannot be the other.
+    if existing.is_none()
+        && let Some(owner) = repo::member_ref_owner(db, system_id, edit.talkgroup_ref).await?
+        && let Some(channel) = talkgroup::Entity::find_by_id(owner.talkgroup_id)
+            .one(db)
+            .await?
+    {
+        return Ok(Some(RejectedRow::new(
+            edit.line,
+            "ref-is-a-member-ref",
+            format!(
+                "{} is a member Ref of Talkgroup {}; unmerge it from that row",
+                edit.talkgroup_ref, channel.r#ref
+            ),
+        )));
+    }
+
+    for wanted in edit.member_refs.iter().flatten() {
+        if *wanted == edit.talkgroup_ref {
+            continue;
+        }
+        if let Some(owner) = repo::member_ref_owner(db, system_id, *wanted).await?
+            && Some(owner.talkgroup_id) != existing.map(|found| found.id)
+            // ...unless the channel holding it is one this very row is folding
+            // in, in which case the Ref arrives here with it. That is not a
+            // conflict, it is the chain fold the guard below insists on
+            // spelling out.
+            && !is_being_absorbed(db, owner.talkgroup_id, edit).await?
+        {
+            return Ok(Some(RejectedRow::new(
+                edit.line,
+                "member-ref-owned-elsewhere",
+                wanted.to_string(),
+            )));
+        }
+        // Folding a channel that owns member Refs of its own would silently
+        // carry them onto this one, and the cell would then no longer describe
+        // the archive it made: it would say `100` where the channel answered to
+        // `100` and `8123`. Re-importing that same file would read the extra
+        // member as one the operator had removed, and unfold it — a merge tool
+        // whose own output does not round-trip. So it is refused, naming what
+        // is missing, and a cell that lists them all applies cleanly.
+        let Some(source) = talkgroup::Entity::find()
+            .filter(talkgroup::Column::SystemId.eq(system_id))
+            .filter(talkgroup::Column::Ref.eq(*wanted))
+            .one(db)
+            .await?
+        else {
+            continue;
+        };
+        let missing: Vec<String> = repo::member_refs_of(db, source.id)
+            .await?
+            .into_iter()
+            .filter(|held| !edit.member_refs.iter().flatten().any(|w| w == held))
+            .map(|held| held.to_string())
+            .collect();
+        if !missing.is_empty() {
+            return Ok(Some(RejectedRow::new(
+                edit.line,
+                "member-ref-owns-members",
+                format!(
+                    "Talkgroup {wanted} answers to {}; list {} here too",
+                    missing.join(", "),
+                    if missing.len() == 1 { "it" } else { "them" }
+                ),
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Is `talkgroup_id` one of the channels this row's member-Refs cell folds in?
+async fn is_being_absorbed<C: ConnectionTrait>(
+    db: &C,
+    talkgroup_id: i64,
+    edit: &TalkgroupEdit,
+) -> Result<bool, DbErr> {
+    Ok(talkgroup::Entity::find_by_id(talkgroup_id)
+        .one(db)
+        .await?
+        .is_some_and(|holder| {
+            edit.member_refs
+                .iter()
+                .flatten()
+                .any(|wanted| *wanted == holder.r#ref)
+        }))
 }
 
 /// Make the Talkgroup's Group set exactly `names`, returning whether that
@@ -984,6 +1192,7 @@ mod tests {
                 tag: Some("Dispatch".into()),
                 groups: vec!["Fire".into()],
                 led: Some("red".into()),
+                member_refs: None,
             }]
         );
     }
@@ -1092,6 +1301,7 @@ mod tests {
                 tag: Some("Fire Dispatch".into()),
                 groups: vec!["Butler County".into()],
                 led: None,
+                member_refs: None,
             }]
         );
     }

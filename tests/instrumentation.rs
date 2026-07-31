@@ -366,11 +366,41 @@ async fn dropped_patch_refs_leave_one_line_saying_how_many() {
         200
     );
 
-    let line = capture.only_line_containing("patch refs with no Talkgroup");
+    let line = capture.only_line_containing("patch refs resolved");
     assert!(line.contains(" DEBUG "), "{line}");
     assert!(line.contains("dropped=2"), "{line}");
+    assert!(line.contains("collapsed=0"), "{line}");
     assert!(line.contains("kept=2"), "{line}");
     assert!(line.contains("system_ref=11"), "{line}");
+}
+
+/// The same line's other half, since #45: two patch refs that name **one**
+/// channel are reported as collapsed rather than dropped.
+///
+/// The distinction is the whole reason the counts are separate. `dropped` says
+/// the System has never heard of a ref, which may be a misconfiguration;
+/// `collapsed` says channel merge did its job, which is the opposite of a
+/// problem — and an operator reading one number for both would go looking for a
+/// fault that isn't there.
+#[tokio::test]
+async fn patch_refs_naming_one_merged_channel_are_reported_as_collapsed() {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+    app.seed_talkgroup(11, 300).await;
+    app.seed_member_ref(11, 300, 8123).await;
+
+    assert_eq!(
+        app.upload(form(RECORDER_KEY, 11, 54241, 1000).set("patches", "[300,8123]"))
+            .await
+            .0,
+        200
+    );
+
+    let line = capture.only_line_containing("patch refs resolved");
+    assert!(line.contains(" DEBUG "), "{line}");
+    assert!(line.contains("dropped=0"), "{line}");
+    assert!(line.contains("collapsed=1"), "{line}");
+    assert!(line.contains("kept=1"), "{line}");
 }
 
 /// The other side of it: a Call whose patch refs all resolve says nothing at
@@ -443,6 +473,14 @@ async fn a_rejection_before_an_upload_has_an_identity_is_attributable_by_request
 async fn a_5xx_gives_the_client_a_ref_and_the_operator_the_cause() {
     let capture = LogCapture::start();
     let app = recorder_app().await;
+
+    // The Talkgroup has to already exist for dedup to be the stage that breaks:
+    // since #45 it is keyed on the resolved channel, and a Ref no channel owns
+    // cannot have a duplicate, so the query is skipped rather than spent. On a
+    // System that has never heard this Ref the first statement to touch `calls`
+    // is the insert, and this test would be asserting about `store-call`
+    // instead — which the stage table below already covers.
+    app.seed_talkgroup(11, 54241).await;
 
     // Break the schema under the handler's feet, the way a missing column did.
     app.break_table("calls").await;

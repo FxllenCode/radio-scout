@@ -85,11 +85,12 @@ use std::time::Duration;
 
 use radio_scout::admin::{AdminAuth, AdminConfig, CSRF_HEADER};
 use radio_scout::config::TrustedProxies;
-use radio_scout::db::entities::{call, call_patch, system, tag, talkgroup};
+use radio_scout::db::entities::{call, call_patch, system, tag, talkgroup, talkgroup_ref, unit};
 use radio_scout::db::repo::{self, NewCall, NewLogEvent};
 use radio_scout::db::{self};
 use radio_scout::enhance::{EnhancementConfig, Enhancer};
 use radio_scout::live::LiveFeed;
+use radio_scout::merge;
 use radio_scout::push::{Push, PushConfig};
 use radio_scout::webpush::VapidKey;
 use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
@@ -631,6 +632,125 @@ impl TestApp {
         .insert(&self.db)
         .await
         .expect("seed talkgroup");
+    }
+
+    /// Give an existing Talkgroup another Ref to answer to (#45).
+    ///
+    /// The Talkgroup must already be there — this is a *member* Ref, and one
+    /// with no owner is not a thing the schema can express. Seeded directly
+    /// rather than through the CSV importer even though that is the operator's
+    /// path, because a test about *resolution* should not fail when the importer
+    /// does; the importer has its own tests, in `tests/import.rs`.
+    pub async fn seed_member_ref(&self, system_ref: i64, primary_ref: i64, member_ref: i64) {
+        let talkgroup = self
+            .talkgroup_by_ref(system_ref, primary_ref)
+            .await
+            .expect("the Talkgroup a member Ref is seeded onto exists");
+        talkgroup_ref::ActiveModel {
+            talkgroup_id: Set(talkgroup.id),
+            system_id: Set(talkgroup.system_id),
+            r#ref: Set(member_ref),
+            position: Set(0),
+            created_at_ms: Set(0),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await
+        .expect("seed member ref");
+    }
+
+    /// Insert a Unit row under a System, so a test can own a Ref without minting
+    /// a Call to roster it. Creates the System if absent, as
+    /// [`TestApp::seed_talkgroup`] does.
+    pub async fn seed_unit(&self, system_ref: i64, unit_ref: i64, label: &str) {
+        let system = repo::resolve_or_create_system(
+            &self.db,
+            system_ref,
+            Some(format!("System {system_ref}")),
+            0,
+        )
+        .await
+        .expect("seed unit's system");
+        unit::ActiveModel {
+            system_id: Set(system.id),
+            r#ref: Set(unit_ref),
+            label: Set(Some(label.to_string())),
+            created_at_ms: Set(0),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await
+        .expect("seed unit");
+    }
+
+    /// Give an existing Unit a Range of Refs to answer to — a fleet's numbered
+    /// block (#45, CONTEXT.md). Both ends inclusive.
+    pub async fn seed_unit_range(&self, system_ref: i64, primary_ref: i64, from: i64, to: i64) {
+        let unit = self
+            .unit_by_ref(system_ref, primary_ref)
+            .await
+            .expect("the Unit a Range is seeded onto exists");
+        // Through the production writer, not around it: a Range seeded past the
+        // overlap check would let a test set up state an operator cannot, and
+        // the first thing that would hide is the check itself.
+        let added = repo::add_unit_range(&self.db, &unit, merge::Range::new(from, to), 0, 0)
+            .await
+            .expect("seed unit range");
+        assert!(
+            matches!(added, repo::RangeAdded::Added(_)),
+            "the seeded Range overlaps one this Unit's System already owns: {added:?}"
+        );
+    }
+
+    /// The Talkgroup row a System knows by that primary Ref, if any.
+    pub async fn talkgroup_by_ref(
+        &self,
+        system_ref: i64,
+        talkgroup_ref: i64,
+    ) -> Option<talkgroup::Model> {
+        let system = system::Entity::find()
+            .filter(system::Column::Ref.eq(system_ref))
+            .one(&self.db)
+            .await
+            .expect("read system")?;
+        talkgroup::Entity::find()
+            .filter(talkgroup::Column::SystemId.eq(system.id))
+            .filter(talkgroup::Column::Ref.eq(talkgroup_ref))
+            .one(&self.db)
+            .await
+            .expect("read talkgroup")
+    }
+
+    /// The Unit row a System knows by that primary Ref, if any.
+    pub async fn unit_by_ref(&self, system_ref: i64, unit_ref: i64) -> Option<unit::Model> {
+        let system = system::Entity::find()
+            .filter(system::Column::Ref.eq(system_ref))
+            .one(&self.db)
+            .await
+            .expect("read system")?;
+        unit::Entity::find()
+            .filter(unit::Column::SystemId.eq(system.id))
+            .filter(unit::Column::Ref.eq(unit_ref))
+            .one(&self.db)
+            .await
+            .expect("read unit")
+    }
+
+    /// The member Refs a Talkgroup answers to, in the operator's order (#45) —
+    /// what a fold leaves behind and an unfold takes away.
+    pub async fn member_refs(&self, system_ref: i64, primary_ref: i64) -> Vec<i64> {
+        let Some(talkgroup) = self.talkgroup_by_ref(system_ref, primary_ref).await else {
+            return Vec::new();
+        };
+        talkgroup_ref::Entity::find()
+            .filter(talkgroup_ref::Column::TalkgroupId.eq(talkgroup.id))
+            .order_by_asc(talkgroup_ref::Column::Position)
+            .all(&self.db)
+            .await
+            .expect("read member refs")
+            .into_iter()
+            .map(|member| member.r#ref)
+            .collect()
     }
 
     /// The Talkgroup Refs a Call is patched to, ascending — the `call_patches`

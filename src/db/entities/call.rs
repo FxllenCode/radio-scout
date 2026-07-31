@@ -11,6 +11,21 @@ pub struct Model {
     pub id: i64,
     pub system_id: i64,
     pub talkgroup_id: i64,
+    /// The Talkgroup Ref the recorder actually sent, where `talkgroup_id` is the
+    /// channel it **resolved** to (#45). The two differ exactly when the Call
+    /// arrived under a member Ref — a patch-minted TGID, a per-site duplicate.
+    ///
+    /// A bare number rather than a foreign key on purpose: it records what the
+    /// radio network said, which may be a Ref no row has ever existed for.
+    ///
+    /// It is what makes a fold reversible. Resolution rewrites the Talkgroup
+    /// before the row is written, so without this there would be no way to tell
+    /// which of an owner's Calls used to belong to a folded channel, and
+    /// unfolding could only ever give back an empty Talkgroup. `NULL` on every
+    /// Call stored before the column existed, which reads as "under the
+    /// Talkgroup's own Ref" — true for all of them, since nothing could have
+    /// resolved yet.
+    pub talkgroup_ref: Option<i64>,
     /// When the transmission happened, unix milliseconds (dialect-agnostic).
     pub call_at_ms: i64,
     pub frequency: Option<i64>,

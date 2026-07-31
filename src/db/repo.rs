@@ -25,7 +25,7 @@ use crate::call::{CallId, FilterOptions, StoredCall, SystemOption, TalkgroupOpti
 use crate::catalog::{Catalog, CatalogSystem, CatalogTalkgroup, display_order};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
-    site, system, tag, talkgroup, talkgroup_group, unit,
+    site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -128,9 +128,43 @@ pub async fn link_talkgroup_group<C: ConnectionTrait>(
     Ok(())
 }
 
-/// Find a Unit by (System, Ref), creating it if absent. A Ref is unique only
-/// within its System. `label` (a radio alias) is recorded only on create — an
-/// existing Unit keeps its curated alias (#8 auto-populate).
+/// The Unit a radio id belongs to on this System (#45): the Unit whose own Ref
+/// it is, else the Unit owning a member Ref or a **Range** it falls inside.
+///
+/// Primary before member, for the reason [`resolve_talkgroup`] spells out. A
+/// lone member Ref is stored as a Range of one, so both are the same query —
+/// `ref_from <= r <= ref_to` — and a fleet's `1200-1299` and its odd spare
+/// `4471` cost the same lookup.
+pub async fn resolve_unit<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    ext_ref: i64,
+) -> Result<Option<unit::Model>, DbErr> {
+    if let Some(primary) = unit::Entity::find()
+        .filter(unit::Column::SystemId.eq(system_id))
+        .filter(unit::Column::Ref.eq(ext_ref))
+        .one(db)
+        .await?
+    {
+        return Ok(Some(primary));
+    }
+    let Some(member) = unit_ref::Entity::find()
+        .filter(unit_ref::Column::SystemId.eq(system_id))
+        .filter(unit_ref::Column::RefFrom.lte(ext_ref))
+        .filter(unit_ref::Column::RefTo.gte(ext_ref))
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+    unit::Entity::find_by_id(member.unit_id).one(db).await
+}
+
+/// Find the Unit a radio id belongs to, creating one if no Unit owns it. A Ref
+/// is unique only within its System. `label` (a radio alias) is recorded only on
+/// create — an existing Unit keeps its curated alias (#8 auto-populate), and a
+/// Unit reached through a Range keeps it for the same reason: an apparatus is
+/// named once, not renamed by whichever of its portables keyed last.
 pub async fn resolve_or_create_unit<C: ConnectionTrait>(
     db: &C,
     system_id: i64,
@@ -138,12 +172,7 @@ pub async fn resolve_or_create_unit<C: ConnectionTrait>(
     label: Option<String>,
     now_ms: i64,
 ) -> Result<unit::Model, DbErr> {
-    if let Some(found) = unit::Entity::find()
-        .filter(unit::Column::SystemId.eq(system_id))
-        .filter(unit::Column::Ref.eq(ext_ref))
-        .one(db)
-        .await?
-    {
+    if let Some(found) = resolve_unit(db, system_id, ext_ref).await? {
         return Ok(found);
     }
     unit::ActiveModel {
@@ -284,7 +313,7 @@ pub async fn insert_call<C: ConnectionTrait>(
         .or_else(|| Some(format!("System {}", new.system_ref)));
     let sys = resolve_or_create_system(db, new.system_ref, system_label, now_ms).await?;
 
-    let tg = match find_talkgroup(db, sys.id, new.talkgroup_ref).await? {
+    let tg = match resolve_talkgroup(db, sys.id, new.talkgroup_ref).await? {
         Some(existing) => existing,
         None => create_populated_talkgroup(db, sys.id, new, now_ms).await?,
     };
@@ -304,6 +333,11 @@ pub async fn insert_call<C: ConnectionTrait>(
     let stored = call::ActiveModel {
         system_id: Set(sys.id),
         talkgroup_id: Set(tg.id),
+        // What the recorder said, beside what it resolved to (#45). Written on
+        // every Call, not only the merged ones: a Ref becomes a member Ref long
+        // after its Calls arrived, and a column filled in only once it mattered
+        // would be empty in exactly the archive an operator wants to unfold.
+        talkgroup_ref: Set(Some(new.talkgroup_ref)),
         call_at_ms: Set(new.call_at_ms),
         frequency: Set(new.frequency),
         source_ref: Set(new.source_ref),
@@ -345,20 +379,27 @@ pub async fn insert_call<C: ConnectionTrait>(
     // One query for the whole array rather than one per ref: this runs inside
     // the transaction that already holds the audio write (ADR-0001), and on a
     // Postgres backend every extra statement is a round-trip a Pi pays for.
-    let members = patch_members(db, sys.id, &new.patches).await?;
-    if members.len() < new.patches.len() {
+    let patched = patch_members(db, sys.id, &new.patches).await?;
+    if patched.dropped > 0 || patched.collapsed > 0 {
         // Expected on every SDRTrunk patch — the radio tail is always dropped —
         // so DEBUG, not the WARN of rule 7: this is protocol detail, not
         // something an operator must act on. It is per-Call, which rule 8
-        // allows, and it is what answers "why is my patch not fanning out?".
+        // allows, and it is what answers "why is my patch not fanning out?"
+        // and, since #45, "why is my patch one chip and not three?".
+        // Bound here rather than inside the macro: `tracing` evaluates a field
+        // expression lazily, and a method call in that position is a coverage
+        // region the instrumentation cannot see taken even when the line it
+        // produces is asserted on.
+        let kept = patched.members.len();
         tracing::debug!(
-            dropped = new.patches.len() - members.len(),
-            kept = members.len(),
+            dropped = patched.dropped,
+            collapsed = patched.collapsed,
+            kept,
             %new.system_ref,
-            "patch refs with no Talkgroup on this System dropped"
+            "patch refs resolved to this System's channels"
         );
     }
-    for patch in members {
+    for patch in patched.members {
         call_patch::ActiveModel {
             call_id: Set(stored.id),
             talkgroup_ref: Set(patch),
@@ -413,8 +454,9 @@ pub async fn insert_call<C: ConnectionTrait>(
     Ok(stored)
 }
 
-/// Which of `refs` are Talkgroups this System has — the patch members (#81), in
-/// the order the recorder sent them, duplicates and all.
+/// Which of `refs` are Talkgroups this System has — the patch members (#81) —
+/// each resolved to the **canonical** channel that owns it (#45), in the order
+/// the recorder sent them.
 ///
 /// The rest are dropped. A recorder's `patches` array is not a list of Talkgroup
 /// Refs and cannot be read as one: SDRTrunk appends the patch group's radio IDs
@@ -424,17 +466,30 @@ pub async fn insert_call<C: ConnectionTrait>(
 /// discriminator there is, and it is the one rdio-scanner uses
 /// (`call.go:572-582`).
 ///
-/// One statement for the whole array — the empty case, which is almost every
-/// Call, costs none at all.
+/// **The resolved list is deduplicated, where the raw one was not.** This is the
+/// array that produces rdio's issue #466 — a console minting a fresh TGID per
+/// patch event floods the panel with duplicate buttons — so once two member Refs
+/// of one channel both appear here, emitting that channel twice would put the
+/// churn straight back on the wire that merging it was meant to take it off.
+/// Two arrivals of the same *number* collapse for the same reason: a patches
+/// array names the channels a Call also reaches, and reaching one twice is not a
+/// fact about anything.
+///
+/// Three statements at worst and one at best: the primaries, then — only when
+/// some ref was not one — the member rows and their owners, each in a single
+/// query. An instance with no merges pays exactly what it did before, and the
+/// empty array (almost every Call) still costs nothing at all.
 async fn patch_members<C: ConnectionTrait>(
     db: &C,
     system_id: i64,
     refs: &[i64],
-) -> Result<Vec<i64>, DbErr> {
+) -> Result<PatchMembers, DbErr> {
     if refs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PatchMembers::default());
     }
-    let known: std::collections::HashSet<i64> = talkgroup::Entity::find()
+    // Arriving Ref -> the primary Ref of the channel that owns it. A primary Ref
+    // owns itself, which is why the first pass maps each hit to itself.
+    let mut canonical: std::collections::HashMap<i64, i64> = talkgroup::Entity::find()
         .filter(talkgroup::Column::SystemId.eq(system_id))
         .filter(talkgroup::Column::Ref.is_in(refs.iter().copied()))
         .select_only()
@@ -443,19 +498,117 @@ async fn patch_members<C: ConnectionTrait>(
         .all(db)
         .await?
         .into_iter()
+        .map(|primary| (primary, primary))
         .collect();
-    Ok(refs.iter().copied().filter(|r| known.contains(r)).collect())
+
+    // Only the Refs the first pass could not place. Asking about the rest would
+    // be asking a question whose answer must be ignored — a member Ref never
+    // overrides a primary one ([`resolve_talkgroup`]'s precedence) — and it
+    // keeps the `IN` list to the Refs that actually need one.
+    let unplaced: Vec<i64> = refs
+        .iter()
+        .copied()
+        .filter(|r| !canonical.contains_key(r))
+        .collect();
+    if !unplaced.is_empty() {
+        let members: Vec<(i64, i64)> = talkgroup_ref::Entity::find()
+            .filter(talkgroup_ref::Column::SystemId.eq(system_id))
+            .filter(talkgroup_ref::Column::Ref.is_in(unplaced))
+            .select_only()
+            .column(talkgroup_ref::Column::Ref)
+            .column(talkgroup_ref::Column::TalkgroupId)
+            .into_tuple()
+            .all(db)
+            .await?;
+        // One statement for the owners, not one per member Ref: this runs
+        // inside the transaction that already holds the audio write
+        // (ADR-0001), and on a Postgres backend every extra statement is a
+        // round-trip a Pi pays for.
+        let owner_refs: std::collections::HashMap<i64, i64> = talkgroup::Entity::find()
+            .filter(talkgroup::Column::Id.is_in(members.iter().map(|(_, id)| *id)))
+            .select_only()
+            .column(talkgroup::Column::Id)
+            .column(talkgroup::Column::Ref)
+            .into_tuple()
+            .all(db)
+            .await?
+            .into_iter()
+            .collect();
+        for (member_ref, talkgroup_id) in members {
+            if let Some(&owner_ref) = owner_refs.get(&talkgroup_id) {
+                canonical.insert(member_ref, owner_ref);
+            }
+        }
+    }
+
+    let mut found = PatchMembers::default();
+    for arrived_as in refs {
+        let Some(&owner) = canonical.get(arrived_as) else {
+            found.dropped += 1;
+            continue;
+        };
+        if found.members.contains(&owner) {
+            found.collapsed += 1;
+        } else {
+            found.members.push(owner);
+        }
+    }
+    Ok(found)
 }
 
-/// Find a Talkgroup by (System, Ref). A Ref is unique only within its System.
-async fn find_talkgroup<C: ConnectionTrait>(
+/// What [`patch_members`] made of a recorder's `patches` array.
+///
+/// The two counts are separate facts and read as separate problems: `dropped`
+/// says the System has never heard of a ref (SDRTrunk's radio-id tail, or a
+/// patch to a channel this instance does not carry), while `collapsed` says two
+/// refs named one channel — which is channel merge working, not a loss.
+#[derive(Debug, Default)]
+struct PatchMembers {
+    /// The canonical primary Refs this Call is patched to, deduplicated, in the
+    /// order the recorder first named each of them.
+    members: Vec<i64>,
+    /// Refs no Talkgroup on this System claims.
+    dropped: usize,
+    /// Refs that resolved to a channel already in `members`.
+    collapsed: usize,
+}
+
+/// The Talkgroup a Ref belongs to on this System, primary Ref or member Ref
+/// (#45). A Ref is unique only within its System.
+///
+/// **Primary before member**, and the order is load-bearing rather than
+/// defensive. The two sets are kept disjoint on the way in — the importer
+/// refuses a member Ref that some Talkgroup already holds as its primary — but a
+/// database an operator has edited by hand is not bound by that, and the answer
+/// that surprises nobody is the one where a channel's own number still means
+/// itself. Resolving to the member owner instead would make a Talkgroup's Calls
+/// silently land somewhere else.
+///
+/// The second query costs one statement and is only spent when the first found
+/// nothing, which on an archive with no merges is exactly the case ingest was
+/// already paying for a moment later in `create_populated_talkgroup`.
+pub async fn resolve_talkgroup<C: ConnectionTrait>(
     db: &C,
     system_id: i64,
     ext_ref: i64,
 ) -> Result<Option<talkgroup::Model>, DbErr> {
-    talkgroup::Entity::find()
+    if let Some(primary) = talkgroup::Entity::find()
         .filter(talkgroup::Column::SystemId.eq(system_id))
         .filter(talkgroup::Column::Ref.eq(ext_ref))
+        .one(db)
+        .await?
+    {
+        return Ok(Some(primary));
+    }
+    let Some(member) = talkgroup_ref::Entity::find()
+        .filter(talkgroup_ref::Column::SystemId.eq(system_id))
+        .filter(talkgroup_ref::Column::Ref.eq(ext_ref))
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+    talkgroup::Entity::find_by_id(member.talkgroup_id)
         .one(db)
         .await
 }
@@ -506,6 +659,393 @@ async fn create_populated_talkgroup<C: ConnectionTrait>(
     }
 
     Ok(tg)
+}
+
+// ---------------------------------------------------------------------------
+// Channel merge (#45, spec US 15–18)
+// ---------------------------------------------------------------------------
+
+/// What changing a Talkgroup's member Refs actually moved.
+///
+/// Counts rather than a boolean because a fold is the one curation act that
+/// touches an operator's *archive* and not just their configuration — "this will
+/// re-point 1,412 Calls" is the sentence a preview has to be able to say (#18's
+/// dry run, and #50's confirmation step).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MergeChange {
+    /// Talkgroups that stopped existing in their own right.
+    pub folded: u64,
+    /// Member Refs that became Talkgroups again.
+    pub unfolded: u64,
+    /// Calls whose owning Talkgroup changed, in either direction.
+    pub calls_repointed: u64,
+}
+
+impl MergeChange {
+    /// Did anything happen? A row whose member Refs already read as the CSV says
+    /// is `unchanged`, which is what makes re-importing a curated file a no-op.
+    pub fn is_empty(&self) -> bool {
+        *self == MergeChange::default()
+    }
+
+    fn add(&mut self, other: MergeChange) {
+        self.folded += other.folded;
+        self.unfolded += other.unfolded;
+        self.calls_repointed += other.calls_repointed;
+    }
+}
+
+/// The Talkgroup that owns `ext_ref` as a **member** Ref on this System, if any.
+///
+/// Distinct from [`resolve_talkgroup`], which answers "which channel does this
+/// Ref reach" and is happy to answer with the Ref's own Talkgroup. This asks the
+/// narrower question the importer needs: *is this Ref spoken for by somebody
+/// else's member list*, which a primary Ref never is.
+pub async fn member_ref_owner<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    ext_ref: i64,
+) -> Result<Option<talkgroup_ref::Model>, DbErr> {
+    talkgroup_ref::Entity::find()
+        .filter(talkgroup_ref::Column::SystemId.eq(system_id))
+        .filter(talkgroup_ref::Column::Ref.eq(ext_ref))
+        .one(db)
+        .await
+}
+
+/// The member Refs a Talkgroup answers to, in the operator's order.
+pub async fn member_refs_of<C: ConnectionTrait>(
+    db: &C,
+    talkgroup_id: i64,
+) -> Result<Vec<i64>, DbErr> {
+    Ok(talkgroup_ref::Entity::find()
+        .filter(talkgroup_ref::Column::TalkgroupId.eq(talkgroup_id))
+        .order_by_asc(talkgroup_ref::Column::Position)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|member| member.r#ref)
+        .collect())
+}
+
+/// Make `owner`'s member Refs exactly `wanted`, folding and unfolding as needed.
+///
+/// The set semantics are [`replace_groups`](crate::import)'s, deliberately: a
+/// non-empty cell in a CSV **is** the whole truth for the row it names, so
+/// removing a Ref from the list is how an operator unmerges. `owner`'s own
+/// primary Ref is ignored if it appears — a channel answering to its own number
+/// is true but not a *member*, and rejecting it would fail a file that is merely
+/// redundant.
+///
+/// Unfolds run before folds, so a Ref moving from one owner to another inside a
+/// single import cannot collide on the uniqueness index halfway through.
+///
+/// Not internally transactional: the caller owns the boundary, because an import
+/// applies many rows together or not at all and a fold that half-happened would
+/// leave Calls pointing at a Talkgroup that no longer exists.
+pub async fn set_member_refs<C: ConnectionTrait>(
+    db: &C,
+    owner: &talkgroup::Model,
+    wanted: &[i64],
+    now_ms: i64,
+) -> Result<MergeChange, DbErr> {
+    let wanted: Vec<i64> = {
+        let mut seen = Vec::new();
+        for &r in wanted {
+            if r != owner.r#ref && !seen.contains(&r) {
+                seen.push(r);
+            }
+        }
+        seen
+    };
+    let current: Vec<talkgroup_ref::Model> = talkgroup_ref::Entity::find()
+        .filter(talkgroup_ref::Column::TalkgroupId.eq(owner.id))
+        .order_by_asc(talkgroup_ref::Column::Position)
+        .all(db)
+        .await?;
+
+    let mut change = MergeChange::default();
+    for gone in current.iter().filter(|m| !wanted.contains(&m.r#ref)) {
+        change.add(unfold_ref(db, owner, gone, now_ms).await?);
+    }
+    for (position, &arrived) in wanted.iter().enumerate() {
+        let position = position as i32;
+        match current.iter().find(|member| member.r#ref == arrived) {
+            // Already a member: the CSV is still the authority on the *order*
+            // an operator sees them in, so a re-ordered file re-orders the list.
+            // Not counted as a change — order is presentation, and a file whose
+            // merges all already applied should still report `unchanged`.
+            Some(member) if member.position != position => {
+                talkgroup_ref::ActiveModel {
+                    id: Set(member.id),
+                    position: Set(position),
+                    ..Default::default()
+                }
+                .update(db)
+                .await?;
+            }
+            Some(_) => {}
+            None => change.add(fold_ref(db, owner, arrived, position, now_ms).await?),
+        }
+    }
+    Ok(change)
+}
+
+/// Give `owner` another Ref to answer to, absorbing the Talkgroup that Ref names
+/// if there is one (spec US 17).
+///
+/// Two cases, and only one of them is a *fold*: naming a Ref nothing has been
+/// heard on yet simply records it, ready for the traffic; naming a Ref that is
+/// already an auto-populated channel carries that channel's history across and
+/// removes it from the panel. The second is the case the feature exists for, and
+/// the operator does not have to know which they are doing.
+///
+/// The absorbed Talkgroup's own member Refs come with it. A Ref left pointing at
+/// a deleted Talkgroup would be a row resolution could never resolve, and
+/// dropping them instead would silently un-merge somebody's earlier work.
+async fn fold_ref<C: ConnectionTrait>(
+    db: &C,
+    owner: &talkgroup::Model,
+    member_ref: i64,
+    position: i32,
+    now_ms: i64,
+) -> Result<MergeChange, DbErr> {
+    let source = talkgroup::Entity::find()
+        .filter(talkgroup::Column::SystemId.eq(owner.system_id))
+        .filter(talkgroup::Column::Ref.eq(member_ref))
+        .one(db)
+        .await?;
+
+    let mut change = MergeChange::default();
+    let mut label = None;
+    if let Some(source) = source {
+        // The Ref each Call arrived under, for the ones stored before the column
+        // existed. Written *before* the move, while "which Talkgroup was this"
+        // is still answerable — afterwards it is the owner's, and the fold would
+        // be irreversible. Two plain statements rather than one `COALESCE`
+        // update: both dialects agree about `IS NULL`, and ADR-0003's rule is to
+        // spend a statement rather than a divergence.
+        call::Entity::update_many()
+            .col_expr(call::Column::TalkgroupRef, Expr::value(source.r#ref))
+            .filter(call::Column::TalkgroupId.eq(source.id))
+            .filter(call::Column::TalkgroupRef.is_null())
+            .exec(db)
+            .await?;
+        change.calls_repointed = call::Entity::update_many()
+            .col_expr(call::Column::TalkgroupId, Expr::value(owner.id))
+            .filter(call::Column::TalkgroupId.eq(source.id))
+            .exec(db)
+            .await?
+            .rows_affected;
+
+        // The patch rows of Calls already archived name the folded number too,
+        // and nothing resolves them on the way out (`stored_calls` reads them
+        // verbatim). Left alone, every one of those Calls keeps serving a chip
+        // for a channel the panel no longer offers — the duplicate-button
+        // problem this feature exists to remove, preserved in the archive.
+        //
+        // Scoped by System through a subquery because `call_patches` carries no
+        // System of its own and a Ref is only unique within one. Collisions go
+        // first: a Call patched to *both* Refs — what a console re-broadcasting
+        // through a minted TGID actually produces — would otherwise end up with
+        // the same chip twice.
+        let calls_of_system = || {
+            sea_orm::sea_query::Query::select()
+                .column(call::Column::Id)
+                .from(call::Entity)
+                .and_where(Expr::col(call::Column::SystemId).eq(owner.system_id))
+                .to_owned()
+        };
+        call_patch::Entity::delete_many()
+            .filter(call_patch::Column::TalkgroupRef.eq(source.r#ref))
+            .filter(call_patch::Column::CallId.in_subquery(calls_of_system()))
+            .filter(
+                call_patch::Column::CallId.in_subquery(
+                    sea_orm::sea_query::Query::select()
+                        .column(call_patch::Column::CallId)
+                        .from(call_patch::Entity)
+                        .and_where(Expr::col(call_patch::Column::TalkgroupRef).eq(owner.r#ref))
+                        .to_owned(),
+                ),
+            )
+            .exec(db)
+            .await?;
+        call_patch::Entity::update_many()
+            .col_expr(call_patch::Column::TalkgroupRef, Expr::value(owner.r#ref))
+            .filter(call_patch::Column::TalkgroupRef.eq(source.r#ref))
+            .filter(call_patch::Column::CallId.in_subquery(calls_of_system()))
+            .exec(db)
+            .await?;
+
+        talkgroup_ref::Entity::update_many()
+            .col_expr(talkgroup_ref::Column::TalkgroupId, Expr::value(owner.id))
+            .filter(talkgroup_ref::Column::TalkgroupId.eq(source.id))
+            .exec(db)
+            .await?;
+        talkgroup_group::Entity::delete_many()
+            .filter(talkgroup_group::Column::TalkgroupId.eq(source.id))
+            .exec(db)
+            .await?;
+        talkgroup::Entity::delete_by_id(source.id).exec(db).await?;
+
+        label = source.label;
+        change.folded = 1;
+    }
+
+    // The Ref may already be a member — carried across a moment ago by the fold
+    // of a channel that owned it (see the guard in `crate::import`, which is why
+    // it is always one the caller also asked for). Then there is nothing to
+    // insert and only its place in the operator's order to settle.
+    //
+    // Written unconditionally rather than behind an `if it moved`: this runs
+    // once per Ref of one curation action, where `set_member_refs` compares
+    // before writing because it walks the whole set on every re-import.
+    if let Some(held) = talkgroup_ref::Entity::find()
+        .filter(talkgroup_ref::Column::TalkgroupId.eq(owner.id))
+        .filter(talkgroup_ref::Column::Ref.eq(member_ref))
+        .one(db)
+        .await?
+    {
+        talkgroup_ref::ActiveModel {
+            id: Set(held.id),
+            position: Set(position),
+            ..Default::default()
+        }
+        .update(db)
+        .await?;
+        return Ok(change);
+    }
+
+    talkgroup_ref::ActiveModel {
+        talkgroup_id: Set(owner.id),
+        system_id: Set(owner.system_id),
+        r#ref: Set(member_ref),
+        position: Set(position),
+        // What the channel called itself, so unfolding gives an operator back
+        // the name they curated rather than the number a recorder sent. `NULL`
+        // for a Ref that was never a Talkgroup of its own, which unfolds to the
+        // auto-populate default exactly as a first sighting would.
+        label: Set(label),
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+    Ok(change)
+}
+
+/// Give a member Ref back its own Talkgroup, and its own Calls with it.
+///
+/// Takes the member row rather than looking it up: every caller has just read
+/// the owner's whole set to decide what to unfold, so a second query would only
+/// buy an unreachable "not found" arm to leave untested.
+///
+/// **Patch rows do not come back.** A `call_patches` row records a Ref with no
+/// note of what it arrived as, so once a fold has rewritten one there is nothing
+/// to tell it from a chip the recorder always sent. Calls are entities and get
+/// their provenance column; a Patch is a property a Call carries (CONTEXT.md),
+/// and one that churns by design — the honest trade, rather than a second
+/// provenance column on a table that exists to be rewritten.
+///
+/// The Calls that come back are exactly the ones that *arrived* under this Ref —
+/// which is the whole reason [`call::Model::talkgroup_ref`] is recorded. The
+/// restored row is built the way auto-populate would build it, so an unfolded
+/// channel is indistinguishable from one the recorder had just discovered: same
+/// `Untagged` Tag, same `Unknown` Group, same `Talkgroup <ref>` name. Only the
+/// label is carried across, because it is the field an operator is most likely
+/// to have curated and the one a bare number replaces most painfully.
+async fn unfold_ref<C: ConnectionTrait>(
+    db: &C,
+    owner: &talkgroup::Model,
+    member: &talkgroup_ref::Model,
+    now_ms: i64,
+) -> Result<MergeChange, DbErr> {
+    let restored = create_populated_talkgroup(
+        db,
+        owner.system_id,
+        &NewCall {
+            talkgroup_ref: member.r#ref,
+            talkgroup_label: member.label.clone(),
+            ..Default::default()
+        },
+        now_ms,
+    )
+    .await?;
+
+    let calls_repointed = call::Entity::update_many()
+        .col_expr(call::Column::TalkgroupId, Expr::value(restored.id))
+        .filter(call::Column::TalkgroupId.eq(owner.id))
+        .filter(call::Column::TalkgroupRef.eq(member.r#ref))
+        .exec(db)
+        .await?
+        .rows_affected;
+
+    talkgroup_ref::Entity::delete_by_id(member.id)
+        .exec(db)
+        .await?;
+    Ok(MergeChange {
+        folded: 0,
+        unfolded: 1,
+        calls_repointed,
+    })
+}
+
+/// Give a Unit another span of Refs to answer to (#45, spec US 16), refusing one
+/// that collides with a Range already owned on this System.
+///
+/// **The refusal is the point.** A Ref inside two Ranges belongs to whichever
+/// row the query returns first, so one radio's Calls would attribute to two
+/// different apparatus depending on the day — a bug an operator would debug by
+/// staring at configuration that looks right. The uniqueness index that stops
+/// this for member Refs cannot express it for spans (`idx_unit_refs_system_span`
+/// is an access path, not a constraint), so the guarantee is this function, and
+/// [`crate::merge`] holds the arithmetic it is made of.
+///
+/// The Unit's own primary Ref is not a Range and is not checked here: primary
+/// beats member in [`resolve_unit`], so a span covering it is redundant rather
+/// than ambiguous.
+pub async fn add_unit_range<C: ConnectionTrait>(
+    db: &C,
+    unit: &unit::Model,
+    range: crate::merge::Range,
+    position: i32,
+    now_ms: i64,
+) -> Result<RangeAdded, DbErr> {
+    let existing: Vec<crate::merge::Range> = unit_ref::Entity::find()
+        .filter(unit_ref::Column::SystemId.eq(unit.system_id))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|owned| crate::merge::Range::new(owned.ref_from, owned.ref_to))
+        .collect();
+    if let Some(collision) = crate::merge::first_overlap(&existing, &range) {
+        return Ok(RangeAdded::Overlaps(collision));
+    }
+    Ok(RangeAdded::Added(
+        unit_ref::ActiveModel {
+            unit_id: Set(unit.id),
+            system_id: Set(unit.system_id),
+            ref_from: Set(range.from()),
+            ref_to: Set(range.to()),
+            position: Set(position),
+            created_at_ms: Set(now_ms),
+            ..Default::default()
+        }
+        .insert(db)
+        .await?,
+    ))
+}
+
+/// What [`add_unit_range`] made of a Range an operator asked for.
+///
+/// A named pair rather than a nested `Result`, which would make "that overlaps
+/// something you already own" and "the database is broken" read identically at
+/// the call site — one is the operator's to fix and the other is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RangeAdded {
+    Added(unit_ref::Model),
+    /// Refused: the Range this one collides with.
+    Overlaps(crate::merge::Range),
 }
 
 /// Which end of the archive a search walks from.
@@ -1076,20 +1616,34 @@ pub async fn authorize_ingest<C: ConnectionTrait>(
     })
 }
 
-/// Is there already a call for this System+Talkgroup within `±window_ms` of
+/// Is there already a Call on this Talkgroup within `±window_ms` of
 /// `call_at_ms`? (ADR-0001 duplicate detection.)
+///
+/// Keyed on the **canonical** Talkgroup's Id rather than the Ref a recorder
+/// sent (#45), which is what makes a merge collapse the traffic and not merely
+/// the panel: a multi-site System uploading one transmission twice, once under
+/// each of its Refs, is the plainest reason to merge two channels, and a merge
+/// that left the Call playing twice would have fixed nothing a listener hears.
+/// Recognising the same transmission across *different* channels, and keeping
+/// the better copy of it, is #46's widening of this predicate.
+///
+/// `None` means no Talkgroup owns that Ref yet, which is not a state a duplicate
+/// can exist in: a Call is a row referencing a Talkgroup row, so no Talkgroup
+/// means no Calls to be a duplicate of. It also costs no query, where the
+/// previous shape spent one joining through two tables to reach the same
+/// certainty — and both Systems and Talkgroups have now been resolved by
+/// [`ingest_disposition`] a moment earlier anyway.
 pub async fn is_duplicate_call<C: ConnectionTrait>(
     db: &C,
-    system_ref: i64,
-    talkgroup_ref: i64,
+    talkgroup_id: Option<i64>,
     call_at_ms: i64,
     window_ms: i64,
 ) -> Result<bool, DbErr> {
+    let Some(talkgroup_id) = talkgroup_id else {
+        return Ok(false);
+    };
     let count = call::Entity::find()
-        .join(JoinType::InnerJoin, call::Relation::System.def())
-        .join(JoinType::InnerJoin, call::Relation::Talkgroup.def())
-        .filter(system::Column::Ref.eq(system_ref))
-        .filter(talkgroup::Column::Ref.eq(talkgroup_ref))
+        .filter(call::Column::TalkgroupId.eq(talkgroup_id))
         .filter(call::Column::CallAtMs.gte(call_at_ms - window_ms))
         .filter(call::Column::CallAtMs.lte(call_at_ms + window_ms))
         .count(db)
@@ -1120,7 +1674,16 @@ pub enum DropReason {
 pub enum Disposition {
     /// Persist the Call. `auto_populate` is the **effective** flag (global OR the
     /// System's per-system flag) that [`insert_call`] uses to gate the Unit roster.
-    Store { auto_populate: bool },
+    ///
+    /// `talkgroup_id` is the **canonical** channel the Ref resolved to (#45) —
+    /// `None` when nothing owns it yet and auto-populate is about to create it.
+    /// Carried rather than rediscovered because deciding the disposition already
+    /// required resolving it, and dedup needs the same answer two statements
+    /// later: on a Pi taking a Call a second, a query saved is a query saved.
+    Store {
+        auto_populate: bool,
+        talkgroup_id: Option<i64>,
+    },
     /// Drop it silently.
     Drop(DropReason),
 }
@@ -1156,27 +1719,45 @@ pub async fn ingest_disposition<C: ConnectionTrait>(
         .one(db)
         .await?
     else {
-        // Unknown System: only auto-created when the global toggle is on.
+        // Unknown System: only auto-created when the global toggle is on. No
+        // System means no Talkgroup, so there is nothing to have resolved.
         return Ok(if global_auto_populate {
             Disposition::Store {
                 auto_populate: true,
+                talkgroup_id: None,
             }
         } else {
             Disposition::Drop(DropReason::NotPopulated)
         });
     };
 
-    if is_blacklisted(sys.blacklist.as_deref(), talkgroup_ref) {
+    // Resolved once, and used for both of the decisions below (#45).
+    let owner = resolve_talkgroup(db, sys.id, talkgroup_ref).await?;
+
+    // **Both Refs are judged**: the one the recorder sent, and the primary Ref of
+    // the channel it resolves to (#45). Blacklisting a channel has to reach every
+    // Ref it answers to, or merging a Ref into a blacklisted channel would be a
+    // way around the operator's own policy — that is the spec's "blacklists
+    // operate on the canonical entity". Judging *only* the canonical one would
+    // be the mirror-image bug: a Ref an operator refused yesterday would start
+    // storing the day somebody merged it, with nothing said about the change.
+    let arrived_as_blacklisted = is_blacklisted(sys.blacklist.as_deref(), talkgroup_ref);
+    let owner_blacklisted = owner
+        .as_ref()
+        .is_some_and(|tg| is_blacklisted(sys.blacklist.as_deref(), tg.r#ref));
+    if arrived_as_blacklisted || owner_blacklisted {
         return Ok(Disposition::Drop(DropReason::Blacklisted));
     }
 
     let effective = global_auto_populate || sys.auto_populate;
     // A Call for an already-known Talkgroup is always stored; an unknown one needs
-    // auto-populate to bring it into being.
-    let known_talkgroup = find_talkgroup(db, sys.id, talkgroup_ref).await?.is_some();
+    // auto-populate to bring it into being. A member Ref counts as known — its
+    // channel exists, and nothing is about to be created.
+    let known_talkgroup = owner.is_some();
     Ok(if known_talkgroup || effective {
         Disposition::Store {
             auto_populate: effective,
+            talkgroup_id: owner.map(|tg| tg.id),
         }
     } else {
         Disposition::Drop(DropReason::NotPopulated)

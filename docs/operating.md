@@ -189,8 +189,8 @@ curl -X POST 'http://localhost:3000/api/admin/talkgroups/import?system=411&dryRu
 - **`dryRun=true` walks the identical path and rolls back**, reporting exactly what would
   change. Use it first, always.
 - **Headers are matched by name in any order** (`ref`/`tgid`/`decimal`, `label`/`alphatag`,
-  `name`/`description`, `tag`, `group`, `led`, `system`), and unknown columns are ignored. With
-  no header row, RadioReference's column positions are assumed.
+  `name`/`description`, `tag`, `group`, `led`, `system`, `memberRefs`), and unknown columns are
+  ignored. With no header row, RadioReference's column positions are assumed.
 - **Re-importing is safe.** Rows upsert on (System, Ref) rather than appending, so running it
   twice does not duplicate anything.
 - **A blank cell means "leave alone"**, never "erase".
@@ -199,6 +199,41 @@ curl -X POST 'http://localhost:3000/api/admin/talkgroups/import?system=411&dryRu
 
 `?system=` sets the default System for rows that do not name one; a `system` column overrides it
 per row.
+
+### Merging duplicate channels
+
+Some systems mint a fresh talkgroup id for every patch event, and multi-site systems can show the
+same channel under more than one number. Auto-populate does what it is told and creates a channel
+for each, so a county panel fills up with buttons nobody chose. A **member Ref** fixes that: one
+Talkgroup answers to several numbers, and everything else — the panel, search, the live feed,
+blacklists — sees one channel.
+
+Add a `memberRefs` column, semicolon-separated:
+
+```csv
+ref,label,memberRefs
+100,Fire Dispatch,8123;8124
+```
+
+- **Naming a Ref that is already its own Talkgroup folds it in.** Its archived Calls move across —
+  they are still there, under the channel that now owns them — and the duplicate disappears from
+  the panel. Traffic arriving under `8123` keeps arriving; it just lands on `100`.
+- **The cell is the whole list**, the way the `group` column is. Dropping `8123` from it unmerges:
+  the channel comes back, with the label it had and exactly the Calls that arrived under it. `-`
+  means the empty list, which is how the last one is removed.
+- **`dryRun=true` tells you how much history a fold would move** before it moves any, as
+  `callsRepointed` in the report. Use it — this is the one import that rewrites the archive
+  rather than the configuration.
+- **A Ref belongs to one channel.** A row claiming one that another Talkgroup already lists is
+  rejected (`member-ref-owned-elsewhere`), and so is a row whose own `ref` is currently somebody's
+  member Ref (`ref-is-a-member-ref`) — so re-importing last year's county export cannot quietly
+  undo your merges. Unmerge from the owner's row instead.
+- **Folding a channel that already has members of its own** is rejected (`member-ref-owns-members`)
+  until the cell lists those too, and the message says which. Otherwise the file would stop
+  describing what it made, and re-importing it would unmerge them again.
+
+Every merge leaves a log line saying what moved (`talkgroup member Refs changed`, with the counts),
+so `journalctl -u radio-scout` has the record even if you lost the report.
 
 ## Logging
 

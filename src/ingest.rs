@@ -274,7 +274,7 @@ async fn run_pipeline(
     // Auto-populate + blacklist policy (#8): decide before any audio is written.
     // A dropped Call still returns success so the recorder doesn't retry — which
     // makes the WARN line the only record that it was dropped at all.
-    let auto_populate = match repo::ingest_disposition(
+    let (auto_populate, talkgroup_id) = match repo::ingest_disposition(
         &state.db,
         new_call.system_ref,
         new_call.talkgroup_ref,
@@ -282,7 +282,10 @@ async fn run_pipeline(
     )
     .await
     {
-        Ok(repo::Disposition::Store { auto_populate }) => auto_populate,
+        Ok(repo::Disposition::Store {
+            auto_populate,
+            talkgroup_id,
+        }) => (auto_populate, talkgroup_id),
         Ok(repo::Disposition::Drop(reason)) => {
             return rejected(
                 drop_reason(reason),
@@ -292,11 +295,12 @@ async fn run_pipeline(
         Err(err) => return ServerError::new("auto-populate-policy", err).into_response(),
     };
 
-    // Dedup (ADR-0001): same System + Talkgroup within the window.
+    // Dedup (ADR-0001): the same *channel* within the window — the Talkgroup the
+    // Ref resolved to a moment ago, not the Ref itself (#45), so a transmission
+    // uploaded once per member Ref is stored once.
     match repo::is_duplicate_call(
         &state.db,
-        new_call.system_ref,
-        new_call.talkgroup_ref,
+        talkgroup_id,
         new_call.call_at_ms,
         state.ingest.dedup_window_ms,
     )

@@ -21,6 +21,7 @@ pub mod ingest;
 pub mod live;
 pub mod logsink;
 pub mod logview;
+pub mod merge;
 pub mod observability;
 pub mod push;
 pub mod query;
