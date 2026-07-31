@@ -50,6 +50,7 @@
 //! The harness's own tests are `tests/harness.rs`.
 #![allow(dead_code)]
 
+mod audio;
 mod faults;
 pub mod logs;
 mod push;
@@ -60,6 +61,8 @@ mod ws;
 // Each binary uses a subset of these, so in most of them most are unused. The
 // allow is scoped to the re-exports alone — the module's own `use` statements
 // below stay checked.
+#[allow(unused_imports)]
+pub use audio::{silence_ms, wav};
 #[allow(unused_imports)]
 pub use faults::{Faults, INJECTED_IO, faulty_store};
 #[allow(unused_imports)]

@@ -706,8 +706,12 @@ mod tests {
             date_time: None,
             timestamp: None,
             audio_mime: None,
+            duration_ms: None,
+            emergency: false,
+            encrypted: false,
+            site_ref: None,
             object_key: String::new(),
-            audio_url: String::new(),
+            audio_url: Some(String::new()),
         })
     }
 

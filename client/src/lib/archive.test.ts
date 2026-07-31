@@ -4,6 +4,7 @@ import {
   dateTimeLocalToMs,
   downloadUrl,
   formatCallTime,
+  formatDuration,
   pageSummary,
   searchParams,
 } from './archive'
@@ -83,5 +84,30 @@ describe('pageSummary', () => {
   it('says so when there is nothing to show', () => {
     expect(pageSummary(0, 0, 0)).toBe('No calls')
     expect(pageSummary(500, 0, 421)).toBe('No calls')
+  })
+})
+
+describe('formatDuration', () => {
+  it('reads a transmission as a scanner operator says one', () => {
+    // Under a minute is bare seconds — a call is almost always this.
+    expect(formatDuration(900)).toBe('0.9s')
+    expect(formatDuration(8250)).toBe('8.3s')
+    expect(formatDuration(59_900)).toBe('59.9s')
+    // Past a minute it becomes m:ss, because "94.2s" is not a length anyone
+    // reads at a glance.
+    expect(formatDuration(60_000)).toBe('1:00')
+    expect(formatDuration(94_200)).toBe('1:34')
+    expect(formatDuration(3_600_000)).toBe('60:00')
+  })
+
+  it('shows a dash for a Call whose length was never measured', () => {
+    // Every Call ingested before #42, and anything whose container header could
+    // not be read. Absent is not zero, and must not read as a kerchunk.
+    expect(formatDuration(undefined)).toBe('—')
+  })
+
+  it('shows a dash rather than nonsense for an impossible value', () => {
+    expect(formatDuration(Number.NaN)).toBe('—')
+    expect(formatDuration(-1)).toBe('—')
   })
 })

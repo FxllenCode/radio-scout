@@ -64,6 +64,27 @@ start_time-not-`now()` behavior — rdio's parser has a `// DBEUG`
 `call.Timestamp = time.Now()` line that clobbers it; #6 deliberately does not), and
 a `talkgroup_group_tag` of `"-"` (locks rdio's `len>0 && != "-"` placeholder drop).
 
+Since #42 the meta is the **complete** field set `create_call_json` writes, in
+TR's own key order (`trunk-recorder/trunk-recorder/call_concluder/call_concluder.cc:785`):
+`emergency`, `encrypted`, `priority`, `audio_type`, `call_length`/`call_length_ms`,
+`stop_time`, and the per-source `time`/`emergency`/`signal_system`/`tag`/`tag_ota`
+that rdio-scanner's parser walks past. Keys we deliberately do **not** model
+(`freq_error`, `signal`, `noise`, `tdma_slot`, `color_code`, …) are present in the
+fixture on purpose: they prove an unmodelled key is ignored rather than fatal.
+
+Because the fixture is the full contract, it is also what pins what the shipped
+`uploadScript` (#43) and the first-party plugin (#44) must emit — neither can
+drift from the parser without failing here.
+
+## `trunk-recorder-native-encrypted.multipart` → `POST /api/trunk-recorder-call-upload`
+
+The same native contract with `encrypted: 1` — a call on an encrypted talkgroup.
+The audio part is present and real, because TR writes a file either way; what is
+in it is the vocoder's noise, not speech. Radio-Scout stores the row and writes
+no object (#42, spec US 9), and the recorder still gets
+`Call imported successfully.` so it never retries. This is the fixture pinning
+the metadata-only half of the plugin's contract (#44).
+
 ## Regenerating
 
 Byte layout and values are produced by `gen_fixtures.py` in this directory

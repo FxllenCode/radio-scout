@@ -313,17 +313,85 @@ async fn golden_trunk_recorder_native_meta_upload() {
         vec!["EMS".to_string()]
     );
 
+    // Everything TR knows about the transmission itself (#42, spec US 5) — the
+    // half rdio-scanner's parser reads straight past. This fixture carries the
+    // full `create_call_json` field set, so it is also the contract the shipped
+    // uploadScript (#43) and the first-party plugin (#44) have to satisfy.
+    assert!(call.emergency, "the emergency bit TR wrote");
+    assert!(!call.encrypted);
+    assert_eq!(call.priority, Some(2));
+    assert_eq!(call.audio_type.as_deref(), Some("digital"));
+    assert_eq!(
+        call.stop_at_ms,
+        Some(1669740344000),
+        "stop_time, seconds -> ms"
+    );
+    assert_eq!(
+        call.duration_ms,
+        Some(5760),
+        "call_length_ms beats both call_length and the WAV header"
+    );
+
     let freqs = call_frequency::Entity::find().all(&app.db).await.unwrap();
     assert_eq!(freqs.len(), 1);
     assert_eq!(freqs[0].freq, 771093750);
     assert_eq!(freqs[0].error_count, Some(3));
     assert_eq!(freqs[0].spike_count, Some(1));
+    assert_eq!(freqs[0].at_ms, Some(1669740338000));
 
     let units = units_for(&app, call.id).await;
     assert_eq!(units.len(), 1);
     assert_eq!(units[0].unit_ref, 1610092);
+    assert_eq!(
+        units[0].label.as_deref(),
+        Some("EMS 1"),
+        "the configured tag"
+    );
+    assert_eq!(
+        units[0].tag_ota.as_deref(),
+        Some("MEDIC7"),
+        "and the one the radio put over the air, kept apart from it"
+    );
+    assert!(
+        units[0].emergency,
+        "this radio is the one that keyed emergency"
+    );
+    assert_eq!(units[0].signal_system.as_deref(), Some("P25"));
+    assert_eq!(units[0].at_ms, Some(1669740339000));
 
     assert_eq!(app.count::<call_patch::Entity>().await, 2);
+}
+
+/// Trunk Recorder recording an **encrypted** talkgroup: the same native
+/// contract, `encrypted: 1`, and audio that is the vocoder's noise rather than
+/// speech.
+///
+/// The Call becomes a flagged metadata-only row (spec US 9) — this fixture is
+/// what pins that half of the contract for #44's plugin, whose acceptance
+/// criteria say encrypted calls are forwarded as metadata-only.
+#[tokio::test]
+async fn golden_trunk_recorder_native_encrypted_call_stores_no_audio() {
+    let app = TestApp::with_key("tr-native-key").await;
+
+    let (status, body) = post_raw(
+        &app,
+        "/api/trunk-recorder-call-upload",
+        "multipart/form-data; boundary=------------------------0f1e2d3c4b5a69788796a5b4",
+        "TrunkRecorder1.0",
+        fixture("trunk-recorder-native-encrypted.multipart"),
+    )
+    .await;
+
+    // The recorder is told the same thing it is told for any other Call: this
+    // is not a rejection, and it must not retry.
+    assert_eq!(status, 200, "{body:?}");
+    assert_eq!(body, "Call imported successfully.\n");
+
+    let call = app.the_call().await;
+    assert!(call.encrypted);
+    assert_eq!(call.object_key, "", "no object was written");
+    assert_eq!(call.duration_ms, Some(3200), "the recorder still knows");
+    assert!(app.object_keys().await.is_empty());
 }
 
 // ---- Parity: rdio drops empty / "-" placeholder talkgroup fields -----------

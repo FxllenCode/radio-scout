@@ -95,11 +95,27 @@ const playbackSlice = createSlice({
       // A stale or empty selection changes nothing — better than stopping
       // whatever is currently playing.
       if (index < 0 || !chosen) return
+      // ...and neither does choosing a Call there is nothing to play (#42,
+      // spec US 9). Nothing offers this — an encrypted archive row has no play
+      // button — but a run that *began* on one would be stuck before it started.
+      if (!chosen.audioUrl) return
+
+      // Everything a run walks must be playable, established once here rather
+      // than checked again in `next` and `previous`.
+      //
+      // An encrypted Call carries no `audioUrl`, so the audio element would get
+      // `src={undefined}` — and an element with no source never fires `ended`,
+      // which is the only thing that advances a run. Left in, the first
+      // encrypted result would stop playback mode dead and look like a bug in
+      // the player. The counts stay the server's, so the readout still says how
+      // far through the *archive* the listener is, not how far through the
+      // subset that happens to be audible.
+      const playable = results.filter((one) => one.audioUrl)
 
       state.exhausted = false
       if (state.mode === 'playback') {
-        state.results = results
-        state.index = index
+        state.results = playable
+        state.index = playable.indexOf(chosen)
         state.offset = offset
         state.total = total ?? results.length
         state.interrupting = false

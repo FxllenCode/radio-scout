@@ -16,7 +16,7 @@ mod common;
 
 use common::logs::LogCapture;
 use common::s3::unreachable_store;
-use common::{CallUpload, TestApp};
+use common::{CallUpload, TestApp, wav};
 use radio_scout::db::entities::call::{self as call_entity, EnhancementState};
 use radio_scout::enhance::{EnhancementConfig, Mode};
 use sea_orm::EntityTrait;
@@ -35,28 +35,6 @@ fn tone(freq: f64, rate: u32, amplitude: f64) -> Vec<f32> {
             (amplitude * (std::f64::consts::TAU * freq * t).sin()) as f32
         })
         .collect()
-}
-
-fn wav(samples: &[f32], rate: u32) -> Vec<u8> {
-    let data: Vec<u8> = samples
-        .iter()
-        .flat_map(|s| ((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes())
-        .collect();
-    let mut out = Vec::new();
-    out.extend(b"RIFF");
-    out.extend(((36 + data.len()) as u32).to_le_bytes());
-    out.extend(b"WAVEfmt ");
-    out.extend(16u32.to_le_bytes());
-    out.extend(1u16.to_le_bytes());
-    out.extend(1u16.to_le_bytes());
-    out.extend(rate.to_le_bytes());
-    out.extend((rate * 2).to_le_bytes());
-    out.extend(2u16.to_le_bytes());
-    out.extend(16u16.to_le_bytes());
-    out.extend(b"data");
-    out.extend((data.len() as u32).to_le_bytes());
-    out.extend(data);
-    out
 }
 
 /// An instance with enhancement turned on, the way an operator would.
@@ -933,4 +911,33 @@ async fn a_call_that_cannot_be_marked_pending_still_lands_and_still_plays() {
     );
     let line = capture.wait_for("reason=mark-pending-failed").await;
     assert!(line.contains(common::INJECTED_WRITE), "{line}");
+}
+
+/// An encrypted Call has no audio object at all (#42, spec US 9), so there is
+/// nothing to enhance and nothing to decode.
+///
+/// Offering it anyway is not harmless: the worker would mark the Call
+/// `pending`, ask the store for the object named by the empty string, fail, and
+/// settle it `skipped` with a WARN — one per Call, forever, on a System whose
+/// traffic is mostly encrypted. That is an operator watching a log fill with a
+/// failure that is not one, and a Pi spending three queries per Call to
+/// discover it.
+#[tokio::test]
+async fn an_encrypted_call_is_never_offered_to_the_enhancement_worker() {
+    let capture = LogCapture::start();
+    let app = TestApp::builder().enhancement(normalizing()).spawn().await;
+    app.create_api_key("k").await;
+
+    let meta = r#"{"short_name":"butco","talkgroup":54241,
+                   "start_time":1669740338,"call_length_ms":4000,"encrypted":1}"#;
+    let (status, body) = app.upload_tr(CallUpload::tr(meta)).await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let stored = app.the_call().await;
+    assert_eq!(
+        stored.enhancement,
+        EnhancementState::NONE,
+        "never queued, so never pending and never skipped"
+    );
+    capture.assert_never_logged("call enhancement failed");
 }

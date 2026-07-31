@@ -24,6 +24,21 @@ Top right: **Q** is the listening queue, how many Calls are waiting behind this 
 showing whether the live feed is connected. Underneath the card is **RECENT**, the handful that
 just played, so you can catch what you missed.
 
+On a multi-site system, the tag/group line also names the **Site** the Call was heard on, so
+simulcast coverage is legible. Single-site systems say nothing there, and neither do recorders
+that don't send one.
+
+Two badges appear beside a Talkgroup's name when the recorder said so:
+
+| Badge | What it means |
+| --- | --- |
+| ⚠ **Emergency** | The radio's emergency button was pressed on this transmission. |
+| 🔒 **Encrypted** | The Talkgroup is encrypted, so there is no audio to hear. |
+
+Encrypted Calls never play — there is genuinely nothing in them but the vocoder's noise — so
+they go straight to **RECENT** rather than into the queue. They are there so a mostly-encrypted
+Talkgroup reads as *busy* instead of as a dead feed.
+
 ### The controls
 
 | Control | What it does |
@@ -115,7 +130,17 @@ time range, System, Talkgroup, Group and Tag, and sort newest or oldest first. *
 tells you how far back the instance's history actually goes, which is decided by its retention
 policy.
 
-Each result plays in place, or downloads with the arrow. **PLAYBACK MODE**, top right, switches
+Every result shows its duration, in a column down the right — so a one-second kerchunk and a
+forty-second dispatch are told apart without playing either. **MIN DURATION** filters the short
+ones out entirely, which is the fastest way to make a busy day readable.
+
+Two things to know about that column. A dash means nobody measured it: Calls stored by an older
+version of Radio-Scout carry no duration, and neither does audio whose header could not be read.
+And because an unknown duration cannot be compared against a threshold, those Calls do not match
+**MIN DURATION** at any setting — leave it on *Any duration* to see them.
+
+Each result plays in place, or downloads with the arrow. Encrypted Calls have neither button:
+they are metadata-only records, with a 🔒 badge and no audio behind them. **PLAYBACK MODE**, top right, switches
 from the live feed to playing the search results in sequence — for working through an incident
 after the fact rather than waiting on what arrives next. Live feed and playback mode are
 mutually exclusive: you are in one or the other.

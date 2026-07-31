@@ -43,7 +43,23 @@ A single radio (identified by a radio ID) heard transmitting within a system. Ma
 _Avoid_: radio, source, subscriber.
 
 **Site**:
-A physical tower/receiver site within a system that a call was heard on.
+A physical tower/receiver site within a system that a call was heard on. Discovered from traffic the way a **Talkgroup** is — never gated on **Auto-populate**, because a tower is the System's own infrastructure rather than a channel that could clutter a panel.
+
+**Duration**:
+How long a **Call**'s transmission lasted. From the **Recorder**'s own metadata when it sent any, otherwise read from the audio's container header at **Ingest** — never by decoding. Every Call carries one except where neither could say, and "unknown" is distinct from "zero": an unmeasured Call matches no length filter.
+_Avoid_: length (the recorder's word — TR's `call_length` — reserve it for the wire field), runtime, playtime.
+
+**Emergency**:
+The bit a radio sets on a transmission when its emergency button is pressed. A property of a **Call**, and separately of each **Unit** heard within one — the Call says somebody keyed it, the per-source flag says which radio did. Absent means no, never unknown.
+_Avoid_: alert (an **Alert** is what an emergency may *produce*), panic, priority (the recorder's own unrelated field).
+
+**Encrypted Call**:
+A **Call** on a talkgroup whose traffic is encrypted: stored as a flagged, metadata-only row with **no audio object at all**, because what a recorder captures there is the vocoder's noise rather than speech. It reaches **Listeners** so the activity is visible, carries no audio URL, and never enters the **Listening queue**.
+_Avoid_: blocked call, private call, secure call.
+
+**OTA alias**:
+The name a radio broadcast about *itself*, as opposed to the alias an **Operator** configured for it — Trunk Recorder's `tag_ota`, SDRTrunk's `talkerAlias`. Kept beside the configured label rather than replacing it: when the two disagree, the disagreement is the information.
+_Avoid_: talker alias (one vendor's word), radio name, over-the-air tag.
 
 **Patch**:
 A temporary, console-made union of talkgroups whose traffic reaches any listener subscribed to a member. A property calls carry, not an entity of its own — patches churn (some systems mint a fresh TGID per patch event), so Radio-Scout deduplicates and routes patched traffic rather than modelling patches as subscribable things.

@@ -261,6 +261,7 @@ async fn insert_call_persists_call_with_children() {
             unit_ref: 4_424_000,
             label: Some("Engine 1".into()),
             offset_ms: Some(1_500),
+            ..Default::default()
         }],
         frequencies: vec![repo::NewCallFrequency {
             freq: 774_031_250,
@@ -269,6 +270,7 @@ async fn insert_call_persists_call_with_children() {
             dbm: Some(-50.5),
             error_count: Some(2),
             spike_count: Some(1),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -723,7 +725,7 @@ fn minimal_call(system_ref: i64, talkgroup_ref: i64) -> repo::NewCall {
         units: vec![repo::NewCallUnit {
             unit_ref: 4242,
             label: Some("Medic 7".into()),
-            offset_ms: None,
+            ..Default::default()
         }],
         ..Default::default()
     }
@@ -1004,16 +1006,19 @@ async fn only_labeled_positive_units_are_rostered() {
                 unit_ref: 0, // junk Ref, even with a label -> skipped
                 label: Some("Ghost".into()),
                 offset_ms: None,
+                ..Default::default()
             },
             repo::NewCallUnit {
                 unit_ref: 5000, // valid Ref but anonymous -> skipped (rdio parity)
                 label: None,
                 offset_ms: None,
+                ..Default::default()
             },
             repo::NewCallUnit {
                 unit_ref: 4242, // valid Ref + alias -> rostered
                 label: Some("Medic 7".into()),
                 offset_ms: None,
+                ..Default::default()
             },
         ],
         ..Default::default()
@@ -1508,4 +1513,111 @@ async fn filter_options_on_an_empty_archive_are_empty() {
     assert!(options.tags.is_empty());
     assert_eq!(options.date_start_ms, None);
     assert_eq!(options.date_stop_ms, None);
+}
+
+/// The same trap again, for #42's eleven columns. `m0001_init` builds its DDL
+/// from the live entities, so a fresh database has `calls.emergency` and the
+/// rest before `m0008` runs — and every other test in this file is a fresh
+/// database, which is exactly why the last two versions of this bug both
+/// shipped.
+///
+/// Reproduce the older shape and migrate over it, then do what an operator
+/// does on the morning after an upgrade: read the archive they already had, and
+/// take a new Call. The **existing** rows are the point — `emergency` and
+/// `encrypted` are `NOT NULL`, so a migration that added them without a default
+/// would either refuse to run or leave rows SeaORM cannot deserialize, and the
+/// first symptom would be an archive that 500s.
+#[tokio::test]
+async fn recorder_truth_migration_converges_on_databases_that_predate_the_columns() {
+    use radio_scout::db::migration::Migrator;
+    use sea_orm::{ConnectionTrait, Database};
+    use sea_orm_migration::MigratorTrait;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+    let db = Database::connect(&url).await.expect("connect");
+
+    Migrator::up(&db, Some(7)).await.expect("migrate to m0007");
+    for (table, column) in [
+        ("calls", "stop_at_ms"),
+        ("calls", "emergency"),
+        ("calls", "encrypted"),
+        ("calls", "priority"),
+        ("calls", "audio_type"),
+        ("calls", "site_id"),
+        ("call_frequencies", "at_ms"),
+        ("call_units", "tag_ota"),
+        ("call_units", "emergency"),
+        ("call_units", "signal_system"),
+        ("call_units", "at_ms"),
+    ] {
+        db.execute_unprepared(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+            .await
+            .expect("reproduce the pre-#42 schema");
+    }
+    // An archive from before the upgrade, inserted through the old shape.
+    db.execute_unprepared(
+        "INSERT INTO systems (id, ref, label, auto_populate, created_at_ms) \
+         VALUES (1, 11, 'butco', 0, 0); \
+         INSERT INTO talkgroups (id, system_id, ref, created_at_ms) VALUES (1, 1, 54241, 0); \
+         INSERT INTO calls (id, system_id, talkgroup_id, call_at_ms, object_key, \
+                            enhancement, created_at_ms) \
+         VALUES (1, 1, 1, 1000, 'aa/1.wav', 'none', 0); \
+         INSERT INTO call_units (id, call_id, unit_ref) VALUES (1, 1, 4242); \
+         INSERT INTO call_frequencies (id, call_id, freq) VALUES (1, 1, 774031250)",
+    )
+    .await
+    .expect("seed the archive an operator is upgrading with");
+
+    Migrator::up(&db, None)
+        .await
+        .expect("migrate the rest of the way");
+
+    // The archive still reads, and the rows the operator already had take the
+    // documented defaults rather than NULL — a `NOT NULL` column added without
+    // one is what turns an upgrade into an archive that 500s.
+    let existing = repo::find_call(&db, 1)
+        .await
+        .expect("read a Call that predates the columns")
+        .expect("it is still there");
+    assert!(
+        !existing.emergency,
+        "a Call nobody flagged is not an emergency"
+    );
+    assert!(!existing.encrypted);
+    assert_eq!(existing.duration_ms, None, "nobody ever measured it");
+    assert_eq!(existing.site_id, None);
+
+    let views = repo::stored_calls(&db, std::slice::from_ref(&existing))
+        .await
+        .expect("denormalize the pre-upgrade archive");
+    assert_eq!(views.len(), 1);
+
+    // ...and a new Call lands with all of it.
+    let stored = repo::insert_call(
+        &db,
+        &repo::NewCall {
+            system_ref: 11,
+            talkgroup_ref: 54241,
+            call_at_ms: NOW,
+            object_key: "aa/2.wav".into(),
+            duration_ms: Some(8250),
+            emergency: true,
+            site_ref: Some(3),
+            units: vec![repo::NewCallUnit {
+                unit_ref: 4242,
+                tag_ota: Some("MEDIC7".into()),
+                emergency: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        true,
+        NOW,
+    )
+    .await
+    .expect("insert a Call into an upgraded database");
+    assert!(stored.emergency);
+    assert_eq!(stored.duration_ms, Some(8250));
+    assert!(stored.site_id.is_some(), "the Site row was created too");
 }

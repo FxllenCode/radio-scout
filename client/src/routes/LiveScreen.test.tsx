@@ -498,3 +498,40 @@ describe('LiveScreen', () => {
     expect(await axe(container)).toHaveNoViolations()
   })
 })
+
+describe('LiveScreen — what the recorder knew (#42)', () => {
+  it('badges an emergency on the scanner display', async () => {
+    // The emergency bit is the one thing on a Call a listener must not have to
+    // go looking for (#42, and what #53 pushes on).
+    listening(call({ emergency: true }))
+
+    expect(within(display()).getByTitle('Emergency')).toBeInTheDocument()
+  })
+
+  it('leaves the display unadorned for an ordinary call', () => {
+    listening(call())
+
+    expect(within(display()).queryByTitle('Emergency')).toBeNull()
+    expect(within(display()).queryByTitle('Encrypted')).toBeNull()
+  })
+
+  it('shows encrypted activity in RECENT without ever playing it', () => {
+    const { audioUrl: _none, ...metadataOnly } = call({ id: 7 })
+    listening({ ...metadataOnly, encrypted: true })
+
+    // Nothing is playing: an encrypted Call has no audio, and the display would
+    // otherwise sit on it forever with no `src` to end.
+    expect(screen.queryByRole('region', { name: 'Scanner display' })).toBeNull()
+    const recent = screen.getByRole('list', { name: 'Recent calls' })
+    expect(within(recent).getByTitle('Encrypted')).toBeInTheDocument()
+  })
+
+  it('badges an encrypted call in RECENT while another one plays', () => {
+    const { audioUrl: _none, ...metadataOnly } = call({ id: 7 })
+    listening(call({ id: 1 }), { ...metadataOnly, encrypted: true })
+
+    expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
+    const recent = screen.getByRole('list', { name: 'Recent calls' })
+    expect(within(recent).getByTitle('Encrypted')).toBeInTheDocument()
+  })
+})

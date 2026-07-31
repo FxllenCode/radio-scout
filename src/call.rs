@@ -55,11 +55,36 @@ pub struct StoredCall {
     pub timestamp: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_mime: Option<String>,
+    /// How long the transmission is, in milliseconds (#42, spec US 8) — from
+    /// the recorder's own metadata when it sent any, else read from the audio's
+    /// container header at ingest. Absent when neither could say, which is what
+    /// every Call stored before this existed looks like.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    /// The emergency bit the radio set (#42, spec US 5) — omitted when it
+    /// wasn't, because it almost never is and every live frame pays for a key
+    /// that is present.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub emergency: bool,
+    /// The talkgroup was encrypted, so this Call is metadata and nothing else
+    /// (spec US 9). Its `audio_url` is absent, which is the same fact said in
+    /// the way a player can act on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub encrypted: bool,
+    /// The Site Ref this Call was heard on, for multi-site Systems (spec
+    /// US 11). Absent unless a recorder named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_ref: Option<i64>,
     /// Where the audio lives in the object store. Internal; not serialized.
     #[serde(skip)]
     pub object_key: String,
     /// The URL a client fetches the audio from (audio never rides the socket).
-    pub audio_url: String,
+    ///
+    /// Absent when there is nothing to fetch — an encrypted Call. A client
+    /// therefore cannot queue an unplayable Call by forgetting to check a flag:
+    /// the thing it would need in order to play it is not there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_url: Option<String>,
 }
 
 impl StoredCall {
@@ -69,6 +94,95 @@ impl StoredCall {
     pub fn talkgroups(&self) -> impl Iterator<Item = i64> + '_ {
         std::iter::once(self.talkgroup_ref).chain(self.patches.iter().copied())
     }
+}
+
+/// One Call, with everything the recorder said about it — the contract of
+/// `GET /api/call/{id}` (#42, spec US 5).
+///
+/// [`StoredCall`] plus the parts nobody wants fifty of: the per-frequency and
+/// per-source detail, and the scalars an archive reader asks for one Call at a
+/// time. Kept off `StoredCall` deliberately — that type is one live-feed frame
+/// per Call *and* fifty rows per search page, and Trunk Recorder sends a
+/// `freqList` and a `srcList` on every single upload, so carrying them there
+/// would put arrays on every frame a Pi pushes to every listener for data a
+/// screen shows only when somebody opens one Call.
+///
+/// rdio-scanner has no equivalent at all: it answers a search with bare ids and
+/// makes the client re-fetch each Call, and even then never surfaces the signal
+/// detail its own parser collected.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallDetail {
+    /// Everything a search row already carries, flattened so one Call has one
+    /// shape whichever endpoint served it.
+    #[serde(flatten)]
+    pub call: StoredCall,
+    /// When the transmission ended, unix milliseconds (the recorder's own
+    /// `stop_time`). Absent unless a recorder said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_ms: Option<i64>,
+    /// The **recorder's** priority for this call, not the listener's per-
+    /// Talkgroup Priority (#58).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// What the recorder was demodulating — `digital`, `digital tdma`,
+    /// `analog`. The recorder's vocabulary, passed through.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_type: Option<String>,
+    /// How the signal behaved, per frequency the call moved across. Always
+    /// present, possibly empty — a caller that asked for the detail is handling
+    /// a list either way, and an absent key would make it handle two things.
+    pub frequencies: Vec<CallFrequencyDetail>,
+    /// Which radios were heard, and when.
+    pub units: Vec<CallUnitDetail>,
+}
+
+/// One frequency segment of a Call: where it sat and how badly it decoded.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallFrequencyDetail {
+    pub freq: i64,
+    /// Offset into the Call, milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pos_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub len_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dbm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spike_count: Option<i32>,
+    /// Wall-clock start, unix milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<i64>,
+}
+
+/// One radio heard within a Call.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallUnitDetail {
+    /// The radio's external id (CONTEXT.md: **Ref**).
+    pub r#ref: i64,
+    /// The alias the recorder had configured for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The alias the radio itself put over the air (#42, spec US 12). Separate
+    /// from `label` because when the two disagree, that *is* the information.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_ota: Option<String>,
+    /// Offset into the Call, milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset_ms: Option<i64>,
+    /// This Unit held the emergency bit — which radio pressed the button,
+    /// where the Call's own flag can only say that somebody did.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub emergency: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_system: Option<String>,
+    /// Wall-clock start, unix milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<i64>,
 }
 
 /// One System that has Calls matching the current archive-search filters.
@@ -141,8 +255,12 @@ mod tests {
             date_time: Some("2022-11-29T18:05:38Z".into()),
             timestamp: Some(1_669_740_338_000),
             audio_mime: Some("audio/mp4".into()),
+            duration_ms: Some(8250),
+            emergency: true,
+            encrypted: false,
+            site_ref: Some(3),
             object_key: "ab/secret-internal-key.m4a".into(),
-            audio_url: "/api/call/42/audio".into(),
+            audio_url: Some("/api/call/42/audio".into()),
         }
     }
 
@@ -193,8 +311,12 @@ mod tests {
             date_time: None,
             timestamp: None,
             audio_mime: None,
+            duration_ms: None,
+            emergency: false,
+            encrypted: false,
+            site_ref: None,
             object_key: "internal".into(),
-            audio_url: "/api/call/1/audio".into(),
+            audio_url: Some("/api/call/1/audio".into()),
         };
         insta::assert_json_snapshot!("stored_call_minimal", minimal);
     }

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { callCategory, formatFrequency, systemName, talkgroupName } from './call'
+import {
+  callCategory,
+  formatFrequency,
+  siteName,
+  systemName,
+  talkgroupName,
+} from './call'
 
 const call = {
   id: 1,
@@ -50,5 +56,20 @@ describe('formatting a frequency', () => {
 
   it('shows a dash when the recorder sent none', () => {
     expect(formatFrequency(undefined)).toBe('—')
+  })
+})
+
+describe('siteName', () => {
+  it('names the tower a Call was heard on (#42, spec US 11)', () => {
+    // A recorder sends a bare number and nothing else, so that is what a
+    // listener gets — enough to tell one tower from another, which is the whole
+    // of what makes simulcast coverage legible.
+    expect(siteName({ ...call, siteRef: 3 })).toBe('Site 3')
+  })
+
+  it('says nothing at all on a single-site system', () => {
+    // Most systems have one site and no recorder mentions it. A "Site —" on
+    // every row would be clutter bought for nothing.
+    expect(siteName(call)).toBeUndefined()
   })
 })

@@ -25,13 +25,67 @@ pub struct Model {
     /// every sweep. `NULL` for rows written before the column existed; those
     /// count as zero toward the cap.
     pub audio_size: Option<i64>,
+    /// How long the transmission is, in milliseconds (#42, spec US 8). From the
+    /// recorder when it said (Trunk Recorder's `call_length_ms`), else read
+    /// from the audio's container header at ingest. `NULL` when neither could
+    /// say — every Call stored before #42, and anything undecodable since.
     pub duration_ms: Option<i64>,
+    /// When the transmission ended, unix milliseconds — TR's `stop_time`.
+    /// `duration_ms` is the number everything reads; this is the recorder's own
+    /// answer kept beside it, which is what the DVR (#63) walks.
+    pub stop_at_ms: Option<i64>,
+    /// The emergency bit the radio set on the transmission (#42, spec US 5).
+    /// Not nullable: a recorder that says nothing said "no", and #53 alerts on
+    /// this — a tri-state would make "unknown" indistinguishable from "quiet".
+    pub emergency: bool,
+    /// The call was on an encrypted talkgroup, so there is nothing to hear.
+    /// The row exists so the *activity* is visible (spec US 9); no audio object
+    /// is ever written for one, and `object_key` is therefore empty.
+    pub encrypted: bool,
+    /// The recorder's own priority for this call. TR's, verbatim; nullable
+    /// because only TR's native meta carries one. Distinct from the listener's
+    /// per-Talkgroup Priority (#58), which is Radio-Scout's own idea.
+    pub priority: Option<i32>,
+    /// What the recorder was demodulating — TR's `audio_type` (`digital`,
+    /// `digital tdma`, `analog`). Free text: it is the recorder's vocabulary,
+    /// not ours, and a new mode must not fail an ingest.
+    pub audio_type: Option<String>,
+    /// The Site this Call was heard on, for multi-site systems (spec US 11).
+    /// rdio's generic `site` field resolves to a row here; TR's native meta has
+    /// no site to give, and #48 fills it retroactively from SDRTrunk's ID3.
+    ///
+    /// **Deliberately not a declared foreign key**, unlike `system_id` and
+    /// `talkgroup_id`. Those have been in `m0001`'s entity-derived DDL since the
+    /// beginning; this column arrives by `ALTER` on every database that already
+    /// exists, and SQLite cannot add a constraint to a table it already made. A
+    /// relation here would therefore mean a fresh database and an upgraded one
+    /// having *different schemas forever* — which is the divergence m0003 and
+    /// m0004 were both written to close, and it would also make the column
+    /// undroppable on SQLite, taking the `down` migration with it. Nothing is
+    /// lost: `sites` rows are only ever created, never deleted, so there is no
+    /// delete for `RESTRICT` to restrict.
+    pub site_id: Option<i64>,
     /// Where this Call is in the enhancement pipeline (#20) — one of
     /// [`Enhancement`]'s four values. Stored as text rather than an integer so
     /// a `SELECT` is readable by a human debugging a stuck queue, and so a
     /// value added later cannot silently collide with an existing number.
     pub enhancement: String,
     pub created_at_ms: i64,
+}
+
+impl Model {
+    /// Is there an audio object behind this Call?
+    ///
+    /// An empty `object_key` means no object was ever written — an **encrypted
+    /// Call** (#42, spec US 9), which is a row recording that the channel was
+    /// busy and nothing else. Everything downstream has to ask: the wire omits
+    /// `audioUrl`, serving and downloading answer 404, Enhancement declines to
+    /// queue it, and Retention has nothing to delete. One method rather than
+    /// four `is_empty()` checks, so the next reason a Call has no audio is one
+    /// edit and not a hunt.
+    pub fn has_audio(&self) -> bool {
+        !self.object_key.is_empty()
+    }
 }
 
 /// The states a Call moves through as it is enhanced.

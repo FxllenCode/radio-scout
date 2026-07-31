@@ -77,8 +77,15 @@ struct RawUpload {
     frequencies: Option<String>,
     source: Option<String>,
     sources: Option<String>,
+    /// SDRTrunk's `talkerAlias` — the name the source radio put over the air
+    /// (`FormField.java`, sent on every upload). rdio-scanner reads the field
+    /// and discards it, which is why its units stay bare numbers (#42, US 12).
+    talker_alias: Option<String>,
     unit: Option<String>,
     units: Option<String>,
+    /// rdio's documented `site` (`docs/api.md`, `parsers.go:344`) — the tower a
+    /// multi-site System heard this on (spec US 11).
+    site: Option<String>,
     patches: Option<String>,
     date_time: Option<String>,
     timestamp: Option<String>,
@@ -129,15 +136,17 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
             "frequencies" => upload.frequencies = Some(value),
             "source" => upload.source = Some(value),
             "sources" => upload.sources = Some(value),
+            "talkerAlias" => upload.talker_alias = Some(value),
             "unit" => upload.unit = Some(value),
             "units" => upload.units = Some(value),
+            "site" => upload.site = Some(value),
             "patches" | "patched_talkgroups" => upload.patches = Some(value),
             "dateTime" => upload.date_time = Some(value),
             "timestamp" => upload.timestamp = Some(value),
             // audioName/audioFilename and audioMime/audioType if sent as fields.
             "audioName" | "audioFilename" => upload.audio_name = Some(value),
             "audioMime" | "audioType" => upload.audio_mime = Some(value),
-            _ => {} // ignore fields we don't model in v1 (e.g. site)
+            _ => {} // a field we don't model: ignored, never an error
         }
     }
 
@@ -180,14 +189,27 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
         audio_name: upload.audio_name,
         // Both filled in by `ingest_call` once the object is written.
         audio_size: None,
+        // Both filled in by `ingest_call` once the audio has been read.
         duration_ms: None,
         patches: parse_patches(upload.patches.as_deref()),
+        // A Site Ref is only ever positive; rdio's own parser takes any
+        // unsigned value, and a `0` from a recorder that fills every field
+        // means "none" rather than "tower zero".
+        site_ref: upload
+            .site
+            .as_deref()
+            .and_then(parse_i64)
+            .filter(|s| *s > 0),
         units: parse_units(
             upload.units.as_deref(),
             upload.sources.as_deref(),
-            upload.unit.as_deref(),
+            // SDRTrunk sends the singular radio as `source` and everyone else
+            // as `unit`; both name one radio, and `talkerAlias` is its name.
+            upload.unit.as_deref().or(upload.source.as_deref()),
+            clean(upload.talker_alias),
         ),
         frequencies: parse_frequencies(upload.frequencies.as_deref()),
+        ..Default::default()
     };
 
     ingest_call(&state, &key, new_call, audio).await
@@ -290,22 +312,48 @@ async fn run_pipeline(
         Err(err) => return ServerError::new("dedup", err).into_response(),
     }
 
-    new_call.object_key = crate::blob::new_object_key(&audio_extension(&new_call.audio_name));
-
-    // The byte length rides along on the row so retention's size cap is a `SUM()`
-    // rather than a stat per object (#10).
-    let audio_bytes = audio.len() as i64;
-    new_call.audio_size = Some(audio_bytes);
-
-    // Write the audio object first (ADR-0001); a failed DB insert afterward leaves
-    // an orphan the GC sweep reclaims (#10).
-    if let Err(err) = state
-        .audio
-        .put(&new_call.object_key, bytes::Bytes::from(audio))
-        .await
-    {
-        return ServerError::new("store-audio", err).into_response();
+    // The *playing* length, so a one-second kerchunk and a forty-second
+    // dispatch are distinguishable everywhere (#42, spec US 8). The recorder's
+    // own figure wins when it sent one — only Trunk Recorder's native meta
+    // does, and it knows the call it recorded better than its own encoder's
+    // header does. Everything else is read here, from the container header
+    // alone: no decode, no sample touched, microseconds on a Pi. Audio whose
+    // header says nothing leaves the column `NULL`, which is the honest answer
+    // and never a failed ingest.
+    //
+    // Read *before* the encrypted check, because the bytes are in hand either
+    // way and an encrypted Call that never stores them still gets a length.
+    if new_call.duration_ms.is_none() {
+        new_call.duration_ms = crate::audio_meta::duration_ms(&audio);
     }
+
+    // An encrypted Call is a row and nothing else (spec US 9): the activity is
+    // worth seeing, the audio is worth nothing — it is the vocoder's noise, not
+    // speech, and storing it would spend a Pi's disk on something no listener
+    // can use. `object_key` stays empty, which is what the serve path and the
+    // wire both read as "there is nothing here", and `audio_size` stays `NULL`,
+    // so retention's cap counts what actually exists.
+    //
+    // The bytes are still *required* on the wire: this endpoint's dialect asks
+    // for an audio part and refusing one for some Calls and not others would
+    // make a recorder's success depend on a flag it also sent.
+    if !new_call.encrypted {
+        new_call.object_key = crate::blob::new_object_key(&audio_extension(&new_call.audio_name));
+        // The byte length rides along on the row so retention's size cap is a
+        // `SUM()` rather than a stat per object (#10).
+        new_call.audio_size = Some(audio.len() as i64);
+
+        // Write the audio object first (ADR-0001); a failed DB insert afterward
+        // leaves an orphan the GC sweep reclaims (#10).
+        if let Err(err) = state
+            .audio
+            .put(&new_call.object_key, bytes::Bytes::from(audio))
+            .await
+        {
+            return ServerError::new("store-audio", err).into_response();
+        }
+    }
+    let audio_bytes = new_call.audio_size.unwrap_or_default();
 
     // Insert the row (+ children) atomically.
     let call = match insert_in_txn(&state.db, &new_call, auto_populate, now_ms()).await {
@@ -327,7 +375,16 @@ async fn run_pipeline(
     // than before the insert because auto-populate may have created the System
     // or the Talkgroup a moment ago, and a row that has just been created says
     // `NULL`, which is the value that inherits.
-    queue_for_enhancement(state, call.id).await;
+    //
+    // An encrypted Call has no object to enhance (#42), and offering one is not
+    // harmless: the worker would mark it `pending`, ask the store for the
+    // object named by the empty string, fail, and settle it `skipped` with a
+    // WARN — once per Call, forever, on a System whose traffic is mostly
+    // encrypted. Asked here rather than inside the worker so the three queries
+    // the scope lookup costs are never spent either.
+    if call.has_audio() {
+        queue_for_enhancement(state, call.id).await;
+    }
 
     // The other half of rule 3: an ingest that *did* become a row is a notable
     // normal event, so "nothing is arriving" is answerable without waiting for
@@ -471,7 +528,19 @@ pub async fn trunk_recorder_call_upload(
     ingest_call(&state, &key, new_call, audio).await
 }
 
-/// Trunk Recorder's call `.json` metadata (the fields rdio's `parsers.go` reads).
+/// Trunk Recorder's call `.json` metadata.
+///
+/// The field set is `create_call_json` in
+/// `trunk-recorder/call_concluder/call_concluder.cc` — the only definition of
+/// this shape there is. rdio-scanner's parser (`parsers.go:477`) reads six of
+/// these keys and walks past the rest; everything the recorder knows about the
+/// *transmission* — that the emergency button was pressed, that the talkgroup
+/// was encrypted, how long the call ran, what the radios called themselves over
+/// the air — is in the half it discards (#42, spec US 5).
+///
+/// Every field is `#[serde(default)]` because a recorder that adds or drops a
+/// key must not fail an upload: TR's JSON has grown over versions and will
+/// again, and a Call refused for an unrecognised shape is a Call lost.
 #[derive(Deserialize, Default)]
 struct TrMeta {
     #[serde(default)]
@@ -489,7 +558,33 @@ struct TrMeta {
     #[serde(default)]
     start_time: Option<f64>, // unix seconds
     #[serde(default)]
+    stop_time: Option<f64>, // unix seconds
+    #[serde(default)]
     timestamp: Option<f64>, // unix milliseconds (overrides start_time)
+    /// The call's length in milliseconds — the recorder's own figure, and the
+    /// best one there is: it counted the samples it wrote.
+    #[serde(default)]
+    call_length_ms: Option<f64>,
+    /// The same length rounded to whole seconds. Older recorders write only
+    /// this one, and one second of resolution still separates a kerchunk from a
+    /// dispatch.
+    #[serde(default)]
+    call_length: Option<f64>,
+    #[serde(default)]
+    emergency: Option<i64>,
+    #[serde(default)]
+    encrypted: Option<i64>,
+    #[serde(default)]
+    priority: Option<i64>,
+    #[serde(default)]
+    audio_type: Option<String>,
+    /// Not a field Trunk Recorder writes today — `create_call_json` has no site
+    /// at all, and neither does its rdio uploader plugin. Read anyway so the
+    /// shipped `uploadScript` (#43) and the first-party plugin (#44) can add one
+    /// without a parser change, and so a fork that already does is not silently
+    /// ignored.
+    #[serde(default)]
+    site: Option<i64>,
     #[serde(default)]
     freq: Option<f64>,
     #[serde(default)]
@@ -508,6 +603,9 @@ struct TrFreq {
     pos: f64,
     #[serde(default)]
     len: f64,
+    /// Wall-clock start of this segment, unix **seconds**.
+    #[serde(default)]
+    time: Option<f64>,
     #[serde(default)]
     error_count: Option<i64>,
     #[serde(default)]
@@ -520,8 +618,18 @@ struct TrSrc {
     src: i64,
     #[serde(default)]
     pos: f64,
+    /// Wall-clock start of this source's transmission, unix **seconds**.
+    #[serde(default)]
+    time: Option<f64>,
+    #[serde(default)]
+    emergency: Option<i64>,
+    #[serde(default)]
+    signal_system: Option<String>,
     #[serde(default)]
     tag: Option<String>,
+    /// The alias the radio itself put over the air, which nothing configured.
+    #[serde(default)]
+    tag_ota: Option<String>,
 }
 
 /// The TR call time: `timestamp` (unix ms) if present, else `start_time`
@@ -565,6 +673,7 @@ fn build_tr_call(
             dbm: None,
             error_count: f.error_count.map(|n| n as i32),
             spike_count: f.spike_count.map(|n| n as i32),
+            at_ms: f.time.map(seconds_to_ms),
         })
         .collect();
     let units = meta
@@ -575,6 +684,10 @@ fn build_tr_call(
             unit_ref: s.src,
             label: clean(s.tag),
             offset_ms: Some((s.pos * 1000.0) as i64),
+            tag_ota: clean(s.tag_ota),
+            emergency: is_set(s.emergency),
+            signal_system: clean(s.signal_system),
+            at_ms: s.time.map(seconds_to_ms),
         })
         .collect();
     let patches = meta
@@ -599,11 +712,41 @@ fn build_tr_call(
         audio_mime,
         audio_name,
         audio_size: None,
-        duration_ms: None,
+        // The recorder counted the samples it wrote, so its figure beats
+        // anything its encoder's header would say — and it is the only figure
+        // an *encrypted* Call has, since no audio is kept to measure (#42).
+        // Milliseconds when TR gives them; older recorders write whole seconds.
+        duration_ms: meta
+            .call_length_ms
+            .map(|ms| ms as i64)
+            .or_else(|| meta.call_length.map(seconds_to_ms))
+            .filter(|ms| *ms > 0),
+        stop_at_ms: meta.stop_time.map(seconds_to_ms),
+        emergency: is_set(meta.emergency),
+        encrypted: is_set(meta.encrypted),
+        priority: meta.priority.map(|p| p as i32),
+        audio_type: clean(meta.audio_type),
+        site_ref: meta.site.filter(|s| *s > 0),
         patches,
         units,
         frequencies,
     }
+}
+
+/// A unix-**seconds** value from a recorder, in the milliseconds every column
+/// here stores. Trunk Recorder writes seconds for `stop_time`, `call_length`,
+/// and the `time` on every `freqList`/`srcList` entry; every one of those is a
+/// place a factor of a thousand could hide.
+fn seconds_to_ms(seconds: f64) -> i64 {
+    (seconds * 1000.0) as i64
+}
+
+/// Trunk Recorder writes its booleans as `int(bool)` (`call_concluder.cc`), so
+/// they arrive as `0`/`1`. Anything non-zero is true and an absent field is
+/// false — a recorder that never mentions emergencies is one where none was
+/// pressed, which is the reading #53 alerts on.
+fn is_set(flag: Option<i64>) -> bool {
+    flag.is_some_and(|value| value != 0)
 }
 
 /// Record that a Call did not become a row, and hand back what the recorder is
@@ -754,6 +897,9 @@ fn parse_frequencies(raw: Option<&str>) -> Vec<NewCallFrequency> {
             dbm: f.dbm,
             error_count: f.error_count.map(|n| n as i32),
             spike_count: f.spike_count.map(|n| n as i32),
+            // rdio's generic `frequencies[]` has no wall-clock time in it; TR's
+            // native `freqList` does.
+            ..Default::default()
         })
         .collect()
 }
@@ -781,8 +927,17 @@ struct SourceJson {
 }
 
 /// Units heard, from `units[]` (rdio-native), `sources[]` (Trunk Recorder), or a
-/// singular `unit`.
-fn parse_units(units: Option<&str>, sources: Option<&str>, unit: Option<&str>) -> Vec<NewCallUnit> {
+/// singular radio — `unit`, or SDRTrunk's `source` — named by `talker_alias`.
+///
+/// The arrays win over the singular pair, and deliberately: they describe every
+/// radio that keyed across the call, with offsets, where the alias describes one
+/// of them. A recorder that sent both took the trouble to send the better thing.
+fn parse_units(
+    units: Option<&str>,
+    sources: Option<&str>,
+    unit: Option<&str>,
+    talker_alias: Option<String>,
+) -> Vec<NewCallUnit> {
     if let Some(raw) = units
         && let Ok(list) = serde_json::from_str::<Vec<UnitJson>>(raw)
     {
@@ -792,6 +947,7 @@ fn parse_units(units: Option<&str>, sources: Option<&str>, unit: Option<&str>) -
                 unit_ref: u.id,
                 label: u.label,
                 offset_ms: Some((u.offset * 1000.0) as i64),
+                ..Default::default()
             })
             .collect();
     }
@@ -804,14 +960,15 @@ fn parse_units(units: Option<&str>, sources: Option<&str>, unit: Option<&str>) -
                 unit_ref: s.src,
                 label: s.tag,
                 offset_ms: Some((s.pos * 1000.0) as i64),
+                ..Default::default()
             })
             .collect();
     }
     if let Some(unit_ref) = unit.and_then(parse_i64) {
         return vec![NewCallUnit {
             unit_ref,
-            label: None,
-            offset_ms: None,
+            label: talker_alias,
+            ..Default::default()
         }];
     }
     Vec::new()
@@ -869,6 +1026,7 @@ mod tests {
             Some(r#"[{"id":4424000,"label":"Engine 1","offset":0.5}]"#),
             None,
             None,
+            None,
         );
         assert_eq!(from_units[0].unit_ref, 4424000);
         assert_eq!(from_units[0].label.as_deref(), Some("Engine 1"));
@@ -881,12 +1039,13 @@ mod tests {
             None,
             Some(r#"[{"src":123,"pos":1.75,"tag":"Medic"}]"#),
             None,
+            None,
         );
         assert_eq!(from_sources[0].unit_ref, 123);
         assert_eq!(from_sources[0].label.as_deref(), Some("Medic"));
         assert_eq!(from_sources[0].offset_ms, Some(1750), "seconds -> ms");
 
-        let from_singular = parse_units(None, None, Some("999"));
+        let from_singular = parse_units(None, None, Some("999"), None);
         assert_eq!(from_singular.len(), 1);
         assert_eq!(from_singular[0].unit_ref, 999);
     }

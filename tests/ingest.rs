@@ -4,7 +4,7 @@
 
 use radio_scout::IngestConfig;
 use radio_scout::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, system, talkgroup, unit,
+    api_key, call, call_frequency, call_patch, call_unit, site, system, talkgroup, unit,
 };
 use radio_scout::db::repo;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -734,4 +734,359 @@ async fn generic_upload_without_positive_system_gets_lowest_free_ref(
 
     let sys = system::Entity::find().one(&app.db).await.unwrap().unwrap();
     assert_eq!(sys.r#ref, 1, "first System gets the lowest-free Ref 1");
+}
+
+// ---------------------------------------------------------------------------
+// Duration on every Call (#42, spec US 8)
+// ---------------------------------------------------------------------------
+
+/// A one-second kerchunk and a forty-second dispatch must be distinguishable
+/// everywhere, so every ingested Call carries its length — read from the audio's
+/// own header when the recorder didn't say (the rdio dialect has no duration
+/// field at all, so for SDRTrunk and TR's plugin this is the only source there
+/// is).
+#[tokio::test]
+async fn a_generic_upload_gets_its_duration_from_the_audio_header() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(CallUpload::new().audio(&common::silence_ms(1500)))
+        .await;
+
+    assert_eq!(app.the_call().await.duration_ms, Some(1500));
+}
+
+/// ...and it rides the wire, which is what makes it usable by a listener.
+#[tokio::test]
+async fn duration_reaches_the_archive_api() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(CallUpload::new().audio(&common::silence_ms(8250)))
+        .await;
+
+    let page = app.get_json("/api/calls").await;
+
+    assert_eq!(page["results"][0]["durationMs"], 8250);
+}
+
+/// Audio whose header can't be read is a Call with no length, never a failed
+/// ingest: the recorder still gets its 200 and the row is still stored.
+#[tokio::test]
+async fn audio_with_no_readable_header_still_stores_the_call() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(CallUpload::new().audio(b"not-audio-at-all"))
+        .await;
+
+    let stored = app.the_call().await;
+    assert_eq!(stored.duration_ms, None);
+    let page = app.get_json("/api/calls").await;
+    assert!(
+        page["results"][0].get("durationMs").is_none(),
+        "an unknown duration is absent from the payload, not zero"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The Trunk Recorder truth the ingest used to discard (#42, spec US 5)
+// ---------------------------------------------------------------------------
+
+/// Everything TR writes into its call `.json` that says something about the
+/// transmission itself — the fields rdio-scanner's own parser reads past.
+///
+/// Verified against `trunk-recorder/call_concluder/call_concluder.cc`'s
+/// `create_call_json`, which is the only definition of this shape there is.
+const TR_ENRICHED_META: &str = r#"{
+  "short_name":"butco","talkgroup":54241,
+  "start_time":1669740338,"stop_time":1669740346,
+  "call_length":8,"call_length_ms":8250,
+  "emergency":1,"encrypted":0,"priority":3,
+  "audio_type":"digital",
+  "freq":774031250,
+  "freqList":[{"freq":774031250,"time":1669740338,"pos":0.25,"len":1.5,
+               "error_count":2,"spike_count":1}],
+  "srcList":[{"src":4424000,"time":1669740339,"pos":0.75,"emergency":1,
+              "signal_system":"P25","tag":"Engine 1","tag_ota":"E1 OTA"}]
+}"#;
+
+#[tokio::test]
+async fn trunk_recorder_meta_carries_the_transmission_flags() {
+    let app = TestApp::with_key("k").await;
+
+    let (status, body) = app.upload_tr(CallUpload::tr(TR_ENRICHED_META)).await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let stored = app.the_call().await;
+    assert!(stored.emergency, "the emergency button was pressed");
+    assert!(!stored.encrypted);
+    assert_eq!(stored.priority, Some(3));
+    assert_eq!(stored.audio_type.as_deref(), Some("digital"));
+}
+
+/// TR knows exactly how long the call it recorded was, down to the millisecond,
+/// and its figure beats anything the encoder's own header would say — so the
+/// header probe is not even consulted when `call_length_ms` is there.
+#[tokio::test]
+async fn trunk_recorder_duration_comes_from_the_recorder_not_the_header() {
+    let app = TestApp::with_key("k").await;
+
+    // The audio really is 1500 ms; the recorder says 8250. The recorder wins.
+    app.upload_tr(CallUpload::tr(TR_ENRICHED_META).audio(&common::silence_ms(1500)))
+        .await;
+
+    let stored = app.the_call().await;
+    assert_eq!(stored.duration_ms, Some(8250));
+    assert_eq!(
+        stored.stop_at_ms,
+        Some(1669740346000),
+        "stop_time is unix seconds, stored as ms"
+    );
+}
+
+/// The per-frequency and per-source detail TR writes and rdio's parser walks
+/// straight past: decode error and spike counts against a wall-clock time, and
+/// the alias the radio put over the air.
+#[tokio::test]
+async fn trunk_recorder_per_frequency_and_per_source_detail_lands() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_tr(CallUpload::tr(TR_ENRICHED_META)).await;
+
+    let freq = call_frequency::Entity::find()
+        .one(&app.db)
+        .await
+        .unwrap()
+        .expect("the freqList row");
+    assert_eq!(freq.error_count, Some(2));
+    assert_eq!(freq.spike_count, Some(1));
+    assert_eq!(
+        freq.at_ms,
+        Some(1669740338000),
+        "TR's `time` is unix seconds"
+    );
+
+    let src = call_unit::Entity::find()
+        .one(&app.db)
+        .await
+        .unwrap()
+        .expect("the srcList row");
+    assert_eq!(src.label.as_deref(), Some("Engine 1"));
+    assert_eq!(
+        src.tag_ota.as_deref(),
+        Some("E1 OTA"),
+        "the alias the radio sent over the air, which nothing configured"
+    );
+    assert!(src.emergency, "this unit is the one that hit the button");
+    assert_eq!(src.signal_system.as_deref(), Some("P25"));
+    assert_eq!(src.at_ms, Some(1669740339000));
+}
+
+// ---------------------------------------------------------------------------
+// Encrypted Calls are flagged metadata-only rows (#42, spec US 9)
+// ---------------------------------------------------------------------------
+
+/// TR's meta for an encrypted transmission — the one thing an encrypted call
+/// still knows is how long it was.
+const TR_ENCRYPTED_META: &str = r#"{
+  "short_name":"butco","talkgroup":54241,
+  "start_time":1669740338,"call_length_ms":4000,
+  "emergency":0,"encrypted":1
+}"#;
+
+/// An encrypted talkgroup's activity is worth seeing; its audio is not worth
+/// storing, because there is nothing in it to hear. The recorder is told the
+/// Call was imported — it was — and the archive gains a row with no object
+/// behind it.
+#[tokio::test]
+async fn an_encrypted_call_is_stored_without_its_audio() {
+    let app = TestApp::with_key("k").await;
+
+    let (status, body) = app.upload_tr(CallUpload::tr(TR_ENCRYPTED_META)).await;
+    assert_eq!(status, 200, "{body:?}");
+    assert!(body.contains("Call imported successfully."));
+
+    let stored = app.the_call().await;
+    assert!(stored.encrypted);
+    assert_eq!(stored.object_key, "", "no object was written");
+    assert_eq!(
+        stored.audio_size, None,
+        "nothing was stored, so nothing counts toward the retention size cap"
+    );
+    assert_eq!(
+        stored.duration_ms,
+        Some(4000),
+        "the recorder still knows how long it was"
+    );
+    assert!(
+        app.object_keys().await.is_empty(),
+        "the store holds nothing at all"
+    );
+}
+
+/// ...and the wire says so: the badge can be drawn, and there is no URL for a
+/// player to try, which is what keeps an unplayable Call out of the listening
+/// queue by construction rather than by the client remembering.
+#[tokio::test]
+async fn an_encrypted_call_reaches_the_archive_with_no_audio_url() {
+    let app = TestApp::with_key("k").await;
+    app.upload_tr(CallUpload::tr(TR_ENCRYPTED_META)).await;
+
+    let page = app.get_json("/api/calls").await;
+
+    let call = &page["results"][0];
+    assert_eq!(call["encrypted"], true);
+    assert!(
+        call.get("audioUrl").is_none(),
+        "an encrypted Call offers no audio to fetch: {call}"
+    );
+}
+
+/// A Call whose bytes were never stored must say "no audio", not fall over
+/// looking for an object named by the empty string.
+#[tokio::test]
+async fn serving_an_encrypted_calls_audio_is_a_clean_404() {
+    let app = TestApp::with_key("k").await;
+    app.upload_tr(CallUpload::tr(TR_ENCRYPTED_META)).await;
+    let id = app.the_call().await.id;
+
+    for path in [
+        format!("/api/call/{id}/audio"),
+        format!("/api/call/{id}/download"),
+    ] {
+        let resp = app.get(&path).await;
+        assert_eq!(resp.status().as_u16(), 404, "{path}");
+    }
+}
+
+/// An unencrypted Call is untouched by any of this: its audio is written and
+/// its URL is on the wire, exactly as before.
+#[tokio::test]
+async fn an_ordinary_call_still_carries_its_audio_and_its_url() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(CallUpload::new()).await;
+
+    let stored = app.the_call().await;
+    assert!(!stored.encrypted);
+    assert!(app.stored(&stored.object_key).await);
+    let page = app.get_json("/api/calls").await;
+    assert_eq!(
+        page["results"][0]["audioUrl"],
+        format!("/api/call/{}/audio", stored.id)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// What the generic dialect knows and we were throwing away (#42, spec US 11–12)
+// ---------------------------------------------------------------------------
+
+/// rdio's generic endpoint has taken a `site` since forever (`docs/api.md`,
+/// `parsers.go:344`) and we ignored it, so simulcast coverage was invisible.
+/// A Site is discovered from traffic the way a Talkgroup is (#8) — an operator
+/// running four towers should not have to enumerate them first.
+#[tokio::test]
+async fn the_generic_site_field_becomes_a_site_on_the_call() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(CallUpload::new().set("site", "3")).await;
+
+    let stored = app.the_call().await;
+    let site = site::Entity::find()
+        .filter(site::Column::Id.eq(stored.site_id.expect("the Call names a Site")))
+        .one(&app.db)
+        .await
+        .unwrap()
+        .expect("the Site row was created");
+    assert_eq!(site.r#ref, 3);
+    assert_eq!(
+        site.system_id, stored.system_id,
+        "a Site Ref means something only within its System"
+    );
+
+    let page = app.get_json("/api/calls").await;
+    assert_eq!(page["results"][0]["siteRef"], 3, "and it rides the wire");
+}
+
+/// Two Calls from the same tower are one Site, not two — the same
+/// resolve-or-create every other Ref goes through.
+#[tokio::test]
+async fn the_same_site_ref_resolves_to_one_row() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(CallUpload::new().set("site", "3")).await;
+    app.upload_ok(CallUpload::new().set("site", "3").at(9000))
+        .await;
+
+    assert_eq!(app.count::<site::Entity>().await, 1);
+}
+
+/// SDRTrunk puts a `talkerAlias` on *every* upload — the name the radio
+/// broadcast about itself — beside the singular `source`. rdio-scanner drops it
+/// on the floor, so units stay bare numbers in a UI forever. Consuming it means
+/// units name themselves with zero configuration (spec US 12).
+#[tokio::test]
+async fn the_generic_talker_alias_names_the_source_radio() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(
+        CallUpload::new()
+            .set("source", "1610092")
+            .set("talkerAlias", "MEDIC 7"),
+    )
+    .await;
+
+    let stored = app.the_call().await;
+    let units = units_of(&app, stored.id).await;
+    assert_eq!(units.len(), 1, "the source radio is a unit heard");
+    assert_eq!(units[0].unit_ref, 1610092);
+    assert_eq!(units[0].label.as_deref(), Some("MEDIC 7"));
+
+    // ...and, having a name, it joins the roster — which is the whole point.
+    let rostered = unit::Entity::find()
+        .one(&app.db)
+        .await
+        .unwrap()
+        .expect("the radio is now a Unit");
+    assert_eq!(rostered.r#ref, 1610092);
+    assert_eq!(rostered.label.as_deref(), Some("MEDIC 7"));
+}
+
+/// A `talkerAlias` never overrides the per-source detail a recorder took the
+/// trouble to send: `sources[]` describes several radios across the call, and
+/// the alias describes one of them.
+#[tokio::test]
+async fn a_sources_array_wins_over_the_singular_talker_alias() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(
+        CallUpload::new()
+            .set(
+                "sources",
+                r#"[{"src":11,"pos":0,"tag":"Engine 1"},{"src":22,"pos":2}]"#,
+            )
+            .set("source", "11")
+            .set("talkerAlias", "MEDIC 7"),
+    )
+    .await;
+
+    let units = units_of(&app, app.the_call().await.id).await;
+    assert_eq!(units.len(), 2, "both sources kept");
+    assert_eq!(units[0].label.as_deref(), Some("Engine 1"));
+}
+
+/// A recorder newer than this Radio-Scout sends fields it has never heard of.
+///
+/// Trunk Recorder's payload has grown over versions and will again, and the
+/// generic dialect is a bag of named parts with no schema — so an unrecognised
+/// one is ignored, never fatal. The alternative is that upgrading a recorder
+/// silently stops every Call arriving.
+#[tokio::test]
+async fn fields_the_ingest_does_not_model_are_ignored_rather_than_fatal() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(
+        CallUpload::new()
+            .set("colorCode", "3")
+            .set("someFieldFromNextYear", "whatever"),
+    )
+    .await;
+
+    assert_eq!(app.count::<call::Entity>().await, 1);
 }

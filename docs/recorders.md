@@ -161,9 +161,30 @@ from then on. Importing a talkgroup CSV up front makes every member known immedi
 ## A note on the Trunk-Recorder-native endpoint
 
 Radio-Scout also serves `POST /api/trunk-recorder-call-upload`, which takes Trunk Recorder's
-own `.wav` + `.json` metadata format rather than the rdio dialect. **You almost certainly do
-not want it.** The `rdioscanner_uploader` plugin — the one everybody runs — posts to
-`/api/call-upload`, and nothing in the wild posts to the native endpoint. It exists because
-that format carries fields the rdio dialect flattens, and it fixes a timestamp bug in rdio's
-own handling of them. If you are writing something new, it is the better target; if you are
-configuring Trunk Recorder, ignore it.
+own `.wav` + `.json` metadata format rather than the rdio dialect. The `rdioscanner_uploader`
+plugin — the one everybody runs today — posts to `/api/call-upload` instead, so nothing needs
+configuring for it and nothing breaks if you ignore it.
+
+It is worth knowing about because **the rdio dialect throws away most of what your recorder
+knows.** Trunk Recorder writes all of this into every call's `.json`, and none of it fits
+through `/api/call-upload`:
+
+| What TR writes | What Radio-Scout does with it |
+| --- | --- |
+| `emergency` | An ⚠ badge on the Call, live and in the archive |
+| `encrypted` | The Call is stored as a flagged, metadata-only row — no audio object at all |
+| `call_length_ms` | The Call's length, exact rather than measured off the audio |
+| `stop_time` | When the transmission ended |
+| `priority`, `audio_type` | Recorded, and served by `GET /api/call/{id}` |
+| `freqList` error/spike counts | Per-frequency decode health, for spotting a dying dongle |
+| `srcList` `tag_ota` | The name each radio broadcast about *itself*, kept beside your configured alias |
+
+Everything the rdio dialect already carries works exactly as it does there, and the response
+strings are byte-identical, so a recorder cannot tell the difference from its side.
+
+Anything in the `.json` that Radio-Scout does not model — `freq_error`, `signal`, `noise`,
+`color_code`, and the rest — is ignored rather than treated as an error, so a Trunk Recorder
+newer than your Radio-Scout still uploads fine.
+
+Two paths to this endpoint are coming: a shipped `uploadScript` you point TR's own hook at, and
+a first-party plugin. Until then it is the right target if you are writing something yourself.

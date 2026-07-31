@@ -19,6 +19,7 @@ export const ARCHIVE: Call[] = [
     talkgroupTag: 'Fire',
     talkgroupGroup: 'Public',
     timestamp: Date.parse('2026-07-25T14:32:05'),
+    durationMs: 8250,
     audioUrl: '/api/call/3/audio',
   },
   {
@@ -30,6 +31,8 @@ export const ARCHIVE: Call[] = [
     talkgroupTag: 'Law',
     talkgroupGroup: 'Emergency',
     timestamp: Date.parse('2026-07-25T14:30:00'),
+    durationMs: 94_200,
+    emergency: true,
     audioUrl: '/api/call/2/audio',
   },
   {

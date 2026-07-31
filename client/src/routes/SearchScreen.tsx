@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
+import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
@@ -17,6 +18,7 @@ import {
   dateTimeLocalToMs,
   downloadUrl,
   formatCallTime,
+  formatDuration,
   pageSummary,
 } from '@/lib/archive'
 import { prefetchAudio } from '@/lib/prefetch'
@@ -349,6 +351,31 @@ export function SearchScreen() {
           </select>
         </Field>
 
+        {/* The kerchunk filter (#42, spec US 8), in whole seconds because that
+            is the unit a listener thinks in. "Any" clears the parameter rather
+            than sending 0 — a Call whose length was never measured matches no
+            threshold, so a zero would silently hide the pre-#42 archive. */}
+        <Field label="Min duration" htmlFor="filter-min-duration">
+          <select
+            id="filter-min-duration"
+            className={controlClass}
+            value={filters.minDuration ?? ''}
+            onChange={(event) =>
+              updateFilters({
+                minDuration: event.target.value
+                  ? Number(event.target.value)
+                  : undefined,
+              })
+            }
+          >
+            <option value="">Any duration</option>
+            <option value="1">1s or longer</option>
+            <option value="3">3s or longer</option>
+            <option value="5">5s or longer</option>
+            <option value="15">15s or longer</option>
+          </select>
+        </Field>
+
         <Field label="Sort" htmlFor="filter-sort">
           <select
             id="filter-sort"
@@ -483,7 +510,8 @@ function Field({
   )
 }
 
-/** How a Call reads in a list: LED, Talkgroup, System·Tag·Group, time. */
+/** How a Call reads in a list: LED, Talkgroup, System·Tag·Group, time,
+ *  duration. */
 function ResultRow({
   call,
   isCurrent,
@@ -509,7 +537,10 @@ function ResultRow({
         size={10}
       />
       <div className="min-w-0 flex-1">
-        <p className="truncate font-mono text-sm">{name}</p>
+        <p className="flex items-center gap-1.5 truncate font-mono text-sm">
+          <span className="truncate">{name}</span>
+          <CallFlags call={call} />
+        </p>
         <p className="truncate font-mono text-[11px] text-muted-foreground">
           {[system, callCategory(call)].filter(Boolean).join(' · ')}
         </p>
@@ -517,22 +548,35 @@ function ResultRow({
       <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
         {formatCallTime(call.timestamp)}
       </time>
-      <Button
-        variant="outline"
-        size="icon"
-        aria-label={`Play ${description}`}
-        onClick={onPlay}
-      >
-        <Play className="size-4" aria-hidden />
-      </Button>
-      <a
-        href={downloadUrl(call.id)}
-        download
-        aria-label={`Download ${description}`}
-        className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <Download className="size-4" aria-hidden />
-      </a>
+      {/* Right-aligned and fixed-width so a column of lengths reads as a
+          column — which is what makes a kerchunk visible next to a dispatch
+          without reading any of the numbers (#42, spec US 8). */}
+      <span className="w-12 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+        {formatDuration(call.durationMs)}
+      </span>
+      {/* An encrypted Call has no audio at all — the server sends no
+          `audioUrl` for one — so it gets no controls rather than controls
+          that 404 (spec US 9). */}
+      {call.audioUrl && (
+        <>
+          <Button
+            variant="outline"
+            size="icon"
+            aria-label={`Play ${description}`}
+            onClick={onPlay}
+          >
+            <Play className="size-4" aria-hidden />
+          </Button>
+          <a
+            href={downloadUrl(call.id)}
+            download
+            aria-label={`Download ${description}`}
+            className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <Download className="size-4" aria-hidden />
+          </a>
+        </>
+      )}
     </li>
   )
 }

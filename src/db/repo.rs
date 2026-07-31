@@ -25,7 +25,7 @@ use crate::call::{CallId, FilterOptions, StoredCall, SystemOption, TalkgroupOpti
 use crate::catalog::{Catalog, CatalogSystem, CatalogTalkgroup, display_order};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
-    system, tag, talkgroup, talkgroup_group, unit,
+    site, system, tag, talkgroup, talkgroup_group, unit,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -157,12 +157,52 @@ pub async fn resolve_or_create_unit<C: ConnectionTrait>(
     .await
 }
 
+/// Find a Site by (System, Ref), creating it if absent (#42, spec US 11).
+///
+/// Unlike a Unit this is never gated on the auto-populate flag. A Site Ref is a
+/// fact about the System's own infrastructure, not a radio somebody keyed — an
+/// operator who turned auto-populate off did so to stop unknown Talkgroups
+/// filling their panel, and unnamed towers are what makes simulcast coverage
+/// legible rather than clutter. It is created without a label: #48 fills those
+/// in from SDRTrunk's ID3 tags, where a site *is* a name.
+pub async fn resolve_or_create_site<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    ext_ref: i64,
+    now_ms: i64,
+) -> Result<site::Model, DbErr> {
+    if let Some(found) = site::Entity::find()
+        .filter(site::Column::SystemId.eq(system_id))
+        .filter(site::Column::Ref.eq(ext_ref))
+        .one(db)
+        .await?
+    {
+        return Ok(found);
+    }
+    site::ActiveModel {
+        system_id: Set(system_id),
+        r#ref: Set(ext_ref),
+        label: Set(None),
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+}
+
 /// A unit heard within a call (rdio `sources[]`/`units[]`).
 #[derive(Debug, Clone, Default)]
 pub struct NewCallUnit {
     pub unit_ref: i64,
     pub label: Option<String>,
     pub offset_ms: Option<i64>,
+    /// The alias the radio transmitted, where `label` is the one the recorder
+    /// had configured (#42, TR's `tag_ota`).
+    pub tag_ota: Option<String>,
+    pub emergency: bool,
+    pub signal_system: Option<String>,
+    /// Wall-clock start of this Unit's transmission, unix milliseconds.
+    pub at_ms: Option<i64>,
 }
 
 /// A frequency sample within a call (rdio `frequencies[]`).
@@ -174,6 +214,8 @@ pub struct NewCallFrequency {
     pub dbm: Option<f64>,
     pub error_count: Option<i32>,
     pub spike_count: Option<i32>,
+    /// Wall-clock start of this segment, unix milliseconds.
+    pub at_ms: Option<i64>,
 }
 
 /// A Call to persist, described by Refs/labels as a recorder sends it.
@@ -195,7 +237,21 @@ pub struct NewCall {
     /// Byte length of the audio object, filled in by ingest when it writes the
     /// object (#10 — retention's size cap sums it).
     pub audio_size: Option<i64>,
+    /// The recorder's own figure when it sent one; otherwise filled in by
+    /// ingest from the audio's container header (#42).
     pub duration_ms: Option<i64>,
+    pub stop_at_ms: Option<i64>,
+    pub emergency: bool,
+    /// No audio object is written for an encrypted Call — the row records that
+    /// the activity happened, and there is nothing to hear (spec US 9).
+    pub encrypted: bool,
+    pub priority: Option<i32>,
+    pub audio_type: Option<String>,
+    /// The Site Ref the recorder named, resolved to (or created as) a `sites`
+    /// row by [`insert_call`] — the auto-populate precedent (#8), because a
+    /// multi-site System discovers its towers the same way it discovers its
+    /// Talkgroups.
+    pub site_ref: Option<i64>,
     pub patches: Vec<i64>,
     pub units: Vec<NewCallUnit>,
     pub frequencies: Vec<NewCallFrequency>,
@@ -233,6 +289,18 @@ pub async fn insert_call<C: ConnectionTrait>(
         None => create_populated_talkgroup(db, sys.id, new, now_ms).await?,
     };
 
+    // A Site is discovered the way a Talkgroup is (#8): a multi-site System
+    // learns its towers from the traffic, because a file naming them goes stale
+    // the moment the operator adds one.
+    let site_id = match new.site_ref {
+        Some(site_ref) => Some(
+            resolve_or_create_site(db, sys.id, site_ref, now_ms)
+                .await?
+                .id,
+        ),
+        None => None,
+    };
+
     let stored = call::ActiveModel {
         system_id: Set(sys.id),
         talkgroup_id: Set(tg.id),
@@ -244,6 +312,12 @@ pub async fn insert_call<C: ConnectionTrait>(
         audio_name: Set(new.audio_name.clone()),
         audio_size: Set(new.audio_size),
         duration_ms: Set(new.duration_ms),
+        stop_at_ms: Set(new.stop_at_ms),
+        emergency: Set(new.emergency),
+        encrypted: Set(new.encrypted),
+        priority: Set(new.priority),
+        audio_type: Set(new.audio_type.clone()),
+        site_id: Set(site_id),
         // Every Call arrives passthrough. Set explicitly rather than left to a
         // column default, because a fresh database gets its `calls` table from
         // the entity-derived DDL in `m0001_init`, which carries no defaults —
@@ -299,6 +373,10 @@ pub async fn insert_call<C: ConnectionTrait>(
             unit_ref: Set(u.unit_ref),
             label: Set(u.label.clone()),
             offset_ms: Set(u.offset_ms),
+            tag_ota: Set(u.tag_ota.clone()),
+            emergency: Set(u.emergency),
+            signal_system: Set(u.signal_system.clone()),
+            at_ms: Set(u.at_ms),
             ..Default::default()
         }
         .insert(db)
@@ -313,6 +391,7 @@ pub async fn insert_call<C: ConnectionTrait>(
             dbm: Set(f.dbm),
             error_count: Set(f.error_count),
             spike_count: Set(f.spike_count),
+            at_ms: Set(f.at_ms),
             ..Default::default()
         }
         .insert(db)
@@ -451,6 +530,12 @@ pub struct CallSearch {
     pub talkgroup_ref: Option<i64>,
     pub group_name: Option<String>,
     pub tag_name: Option<String>,
+    /// Hide anything shorter than this many milliseconds (#42, spec US 8) — the
+    /// kerchunk filter. A Call whose length was never measured never matches:
+    /// a threshold cannot be tested against an unknown, and admitting unknowns
+    /// would make the filter quietly not filter the part of an upgraded archive
+    /// that predates the duration column.
+    pub min_duration_ms: Option<i64>,
     pub sort: CallSort,
     pub limit: u64,
     pub offset: u64,
@@ -487,6 +572,14 @@ fn apply_filters(
             query = query.join(JoinType::InnerJoin, call::Relation::System.def());
         }
         query = query.filter(system::Column::Ref.eq(system_ref));
+    }
+    if let Some(min_duration_ms) = search.min_duration_ms {
+        // `>=` on a nullable column is already false for `NULL` in both
+        // dialects, so the unmeasured Calls fall out here without a second
+        // clause — but the behaviour is load-bearing enough to be tested
+        // (`a_call_with_no_known_duration_does_not_match_a_duration_filter`)
+        // rather than left to SQL's three-valued logic being remembered.
+        query = query.filter(call::Column::DurationMs.gte(min_duration_ms));
     }
 
     // Talkgroup is the hinge: the Talkgroup, Tag, and Group filters all reach
@@ -1436,6 +1529,16 @@ pub async fn stored_calls<C: ConnectionTrait>(
         group_of.entry(talkgroup_id).or_insert(name);
     }
 
+    // Sites (#42, spec US 11). The wire carries the recorder-facing **Ref**,
+    // like every other id a client sees; the column is an internal Id.
+    let site_refs: HashMap<i64, i64> = site::Entity::find()
+        .filter(site::Column::Id.is_in(distinct(calls.iter().filter_map(|c| c.site_id))))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|s| (s.id, s.r#ref))
+        .collect();
+
     // Patched Talkgroup Refs (rdio `patches[]`): carried on the wire and used for
     // live-feed patch fanout (#9). Ordered for a stable payload.
     let mut patches_of: HashMap<CallId, Vec<i64>> = HashMap::new();
@@ -1475,11 +1578,84 @@ pub async fn stored_calls<C: ConnectionTrait>(
                 date_time: None,
                 timestamp: Some(call.call_at_ms),
                 audio_mime: call.audio_mime.clone(),
+                duration_ms: call.duration_ms,
+                emergency: call.emergency,
+                encrypted: call.encrypted,
+                site_ref: call.site_id.and_then(|id| site_refs.get(&id).copied()),
                 object_key: call.object_key.clone(),
-                audio_url: format!("/api/call/{}/audio", call.id),
+                // An empty key means no object was ever written — an encrypted
+                // Call (#42). Offering a URL for it would be offering a 404.
+                audio_url: (!call.object_key.is_empty())
+                    .then(|| format!("/api/call/{}/audio", call.id)),
             }
         })
         .collect())
+}
+
+/// One Call with everything the recorder said about it (#42) — the query behind
+/// `GET /api/call/{id}`.
+///
+/// Three statements past [`stored_call`]'s, and only ever for one Call: this is
+/// the detail deliberately kept off the live-feed frame and the search page, so
+/// it is paid for exactly when somebody opens a Call.
+pub async fn call_detail<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<crate::call::CallDetail>, DbErr> {
+    let Some(row) = call::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+
+    // Ordered by the id they were inserted under, which is the order the
+    // recorder listed them — a timeline read out of order is not a timeline.
+    let frequencies = call_frequency::Entity::find()
+        .filter(call_frequency::Column::CallId.eq(id))
+        .order_by_asc(call_frequency::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|f| crate::call::CallFrequencyDetail {
+            freq: f.freq,
+            pos_ms: f.pos_ms,
+            len_ms: f.len_ms,
+            dbm: f.dbm,
+            error_count: f.error_count,
+            spike_count: f.spike_count,
+            at_ms: f.at_ms,
+        })
+        .collect();
+    let units = call_unit::Entity::find()
+        .filter(call_unit::Column::CallId.eq(id))
+        .order_by_asc(call_unit::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|u| crate::call::CallUnitDetail {
+            r#ref: u.unit_ref,
+            label: u.label,
+            tag_ota: u.tag_ota,
+            offset_ms: u.offset_ms,
+            emergency: u.emergency,
+            signal_system: u.signal_system,
+            at_ms: u.at_ms,
+        })
+        .collect();
+
+    // `.map` rather than a second `let … else`: one row in gives one view out,
+    // so a `None` here is a case that cannot happen — and writing the branch
+    // anyway would mean either an untestable line or a panic on a read path.
+    // [`crate::archive::load_call`] resolves the same shape the same way.
+    Ok(stored_calls(db, std::slice::from_ref(&row))
+        .await?
+        .pop()
+        .map(|call| crate::call::CallDetail {
+            call,
+            stop_ms: row.stop_at_ms,
+            priority: row.priority,
+            audio_type: row.audio_type,
+            frequencies,
+            units,
+        }))
 }
 
 /// The distinct values of an iterator, order-insensitive — the `IN (…)` list for

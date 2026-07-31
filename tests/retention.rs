@@ -340,3 +340,42 @@ async fn retention_days_zero_keeps_everything() {
     assert_eq!(report.aged_out, 0);
     assert_eq!(app.count::<call::Entity>().await, 1);
 }
+
+/// An encrypted Call is a row with no object behind it (#42, spec US 9), so
+/// pruning it deletes a row and nothing else.
+///
+/// Asking the store to delete the object named by the empty string would fail,
+/// and the sweep would report an error and log "could not delete pruned audio
+/// object" — once per encrypted Call, on a System where they may be most of the
+/// traffic. An operator reading that would go looking for a broken object store
+/// and find a working one.
+#[tokio::test]
+async fn pruning_an_encrypted_call_deletes_a_row_and_complains_about_nothing() {
+    let capture = common::logs::LogCapture::start();
+    let app = TestApp::with_key("k").await;
+    let meta = format!(
+        r#"{{"short_name":"butco","talkgroup":54241,
+             "timestamp":{},"call_length_ms":4000,"encrypted":1}}"#,
+        NOW - 30 * DAY
+    );
+    app.upload_tr(CallUpload::tr(&meta)).await;
+    assert_eq!(app.the_call().await.object_key, "", "no object was written");
+
+    let report = retention::sweep(
+        &app.db,
+        &app.store,
+        &RetentionConfig {
+            days: 7,
+            max_size_bytes: None,
+            ..Default::default()
+        },
+        NOW,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.aged_out, 1, "the row is gone");
+    assert_eq!(report.object_errors, 0, "there was nothing to fail at");
+    assert_eq!(report.bytes_freed, 0, "and nothing was freed");
+    capture.assert_never_logged("could not delete pruned audio object");
+}

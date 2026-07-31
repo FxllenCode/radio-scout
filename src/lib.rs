@@ -7,6 +7,7 @@
 
 pub mod admin;
 pub mod archive;
+pub mod audio_meta;
 pub mod blob;
 pub mod call;
 pub mod catalog;
@@ -112,6 +113,10 @@ pub fn build_app(state: AppState) -> Router {
         // What a listener can select from (#12) — Systems + Talkgroups, whether
         // or not any of their Calls are still in the archive.
         .route("/api/catalog", get(catalog::catalog))
+        // One Call, with the recorder detail a list deliberately doesn't carry
+        // (#42). Declared before the `/audio` and `/download` children only for
+        // readability — the router matches on the whole path, not on order.
+        .route("/api/call/{id}", get(archive::detail))
         .route("/api/call/{id}/audio", get(serve_audio))
         .route("/api/call/{id}/download", get(archive::download))
         // Web Push (#16): the listener-facing half. Unauthenticated like the
@@ -232,6 +237,14 @@ async fn serve_audio(
 
     let cache_control = audio_cache_control(&audio.enhancement);
     let object_key = audio.object_key;
+    // An encrypted Call is a row with no object behind it (#42, spec US 9).
+    // Answered here rather than left to the store, which would be asked for an
+    // object named by the empty string and fail as a 500 — the wire already
+    // omits `audioUrl` for these, so anything arriving here is a hand-built URL
+    // or a stale link, and both deserve the truth.
+    if object_key.is_empty() {
+        return (StatusCode::NOT_FOUND, "call has no audio\n").into_response();
+    }
     if state.audio.is_presigning() {
         match state.audio.presigned_get_url(&object_key).await {
             Some(Ok(signed)) => {

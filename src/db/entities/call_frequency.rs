@@ -15,6 +15,10 @@ pub struct Model {
     pub dbm: Option<f64>,
     pub error_count: Option<i32>,
     pub spike_count: Option<i32>,
+    /// Wall-clock time this frequency segment started, unix milliseconds — TR's
+    /// `time`, where `pos_ms` is the same instant relative to the Call. What
+    /// #71's per-frequency health history is charted against.
+    pub at_ms: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

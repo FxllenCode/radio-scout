@@ -362,6 +362,7 @@ async fn a_broken_database_is_a_server_error_not_an_empty_archive() {
         ("/api/calls", "search-calls"),
         ("/api/calls/filters", "load-filter-options"),
         ("/api/call/1/download", "look-up-call"),
+        ("/api/call/1", "load-call-detail"),
     ] {
         let resp = app.get(path).await;
         assert_eq!(resp.status(), 500, "GET {path}");
@@ -428,4 +429,184 @@ async fn download_reports_an_unreachable_object_store() {
     let line = capture.only_line_containing("stage=read-audio");
     assert!(line.contains(" ERROR "), "{line}");
     assert!(line.contains("cause="), "the store's own words: {line}");
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/call/{id} — one Call, all of it (#42, spec US 5)
+// ---------------------------------------------------------------------------
+
+/// The per-frequency and per-source detail every recorder sends and rdio-scanner
+/// throws away has to be *reachable*, or parsing it was pointless.
+///
+/// It lives here rather than on `StoredCall` on purpose: `StoredCall` is one
+/// live-feed frame per Call and fifty rows per search page, and on a Pi serving
+/// a county neither should carry arrays nobody is looking at. Asking for one
+/// Call is the moment somebody is.
+#[tokio::test]
+async fn a_call_detail_carries_everything_the_recorder_said() {
+    let app = TestApp::with_key("k").await;
+    let meta = r#"{
+      "short_name":"butco","talkgroup":54241,
+      "start_time":1669740338,"stop_time":1669740346,"call_length_ms":8250,
+      "emergency":1,"encrypted":0,"priority":3,"audio_type":"digital",
+      "freqList":[{"freq":774031250,"time":1669740338,"pos":0.25,"len":1.5,
+                   "error_count":2,"spike_count":1}],
+      "srcList":[{"src":4424000,"time":1669740339,"pos":0.75,"emergency":1,
+                  "signal_system":"P25","tag":"Engine 1","tag_ota":"E1 OTA"}]
+    }"#;
+    app.upload_tr(common::CallUpload::tr(meta)).await;
+    let id = app.the_call().await.id;
+
+    let call = app.get_json(&format!("/api/call/{id}")).await;
+
+    // Everything a search row already knows...
+    assert_eq!(call["talkgroupRef"], 54241);
+    assert_eq!(call["durationMs"], 8250);
+    assert_eq!(call["emergency"], true);
+    // ...plus what only this endpoint carries.
+    assert_eq!(call["priority"], 3);
+    assert_eq!(call["audioType"], "digital");
+    assert_eq!(call["stopMs"], 1669740346000i64);
+    assert_eq!(
+        call["frequencies"],
+        serde_json::json!([{
+            "freq": 774031250, "posMs": 250, "lenMs": 1500,
+            "errorCount": 2, "spikeCount": 1, "atMs": 1669740338000i64
+        }])
+    );
+    assert_eq!(
+        call["units"],
+        serde_json::json!([{
+            "ref": 4424000, "label": "Engine 1", "tagOta": "E1 OTA",
+            "offsetMs": 750, "emergency": true, "signalSystem": "P25",
+            "atMs": 1669740339000i64
+        }])
+    );
+}
+
+/// A Call the recorder said little about carries little — the detail keys are
+/// absent rather than null, the same rule the rest of the wire follows.
+#[tokio::test]
+async fn a_call_detail_omits_what_was_never_sent() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(common::CallUpload::new()).await;
+    let id = app.the_call().await.id;
+
+    let call = app.get_json(&format!("/api/call/{id}")).await;
+
+    assert_eq!(call["id"], id);
+    for absent in ["priority", "audioType", "stopMs", "emergency", "encrypted"] {
+        assert!(
+            call.get(absent).is_none(),
+            "{absent} should be absent: {call}"
+        );
+    }
+    assert_eq!(call["frequencies"], serde_json::json!([]));
+    assert_eq!(call["units"], serde_json::json!([]));
+}
+
+/// A Call that isn't there is a 404, not a 500 and not an empty object.
+#[tokio::test]
+async fn a_call_detail_for_an_unknown_id_is_not_found() {
+    let app = TestApp::spawn().await;
+
+    let resp = app.get("/api/call/999999").await;
+
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// The minimum-duration filter (#42, spec US 8)
+// ---------------------------------------------------------------------------
+
+/// Seed three Calls one second apart: a kerchunk, a dispatch, and one from
+/// before durations were recorded at all.
+async fn seed_by_duration(app: &TestApp) {
+    for (at_ms, duration_ms) in [(1000, Some(900)), (2000, Some(12_000)), (3000, None)] {
+        app.seed_call(NewCall {
+            system_ref: 100,
+            talkgroup_ref: 1,
+            call_at_ms: at_ms,
+            duration_ms,
+            object_key: format!("k/{at_ms}.wav"),
+            ..Default::default()
+        })
+        .await;
+    }
+}
+
+/// "Hide the kerchunks" — the filter a listener actually wants, in the unit a
+/// listener thinks in.
+#[tokio::test]
+async fn min_duration_hides_the_short_calls() {
+    let app = TestApp::spawn().await;
+    seed_by_duration(&app).await;
+
+    let page = app.get_json("/api/calls?minDuration=5").await;
+
+    assert_eq!(page["count"], 1, "only the twelve-second call: {page}");
+    assert_eq!(page["results"][0]["durationMs"], 12_000);
+}
+
+/// A Call whose length was never measured does not match a length filter.
+///
+/// It is the only honest answer — a threshold cannot be tested against an
+/// unknown — and it costs nothing to the archive an operator can see, because
+/// leaving the filter unset still shows every Call there is. The alternative,
+/// admitting unknowns, would make the filter quietly not filter the half of an
+/// upgraded archive that predates #42.
+#[tokio::test]
+async fn a_call_with_no_known_duration_does_not_match_a_duration_filter() {
+    let app = TestApp::spawn().await;
+    seed_by_duration(&app).await;
+
+    let filtered = app.get_json("/api/calls?minDuration=0").await;
+    assert_eq!(
+        filtered["count"], 2,
+        "zero is still a filter, and still excludes the unknown: {filtered}"
+    );
+
+    let unfiltered = app.get_json("/api/calls").await;
+    assert_eq!(unfiltered["count"], 3, "unset shows everything");
+}
+
+/// The filter narrows the cascading filter options too, so the dropdowns keep
+/// their promise: every value offered has Calls behind it *given the other
+/// filters already chosen*.
+#[tokio::test]
+async fn min_duration_narrows_the_filter_options() {
+    let app = TestApp::spawn().await;
+    seed_by_duration(&app).await;
+    app.seed_call(NewCall {
+        system_ref: 200,
+        talkgroup_ref: 9,
+        call_at_ms: 4000,
+        duration_ms: Some(500),
+        object_key: "k/short.wav".into(),
+        ..Default::default()
+    })
+    .await;
+
+    let options = app.get_json("/api/calls/filters?minDuration=5").await;
+
+    let systems: Vec<i64> = options["systems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["ref"].as_i64().unwrap())
+        .collect();
+    assert_eq!(systems, vec![100], "System 200 has only kerchunks");
+}
+
+/// A malformed value names itself, the way every other filter does — rdio
+/// silently ignores what it can't parse, so a typo returns plausible wrong
+/// results.
+#[tokio::test]
+async fn a_malformed_min_duration_is_a_named_bad_request() {
+    let app = TestApp::spawn().await;
+
+    let resp = app.get("/api/calls?minDuration=ages").await;
+
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(resp.text().await.unwrap().contains("minDuration"));
 }

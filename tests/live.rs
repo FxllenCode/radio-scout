@@ -361,3 +361,51 @@ async fn a_radio_id_trailing_the_patched_talkgroups_does_not_fan_out() {
         "a trailing radio id is not a patch member, so it fans out to nobody"
     );
 }
+
+/// An encrypted Call is still a Call: a listener watching a mostly-encrypted
+/// talkgroup sees that it is busy rather than a dead feed (#42, spec US 9).
+///
+/// It arrives flagged and with **no `audioUrl`**, so the thing the player would
+/// need in order to try is simply not there — the queue cannot be poisoned by a
+/// client that forgets to check a flag.
+#[tokio::test]
+async fn an_encrypted_call_reaches_a_listener_flagged_and_unplayable() {
+    let app = feed_app().await;
+    let mut ws = app.connect_ws().await;
+    subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
+
+    let meta = r#"{"short_name":"butco","talkgroup":54241,
+                   "start_time":1669740338,"call_length_ms":4000,"encrypted":1}"#;
+    let (status, body) = app.upload_tr(CallUpload::tr(meta).key("test-key")).await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let frame = received(&mut ws).await.expect("the Call reaches the feed");
+    assert_eq!(frame["t"], "call");
+    assert_eq!(frame["call"]["encrypted"], true);
+    assert_eq!(frame["call"]["durationMs"], 4000);
+    assert!(
+        frame["call"].get("audioUrl").is_none(),
+        "nothing to play: {frame}"
+    );
+}
+
+/// The flags a listener draws badges from ride the same frame — an emergency
+/// button press is on screen the moment it happens, not once someone searches
+/// the archive for it (#42, and what #53 alerts on).
+#[tokio::test]
+async fn the_emergency_flag_rides_the_live_frame() {
+    let app = feed_app().await;
+    let mut ws = app.connect_ws().await;
+    subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
+
+    let meta = r#"{"short_name":"butco","talkgroup":54241,
+                   "start_time":1669740338,"emergency":1}"#;
+    app.upload_tr(CallUpload::tr(meta).key("test-key")).await;
+
+    let frame = received(&mut ws).await.expect("the Call reaches the feed");
+    assert_eq!(frame["call"]["emergency"], true);
+    assert!(
+        frame["call"].get("encrypted").is_none(),
+        "a quiet flag is omitted, keeping the frame small: {frame}"
+    );
+}

@@ -48,6 +48,22 @@ export function formatCallTime(ms: number | undefined): string {
   )
 }
 
+/** How long a transmission was (#42, spec US 8), in the shape a scanner
+ *  operator reads at a glance: bare seconds under a minute, `m:ss` past it.
+ *
+ *  A Call that carries no `durationMs` — every Call ingested before #42, and
+ *  anything whose container header could not be read — shows a dash. Absent is
+ *  not zero: rendering an unknown length as `0.0s` would make an unmeasured
+ *  Call look like the kerchunk the duration column exists to spot. */
+export function formatDuration(ms: number | undefined): string {
+  if (ms === undefined || Number.isNaN(ms) || ms < 0) return '—'
+  const seconds = ms / 1000
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = Math.floor(seconds % 60)
+  return `${minutes}:${String(rest).padStart(2, '0')}`
+}
+
 /** The `1–100 of 421` readout under a result list. `count` is the true total,
  *  so it stays honest across pages. `noun` names what is being counted, since
  *  the operator log (#30) pages the same way over something that isn't Calls. */

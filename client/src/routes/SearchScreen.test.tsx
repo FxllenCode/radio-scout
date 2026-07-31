@@ -841,3 +841,118 @@ describe('SearchScreen', () => {
     expect(await axe(container)).toHaveNoViolations()
   })
 })
+
+describe('SearchScreen — what the recorder knew (#42)', () => {
+  it('shows how long each call was, and a dash when nobody measured it', async () => {
+    renderApp('/search')
+    const rows = await resultRows()
+
+    // A kerchunk and a dispatch have to be distinguishable at a glance —
+    // that is the whole point of carrying the duration (spec US 8).
+    expect(within(rows[0]).getByText('8.3s')).toBeInTheDocument()
+    expect(within(rows[1]).getByText('1:34')).toBeInTheDocument()
+    // Call 1 predates the duration column; an unknown length is a dash, never
+    // a zero that would read as a kerchunk.
+    expect(within(rows[2]).getByText('—')).toBeInTheDocument()
+  })
+
+  it('badges the call the emergency button was pressed on', async () => {
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(within(rows[1]).getByTitle('Emergency')).toBeInTheDocument()
+    expect(within(rows[0]).queryByTitle('Emergency')).toBeNull()
+  })
+
+  it('badges an encrypted call and offers no way to play or download it', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) =>
+        HttpResponse.json(
+          archivePage(new URL(request.url), [
+            {
+              id: 9,
+              systemRef: 100,
+              systemLabel: 'Alpha',
+              talkgroupRef: 5,
+              talkgroupLabel: 'Sheriff Tac 1',
+              timestamp: Date.parse('2026-07-25T15:00:00'),
+              durationMs: 4000,
+              encrypted: true,
+            },
+          ]),
+        ),
+      ),
+    )
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(within(rows[0]).getByTitle('Encrypted')).toBeInTheDocument()
+    // There is nothing behind those controls: the server sends no audioUrl for
+    // an encrypted Call, so offering a play button would offer a 404.
+    expect(within(rows[0]).queryByRole('button', { name: /^Play/ })).toBeNull()
+    expect(within(rows[0]).queryByRole('link', { name: /^Download/ })).toBeNull()
+  })
+
+  it('filters out the kerchunks, in whole seconds', async () => {
+    renderApp('/search')
+    await filtersLoaded()
+
+    await userEvent.selectOptions(
+      screen.getByLabelText('Min duration'),
+      '5',
+    )
+
+    await waitFor(() => expect(lastSearch().get('minDuration')).toBe('5'))
+  })
+
+  it('brings the unmeasured Calls back when the filter is cleared', async () => {
+    // A Call with no `durationMs` matches no threshold — so "any" has to mean
+    // *absent*, not `minDuration=0`. This is what that costs if it is wrong:
+    // the pre-#42 half of an operator's archive would be unreachable from the
+    // moment they touched the control.
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) => {
+        const url = new URL(request.url)
+        searches.push(url.search)
+        const floor = url.searchParams.get('minDuration')
+        const rows =
+          floor === null
+            ? ARCHIVE
+            : ARCHIVE.filter(
+                (call) => (call.durationMs ?? -1) >= Number(floor) * 1000,
+              )
+        return HttpResponse.json(archivePage(url, rows))
+      }),
+    )
+    renderApp('/search')
+    await filtersLoaded()
+    expect(await resultRows()).toHaveLength(3)
+
+    const select = screen.getByLabelText('Min duration')
+    await userEvent.selectOptions(select, '5')
+    await waitFor(async () => expect(await resultRows()).toHaveLength(2))
+
+    await userEvent.selectOptions(select, '')
+    await waitFor(async () => expect(await resultRows()).toHaveLength(3))
+  })
+})
+
+describe('SearchScreen — multi-site coverage (#42, spec US 11)', () => {
+  it('names the tower a Call was heard on, and stays quiet when there is none', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) =>
+        HttpResponse.json(
+          archivePage(new URL(request.url), [
+            { ...ARCHIVE[0], id: 20, siteRef: 3 },
+            { ...ARCHIVE[1], id: 21 },
+          ]),
+        ),
+      ),
+    )
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(within(rows[0]).getByText(/Site 3/)).toBeInTheDocument()
+    expect(within(rows[1]).queryByText(/Site/)).toBeNull()
+  })
+})

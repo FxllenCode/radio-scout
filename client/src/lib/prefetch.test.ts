@@ -39,6 +39,15 @@ describe('next-call prefetch', () => {
     await expect(prefetchAudio('/api/call/9/audio')).resolves.toBeUndefined()
   })
 
+  it('asks for nothing when the Call has no audio', async () => {
+    // An encrypted Call carries no `audioUrl` at all (#42, spec US 9). Passing
+    // `undefined` through to `fetch` would request the page the app is on —
+    // wasted bytes, and a cache entry for the wrong thing.
+    await prefetchAudio(undefined)
+
+    expect(requested).toEqual([])
+  })
+
   it('stops downloading when the queue moves on', async () => {
     const controller = new AbortController()
     const prefetch = prefetchAudio('/api/call/2/audio', controller.signal)

@@ -66,10 +66,35 @@ fn parse_search(params: &HashMap<String, String>) -> Result<CallSearch, String> 
         talkgroup_ref: params.number("talkgroup")?,
         group_name: params.raw("group").map(str::to_owned),
         tag_name: params.raw("tag").map(str::to_owned),
+        // Whole **seconds** on the wire, milliseconds in the column. Seconds is
+        // the unit a listener thinks in and the unit the control offers
+        // (1 s / 3 s / 5 s); every other time value here is milliseconds
+        // because it is an *instant*, and a duration is not one.
+        //
+        // `checked_mul` because `number` yields an unbounded `i64`, and the
+        // conversion is the one place in this function where a value that
+        // *parsed* can still not fit — an unchecked `* 1000` would panic in
+        // debug and silently wrap in release, turning a hostile query string
+        // into a search that quietly matched the wrong Calls.
+        min_duration_ms: params
+            .number("minDuration")?
+            .map(seconds_to_ms)
+            .transpose()?,
         sort,
         limit: params.limit(DEFAULT_LIMIT, MAX_LIMIT)?,
         offset: params.offset()?,
     })
+}
+
+/// A whole-second duration from a query string, as the milliseconds the column
+/// stores — or the same named-parameter rejection every other bad value here
+/// gets. Refuses a negative value too: a Call cannot be shorter than no time at
+/// all, and `-1` would otherwise match everything with a duration.
+fn seconds_to_ms(seconds: i64) -> Result<i64, String> {
+    seconds
+        .checked_mul(1000)
+        .filter(|ms| *ms >= 0)
+        .ok_or_else(|| "minDuration must be a duration in whole seconds".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +147,20 @@ pub async fn filters(
     }
 }
 
+/// `GET /api/call/{id}` — one Call, with everything the recorder said about it
+/// (#42, spec US 5).
+///
+/// The home of the per-frequency and per-source detail: the search page and the
+/// live feed carry what a *list* needs, and this carries what one Call is. See
+/// [`crate::call::CallDetail`] for why the split is where it is.
+pub async fn detail(State(state): State<AppState>, Path(id): Path<CallId>) -> Response {
+    match repo::call_detail(&state.db, id).await {
+        Ok(Some(call)) => axum::Json(call).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "call not found\n").into_response(),
+        Err(err) => ServerError::new("load-call-detail", err).into_response(),
+    }
+}
+
 /// `GET /api/call/{id}/download` — the Call's audio as a named file attachment
 /// (spec US 27).
 ///
@@ -136,6 +175,12 @@ pub async fn download(State(state): State<AppState>, Path(id): Path<CallId>) -> 
         Ok(None) => return (StatusCode::NOT_FOUND, "call not found\n").into_response(),
         Err(err) => return ServerError::new("look-up-call", err).into_response(),
     };
+
+    // An encrypted Call has no object behind it (#42, spec US 9) — the same
+    // answer the streaming path gives, for the same reason.
+    if view.object_key.is_empty() {
+        return (StatusCode::NOT_FOUND, "call has no audio\n").into_response();
+    }
 
     let bytes = match state.audio.get(&view.object_key).await {
         Ok(Some(bytes)) => bytes,
@@ -303,6 +348,7 @@ mod tests {
         assert_eq!(search.talkgroup_ref, None);
         assert_eq!(search.group_name, None);
         assert_eq!(search.tag_name, None);
+        assert_eq!(search.min_duration_ms, None);
     }
 
     #[test]
@@ -314,6 +360,7 @@ mod tests {
             ("talkgroup", "54241"),
             ("group", " Fire "),
             ("tag", "Fire Dispatch"),
+            ("minDuration", " 5 "),
             ("sort", "oldest"),
             ("limit", "25"),
             ("offset", "50"),
@@ -326,6 +373,9 @@ mod tests {
         assert_eq!(search.talkgroup_ref, Some(54241));
         assert_eq!(search.group_name.as_deref(), Some("Fire"));
         assert_eq!(search.tag_name.as_deref(), Some("Fire Dispatch"));
+        // Seconds on the wire, milliseconds in the column — asserted on a value
+        // where the conversion is the only arithmetic that reaches it (#83).
+        assert_eq!(search.min_duration_ms, Some(5_000));
         assert_eq!(search.sort, CallSort::Oldest);
         assert_eq!(search.limit, 25);
         assert_eq!(search.offset, 50);
@@ -344,6 +394,7 @@ mod tests {
             ("tag", blank),
             ("after", blank),
             ("before", blank),
+            ("minDuration", blank),
             ("sort", blank),
             ("limit", blank),
             ("offset", blank),
@@ -356,6 +407,7 @@ mod tests {
         assert_eq!(search.tag_name, None);
         assert_eq!(search.after_ms, None);
         assert_eq!(search.before_ms, None);
+        assert_eq!(search.min_duration_ms, None);
         assert_eq!(search.sort, CallSort::Newest);
         assert_eq!(search.limit, DEFAULT_LIMIT);
         assert_eq!(search.offset, 0);
@@ -395,6 +447,12 @@ mod tests {
     #[case("after", "yesterday")]
     #[case("after", "2026-13-45T00:00:00Z")]
     #[case("before", "")] // (blank is fine — see below; this case is overridden)
+    #[case("minDuration", "a while")]
+    #[case("minDuration", "2.5")]
+    // The conversion to milliseconds is where a value that parsed can still
+    // not fit — an unchecked multiply would panic in debug and wrap in release.
+    #[case("minDuration", "9223372036854775807")]
+    #[case("minDuration", "-1")]
     #[case("sort", "sideways")]
     #[case("limit", "-1")]
     #[case("offset", "-1")]
@@ -431,8 +489,12 @@ mod tests {
             date_time: None,
             timestamp: Some(1_669_740_338_000),
             audio_mime: Some("audio/mp4".into()),
+            duration_ms: None,
+            emergency: false,
+            encrypted: false,
+            site_ref: None,
             object_key: "ab/opaque-key.m4a".into(),
-            audio_url: "/api/call/42/audio".into(),
+            audio_url: Some("/api/call/42/audio".into()),
         }
     }
 

@@ -22,11 +22,16 @@
  */
 
 /** Warm the HTTP cache for `url`. Never rejects: a prefetch that fails just
- *  means the next Call loads the slow way. */
+ *  means the next Call loads the slow way.
+ *
+ *  `url` is optional because a Call may have no audio at all — an encrypted one
+ *  (#42, spec US 9). Warming nothing is the whole of the right behavior there,
+ *  so it is handled here rather than at each of the two call sites. */
 export async function prefetchAudio(
-  url: string,
+  url: string | undefined,
   signal?: AbortSignal,
 ): Promise<void> {
+  if (!url) return
   try {
     const response = await fetch(url, { signal })
     // Read it to the end — an unread body may never reach the cache, which is

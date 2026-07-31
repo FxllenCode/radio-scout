@@ -20,5 +20,8 @@ expression: full()
   "dateTime": "2022-11-29T18:05:38Z",
   "timestamp": 1669740338000,
   "audioMime": "audio/mp4",
+  "durationMs": 8250,
+  "emergency": true,
+  "siteRef": 3,
   "audioUrl": "/api/call/42/audio"
 }

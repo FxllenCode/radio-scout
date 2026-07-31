@@ -24,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0005_push_subscriptions::Migration),
             Box::new(m0006_enhancement::Migration),
             Box::new(m0007_logs::Migration),
+            Box::new(m0008_recorder_truth::Migration),
         ]
     }
 }
@@ -520,6 +521,242 @@ mod m0007_logs {
             manager
                 .drop_table(Table::drop().table(log_event::Entity).to_owned())
                 .await
+        }
+    }
+}
+
+/// Ingest enrichment (#42): the recorder truth the parser used to discard.
+///
+/// Trunk Recorder writes emergency, encrypted, priority, audio type, a stop
+/// time and per-source over-the-air aliases into every call `.json`
+/// (`call_concluder.cc`'s `create_call_json`); rdio-scanner's parser reads past
+/// all of it, and so did ours. Duration is the one every recorder can answer —
+/// from its own metadata or, failing that, from the audio's container header at
+/// ingest — so the column stops being something only Enhancement ever filled in.
+///
+/// **`emergency` and `encrypted` are `NOT NULL DEFAULT false`, not nullable.**
+/// A recorder that says nothing said "no". Making them tri-state would leave
+/// #53's alerting unable to tell "no emergency" from "this recorder never
+/// mentions emergencies", which is a distinction no listener can act on and a
+/// query nobody can index sensibly.
+///
+/// `site_id` points at the `sites` table m0001 has created and nothing has ever
+/// written to — a plain column rather than a declared foreign key, for the
+/// reason spelled out on `call::Model::site_id`. rdio's generic `site` field is
+/// a bare number, but #48 backfills the same column from SDRTrunk's ID3 tags
+/// where a site is a *name*, and a row is the only shape that holds both.
+///
+/// Guarded column by column, for the reason m0003 wrote down: m0001 generates
+/// its DDL from the *live* entities, so a fresh database already has all of
+/// these by the time this runs and an upgraded one has none of them.
+mod m0008_recorder_truth {
+    use super::*;
+    use crate::db::entities::{call_frequency, call_unit};
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0008_recorder_truth"
+        }
+    }
+
+    /// Add `column` to `entity`'s table if it isn't there already. One helper
+    /// because this migration adds eleven columns across three tables and the
+    /// guard is the only interesting part of each.
+    ///
+    /// The table is named **once**, by its `Iden`, and the column name is read
+    /// off the definition. `has_column` takes strings and `alter_table` takes
+    /// the entity, so passing both separately would let the guard probe one
+    /// table while the `ALTER` hit another — a silently skipped column, which
+    /// is exactly the failure this family of migrations exists to prevent.
+    async fn add_column(
+        manager: &SchemaManager<'_>,
+        entity: impl Iden + Clone + 'static,
+        column: ColumnDef,
+    ) -> Result<(), DbErr> {
+        let table = entity.to_string();
+        let name = column.get_column_name();
+        if manager.has_column(&table, &name).await? {
+            return Ok(());
+        }
+        manager
+            .alter_table(Table::alter().table(entity).add_column(column).to_owned())
+            .await
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            add_column(
+                manager,
+                call::Entity,
+                ColumnDef::new(call::Column::StopAtMs)
+                    .big_integer()
+                    .null()
+                    .to_owned(),
+            )
+            .await?;
+            add_column(
+                manager,
+                call::Entity,
+                ColumnDef::new(call::Column::Emergency)
+                    .boolean()
+                    .not_null()
+                    .default(false)
+                    .to_owned(),
+            )
+            .await?;
+            add_column(
+                manager,
+                call::Entity,
+                ColumnDef::new(call::Column::Encrypted)
+                    .boolean()
+                    .not_null()
+                    .default(false)
+                    .to_owned(),
+            )
+            .await?;
+            add_column(
+                manager,
+                call::Entity,
+                ColumnDef::new(call::Column::Priority)
+                    .integer()
+                    .null()
+                    .to_owned(),
+            )
+            .await?;
+            add_column(
+                manager,
+                call::Entity,
+                ColumnDef::new(call::Column::AudioType)
+                    .string()
+                    .null()
+                    .to_owned(),
+            )
+            .await?;
+            // A plain column, not a foreign key — see `call::Model::site_id`.
+            // SQLite cannot add a constraint to a table it already made, so a
+            // declared relation would give a fresh database and an upgraded one
+            // permanently different schemas, which is precisely the divergence
+            // m0003 and m0004 exist to close.
+            add_column(
+                manager,
+                call::Entity,
+                ColumnDef::new(call::Column::SiteId)
+                    .big_integer()
+                    .null()
+                    .to_owned(),
+            )
+            .await?;
+
+            add_column(
+                manager,
+                call_frequency::Entity,
+                ColumnDef::new(call_frequency::Column::AtMs)
+                    .big_integer()
+                    .null()
+                    .to_owned(),
+            )
+            .await?;
+
+            add_column(
+                manager,
+                call_unit::Entity,
+                ColumnDef::new(call_unit::Column::TagOta)
+                    .string()
+                    .null()
+                    .to_owned(),
+            )
+            .await?;
+            add_column(
+                manager,
+                call_unit::Entity,
+                ColumnDef::new(call_unit::Column::Emergency)
+                    .boolean()
+                    .not_null()
+                    .default(false)
+                    .to_owned(),
+            )
+            .await?;
+            add_column(
+                manager,
+                call_unit::Entity,
+                ColumnDef::new(call_unit::Column::SignalSystem)
+                    .string()
+                    .null()
+                    .to_owned(),
+            )
+            .await?;
+            add_column(
+                manager,
+                call_unit::Entity,
+                ColumnDef::new(call_unit::Column::AtMs)
+                    .big_integer()
+                    .null()
+                    .to_owned(),
+            )
+            .await?;
+
+            // Every archive query that offers "hide the kerchunks" (#42's
+            // min-duration filter) walks this alongside the time ordering the
+            // m0001 indexes already provide.
+            if !manager.has_index("calls", "idx_calls_duration").await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name("idx_calls_duration")
+                            .table(call::Entity)
+                            .col(call::Column::DurationMs)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            for column in [
+                call::Column::StopAtMs,
+                call::Column::Emergency,
+                call::Column::Encrypted,
+                call::Column::Priority,
+                call::Column::AudioType,
+                call::Column::SiteId,
+            ] {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .drop_column(column)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call_frequency::Entity)
+                        .drop_column(call_frequency::Column::AtMs)
+                        .to_owned(),
+                )
+                .await?;
+            for column in [
+                call_unit::Column::TagOta,
+                call_unit::Column::Emergency,
+                call_unit::Column::SignalSystem,
+                call_unit::Column::AtMs,
+            ] {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call_unit::Entity)
+                            .drop_column(column)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
         }
     }
 }

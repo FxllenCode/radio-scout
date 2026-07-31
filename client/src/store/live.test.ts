@@ -66,6 +66,13 @@ function rootState(live: LiveState) {
 /** Play `call` and let it arrive as the live feed would. */
 const arrive = (...calls: Call[]) => calls.map((one) => received({ call: one }))
 
+/** A Call on an encrypted talkgroup: flagged, and with no audio to fetch — the
+ *  shape `GET /api/calls` and the live feed both deliver for one (#42). */
+function encryptedCall(id: number, talkgroupRef = 100): Call {
+  const { audioUrl: _dropped, ...rest } = call(id, 11, talkgroupRef)
+  return { ...rest, encrypted: true }
+}
+
 describe('live slice', () => {
   describe('the connection', () => {
     it('starts offline with nothing playing', () => {
@@ -872,5 +879,48 @@ describe('the selection as the panel draws it', () => {
     )
 
     expect(selectIsAvoided(rootState(state), 11, 100)).toBe(true)
+  })
+})
+
+describe('encrypted Calls (#42, spec US 9)', () => {
+  it('shows the activity without ever making it the current Call', () => {
+    // An encrypted Call has no audio to play. Making it `current` would leave
+    // the audio element with no `src`, so it would never fire `ended` — and the
+    // live feed would sit on it forever, silent, with the queue behind it
+    // frozen. That is the failure this guards.
+    const state = reduce(connected(), ...arrive(encryptedCall(1)))
+
+    expect(selectLiveCall(rootState(state))).toBeNull()
+    expect(selectQueueDepth(rootState(state))).toBe(0)
+    expect(selectHistory(rootState(state)).map((one) => one.id)).toEqual([1])
+  })
+
+  it('never queues one behind a Call that is playing', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1), encryptedCall(2), call(3)),
+    )
+
+    expect(selectLiveCall(rootState(state))?.id).toBe(1)
+    expect(selectQueueDepth(rootState(state))).toBe(1)
+    expect(selectHistory(rootState(state)).map((one) => one.id)).toEqual([2])
+  })
+
+  it('still advances the cursor, so a reconnect does not ask for it again', () => {
+    const state = reduce(connected(), ...arrive(encryptedCall(7)))
+
+    expect(selectSince(rootState(state))).toBe(7)
+  })
+
+  it('leaves one out of the history when the listener is not selected to it', () => {
+    // Encrypted or not, a Call the listener did not ask for is not their
+    // business — the Selection decides first.
+    const state = reduce(
+      connected(),
+      chooseTalkgroups({ keys: [{ systemRef: 11, talkgroupRef: 100 }], on: false }),
+      ...arrive(encryptedCall(1, 100)),
+    )
+
+    expect(selectHistory(rootState(state))).toEqual([])
   })
 })

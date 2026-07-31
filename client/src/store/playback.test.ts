@@ -336,3 +336,56 @@ describe('playback slice', () => {
     })
   })
 })
+
+describe('encrypted results (#42, spec US 9)', () => {
+  /** A metadata-only Call, exactly as the archive serves one: flagged, and
+   *  carrying no `audioUrl` because there is no audio to fetch. */
+  function encrypted(id: number): Call {
+    const { audioUrl: _none, ...rest } = call(id)
+    return { ...rest, encrypted: true }
+  }
+
+  it('never walks a playback run onto a Call it cannot play', () => {
+    // The audio element gets `src={undefined}`, so it never fires `ended` — the
+    // only thing that advances a run. Playback mode would stop dead on the
+    // first encrypted result and look like a bug in the player.
+    const state = reduce(
+      enterPlaybackMode(),
+      playResults({ results: [call(1), encrypted(2), call(3)], index: 0 }),
+      next(),
+    )
+
+    expect(selectCurrentCall(rootState(state))?.id).toBe(3)
+  })
+
+  it('runs out cleanly when everything left is unplayable', () => {
+    const state = reduce(
+      enterPlaybackMode(),
+      playResults({ results: [call(1), encrypted(2)], index: 0 }),
+      next(),
+    )
+
+    expect(selectIsExhausted(rootState(state))).toBe(true)
+  })
+
+  it('walks backwards past one too', () => {
+    const state = reduce(
+      enterPlaybackMode(),
+      playResults({ results: [call(1), encrypted(2), call(3)], index: 2 }),
+      previous(),
+    )
+
+    expect(selectCurrentCall(rootState(state))?.id).toBe(1)
+  })
+
+  it('refuses to start a run on one at all', () => {
+    // Nothing offers this — the archive row has no play button — but a run
+    // that began on an unplayable Call would be stuck before it started.
+    const state = reduce(
+      enterPlaybackMode(),
+      playResults({ results: [call(1), encrypted(2)], index: 1 }),
+    )
+
+    expect(selectCurrentCall(rootState(state))).toBeNull()
+  })
+})

@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 
+import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
@@ -283,8 +284,11 @@ function Display({
         {/* docs/design/brief.md state 6: paused blinks, playing is steady. */}
         <StatusLed color={color} size={16} pulse={paused} className="mt-1.5" />
         <div className="min-w-0 flex-1">
-          <p className="truncate font-mono text-lg leading-tight">
-            {talkgroupName(call)}
+          <p className="flex items-center gap-2 truncate font-mono text-lg leading-tight">
+            <span className="truncate">{talkgroupName(call)}</span>
+            {/* An emergency has to be legible without reading anything (#42,
+                spec US 5) — it is the flag #53 will also push on. */}
+            <CallFlags call={call} />
           </p>
           <p className="truncate font-mono text-xs text-muted-foreground">
             {systemName(call)}
@@ -466,8 +470,12 @@ function History({
                 color={ledForCall(call)}
                 size={10}
               />
-              <span className="min-w-0 flex-1 truncate font-mono text-sm">
-                {talkgroupName(call)}
+              <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate font-mono text-sm">
+                <span className="truncate">{talkgroupName(call)}</span>
+                {/* Encrypted Calls only ever appear here — they never play
+                    (#42, spec US 9) — so this is the one place their badge is
+                    the whole of what says the channel was busy. */}
+                <CallFlags call={call} />
               </span>
               <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
                 {formatCallTime(call.timestamp)}

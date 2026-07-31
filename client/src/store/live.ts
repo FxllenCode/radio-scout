@@ -316,6 +316,22 @@ const liveSlice = createSlice({
       state.since = Math.max(state.since ?? 0, call.id)
 
       if (!wanted(state, call)) return
+
+      // An encrypted Call is activity, not audio (#42, spec US 9): it goes
+      // straight into RECENT so the listener sees the channel is busy, and it
+      // never becomes `current` and never joins the queue.
+      //
+      // This is not tidiness. There is nothing to play — the server sends no
+      // `audioUrl` for one — so making it `current` would leave the audio
+      // element with no source, and an element with no source never fires
+      // `ended`. The feed would stop on it silently and forever, with
+      // everything queued behind it frozen.
+      if (call.encrypted) {
+        state.history.unshift(call)
+        state.history = state.history.slice(0, HISTORY_DEPTH)
+        return
+      }
+
       if (!state.current) {
         play(state, call)
         return

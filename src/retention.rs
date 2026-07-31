@@ -367,6 +367,13 @@ async fn prune_batch(
     txn.commit().await?;
 
     for call in batch {
+        // An encrypted Call is a row with no object behind it (#42, spec US 9).
+        // Asking the store to delete the empty key would fail and be reported
+        // as a broken object store — once per Call, on a System where they may
+        // be most of the traffic.
+        if call.object_key.is_empty() {
+            continue;
+        }
         match store.delete(&call.object_key).await {
             Ok(()) => report.bytes_freed += call.audio_size as u64,
             Err(error) => {

@@ -157,29 +157,54 @@ def sdrtrunk_patched() -> tuple[bytes, str]:
 def tr_native() -> tuple[bytes, str]:
     """Trunk Recorder native .wav+.json -> POST /api/trunk-recorder-call-upload.
 
-    key + meta(JSON) + audio(file). Mirrors rdio ParseTrunkRecorderMeta; the meta
-    carries talkgroup_group_tag "-" to lock the placeholder-cleaning on the native
-    path, and start_time (no timestamp) to lock the start_time-not-now() fix (#6).
+    key + meta(JSON) + audio(file). The meta is the **full** field set
+    `create_call_json` writes, in its own key order
+    (`trunk-recorder/call_concluder/call_concluder.cc:785`) — rdio-scanner's
+    ParseTrunkRecorderMeta reads six of those keys and ignores the rest, and #42
+    reads the transmission truth in the remainder. This is therefore also the
+    contract the shipped uploadScript (#43) and the first-party plugin (#44) must
+    satisfy.
+
+    Two behaviors are deliberately locked here: talkgroup_group_tag "-" pins the
+    placeholder-cleaning on the native path, and start_time with **no** timestamp
+    pins the start_time-not-now() fix (#6).
     """
     boundary = b"------------------------0f1e2d3c4b5a69788796a5b4"
     wav = minimal_wav()
     audio_name = "54155-1669740338_771093750.wav"
     meta = (
         '{\n'
+        '  "call_num": 4171,\n'
         '  "freq": 771093750,\n'
+        '  "freq_error": -12,\n'
+        '  "signal": -74,\n'
+        '  "noise": -96,\n'
+        '  "source_num": 0,\n'
+        '  "recorder_num": 3,\n'
+        '  "tdma_slot": 0,\n'
+        '  "phase2_tdma": 0,\n'
         '  "start_time": 1669740338,\n'
         '  "stop_time": 1669740344,\n'
+        '  "start_time_ms": 1669740338000,\n'
+        '  "stop_time_ms": 1669740344000,\n'
+        '  "emergency": 1,\n'
+        '  "priority": 2,\n'
+        '  "mode": 1,\n'
+        '  "duplex": 0,\n'
+        '  "encrypted": 0,\n'
         '  "call_length": 5.76,\n'
+        '  "call_length_ms": 5760,\n'
         '  "talkgroup": 54155,\n'
         '  "talkgroup_tag": "EMS DISP",\n'
         '  "talkgroup_description": "EMS Dispatch",\n'
         '  "talkgroup_group_tag": "-",\n'
         '  "talkgroup_group": "EMS",\n'
+        '  "color_code": 0,\n'
         '  "audio_type": "digital",\n'
         '  "short_name": "butco",\n'
+        '  "patched_talkgroups": [54155, 54156],\n'
         '  "freqList": [{"freq": 771093750, "time": 1669740338, "pos": 0.0, "len": 5.76, "error_count": 3, "spike_count": 1}],\n'
-        '  "srcList": [{"src": 1610092, "pos": 0.0}],\n'
-        '  "patched_talkgroups": [54155, 54156]\n'
+        '  "srcList": [{"src": 1610092, "time": 1669740339, "pos": 0.0, "emergency": 1, "signal_system": "P25", "tag": "EMS 1", "tag_ota": "MEDIC7"}]\n'
         '}'
     )
     parts = []
@@ -197,12 +222,61 @@ def tr_native() -> tuple[bytes, str]:
     return body, ct
 
 
+def tr_native_encrypted() -> tuple[bytes, str]:
+    """Trunk Recorder native upload of an ENCRYPTED call (#42, spec US 9).
+
+    Same contract as `tr_native`, with `encrypted: 1`. The audio part is present
+    and real — TR writes a file either way — and Radio-Scout stores the row and
+    discards the bytes, because what is in them is the vocoder's noise rather
+    than speech. This fixture is what pins that half of the contract for the
+    first-party plugin (#44).
+    """
+    boundary = b"------------------------0f1e2d3c4b5a69788796a5b4"
+    wav = minimal_wav()
+    audio_name = "54999-1669740400_771093750.wav"
+    meta = (
+        '{\n'
+        '  "call_num": 4172,\n'
+        '  "freq": 771093750,\n'
+        '  "start_time": 1669740400,\n'
+        '  "stop_time": 1669740403,\n'
+        '  "emergency": 0,\n'
+        '  "priority": 0,\n'
+        '  "encrypted": 1,\n'
+        '  "call_length": 3.2,\n'
+        '  "call_length_ms": 3200,\n'
+        '  "talkgroup": 54999,\n'
+        '  "talkgroup_tag": "SO TAC 1",\n'
+        '  "talkgroup_description": "Sheriff Tactical 1",\n'
+        '  "talkgroup_group_tag": "Law Tac",\n'
+        '  "talkgroup_group": "Law",\n'
+        '  "audio_type": "digital",\n'
+        '  "short_name": "butco",\n'
+        '  "freqList": [{"freq": 771093750, "time": 1669740400, "pos": 0.0, "len": 3.2, "error_count": 0, "spike_count": 0}],\n'
+        '  "srcList": []\n'
+        '}'
+    )
+    parts = [
+        text_part(boundary, "key", "tr-native-key"),
+        text_part(boundary, "meta", meta),
+        b"--" + boundary + CRLF
+        + b'Content-Disposition: form-data; name="audio"; filename="'
+        + audio_name.encode() + b'"' + CRLF
+        + b"Content-Type: application/octet-stream" + CRLF
+        + CRLF + wav + CRLF,
+    ]
+    body = b"".join(parts) + b"--" + boundary + b"--" + CRLF
+    ct = "multipart/form-data; boundary=" + boundary.decode()
+    return body, ct
+
+
 def main():
     for name, (body, ct) in {
         "trunk-recorder-call-upload.multipart": tr_generic(),
         "sdrtrunk-call-upload.multipart": sdrtrunk(),
         "sdrtrunk-call-upload-patched.multipart": sdrtrunk_patched(),
         "trunk-recorder-native-meta.multipart": tr_native(),
+        "trunk-recorder-native-encrypted.multipart": tr_native_encrypted(),
     }.items():
         path = os.path.join(OUT, name)
         with open(path, "wb") as f:

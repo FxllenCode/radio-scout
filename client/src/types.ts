@@ -20,8 +20,25 @@ export interface Call {
   dateTime?: string
   timestamp?: number
   audioMime?: string
-  /** Where to fetch the audio (audio never rides the live-feed socket). */
-  audioUrl: string
+  /** How long the transmission is, in milliseconds (#42, spec US 8) — from the
+   *  recorder's metadata or an audio-header parse at ingest. Absent when
+   *  neither could say, which is every Call stored before #42. */
+  durationMs?: number
+  /** The radio set the emergency bit on this transmission. Absent when it
+   *  didn't, which is nearly always. */
+  emergency?: boolean
+  /** The talkgroup was encrypted, so this Call is metadata and nothing else
+   *  (spec US 9) — there is no `audioUrl` on one. */
+  encrypted?: boolean
+  /** The Site (tower) this was heard on, for multi-site systems (spec US 11). */
+  siteRef?: number
+  /** Where to fetch the audio (audio never rides the live-feed socket).
+   *
+   *  **Absent when there is nothing to fetch** — an encrypted Call. That is
+   *  what keeps an unplayable Call out of the listening queue by construction:
+   *  the queue is built from Calls that have audio, not from Calls that don't
+   *  carry a flag. */
+  audioUrl?: string
 }
 
 /** The archive-search filters, exactly as `GET /api/calls` takes them. */
@@ -34,6 +51,10 @@ export interface SearchQuery {
   talkgroup?: number
   group?: string
   tag?: string
+  /** Hide anything shorter than this many **whole seconds** (#42, spec US 8) —
+   *  the kerchunk filter. A Call whose duration was never measured never
+   *  matches; leaving this unset still shows every Call there is. */
+  minDuration?: number
   /** `oldest` is what playback mode walks: forwards through history. */
   sort?: 'newest' | 'oldest'
   limit?: number
