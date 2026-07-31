@@ -13,6 +13,24 @@ Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all op
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+## Starting a ticket
+
+**Pick from the frontier.** The open, unblocked, unassigned children of the version epic — `issue_dependencies_summary.blocked_by == 0`. GitHub's native dependencies carry the order, so nothing else has to:
+
+```sh
+gh api repos/OWNER/REPO/issues/<n> -q '.issue_dependencies_summary.blocked_by'
+```
+
+**Check it hasn't already landed.** A ticket can be built and still be open — it has happened more than once here (#10 was requested via `/implement` after its commit was already on the working branch). `git log --oneline --grep '#<n>'` before trusting its state.
+
+**Then read it as a claim, not an instruction** — the hard constraint at the top of [CLAUDE.md](../../CLAUDE.md). Before the first test, say what the ticket asserts, what you mean to build, and what you are unsure of:
+
+- **Anything genuinely open → ask, and wait.** A choice between real alternatives goes to `AskUserQuestion`; an answer that will outlive the ticket goes through **`/grill-with-docs`**, which records it in `CONTEXT.md` or an ADR instead of burying it in a commit message.
+- **A claim in the ticket that looks wrong is an open question.** Tickets here are written by earlier sessions, often months before the work. They carry inherited reasoning, and #83's §6 carried reasoning that was flatly false — asserted as "known equivalent, do not chase", believed, and written into `.cargo/mutants.toml` as a proof before `/code-review` caught it. Verify the ticket's premises against the code the way you would verify your own.
+- **Nothing open → say so, name your assumptions, and build.** Most tickets are like this. A grill on a mechanical ticket spends the maintainer's attention where there is nothing to decide, which is how the grills that matter get rubber-stamped.
+
+**One ticket per session, and a fresh context for each.** `/implement <n>` drives `/tdd` for the build and closes with `/code-review`; the flow assumes it is not sharing a window with the last ticket's reasoning.
+
 ## Finishing a ticket
 
 **A ticket is not finished until it is committed, pushed, *and* closed.** All three, in that order, in the session that did the work — never left for "next time". An issue left open after its code shipped is worse than no tracker at all: the frontier query reads open blockers as live gates, so a built-but-open ticket silently blocks everything behind it (#28 sat blocked on an already-finished #27 for exactly this reason), and the next session can't tell "built" from "not started" without reading the diff.
@@ -22,8 +40,6 @@ Infer the repo from `git remote -v` — `gh` does this automatically when run in
 3. `gh issue close <n>`.
 
 If the work is genuinely partial, say so in the comment and leave it open — but then say *what* is missing, so the next session doesn't have to re-derive it. "Built but unverified" is not a reason to leave it open; verify it, or write down what verification is outstanding.
-
-**Check before starting, too.** A ticket can already be built and still be open (it has happened more than once here). Before picking one up, look for a commit naming it — `git log --oneline --grep '#<n>'` — rather than trusting its state.
 
 ## Pull requests as a triage surface
 
