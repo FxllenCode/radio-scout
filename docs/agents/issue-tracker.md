@@ -13,6 +13,26 @@ Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all op
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+## Publishing a batch of tickets
+
+A spec becomes an epic plus its tickets, and the **structure is the deliverable, not the bodies** — sub-issue links and dependency edges are what the frontier query reads. Two calls do the wiring, and both take the other issue's numeric **database id** (`gh api repos/OWNER/REPO/issues/<n> --jq .id`), never the `#number`:
+
+```sh
+gh api --method POST repos/OWNER/REPO/issues/<parent>/sub_issues     -F sub_issue_id=<child-db-id>
+gh api --method POST repos/OWNER/REPO/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>
+```
+
+**Then read the graph back, and check it against what you meant to write.** Not the responses — the graph:
+
+```sh
+gh api repos/OWNER/REPO/issues/<epic> -q .sub_issues_summary.total
+gh api repos/OWNER/REPO/issues/<n>/dependencies/blocked_by --paginate -q '[.[].number]'
+```
+
+An issue number is a valid database id for *some other* issue, so a wrong-argument write does not necessarily fail — it can succeed against a stranger. And the endpoint **pages at 30**, so a ticket with more blockers than that reads as complete when it is truncated (`--paginate`, always; `issue_dependencies_summary.blocked_by` is the unpaged count to check it against).
+
+**The evidence is #84.** Its programme — an epic and fourteen tickets — was published on 2026-07-30 with a comment stating the chain it had wired and the eleven feature tickets it gated. None of it existed: #84 was a sub-issue of nothing, `sub_issues_summary.total` was `0` on every one of them, and not one dependency edge had been created. The bodies said "Sub-issue of #84" in prose, which is what made it look done. For a day the frontier query returned every ticket that programme was written to gate, and the next `/implement` session would have rebuilt the seams #92 and #96 exist to replace — reported by the tracker as correct. **A publication is not finished until the graph has been read back**, the same way a ticket is not finished until it is closed.
+
 ## Starting a ticket
 
 **Pick from the frontier.** The open, unblocked, unassigned children of the version epic — `issue_dependencies_summary.blocked_by == 0`. GitHub's native dependencies carry the order, so nothing else has to:
@@ -67,7 +87,7 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
 - **Child ticket**: an issue linked to the map as a GitHub sub-issue (`gh api` on the sub-issues endpoint). Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Once claimed, the ticket is assigned to the driving dev.
-- **Blocking**: GitHub's **native issue dependencies** — the canonical, UI-visible representation. Add an edge with `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where `<blocker-db-id>` is the blocker's numeric **database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`, _not_ the `#number` or `node_id`). GitHub reports `issue_dependencies_summary.blocked_by` (open blockers only — the live gate). Where dependencies aren't available, fall back to a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every blocker is closed.
+- **Blocking**: GitHub's **native issue dependencies** — the canonical, UI-visible representation. Add an edge with `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where `<blocker-db-id>` is the blocker's numeric **database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`, _not_ the `#number` or `node_id`). GitHub reports `issue_dependencies_summary.blocked_by` (open blockers only — the live gate). Where dependencies aren't available, fall back to a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every blocker is closed. Read every edge back after writing it — see [Publishing a batch of tickets](#publishing-a-batch-of-tickets) for what a silently-unwritten graph costs.
 - **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
 - **Claim**: `gh issue edit <n> --add-assignee @me` — the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
