@@ -18,14 +18,16 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [master, v1]
+    branches: [master, next]
 
-# A branch pushed twice in a minute should not build twice. The default branch
-# is exempt: its runs are the record of what merged.
+# A branch pushed twice in a minute should not build twice. `master` and the
+# working branch are exempt: their runs are the record of what landed, and while
+# a version is in development that record lives on `next` rather than on the
+# default branch.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: >-
-    ${{ github.ref != 'refs/heads/master' && github.ref != 'refs/heads/v1' }}
+    ${{ github.ref != 'refs/heads/master' && github.ref != 'refs/heads/next' }}
 
 permissions:
   contents: read

@@ -52,7 +52,19 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
+      # The working branch, explicitly — NOT the ref that triggered this.
+      #
+      # A scheduled workflow always runs on the default branch, and between
+      # releases `master` is frozen at the last tag: sweeping it would re-prove
+      # the same released code every night and never see the version being
+      # built. That is a silent failure — a green sweep of the wrong commit
+      # reads exactly like a green sweep. The sweep is worth having only if it
+      # follows the code that is changing, which is `next` (see CLAUDE.md's
+      # branch note). If `next` is ever retired, this fails loudly rather than
+      # quietly sweeping the wrong branch, which is the intended failure mode.
       - uses: actions/checkout@v7
+        with:
+          ref: next
       - uses: actions/setup-node@v7
         with:
           node-version: 22

@@ -17,7 +17,7 @@ Infer the repo from `git remote -v` — `gh` does this automatically when run in
 
 **A ticket is not finished until it is committed, pushed, *and* closed.** All three, in that order, in the session that did the work — never left for "next time". An issue left open after its code shipped is worse than no tracker at all: the frontier query reads open blockers as live gates, so a built-but-open ticket silently blocks everything behind it (#28 sat blocked on an already-finished #27 for exactly this reason), and the next session can't tell "built" from "not started" without reading the diff.
 
-1. `git commit` on the working branch, then `git push` — the ticket number goes in the commit subject (`feat(x): … (#27)`).
+1. `git commit` on the working branch — **`next`**, which takes direct pushes; see CLAUDE.md's branch note for why the release branch is not it — then `git push`. The ticket number goes in the commit subject (`feat(x): … (#27)`). No pull request per ticket: a whole version lands on `master` as one PR when it is complete, which is also the only moment the patch-coverage gate runs, so the local gates are what hold each ticket to the policy.
 2. `gh issue comment <n>` with what actually shipped: the commit SHA, which acceptance criteria are met, any decision taken along the way, and anything deliberately left to a later ticket.
 3. `gh issue close <n>`.
 
