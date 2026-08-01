@@ -1,33 +1,27 @@
 //! Radio-Scout binary entrypoint.
 //!
-//! Resolve the configuration (#17: TOML + flags + environment), then serve —
-//! create the base dir, open the database and the audio store, make sure there
-//! is an ingest API key, and run the retention sweeper (#10) in the background.
-//! Zero-config is the path where none of that is configured: a directory, a
-//! SQLite file and a folder of audio, all created on first run (US 35).
+//! Resolve the configuration (#17: TOML + flags + environment), bring logging
+//! up on it, and hand it to `radio_scout::instance` (#90), which owns every
+//! step of assembling a running Instance. Zero-config is the path where none of
+//! it is configured: a directory, a SQLite file and a folder of audio, all
+//! created on first run (US 35).
 //!
-//! Everything here is bootstrap glue: the decisions worth testing live in the
-//! library (`config`, `startup`, `observability`, `retention`), and this file
-//! wires them together in the order a boot needs them. What it *does* own is
-//! that order — configuration before logging (logging is configured), and both
-//! before anything that can fail with something worth logging.
+//! Everything here is bootstrap glue and is excluded from coverage, so what is
+//! left is deliberately only what the library cannot answer: this process's
+//! flags, its environment, its working directory, and where its own executable
+//! is. What it *does* own is the order — configuration before logging (logging
+//! is configured), and both before anything that can fail with something worth
+//! logging.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use clap::Parser;
-use radio_scout::admin::AdminAuth;
 use radio_scout::config::{self, Cli, Config};
-use radio_scout::db;
-use radio_scout::enhance::Enhancer;
+use radio_scout::instance::{self, Credentials, Wiring};
 use radio_scout::logsink;
-use radio_scout::push::Push;
-use radio_scout::retention;
+use radio_scout::observability;
 use radio_scout::service;
-use radio_scout::startup::{self, INGEST_KEY_VAR};
-use radio_scout::{AppState, BlobStore, build_app, now_ms, observability};
 use tracing::{debug, error, info};
 
 /// The configuration step failed: an unusable setting, or a config file that
@@ -146,112 +140,26 @@ fn service_command(
 }
 
 /// Bring the scanner up and serve until the process ends.
+///
+/// Everything about *how* an Instance is assembled lives in
+/// `radio_scout::instance` (#90), so this is the one thing the library cannot
+/// answer: what this process's environment says the credentials are, and where
+/// its env file is. A subsystem wired here instead of there would be a
+/// subsystem no test can reach — this file is excluded from coverage.
 async fn serve(
     config: Config,
     env_file: Option<PathBuf>,
     log_writer: Option<logsink::LogWriter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let base_dir = config.server.base_dir.clone();
-    std::fs::create_dir_all(&base_dir)?;
-
-    let db = db::connect(&config.database_url()).await?;
-
-    // Now there is somewhere to put them, everything logged since boot — the
-    // migrations included — is written out, and the sink keeps up from here.
+    let mut wiring = Wiring::default().credentials(Credentials::from_env(env_file, |name| {
+        std::env::var(name).ok()
+    }));
     if let Some(writer) = log_writer {
-        writer.spawn(db.clone());
+        wiring = wiring.log_writer(writer);
     }
-
-    // The ingest key (ADR-0008). A configured one — `RADIO_SCOUT_API_KEY`, from
-    // the environment or `.env` — is registered on every boot, so a recorder's
-    // key keeps working across restarts and across a wiped database. With none
-    // configured, first run generates one and writes it to the env file it would
-    // have been read from; it is never logged (ADR-0011 rule 2).
-    //
-    // With no env file to have read it from, it goes beside the database rather
-    // than into the working directory: under systemd or Docker (#23) the cwd is
-    // routinely `/` or read-only, and a write that fails there would leave a
-    // scanner with no usable ingest key at all. `base_dir` was just created, so
-    // it is known to be writable.
-    let env_file = env_file.unwrap_or_else(|| base_dir.join(".env"));
-    let configured = std::env::var(INGEST_KEY_VAR).ok();
-    startup::log_ingest_key(
-        &startup::provision_ingest_key(&db, configured.as_deref(), &env_file, now_ms()).await?,
-    );
-
-    // The admin password (#19, ADR-0008), from the same file for the same
-    // reason: first run *writes* it. With none configured a random one is
-    // generated — Radio-Scout never ships a guessable default the way rdio does
-    // — and if it cannot be saved, no password is set and the admin surface
-    // stays shut rather than opening on a credential only the server ever saw.
-    let admin = startup::provision_admin_password(
-        std::env::var(startup::ADMIN_PASSWORD_VAR).ok().as_deref(),
-        &env_file,
-    );
-    startup::log_admin_password(&admin);
-
-    // The Web Push identity (#16, ADR-0005), from the same file for the same
-    // reason again: first run writes it. Unlike the other two it must be the
-    // *same* key next boot — a browser pins the public half at subscribe time —
-    // so a key that cannot be saved leaves notifications off rather than
-    // running on one that will not survive a restart.
-    let vapid = startup::provision_vapid_key(
-        std::env::var(startup::VAPID_KEY_VAR).ok().as_deref(),
-        &env_file,
-    );
-    startup::log_vapid_key(&vapid);
-    let push = match vapid.key() {
-        Some(key) => Push::new(key, config.push.clone()),
-        None => Push::disabled(),
-    };
-
-    let audio = Arc::new(BlobStore::open(&config.storage())?);
-
-    // Retention (#10): bound the archive so the disk can't fill. Sweeps once
-    // now and then on its interval, for the life of the process.
-    let retention = config.retention.clone();
-    retention.log();
-    retention::spawn(db.clone(), audio.clone(), retention);
-
-    let mut state = AppState::new(audio, db, config.ingest.clone());
-    state.trusted_proxies = config.trusted_proxies();
-    state.admin = AdminAuth::provisioned(&admin, config.admin.clone());
-    state.push = push;
-    state.enhancer = Enhancer::from_config(config.enhancement.clone());
-    // Notifications ride the live-feed fanout (#16), so an ingest never waits
-    // on a push service. A server with no identity spawns nothing.
-    radio_scout::push::spawn(state.clone());
-    // Enhancement (#20) runs off its own queue, behind ingest rather than in
-    // it. With `[enhancement] mode = "off"` — what ships — this spawns nothing,
-    // and the first thing it does when it is on is pick up whatever a previous
-    // process was part-way through.
-    radio_scout::enhance::spawn(state.clone());
-    let app = build_app(state);
-
-    let port = config.server.port;
-    // A port already in use is the most common way a boot fails; `?` alone would
-    // answer with a Debug-printed `Os { code: 48, .. }` and no mention of the
-    // port (ADR-0011 rule 4: an operator must be told what to act on).
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
-        .await
-        .inspect_err(|error| error!(port, %error, "could not bind the listening port"))?;
-    let addr = listener.local_addr()?;
-    // `port` from the socket, not the setting: `--port 0` asks the OS to pick
-    // one, and the number a client has to connect to is the only useful thing
-    // to say about it.
-    info!(
-        %addr,
-        port = addr.port(),
-        base_dir = %base_dir.display(),
-        "radio-scout listening"
-    );
-    // With connect info: the request log (#28) names the host an ingest came
-    // from, which is the diagnostic that matters when a recorder says it is
-    // uploading and the archive disagrees.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    instance::start(config, wiring)
+        .await?
+        .serve_forever()
+        .await?;
     Ok(())
 }

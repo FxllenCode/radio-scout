@@ -75,3 +75,33 @@ One gap is left open honestly, because Rust has no reflection to close it: a new
 The other visible change is one message's *source*: `RADIO_SCOUT_RETENTION_MAX_SIZE_GB=0` now names the variable rather than `retention.max_size_gb`, because the check is reached through the settings table, which knows what the operator actually wrote. That is what every other environment error already does.
 
 Otherwise nothing an operator writes changed: the same keys, the same variables, the same defaults, the same exit codes, and a `--write-config` byte-identical to 0.1.0's. Ten variables still do not follow their key mechanically (`RADIO_SCOUT_PORT`, the six `RADIO_SCOUT_S3_*`, `RUST_LOG`); those spellings shipped in 0.1.0 and are named in the table rather than derived, because a uniform rule that renamed ten live settings would be a nicer table and a worse upgrade.
+
+## Amendment (#90, 2026-08-01): where a resolved configuration is consumed
+
+The amendment above settled where a setting is *written down*. This one settles where it is *acted on*, which was the half still spread across two files that had drifted apart.
+
+**One module consumes a resolved `Config`**: `radio_scout::instance`. `instance::start(config, wiring)` creates the base directory, opens the database, drains the operator log sink, provisions all three credentials, opens the store, starts every worker, builds the router, binds and serves — and hands back a handle carrying the bound address, the database, the store, a shutdown and a restart. `main.rs` calls it. So does the integration harness.
+
+Before this the sequence existed twice, and the second copy was wrong in ways nothing could see: `main.rs` ran thirteen steps and `TestApp::spawn` re-implemented twelve of them differently while omitting two — no Retention sweeper, no operator log sink. Every test in the suite was therefore green about an Instance that was not the one an operator boots, and no test anywhere covered how a configuration becomes a running Instance, because there was no seam between the two to test at.
+
+**The rule, which is this ADR's `#87` rule extended one step:** a new subsystem is **a configuration section — the subsystem's own type — wired inside `instance`**. It goes in the binary's own startup **never**, because `main.rs` is excluded from coverage and a subsystem wired there is one no test can reach. It goes in the second parameter (`Wiring`) **only if something genuinely varies between two real runs**, which today is four things:
+
+| `Wiring` | Why it cannot be a setting |
+| --- | --- |
+| `store` | An S3 store built elsewhere, or a decorator that makes I/O fail (#37) — neither is expressible in TOML. |
+| `clock` | What time it is. Injected so "this Call is an hour old" is a fact a test arranges rather than a sleep it waits out; #94 builds on it. |
+| `credentials` | The three credentials that stay *out* of the TOML because first run writes them. See below. |
+| `log_writer` | The draining half of the sink, which must be created before the subscriber and given a database after — an ordering, not a value. |
+
+Two more are there on borrowed time and say so in their doc comments: `bind`, because the suite listens on loopback where a scanner listens on every interface (an operator-facing bind-address setting would be `[server]`'s, and is a separate ask); and `heartbeat`, which #94 removes along with the need for it.
+
+**Credential sources became inputs rather than process-environment reads.** `Credentials { env_file, ingest_key, admin_password, vapid_key }` carries the raw configured text, exactly as `RADIO_SCOUT_API_KEY` and its two siblings hold it, and `Credentials::from_env(env_file, lookup)` is how the binary fills it — the same shape `config::resolve` already took its environment in, and for the same reason. Two consequences, both of them the point:
+
+- A test gets a **genuinely provisioned** Instance: a real generated Web Push identity, a real `.env` written `0600` into a temporary directory of its own. `AdminAuth::locked()` and `Push::disabled()` stopped being harness knobs and became what they are — *outcomes*. An env file that cannot be written leaves the admin surface shut; a VAPID value that is not a key leaves notifications off. Both are now reachable by arranging the cause rather than by injecting the effect, which is the difference between proving the state is refusable and proving a boot can arrive at it.
+- Process environment is a global. Reading it inside `start` would make two Instances in one process impossible to configure differently, and would make every test that touched it racy with every other.
+
+**Boot ordering is observable rather than commented.** The sink is installed before the subscriber and drained after the database opens, so a line written when there was nowhere to put it — `db::connect`'s own migration lines — still reaches `GET /api/admin/logs`; provisioning happens before the port is bound, so the *first* request the port ever accepts already authenticates with the credentials that boot generated. Both are asserted in `tests/instance.rs` as consequences an Operator could see, rather than as a recorded list of steps the code would be marking its own homework with.
+
+**A restart is stop-then-start on one handle.** `Instance::stop` is graceful and does not return until the socket is closed, so "the old Instance stopped" is a fact rather than a race; `restart_with` takes the configuration the next boot will have, which is what an Operator who edited their file and restarted actually does. It replaced eight copies of a four-line preamble in the enhancement tests that stood a second app up on a hand-shared database URL while the first one was still running.
+
+**What did not change:** every key, every variable, every default, every exit code, and `--write-config` byte for byte. `[server] port` still decides the port. The one behavioural difference is inside the test suite, and it is the one worth stating — a spawned app now runs the sweeper and the sink for real, so the harness turns the Retention *windows* off (`days = 0`, `log_days = 0`) rather than the sweeper, because the suite dates its fixtures in 1970 and 2020 and a background sweep would otherwise decide tests by when it got to them.

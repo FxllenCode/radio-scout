@@ -34,10 +34,10 @@ use serde::{Deserialize, Serialize};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 
+use crate::Clock;
 use crate::blob::{self, BlobStore};
 use crate::call::CallId;
 use crate::db::repo::{self, PrunableCall};
-use crate::now_ms;
 
 /// Milliseconds in a day.
 const MS_PER_DAY: i64 = 86_400_000;
@@ -374,6 +374,7 @@ pub fn spawn(
     db: DatabaseConnection,
     store: Arc<BlobStore>,
     config: RetentionConfig,
+    clock: Clock,
 ) -> tokio::task::JoinHandle<()> {
     let period = config.effective_interval();
     tokio::spawn(async move {
@@ -382,7 +383,7 @@ pub fn spawn(
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             ticker.tick().await; // the first tick completes immediately
-            log_sweep(&sweep(&db, &store, &config, now_ms()).await);
+            log_sweep(&sweep(&db, &store, &config, clock.now_ms()).await);
         }
     })
 }
@@ -463,6 +464,7 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::db::entities::call;
+    use crate::now_ms;
     use crate::testing::LogCapture;
     use proptest::prelude::*;
     use rstest::rstest;
@@ -547,7 +549,7 @@ mod tests {
             ..Default::default()
         };
 
-        let task = spawn(db.clone(), store.clone(), config);
+        let task = spawn(db.clone(), store.clone(), config, Clock::system());
         await_empty_archive(&db, "the startup sweep should have pruned the stale call").await;
         task.abort();
     }
@@ -565,7 +567,7 @@ mod tests {
             ..Default::default()
         };
 
-        let task = spawn(db.clone(), store.clone(), config);
+        let task = spawn(db.clone(), store.clone(), config, Clock::system());
         tokio::time::sleep(Duration::from_millis(100)).await;
         add_stale_call(&db, &store, 2).await;
         await_empty_archive(&db, "a later tick should have pruned the new stale call").await;
@@ -584,7 +586,7 @@ mod tests {
             ..Default::default()
         };
 
-        let task = spawn(db.clone(), store.clone(), config);
+        let task = spawn(db.clone(), store.clone(), config, Clock::system());
         await_empty_archive(&db, "a zero interval should still sweep at startup").await;
         let alive = !task.is_finished();
         task.abort();
@@ -607,7 +609,7 @@ mod tests {
         let probe_store = store.clone();
         let probe_config = config.clone();
         let probe_db = db.clone();
-        let task = spawn(db.clone(), store, config);
+        let task = spawn(db.clone(), store, config, Clock::system());
         await_empty_archive(&db, "the startup sweep should have run").await;
 
         // Pull the database out from under the ticker, and confirm sweeps really

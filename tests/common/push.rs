@@ -8,9 +8,12 @@
 //! left the process — headers, VAPID token and all — and decrypts the body with
 //! the subscriber's own private key.
 //!
-//! Both keypairs are RFC 8291 §5's, because a fixed identity makes a failure
-//! reproducible and the RFC's is the one already proven correct in
-//! `src/webpush.rs`.
+//! The subscriber's keypair is RFC 8291 §5's, because a fixed identity makes a
+//! failure reproducible and the RFC's is the one already proven correct in
+//! `src/webpush.rs`. The *server's* identity is not fixed: since #90 every
+//! spawned app provisions a real generated one into its own env file, the way a
+//! first boot does, and a test that needs the public half asks the running app
+//! for it.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -27,15 +30,6 @@ use base64::Engine;
 /// base64url, unpadded — everything Web Push encodes.
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-/// The server's VAPID private key in tests: RFC 8291's application-server key,
-/// so the public half below is a constant a test can assert against.
-pub const VAPID_PRIVATE_KEY: &str = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
-
-/// The public half of [`VAPID_PRIVATE_KEY`] — what `GET /api/push/key` serves
-/// and a browser passes as `applicationServerKey`.
-pub const VAPID_PUBLIC_KEY: &str =
-    "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8";
 
 /// The subscribing device's public key (RFC 8291's user agent).
 pub const SUBSCRIBER_PUBLIC: &str =

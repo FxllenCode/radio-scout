@@ -327,35 +327,21 @@ async fn set_system_enhancement(app: &TestApp, system_ref: i64, enhancement: Opt
 /// nothing anywhere to fix them.
 #[tokio::test]
 async fn a_restart_resumes_the_calls_it_was_part_way_through() {
-    let shared = tempfile::tempdir().expect("tempdir");
-    let url = shared_database_url(&shared).await;
-    let store =
-        || radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("shared store");
-
-    // The instance that took the Call in — enhancement off, so nothing runs and
-    // the Call is left exactly as a killed worker would have left it.
-    let before = TestApp::builder()
-        .database_url(url.clone())
-        .store(store())
-        .spawn()
-        .await;
-    before.create_api_key("k").await;
-    before.upload_ok(call()).await;
-    let id = before.the_call().await.id;
-    radio_scout::db::repo::mark_enhancement(&before.db, id, EnhancementState::PENDING)
+    // Enhancement off, so nothing runs and the Call is left exactly as a killed
+    // worker would have left it.
+    let mut app = TestApp::with_key("k").await;
+    app.upload_ok(call()).await;
+    let id = app.the_call().await.id;
+    radio_scout::db::repo::mark_enhancement(&app.db, id, EnhancementState::PENDING)
         .await
         .expect("leave it mid-flight");
 
-    // ...and the instance that comes up afterwards, onto the same database and
-    // the same audio.
-    let after = TestApp::builder()
-        .database_url(url)
-        .store(store())
-        .enhancement(normalizing())
-        .spawn()
+    // ...and the boot that comes afterwards, onto the same database and the
+    // same audio, with the operator having turned enhancement on.
+    app.restart_with(|config| config.enhancement = normalizing())
         .await;
 
-    let resumed = after.await_enhancement(id).await;
+    let resumed = app.await_enhancement(id).await;
     assert_eq!(resumed.enhancement, "done", "the restart abandoned it");
 }
 
@@ -365,34 +351,20 @@ async fn a_restart_resumes_the_calls_it_was_part_way_through() {
 /// archive because they restarted.
 #[tokio::test]
 async fn a_restart_leaves_the_existing_archive_alone() {
-    let shared = tempfile::tempdir().expect("tempdir");
-    let url = shared_database_url(&shared).await;
-    let store =
-        || radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("shared store");
+    let mut app = TestApp::with_key("k").await;
+    app.upload_ok(call()).await;
+    let id = app.the_call().await.id;
 
-    let before = TestApp::builder()
-        .database_url(url.clone())
-        .store(store())
-        .spawn()
-        .await;
-    before.create_api_key("k").await;
-    before.upload_ok(call()).await;
-    let id = before.the_call().await.id;
-
-    let after = TestApp::builder()
-        .database_url(url)
-        .store(store())
-        .enhancement(normalizing())
-        .spawn()
+    app.restart_with(|config| config.enhancement = normalizing())
         .await;
 
     // Long enough that a catch-up sweep would have finished if it were going to
     // touch this Call; the assertion is that nothing happened at all.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let untouched = call_row(&after, id).await;
+    let untouched = call_row(&app, id).await;
     assert_eq!(untouched.enhancement, "none");
     assert_eq!(
-        after.object_bytes(&untouched.object_key).await.as_deref(),
+        app.object_bytes(&untouched.object_key).await.as_deref(),
         Some(quiet_wav().as_slice()),
         "an existing archive was rewritten by a restart"
     );
@@ -407,56 +379,26 @@ async fn call_row(app: &TestApp, id: i64) -> radio_scout::db::entities::call::Mo
         .expect("the Call exists")
 }
 
-/// A database two apps in one test can share — Postgres when the run was given
-/// one, SQLite otherwise, so this works in both dialects (#22).
-async fn shared_database_url(dir: &tempfile::TempDir) -> String {
-    match common::postgres_server() {
-        Some(server) => common::create_test_database(&server).await,
-        None => format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("shared.db").display()
-        ),
-    }
-}
-
 /// Retention is entitled to prune a Call between it being queued and the worker
 /// reaching it — the archive is bounded and the queue is deep, so on a busy
 /// instance this is ordinary, not exotic. The worker must not treat a missing
 /// object as a crash.
 #[tokio::test]
 async fn a_call_whose_audio_vanished_is_skipped_rather_than_retried_forever() {
-    let shared = tempfile::tempdir().expect("tempdir");
-    let url = shared_database_url(&shared).await;
-    let store =
-        || radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("shared store");
-
-    let before = TestApp::builder()
-        .database_url(url.clone())
-        .store(store())
-        .spawn()
-        .await;
-    before.create_api_key("k").await;
-    before.upload_ok(call()).await;
-    let stored = before.the_call().await;
+    let mut app = TestApp::with_key("k").await;
+    app.upload_ok(call()).await;
+    let stored = app.the_call().await;
     // The Call is queued, and its audio is then gone — the order a prune
     // interrupted between the row and the object leaves things in.
-    radio_scout::db::repo::mark_enhancement(&before.db, stored.id, EnhancementState::PENDING)
+    radio_scout::db::repo::mark_enhancement(&app.db, stored.id, EnhancementState::PENDING)
         .await
         .expect("queue it");
-    before
-        .store
-        .delete(&stored.object_key)
-        .await
-        .expect("prune");
+    app.store.delete(&stored.object_key).await.expect("prune");
 
-    let after = TestApp::builder()
-        .database_url(url)
-        .store(store())
-        .enhancement(normalizing())
-        .spawn()
+    app.restart_with(|config| config.enhancement = normalizing())
         .await;
 
-    let settled = after.await_enhancement(stored.id).await;
+    let settled = app.await_enhancement(stored.id).await;
     assert_eq!(
         settled.enhancement, "skipped",
         "a Call with no audio must settle, or every boot re-queues it forever"
@@ -469,27 +411,14 @@ async fn a_call_whose_audio_vanished_is_skipped_rather_than_retried_forever() {
 /// what happened and the process serves anyway.
 #[tokio::test]
 async fn a_database_the_sweep_cannot_read_does_not_stop_the_boot() {
-    let shared = tempfile::tempdir().expect("tempdir");
-    let url = shared_database_url(&shared).await;
-    let store =
-        || radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("shared store");
+    let mut app = TestApp::spawn().await;
+    app.break_table("calls").await;
 
-    let before = TestApp::builder()
-        .database_url(url.clone())
-        .store(store())
-        .spawn()
-        .await;
-    before.break_table("calls").await;
-
-    let after = TestApp::builder()
-        .database_url(url)
-        .store(store())
-        .enhancement(normalizing())
-        .spawn()
+    app.restart_with(|config| config.enhancement = normalizing())
         .await;
 
     assert_eq!(
-        after.get("/healthz").await.status(),
+        app.get("/healthz").await.status(),
         200,
         "a sweep that could not run took the scanner down with it"
     );
@@ -525,18 +454,10 @@ async fn an_undecidable_scope_leaves_the_call_alone_without_failing_ingest() {
 /// first thing the worker does with it fails.
 #[tokio::test]
 async fn a_store_that_cannot_be_read_skips_the_call_and_keeps_going() {
-    let shared = tempfile::tempdir().expect("tempdir");
-    let url = shared_database_url(&shared).await;
-
-    let before = TestApp::builder()
-        .database_url(url.clone())
-        .store(radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("store"))
-        .spawn()
-        .await;
-    before.create_api_key("k").await;
-    before.upload_ok(call()).await;
-    let id = before.the_call().await.id;
-    radio_scout::db::repo::mark_enhancement(&before.db, id, EnhancementState::PENDING)
+    let mut app = TestApp::with_key("k").await;
+    app.upload_ok(call()).await;
+    let id = app.the_call().await.id;
+    radio_scout::db::repo::mark_enhancement(&app.db, id, EnhancementState::PENDING)
         .await
         .expect("queue it");
 
@@ -544,20 +465,18 @@ async fn a_store_that_cannot_be_read_skips_the_call_and_keeps_going() {
     // connection is not on its own enough to settle inside the deadline below —
     // the connection fails fast but the *call* retries it — so what actually
     // bounds this is `blob::retry_policy` (#39).
-    let after = TestApp::builder()
-        .database_url(url)
-        .store(unreachable_store())
-        .enhancement(normalizing())
-        .spawn()
-        .await;
+    app.restart_onto(Some(unreachable_store()), |config| {
+        config.enhancement = normalizing()
+    })
+    .await;
 
-    let settled = after.await_enhancement(id).await;
+    let settled = app.await_enhancement(id).await;
     assert_eq!(
         settled.enhancement, "skipped",
         "an unreachable store must settle the Call, not re-queue it forever"
     );
     assert_eq!(
-        after.get("/healthz").await.status(),
+        app.get("/healthz").await.status(),
         200,
         "the process must still be serving"
     );
@@ -573,42 +492,28 @@ async fn a_store_that_cannot_be_read_skips_the_call_and_keeps_going() {
 /// limbo.
 #[tokio::test]
 async fn a_sweep_that_overflows_the_queue_leaves_nothing_pending() {
-    let shared = tempfile::tempdir().expect("tempdir");
-    let url = shared_database_url(&shared).await;
-    let store =
-        || radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("shared store");
-
-    let before = TestApp::builder()
-        .database_url(url.clone())
-        .store(store())
-        .spawn()
-        .await;
-    before.create_api_key("k").await;
+    let mut app = TestApp::with_key("k").await;
     for n in 0..8 {
-        before
-            .upload_ok(call().talkgroup(100 + n).at(1_000 + n))
-            .await;
+        app.upload_ok(call().talkgroup(100 + n).at(1_000 + n)).await;
     }
-    for stored in before.calls().await {
-        radio_scout::db::repo::mark_enhancement(&before.db, stored.id, EnhancementState::PENDING)
+    for stored in app.calls().await {
+        radio_scout::db::repo::mark_enhancement(&app.db, stored.id, EnhancementState::PENDING)
             .await
             .expect("interrupt it");
     }
 
     // A queue one Call deep: the sweep offers eight and can hold one.
-    let after = TestApp::builder()
-        .database_url(url)
-        .store(store())
-        .enhancement(EnhancementConfig {
+    app.restart_with(|config| {
+        config.enhancement = EnhancementConfig {
             queue_depth: 1,
             ..normalizing()
-        })
-        .spawn()
-        .await;
+        }
+    })
+    .await;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        let states: Vec<String> = after
+        let states: Vec<String> = app
             .calls()
             .await
             .into_iter()
@@ -654,33 +559,24 @@ async fn a_sweep_that_overflows_the_queue_leaves_nothing_pending() {
 async fn a_store_that_cannot_be_written_leaves_the_call_on_its_original_audio() {
     let capture = LogCapture::start();
     let shared = tempfile::tempdir().expect("tempdir");
-    let url = shared_database_url(&shared).await;
+    let (store, faults) = common::faulty_store(shared.path());
 
-    let before = TestApp::builder()
-        .database_url(url.clone())
-        .store(radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("store"))
-        .spawn()
-        .await;
-    before.create_api_key("k").await;
-    before.upload_ok(call()).await;
-    let stored = before.the_call().await;
-    radio_scout::db::repo::mark_enhancement(&before.db, stored.id, EnhancementState::PENDING)
+    let mut app = TestApp::builder().store(store).spawn().await;
+    app.create_api_key("k").await;
+    app.upload_ok(call()).await;
+    let stored = app.the_call().await;
+    radio_scout::db::repo::mark_enhancement(&app.db, stored.id, EnhancementState::PENDING)
         .await
         .expect("queue it");
 
-    // The same archive, now behind a store that will take no more writes. Armed
-    // before the app is spawned, so the very first thing the worker tries to
-    // write fails — no timing, no race.
-    let (store, faults) = common::faulty_store(shared.path());
+    // The same archive, now on a disk that has filled up. Armed before the
+    // restart, so the very first thing the worker tries to write fails — no
+    // timing, no race.
     faults.fail_puts();
-    let after = TestApp::builder()
-        .database_url(url)
-        .store(store)
-        .enhancement(normalizing())
-        .spawn()
+    app.restart_with(|config| config.enhancement = normalizing())
         .await;
 
-    let settled = after.await_enhancement(stored.id).await;
+    let settled = app.await_enhancement(stored.id).await;
     assert_eq!(
         settled.enhancement,
         EnhancementState::SKIPPED,
@@ -691,7 +587,7 @@ async fn a_store_that_cannot_be_written_leaves_the_call_on_its_original_audio() 
         "and must still point at the audio the recorder uploaded"
     );
     assert_eq!(
-        after.object_keys().await,
+        app.object_keys().await,
         [stored.object_key],
         "nothing was written, so there is no orphan for #10's sweep to find"
     );
@@ -699,7 +595,7 @@ async fn a_store_that_cannot_be_written_leaves_the_call_on_its_original_audio() 
     let line = capture.wait_for("enhancement skipped").await;
     assert!(line.contains("reason=store-audio"), "{line}");
     assert_eq!(
-        after.get("/healthz").await.status(),
+        app.get("/healthz").await.status(),
         200,
         "the process must still be serving"
     );
@@ -721,41 +617,27 @@ async fn a_store_that_cannot_be_written_leaves_the_call_on_its_original_audio() 
 #[tokio::test]
 async fn a_database_that_stops_taking_writes_says_so_for_every_call_it_loses() {
     let capture = LogCapture::start();
-    let shared = tempfile::tempdir().expect("tempdir");
-    let url = shared_database_url(&shared).await;
-    let store =
-        || radio_scout::BlobStore::filesystem(shared.path().join("audio")).expect("shared store");
-
-    let before = TestApp::builder()
-        .database_url(url.clone())
-        .store(store())
-        .spawn()
-        .await;
-    before.create_api_key("k").await;
+    let mut app = TestApp::with_key("k").await;
     for n in 0..8 {
-        before
-            .upload_ok(call().talkgroup(100 + n).at(1_000 + n))
-            .await;
+        app.upload_ok(call().talkgroup(100 + n).at(1_000 + n)).await;
     }
-    for stored in before.calls().await {
-        radio_scout::db::repo::mark_enhancement(&before.db, stored.id, EnhancementState::PENDING)
+    for stored in app.calls().await {
+        radio_scout::db::repo::mark_enhancement(&app.db, stored.id, EnhancementState::PENDING)
             .await
             .expect("interrupt it");
     }
     // Only now: everything above is the arrangement, and it is all writes.
-    before.fail_writes_to("calls").await;
+    app.fail_writes_to("calls").await;
 
     // A queue one Call deep, so the sweep both *runs* one Call to its failing
     // update and *refuses* the other seven to their failing update.
-    let after = TestApp::builder()
-        .database_url(url)
-        .store(store())
-        .enhancement(EnhancementConfig {
+    app.restart_with(|config| {
+        config.enhancement = EnhancementConfig {
             queue_depth: 1,
             ..normalizing()
-        })
-        .spawn()
-        .await;
+        }
+    })
+    .await;
 
     let skipped = capture.wait_for("reason=store-call").await;
     assert!(
@@ -774,7 +656,7 @@ async fn a_database_that_stops_taking_writes_says_so_for_every_call_it_loses() {
         .await;
 
     assert_eq!(
-        after.get("/healthz").await.status(),
+        app.get("/healthz").await.status(),
         200,
         "a database that will not take writes must not take the scanner down"
     );

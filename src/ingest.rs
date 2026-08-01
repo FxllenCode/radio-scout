@@ -363,7 +363,8 @@ async fn run_pipeline(
     let audio_bytes = new_call.audio_size.unwrap_or_default();
 
     // Insert the row (+ children) atomically.
-    let call = match insert_in_txn(&state.db, &new_call, auto_populate, now_ms()).await {
+    let call = match insert_in_txn(&state.db, &new_call, auto_populate, state.clock.now_ms()).await
+    {
         Ok(call) => call,
         Err(err) => return ServerError::new("store-call", err).into_response(),
     };

@@ -595,11 +595,12 @@ pub async fn import(
     db: &sea_orm::DatabaseConnection,
     bytes: &[u8],
     options: &ImportOptions,
+    now_ms: i64,
 ) -> Result<ImportReport, ImportError> {
     let parsed = parse(bytes, options.default_system.as_ref()).map_err(ImportError::Parse)?;
 
     let txn = db.begin().await?;
-    let report = apply(&txn, &parsed, options.dry_run, crate::now_ms()).await?;
+    let report = apply(&txn, &parsed, options.dry_run, now_ms).await?;
     if options.dry_run {
         txn.rollback().await?;
     } else {
@@ -1121,7 +1122,7 @@ pub async fn import_talkgroups(
             .is_some_and(|value| !matches!(value.trim(), "false" | "0" | "no" | "off")),
     };
 
-    match import(&state.db, &body, &options).await {
+    match import(&state.db, &body, &options, state.clock.now_ms()).await {
         Ok(report) => (StatusCode::OK, axum::Json(report)).into_response(),
         Err(ImportError::Parse(err)) => (
             StatusCode::BAD_REQUEST,

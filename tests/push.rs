@@ -10,7 +10,6 @@ mod common;
 
 use common::{CallUpload, PushService, SUBSCRIBER_AUTH, SUBSCRIBER_PUBLIC, TestApp};
 use radio_scout::db::entities::push_subscription;
-use radio_scout::push::Push;
 use rstest::rstest;
 use sea_orm::EntityTrait;
 use serde_json::{Value, json};
@@ -80,7 +79,12 @@ async fn the_vapid_public_key_is_served_to_the_client() {
 
     let key = app.get_json("/api/push/key").await;
 
-    assert_eq!(key["key"], common::VAPID_PUBLIC_KEY);
+    // The public half of the identity this boot generated into its own env
+    // file — not a fixture, because a spawned Instance provisions for real.
+    let generated =
+        radio_scout::webpush::VapidKey::parse(&app.env_var(radio_scout::startup::VAPID_KEY_VAR))
+            .expect("the generated identity");
+    assert_eq!(key["key"], generated.public_base64url());
 }
 
 /// The whole point of the ticket: a Call on a watched Talkgroup wakes the
@@ -354,7 +358,7 @@ async fn an_unusable_subscription_is_refused_and_says_why(
 /// subscriptions it could never deliver to.
 #[tokio::test]
 async fn a_server_without_push_configured_refuses_it() {
-    let app = TestApp::builder().push(Push::disabled()).spawn().await;
+    let app = TestApp::builder().without_push().spawn().await;
 
     assert_eq!(app.get("/api/push/key").await.status(), 404);
     let response = app

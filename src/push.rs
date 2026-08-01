@@ -228,7 +228,7 @@ pub async fn subscribe(State(state): State<AppState>, Json(body): Json<Subscribe
         &body.keys.p256dh,
         &body.keys.auth,
         selection.as_deref(),
-        crate::now_ms(),
+        state.clock.now_ms(),
     )
     .await
     {
@@ -354,10 +354,8 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// the other side of the internet, and the Call reaches a notification by
 /// exactly the same broadcast that reaches a socket. A server with no VAPID
 /// identity spawns nothing at all.
-pub fn spawn(state: AppState) {
-    let Some(inner) = state.push.0.clone() else {
-        return;
-    };
+pub fn spawn(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
+    let inner = state.push.0.clone()?;
     let client = reqwest::Client::builder()
         .timeout(SEND_TIMEOUT)
         .build()
@@ -368,7 +366,7 @@ pub fn spawn(state: AppState) {
     let mut calls = state.live.subscribe();
     let mut coalescer = Coalescer::new(inner.config.coalesce);
 
-    tokio::spawn(async move {
+    let sender = tokio::spawn(async move {
         loop {
             match on_broadcast(calls.recv().await) {
                 Fanout::Notify(call) => {
@@ -379,6 +377,7 @@ pub fn spawn(state: AppState) {
             }
         }
     });
+    Some(sender)
 }
 
 /// What the sender does with one fanout result — a pure decision, kept out of
@@ -428,7 +427,7 @@ async fn notify(
         }
     };
 
-    let now_ms = crate::now_ms();
+    let now_ms = state.clock.now_ms();
     for row in subscriptions {
         let Some(delivery) = plan(inner, coalescer, &row, call, now_ms) else {
             continue;

@@ -66,10 +66,7 @@ pub use audio::{silence_ms, wav};
 #[allow(unused_imports)]
 pub use faults::{Faults, INJECTED_IO, faulty_store};
 #[allow(unused_imports)]
-pub use push::{
-    PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRIBER_PUBLIC, VAPID_PRIVATE_KEY,
-    VAPID_PUBLIC_KEY,
-};
+pub use push::{PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRIBER_PUBLIC};
 #[allow(unused_imports)]
 pub use upload::CallUpload;
 #[allow(unused_imports)]
@@ -83,17 +80,16 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use radio_scout::admin::{AdminAuth, AdminConfig, CSRF_HEADER};
-use radio_scout::config::TrustedProxies;
+use clap::Parser;
+use radio_scout::admin::CSRF_HEADER;
+use radio_scout::config::{Cli, Config};
 use radio_scout::db::entities::{call, call_patch, system, tag, talkgroup, talkgroup_ref, unit};
 use radio_scout::db::repo::{self, NewCall, NewLogEvent};
 use radio_scout::db::{self};
-use radio_scout::enhance::{EnhancementConfig, Enhancer};
-use radio_scout::live::LiveFeed;
+use radio_scout::enhance::EnhancementConfig;
+use radio_scout::instance::{self, Credentials, Instance, Wiring};
 use radio_scout::merge;
-use radio_scout::push::{Push, PushConfig};
-use radio_scout::webpush::VapidKey;
-use radio_scout::{AppState, BlobStore, IngestConfig, build_app};
+use radio_scout::{BlobStore, Clock, IngestConfig};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder, Set,
@@ -111,6 +107,13 @@ pub struct TestApp {
     pub db: DatabaseConnection,
     /// The same blob store the app writes audio to.
     pub store: Arc<BlobStore>,
+    /// The running Instance itself (#90) — the same assembly the binary boots,
+    /// and what [`TestApp::restart`] stops and starts.
+    instance: Instance,
+    /// The feeding half of this Instance's operator log sink, until a test asks
+    /// for it with [`TestApp::store_logs`]. The Instance is already draining
+    /// it; what a test adds is *this thread's* logging as a source.
+    log_sink: std::sync::Mutex<Option<radio_scout::logsink::LogSink>>,
     client: reqwest::Client,
     /// The admin session [`TestApp::login`] opened, if any: the raw session
     /// cookie and the CSRF token bound to it. The client's jar carries the
@@ -143,6 +146,51 @@ impl TestApp {
     /// The temp directory the app's database and (default) audio live under.
     pub fn path(&self) -> &Path {
         self.tmp.path()
+    }
+
+    /// Stop this Instance and start it again on the same configuration, the
+    /// same database and the same store (#90).
+    ///
+    /// This is what a real restart is: the workers stop, the port is released,
+    /// and the next boot picks up whatever the last one left behind — a Call
+    /// still marked pending, an archive to leave alone, an ingest key in the
+    /// env file. It replaces the preamble that used to stand a second app up on
+    /// a hand-shared database URL while the first one was still running.
+    ///
+    /// The port changes, because the harness asks for an ephemeral one; the
+    /// handle's `addr` follows it. Server-side state does not survive, so a
+    /// test that was logged in logs in again — which is also true of the thing
+    /// being modelled.
+    pub async fn restart(&mut self) {
+        self.restart_onto(None, |_| {}).await;
+    }
+
+    /// [`TestApp::restart`], with the configuration the next boot will have —
+    /// an operator who edited `radio-scout.toml` before restarting.
+    pub async fn restart_with(&mut self, edit: impl FnOnce(&mut Config)) {
+        self.restart_onto(None, edit).await;
+    }
+
+    /// [`TestApp::restart_with`], and onto a different store — an operator
+    /// whose `[storage]` now points somewhere else, or whose disk filled up
+    /// while the process was down.
+    pub async fn restart_onto(&mut self, store: Option<BlobStore>, edit: impl FnOnce(&mut Config)) {
+        let mut config = self.instance.config().clone();
+        edit(&mut config);
+        self.instance
+            .restart_with(config, store.map(Arc::new))
+            .await
+            .expect("restart");
+        self.addr = loopback(&self.instance);
+        self.db = self.instance.db.clone();
+        self.store = self.instance.store.clone();
+        *self.session.lock().expect("session") = None;
+    }
+
+    /// What this app's own env file pins `var` to — the only copy of a
+    /// credential its boot generated, exactly as an operator would read it.
+    pub fn env_var(&self, var: &str) -> String {
+        env_value(&self.tmp.path().join(ENV_FILE), var)
     }
 
     /// An absolute URL for `path` on this app.
@@ -550,7 +598,10 @@ impl TestApp {
     /// thread's subscriber back. Events land through the real `tracing` layer,
     /// so what a test reads back is what an operator would.
     pub fn store_logs(&self) -> logs::LogCapture {
-        logs::LogCapture::storing(&self.db, radio_scout::logsink::StoredLevel::default())
+        logs::LogCapture::with_sink(self.log_sink.lock().expect("log sink").take().expect(
+            "this app has no sink to feed — it has already been captured, \
+                 or `[log] database_level` is off",
+        ))
     }
 
     /// Wait until the Logs view has an event whose message is `needle`, and
@@ -903,18 +954,33 @@ impl TestApp {
     }
 }
 
-/// Describes an app that differs from the default in some way. Every knob is
-/// optional; [`TestAppBuilder::spawn`] fills in the rest.
+/// Describes an app that differs from the default in some way.
+///
+/// Since #90 the settings are **configuration** edits rather than subsystems
+/// assembled by hand: the builder resolves a [`Config`] and hands it to
+/// `instance::start`, which is the same call the binary makes. `.ingest()`,
+/// `.enhancement()`, `.trusted_proxies()` and `.database_url()` survive as
+/// one-line sugar over that `Config`, beside [`TestAppBuilder::config`] for
+/// anything without sugar and [`TestAppBuilder::toml`] for the file itself.
+///
+/// Three knobs are not configuration and so are still knobs: the object store,
+/// the clock, and the live-feed heartbeat that #94 retires once reaping can be
+/// driven without shortening it.
+///
+/// What went away: `.admin(AdminAuth)` and `.push(Push)`. Both handed the app a
+/// finished subsystem, which is precisely how the old harness could be green
+/// about an Instance that had never been provisioned. A shut admin surface and
+/// a disabled Push are now *outcomes* — [`TestAppBuilder::without_credentials`]
+/// and [`TestAppBuilder::without_push`].
 #[derive(Default)]
 pub struct TestAppBuilder {
-    ingest: Option<IngestConfig>,
-    heartbeat: Option<Duration>,
+    toml: Option<String>,
+    edits: Vec<ConfigEdit>,
     store: Option<BlobStore>,
-    database_url: Option<String>,
-    trusted_proxies: Option<String>,
-    admin: Option<AdminAuth>,
-    push: Option<Push>,
-    enhancement: Option<EnhancementConfig>,
+    heartbeat: Option<Duration>,
+    clock: Option<Clock>,
+    vapid: Option<String>,
+    unwritable_env: bool,
 }
 
 /// What [`TestApp::fail_writes_to`] raises, on either dialect — so a test can
@@ -929,29 +995,62 @@ pub const INJECTED_WRITE: &str = "injected write failure";
 pub const FORWARDED_FOR: &str = "x-forwarded-for";
 
 /// The admin password every spawned app is gated by (#19), so any test can log
-/// in without configuring one. A test *about* provisioning takes
-/// [`TestAppBuilder::admin`] instead.
+/// in without configuring one.
+///
+/// It is a *provisioned* password, not an injected `AdminAuth`: the harness
+/// hands it to `instance::start` as `RADIO_SCOUT_ADMIN_PASSWORD` would, and the
+/// Instance provisions the admin surface from it exactly as a boot does.
 pub const ADMIN_PASSWORD: &str = "test-admin-password";
 
+/// A value that is not a P-256 key, so provisioning leaves Web Push off — the
+/// same outcome an operator gets from a typo'd `RADIO_SCOUT_VAPID_PRIVATE_KEY`.
+const NOT_A_VAPID_KEY: &str = "not-a-key";
+
 impl TestAppBuilder {
+    /// Edit the configuration this app is started from — the general seam, for
+    /// a setting with no sugar of its own.
+    ///
+    /// Applied after the harness's own baseline, so an edit always wins.
+    pub fn config(mut self, edit: impl FnOnce(&mut Config) + 'static) -> Self {
+        self.edits.push(Box::new(edit));
+        self
+    }
+
+    /// Start from this `radio-scout.toml` — the file itself, resolved the way a
+    /// boot resolves it, for a test about configuration rather than about a
+    /// setting's effect.
+    ///
+    /// Everything not written in it is at its shipped default, including
+    /// `[retention] days`; the harness still owns `base_dir` and the database
+    /// URL, because a test cannot be given the operator's disk.
+    pub fn toml(mut self, text: impl Into<String>) -> Self {
+        self.toml = Some(text.into());
+        self
+    }
+
     /// Ingest configuration — the dedup window and the auto-populate toggle
     /// (#5, #8).
-    pub fn ingest(mut self, ingest: IngestConfig) -> Self {
-        self.ingest = Some(ingest);
-        self
+    pub fn ingest(self, ingest: IngestConfig) -> Self {
+        self.config(move |config| config.ingest = ingest)
     }
 
     /// Live-feed heartbeat period. Drive it short so heartbeat and
     /// dead-connection reaping (#9) are observable without waiting the
-    /// production 30 s.
+    /// production 30 s. #94 removes this, along with the need for it.
     pub fn heartbeat(mut self, heartbeat: Duration) -> Self {
         self.heartbeat = Some(heartbeat);
         self
     }
 
-    /// Use this blob store instead of a temp filesystem one — an S3-backed store
-    /// exercises the presigned-redirect serving path offline (SigV4 is computed
-    /// locally).
+    /// Read the time from here rather than from the machine's clock (#90).
+    pub fn clock(mut self, clock: Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// Use this blob store instead of the one `[storage]` describes — an
+    /// S3-backed store exercises the presigned-redirect serving path offline
+    /// (SigV4 is computed locally), and [`faulty_store`] makes I/O fail.
     pub fn store(mut self, store: BlobStore) -> Self {
         self.store = Some(store);
         self
@@ -960,94 +1059,131 @@ impl TestAppBuilder {
     /// Believe `X-Forwarded-For` from these proxies — a comma-separated list of
     /// addresses or CIDR blocks, exactly as `[server] trusted_proxies` takes
     /// them. The default trusts nobody, which is what ships.
-    pub fn trusted_proxies(mut self, proxies: &str) -> Self {
-        self.trusted_proxies = Some(proxies.to_string());
+    pub fn trusted_proxies(self, proxies: &str) -> Self {
+        let proxies: Vec<_> = proxies
+            .split(',')
+            .map(|entry| entry.trim().parse().expect("an address or CIDR block"))
+            .collect();
+        self.config(move |config| config.server.trusted_proxies = proxies)
+    }
+
+    /// Boot with no Web Push identity, the way an operator with a typo'd key
+    /// does: notifications are off and the routes say so.
+    pub fn without_push(mut self) -> Self {
+        self.vapid = Some(NOT_A_VAPID_KEY.to_string());
         self
     }
 
-    /// Gate the admin surface with this rather than the default
-    /// [`ADMIN_PASSWORD`] — a shorter session TTL, or
-    /// [`AdminAuth::locked`] for an app nobody can get into.
-    pub fn admin(mut self, admin: AdminAuth) -> Self {
-        self.admin = Some(admin);
-        self
-    }
-
-    /// Wire Web Push differently — a shorter coalescing window, or
-    /// [`Push::disabled`] for a server with no VAPID identity at all. The
-    /// default gives every app [`VAPID_PRIVATE_KEY`], so push is on and its
-    /// public key is a constant.
-    pub fn push(mut self, push: Push) -> Self {
-        self.push = Some(push);
+    /// Boot with the admin surface shut, the way an operator whose env file
+    /// cannot be written does: a password was generated, nobody can read it, so
+    /// none is set and nothing authenticates.
+    ///
+    /// A provisioning *outcome* rather than an injected `AdminAuth` — the
+    /// difference between proving the state is refusable and proving a boot can
+    /// arrive at it. It takes Web Push with it, for the same reason: the two
+    /// generated credentials share the file that cannot be written.
+    pub fn without_credentials(mut self) -> Self {
+        self.unwritable_env = true;
         self
     }
 
     /// Turn audio enhancement on (#20). The default is what ships — off — so
     /// every other test in the suite is untouched by this existing.
-    pub fn enhancement(mut self, enhancement: EnhancementConfig) -> Self {
-        self.enhancement = Some(enhancement);
-        self
+    pub fn enhancement(self, enhancement: EnhancementConfig) -> Self {
+        self.config(move |config| config.enhancement = enhancement)
     }
 
     /// Use this database instead of the one this run would have chosen.
     ///
-    /// A per-call-site override, for a test about *which* database an app used.
-    /// The dual-dialect run ADR-0009 asks for does not go through here: it is
-    /// [`postgres_server`], which moves the whole suite at once and gives every
-    /// spawned app a database of its own.
-    pub fn database_url(mut self, url: impl Into<String>) -> Self {
-        self.database_url = Some(url.into());
-        self
+    /// A per-call-site override, for a test about *which* database an app used
+    /// — two apps sharing one is how a restart used to be written, which
+    /// [`TestApp::restart`] now does properly. The dual-dialect run ADR-0009
+    /// asks for does not go through here: it is [`postgres_server`], which
+    /// moves the whole suite at once and gives every spawned app a database of
+    /// its own.
+    pub fn database_url(self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        self.config(move |config| config.database.url = Some(url))
     }
 
     /// Bring the app up.
     pub async fn spawn(self) -> TestApp {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store = Arc::new(
-            self.store
-                .unwrap_or_else(|| BlobStore::filesystem(tmp.path().join("audio")).expect("blob")),
-        );
-        let url = match self.database_url {
-            Some(url) => url,
-            None => match postgres_server() {
-                Some(server) => create_test_database(&server).await,
-                None => format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display()),
-            },
-        };
-        let db = db::connect(&url).await.expect("db connect");
-
-        let mut state = AppState::new(store.clone(), db.clone(), self.ingest.unwrap_or_default());
-        if let Some(heartbeat) = self.heartbeat {
-            state.live = LiveFeed::with_heartbeat(heartbeat);
-        }
-        if let Some(proxies) = self.trusted_proxies {
-            state.trusted_proxies = trusted_proxies(&proxies);
-        }
-        state.admin = self
-            .admin
-            .unwrap_or_else(|| AdminAuth::new(ADMIN_PASSWORD, AdminConfig::default()));
-        state.push = self.push.unwrap_or_else(|| {
-            Push::new(
-                VapidKey::parse(VAPID_PRIVATE_KEY).expect("the test VAPID key"),
-                PushConfig::default(),
+        let mut config = match &self.toml {
+            Some(text) => radio_scout::config::resolve(
+                &Cli::parse_from(["radio-scout"]),
+                |_| None,
+                Some(&radio_scout::config::ConfigFile::new(
+                    tmp.path().join("radio-scout.toml"),
+                    text.clone(),
+                )),
             )
+            .expect("a configuration the harness was given"),
+            None => baseline_config(),
+        };
+        config.server.base_dir = tmp.path().to_path_buf();
+        config.database.url = Some(match postgres_server() {
+            Some(server) => create_test_database(&server).await,
+            None => format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display()),
         });
+        for edit in self.edits {
+            edit(&mut config);
+        }
 
-        state.enhancer = match self.enhancement {
-            Some(config) => Enhancer::from_config(config),
-            None => Enhancer::disabled(),
+        // The sink is made before the subscriber and drained by the Instance,
+        // exactly as `main.rs` does it — so a test that calls `store_logs`
+        // reads back what the *running Instance* stored, not a second sink
+        // beside it.
+        // `None` when `[log] database_level` is `off`, which a test is entitled
+        // to configure — the sink is a setting like any other, and the harness
+        // overriding configuration must not mean the harness refusing it.
+        let (sink, log_writer) = match radio_scout::logsink::channel(config.log.database_level) {
+            Some((sink, writer)) => (Some(sink), Some(writer)),
+            None => (None, None),
         };
 
-        // The real sender, on the real fanout: a test asserts on the request
-        // that leaves the process, not on a decision to make one.
-        radio_scout::push::spawn(state.clone());
-        // ...and the real worker, on the real queue, for the same reason.
-        radio_scout::enhance::spawn(state.clone());
+        // A directory is not a writable env file, so a generated credential
+        // cannot be saved and is therefore never put into service.
+        let env_file = match self.unwritable_env {
+            true => tmp.path().join("env-is-a-directory"),
+            false => tmp.path().join(ENV_FILE),
+        };
+        if self.unwritable_env {
+            std::fs::create_dir(&env_file).expect("an unwritable env path");
+        }
+        let mut wiring = Wiring::default()
+            .credentials(Credentials {
+                env_file: Some(env_file),
+                // Configured, so `login()` knows it; the other two are
+                // generated into this app's own env file, which is what makes a
+                // spawned Instance genuinely provisioned.
+                admin_password: (!self.unwritable_env).then(|| ADMIN_PASSWORD.to_string()),
+                vapid_key: self.vapid,
+                ingest_key: None,
+            })
+            // ...so an app with the sink off simply has no writer to drain.
+            .maybe_log_writer(log_writer)
+            // Loopback, not the binary's `0.0.0.0`: a suite that opened a port
+            // on every interface would be a firewall prompt per test binary,
+            // and there is nothing to prove by listening where nobody calls.
+            .bind(LOOPBACK);
+        if let Some(store) = self.store {
+            wiring = wiring.store(store);
+        }
+        if let Some(clock) = self.clock {
+            wiring = wiring.clock(clock);
+        }
+        if let Some(heartbeat) = self.heartbeat {
+            wiring = wiring.heartbeat(heartbeat);
+        }
 
+        let instance = instance::start(config, wiring).await.expect("start");
         TestApp {
-            addr: serve(build_app(state)).await,
-            db,
-            store,
+            addr: loopback(&instance),
+            db: instance.db.clone(),
+            store: instance.store.clone(),
+            instance,
+            log_sink: std::sync::Mutex::new(sink),
             // With a cookie jar, so the client behaves like the browser the
             // admin session (#19) is designed around: log in once and every
             // later request on this handle carries the session.
@@ -1059,6 +1195,63 @@ impl TestAppBuilder {
             tmp,
         }
     }
+}
+
+/// One caller-supplied change to the configuration an app is started from.
+type ConfigEdit = Box<dyn FnOnce(&mut Config)>;
+
+/// The env file an Instance writes its generated credentials into.
+pub const ENV_FILE: &str = ".env";
+
+/// What an env file pins `var` to — the operator's only copy of a generated
+/// credential, and so the only way a test can present one.
+pub fn env_value(env_file: &Path, var: &str) -> String {
+    std::fs::read_to_string(env_file)
+        .expect("an env file")
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{var}=")))
+        .unwrap_or_else(|| panic!("{var} was never written to {}", env_file.display()))
+        .to_string()
+}
+
+/// Poll until `check` is true, failing with `what` rather than hanging.
+///
+/// Several things an Instance does are deliberately asynchronous — the sweeper,
+/// the enhancement worker, the log sink — so there is no completion to await
+/// from outside. Polling the *observable* state keeps the assertion about what
+/// an Operator could see; #93's idle signals replace this with a real one.
+pub async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !check().await {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Where a spawned app listens: an ephemeral loopback port.
+const LOOPBACK: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+
+/// `host:port` for a running Instance, as a test addresses it.
+fn loopback(instance: &Instance) -> String {
+    format!("127.0.0.1:{}", instance.addr.port())
+}
+
+/// The configuration a spawned app starts from: everything shipped, except that
+/// **Retention keeps everything** — both windows.
+///
+/// A spawned Instance runs the sweeper for real (#90), and the suite dates its
+/// fixtures by hand so that assertions about ordering and filtering are
+/// deterministic: Calls in 1970, log events in 2020. The shipped windows —
+/// seven days of audio, thirty of logs — would prune those, and the boot sweep
+/// is a background task, so *when* it got to them would decide whether a test
+/// passed. Turning the policy off rather than the sweeper keeps what runs
+/// identical to what ships; a test that is about pruning sets a window itself.
+fn baseline_config() -> Config {
+    let mut config = Config::default();
+    config.retention.days = 0;
+    config.retention.log_days = 0;
+    config
 }
 
 /// The Postgres server this run was handed, or `None` for the SQLite default.
@@ -1115,35 +1308,6 @@ pub fn database_url_in(server: &str, name: &str) -> String {
         Some(query) => format!("{root}/{name}?{query}"),
         None => format!("{root}/{name}"),
     }
-}
-
-/// The trust list `[server] trusted_proxies = [...]` would have produced.
-fn trusted_proxies(entries: &str) -> TrustedProxies {
-    entries
-        .split(',')
-        .map(|entry| entry.trim().parse().expect("an address or CIDR block"))
-        .collect()
-}
-
-/// Serve `app` on an ephemeral loopback port, returning its `host:port`.
-///
-/// With connect info, exactly as the binary serves it: the request log (#28)
-/// reads the peer address from there, so a harness without it would make the
-/// address field untestable.
-async fn serve(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .expect("serve");
-    });
-    format!("127.0.0.1:{}", addr.port())
 }
 
 /// A response header as text, or `None` if it is absent (or not ASCII). Header

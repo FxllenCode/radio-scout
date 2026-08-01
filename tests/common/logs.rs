@@ -30,8 +30,7 @@ use std::io;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
-use radio_scout::logsink::{LogSink, StoredLevel};
-use sea_orm::DatabaseConnection;
+use radio_scout::logsink::LogSink;
 use tracing::level_filters::LevelFilter;
 use tracing::subscriber::{DefaultGuard, Interest};
 use tracing::{Event, Metadata, Subscriber, span};
@@ -139,18 +138,19 @@ impl LogCapture {
         Self::install(None)
     }
 
-    /// Capture the console **and** store events in `db`, the way a running
-    /// instance does once the operator log surface is on (#30).
+    /// Capture the console **and** feed the operator log sink (#30) this app
+    /// was started with, so a test can drive a real request and read the result
+    /// back through `GET /api/admin/logs` — the only place an operator sees it.
     ///
     /// The sink is a second layer beside the capture, exactly as
-    /// `observability::subscriber` wires it beside stdout — so a test drives a
-    /// real request and then reads the result back through
-    /// `GET /api/admin/logs`, which is the only place an operator sees it. The
-    /// writer task rides the same current-thread runtime as the server, and the
-    /// guard keeps both installed for as long as the test holds it.
-    pub fn storing(db: &DatabaseConnection, level: StoredLevel) -> Self {
-        let (sink, writer) = radio_scout::logsink::channel(level).expect("an enabled sink");
-        writer.spawn(db.clone());
+    /// `observability::subscriber` wires it beside stdout, and the guard keeps
+    /// both installed for as long as the test holds it. It arrives from the
+    /// caller rather than being made here because of the order a boot needs
+    /// (#90): the channel exists *before* the subscriber, and its draining half
+    /// is handed to `instance::start`, which spawns it once the database is
+    /// open — so the migration lines written before there was anywhere to store
+    /// them still reach the Logs view.
+    pub fn with_sink(sink: LogSink) -> Self {
         Self::install(Some(sink))
     }
 

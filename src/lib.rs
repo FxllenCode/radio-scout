@@ -18,6 +18,7 @@ pub mod failure;
 pub mod http_log;
 pub mod import;
 pub mod ingest;
+pub mod instance;
 pub mod live;
 pub mod logsink;
 pub mod logview;
@@ -77,6 +78,8 @@ pub struct AppState {
     /// The enhancement queue, or nothing at all when `[enhancement] mode` is
     /// `off` — which is what ships (#20).
     pub enhancer: Enhancer,
+    /// What time it is, for everything a handler stamps or expires (#90).
+    pub clock: Clock,
 }
 
 impl AppState {
@@ -93,6 +96,7 @@ impl AppState {
             admin: AdminAuth::locked(),
             push: Push::disabled(),
             enhancer: Enhancer::disabled(),
+            clock: Clock::system(),
         }
     }
 }
@@ -400,11 +404,61 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// What time it is, as an **input** rather than a global (#90).
+///
+/// An Instance is wired with one and everything it assembles reads it: ingest
+/// stamps a Call with it, the Retention sweeper decides what has aged out by
+/// it, Web Push coalesces on it. That is what makes those decisions testable —
+/// "this Call is one hour old" is a fact a test can arrange, where "this Call
+/// is one hour old *right now*" is a sleep.
+///
+/// A moment stopped at is all this offers. Moving a frozen clock forward is
+/// what a test proving a *timeout* would want, and nothing needs one yet —
+/// #93's idle signals and #94's reaping table are where that question actually
+/// arises, so the knob belongs with whichever of them turns out to need it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Clock(Option<i64>);
+
+impl Clock {
+    /// The machine's clock.
+    pub fn system() -> Self {
+        Clock(None)
+    }
+
+    /// A clock stopped at `at_ms`.
+    pub fn frozen(at_ms: i64) -> Self {
+        Clock(Some(at_ms))
+    }
+
+    /// What time it is, in unix milliseconds.
+    pub fn now_ms(&self) -> i64 {
+        self.0.unwrap_or_else(now_ms)
+    }
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Clock::system()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     use rstest::rstest;
+
+    /// A frozen clock stays where it was put — which is what lets a test say
+    /// "this Call is an hour old" instead of sleeping for an hour — and the
+    /// default is the machine's, so a scanner is unaffected by this existing.
+    #[test]
+    fn a_frozen_clock_stays_put_and_the_default_does_not() {
+        assert_eq!(Clock::frozen(1_000).now_ms(), 1_000);
+
+        let real = Clock::default().now_ms();
+
+        assert!(real > 1_700_000_000_000, "that is not a real wall clock");
+    }
 
     /// The pending Call's ceiling is written twice — once as a header string
     /// for the proxied response, once as a number the S3 redirect takes the

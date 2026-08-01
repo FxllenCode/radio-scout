@@ -685,20 +685,17 @@ impl Enhancer {
 /// that are also serving audio, taking uploads and running a database; a pool
 /// sized to the machine would make enhancement the thing that makes everything
 /// else slow, which is precisely what US 34 exists to prevent.
-pub fn spawn(state: AppState) {
-    let Some(inner) = state.enhancer.0.clone() else {
-        return;
-    };
-    let Some(mut inbox) = inner.inbox.lock().expect("enhancement inbox").take() else {
-        return;
-    };
+pub fn spawn(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
+    let inner = state.enhancer.0.clone()?;
+    let mut inbox = inner.inbox.lock().expect("enhancement inbox").take()?;
 
-    tokio::spawn(async move {
+    let worker = tokio::spawn(async move {
         catch_up(&state).await;
         while let Some(call_id) = inbox.recv().await {
             run(&state, &inner.config, call_id).await;
         }
     });
+    Some(worker)
 }
 
 /// Re-queue Calls that were pending when the process last stopped.

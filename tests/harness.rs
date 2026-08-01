@@ -12,7 +12,9 @@
 //! the ones the rest of the suite is written in.
 
 mod common;
-use common::{CallUpload, TestApp, frame_within, next_json, no_frame_within, subscribe};
+use common::{
+    ADMIN_PASSWORD, CallUpload, TestApp, frame_within, next_json, no_frame_within, subscribe,
+};
 
 use std::time::Duration;
 
@@ -706,4 +708,111 @@ async fn get_json_checks_the_status_on_the_way_past() {
     let page = app.get_json("/api/calls").await;
 
     assert!(page["results"].is_array(), "{page}");
+}
+
+// ---------------------------------------------------------------------------
+// A spawned app is the Instance the binary boots (#90). Everything below is
+// about the assembly rather than about a route: the workers that used to be
+// missing from the harness entirely, the configuration seam that replaced
+// hand-wiring each subsystem, and the restart that replaced standing a second
+// app up on a hand-shared database.
+// ---------------------------------------------------------------------------
+
+/// **The Retention sweeper runs**, which the harness used to omit — so every
+/// test in the suite ran against an instance with no sweeper, and #10's
+/// behaviour was only ever exercised by calling `sweep` directly.
+///
+/// The policy is turned off by default here (`baseline_config`) because the
+/// suite dates its fixtures in 1970; a test that wants pruning asks for it, and
+/// then it happens on the next boot exactly as it does on an operator's.
+#[tokio::test]
+async fn a_spawned_app_runs_the_retention_sweeper() {
+    let mut app = TestApp::with_key("k").await;
+    app.upload_ok(CallUpload::new()).await;
+    assert_eq!(app.count::<call::Entity>().await, 1);
+
+    // A week's policy, and a Call from 1970: the boot sweep prunes it.
+    app.restart_with(|config| config.retention.days = 7).await;
+
+    common::eventually("the sweeper never ran on a spawned app", async || {
+        app.count::<call::Entity>().await == 0
+    })
+    .await;
+}
+
+/// **A restart is one handle**, and it is a real one: the archive and the audio
+/// survive, and the port does not.
+#[tokio::test]
+async fn a_restart_keeps_the_archive_and_moves_to_a_new_port() {
+    let mut app = TestApp::with_key("k").await;
+    app.upload_ok(CallUpload::new()).await;
+    let key = app.the_call().await.object_key;
+    let before = app.addr.clone();
+
+    app.restart().await;
+
+    assert_ne!(app.addr, before, "a stopped app released its port");
+    assert_eq!(app.get("/healthz").await.status(), 200);
+    assert_eq!(app.count::<call::Entity>().await, 1, "the archive survived");
+    assert!(app.stored(&key).await, "the audio survived");
+}
+
+/// **A shut admin surface is a provisioning outcome**, reachable from the
+/// harness by arranging its cause: an env file that cannot be written means the
+/// generated password exists only inside the process, so none is set.
+///
+/// This is what `.admin(AdminAuth::locked())` used to fake. Faking it proved
+/// the state was refusable; this proves a boot can arrive at it — and that the
+/// same boot takes Web Push with it, because the two generated credentials
+/// share the file that could not be written.
+#[tokio::test]
+async fn an_app_that_could_not_save_its_credentials_has_none() {
+    let app = TestApp::builder().without_credentials().spawn().await;
+
+    assert_eq!(
+        app.login_as(ADMIN_PASSWORD).await.status(),
+        401,
+        "an unprovisioned admin surface let somebody in"
+    );
+    assert_eq!(app.get("/api/push/key").await.status(), 404);
+    assert_eq!(
+        app.get("/healthz").await.status(),
+        200,
+        "...and the scanner keeps scanning, which is the whole bargain"
+    );
+}
+
+/// ...and so does a configuration **file**, resolved the way a boot resolves
+/// one. A test about configuration should be able to write the thing an
+/// operator writes.
+#[tokio::test]
+async fn a_configuration_file_reaches_the_running_app() {
+    let app = TestApp::builder()
+        .toml("[ingest]\nauto_populate = false\n")
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+
+    app.upload_ok(CallUpload::new().set("source", 4242)).await;
+
+    assert_eq!(
+        app.count::<radio_scout::db::entities::unit::Entity>().await,
+        0,
+        "`auto_populate = false` never left the file"
+    );
+}
+
+/// The clock is an input (#90), so a harness can put an app at a moment of its
+/// choosing rather than at whatever time the test machine says it is.
+#[tokio::test]
+async fn a_spawned_app_reads_the_clock_it_was_given() {
+    let app = TestApp::builder()
+        .clock(radio_scout::Clock::frozen(1_700_000_000_000))
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+
+    app.upload_ok(CallUpload::new()).await;
+
+    assert_eq!(app.the_call().await.created_at_ms, 1_700_000_000_000);
 }

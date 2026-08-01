@@ -5,7 +5,6 @@ mod common;
 
 use common::logs::LogCapture;
 use common::{ADMIN_PASSWORD, TestApp, header_of};
-use radio_scout::admin::{AdminAuth, AdminConfig};
 use radio_scout::db::entities::talkgroup;
 use rstest::rstest;
 use serde_json::json;
@@ -214,13 +213,7 @@ async fn logging_out_revokes_the_session_server_side() {
 /// spends three Argon2 verifications rather than the shipped five.
 async fn app_locking_after_three() -> TestApp {
     TestApp::builder()
-        .admin(AdminAuth::new(
-            ADMIN_PASSWORD,
-            AdminConfig {
-                lockout_attempts: 3,
-                ..AdminConfig::default()
-            },
-        ))
+        .config(|config| config.admin.lockout_attempts = 3)
         .spawn()
         .await
 }
