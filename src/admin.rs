@@ -78,19 +78,28 @@ pub const SESSION_COOKIE: &str = "rs_session";
 /// The header an unsafe admin request echoes its session's CSRF token in.
 pub const CSRF_HEADER: &str = "x-csrf-token";
 
-/// Tuning for the admin surface, from `[admin]` (#17).
-#[derive(Debug, Clone, PartialEq)]
+/// Tuning for the admin surface — and the `[admin]` section itself (#17, #87).
+///
+/// The admin *password* is deliberately not here: like the ingest key, first run
+/// **writes** it, so it lives in the environment and `.env`
+/// (`RADIO_SCOUT_ADMIN_PASSWORD`) rather than in a file `--write-config`
+/// generates. Everything about it that is a knob rather than a secret is here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     /// How long a session survives without being used. Refreshed on every
     /// authenticated request.
+    #[serde(rename = "session_idle_secs", with = "crate::config::secs")]
     pub session_idle: Duration,
     /// How long a session may live at all, however active. Never refreshed.
+    #[serde(rename = "session_max_secs", with = "crate::config::secs")]
     pub session_max: Duration,
     /// Failed logins one address may spend before it is locked out.
     pub lockout_attempts: u32,
     /// How long a spent address stays locked out, measured from its **last**
     /// attempt — so hammering a locked address keeps it locked, and walking
     /// away clears it.
+    #[serde(rename = "lockout_secs", with = "crate::config::secs")]
     pub lockout: Duration,
 }
 

@@ -156,6 +156,101 @@ fn every_setting_the_docs_name_is_one_the_binary_reads() {
     }
 }
 
+/// The three credentials that are not settings.
+///
+/// First run **writes** each of these, so none has a TOML key, a default or a
+/// place in `--write-config`'s output — they live in `.env` and nowhere else
+/// (ADR-0012). They are named here rather than derived because that is exactly
+/// what makes them different from everything in [`SETTINGS`]: a fourth appearing
+/// in `.env.example` should have to be argued for in this list.
+const WRITTEN_CREDENTIALS: &[&str] = &[
+    "RADIO_SCOUT_API_KEY",
+    "RADIO_SCOUT_ADMIN_PASSWORD",
+    "RADIO_SCOUT_VAPID_PRIVATE_KEY",
+];
+
+/// ...and the one variable that selects a file rather than a setting inside one.
+const CONFIG_FILE_VAR: &str = "RADIO_SCOUT_CONFIG";
+
+/// **`.env.example` is the environment layer's reference, so it comes under the
+/// settings table (#87).**
+///
+/// Both directions, and each catches a different lie. A setting missing from the
+/// file is one an operator configuring a container has no way to discover —
+/// `--write-config` documents the TOML spelling, and this file is the only place
+/// the variable spelling is written down. A variable *in* the file that is not a
+/// setting is worse: it reads as configuration and does nothing, which is
+/// indistinguishable from a default until someone works out why their value is
+/// being ignored.
+///
+/// Matched on the assignment (`NAME=`) rather than anywhere in the prose, so the
+/// paragraphs above each block can go on explaining a setting without being
+/// mistaken for one.
+#[test]
+fn the_example_environment_file_shows_exactly_the_settings_that_exist() {
+    let text = read(".env.example");
+    let assigned: BTreeSet<String> = text
+        .lines()
+        .map(|line| line.trim_start_matches('#').trim())
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, _)| name.trim().to_string())
+        .filter(|name| name.starts_with("RADIO_SCOUT_") || name == "RUST_LOG")
+        .collect();
+
+    for setting in radio_scout::config::SETTINGS {
+        assert!(
+            assigned.contains(setting.var),
+            ".env.example never shows `{}` (the environment spelling of `{}`)",
+            setting.var,
+            setting.key
+        );
+    }
+
+    let known: BTreeSet<&str> = radio_scout::config::SETTINGS
+        .iter()
+        .map(|setting| setting.var)
+        .chain(WRITTEN_CREDENTIALS.iter().copied())
+        .chain(std::iter::once(CONFIG_FILE_VAR))
+        .collect();
+    for name in &assigned {
+        assert!(
+            known.contains(name.as_str()),
+            ".env.example tells the reader to set `{name}`, which no setting reads"
+        );
+    }
+}
+
+/// ...and every value it shows is one that setting would accept.
+///
+/// Deliberately not "equal to the settings table's example": the two are
+/// answering different questions. The table's example must be a value that is
+/// *not* the default, or it could not prove a variable is read at all; the file
+/// mostly shows an operator the default, which is the more useful thing to see
+/// beside a commented-out line. What must be true of both is that they work —
+/// so this asks the setting itself, which is the only thing that knows.
+///
+/// The failure it catches is the ordinary one: a default changes, or a value
+/// stops being legal (`database_level = "debug"` did, with ADR-0011 rule 5), and
+/// the line an operator would have copied goes on sitting there.
+#[test]
+fn every_value_the_example_environment_file_shows_is_one_that_setting_accepts() {
+    let text = read(".env.example");
+
+    for setting in radio_scout::config::SETTINGS {
+        let shown = text
+            .lines()
+            .map(|line| line.trim_start_matches('#').trim())
+            .find_map(|line| line.strip_prefix(setting.var)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("{} is never assigned a value", setting.var));
+        if let Err(error) = setting.apply(&mut Default::default(), shown) {
+            panic!(
+                ".env.example shows `{}={shown}`, which is refused: {error}",
+                setting.var
+            );
+        }
+    }
+}
+
 /// The README's platform table and the release matrix name the same targets.
 ///
 /// Both directions matter, and for different reasons: a target in the table that

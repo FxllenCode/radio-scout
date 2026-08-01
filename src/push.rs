@@ -33,7 +33,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -45,13 +45,22 @@ use crate::failure::ServerError;
 use crate::selection::Selection;
 use crate::webpush::VapidKey;
 
-/// How Web Push behaves, from `[push]` (#17, ADR-0012).
-#[derive(Debug, Clone)]
+/// How Web Push behaves — and the `[push]` section itself (#17, ADR-0012, #87).
+///
+/// The VAPID identity is deliberately not here, for the same reason the admin
+/// password isn't: first run **writes** it, so it lives in the environment and
+/// `.env` as `RADIO_SCOUT_VAPID_PRIVATE_KEY`. Everything here is a knob rather
+/// than a secret.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct PushConfig {
-    /// At most one notification per Talkgroup per device in this window.
+    /// At most one notification per Talkgroup per device in this window. `0`
+    /// notifies about every Call.
+    #[serde(rename = "coalesce_secs", with = "crate::config::secs")]
     pub coalesce: Duration,
     /// How long a push service should hold a notification for a device that is
     /// offline before giving up.
+    #[serde(rename = "ttl_secs", with = "crate::config::secs")]
     pub ttl: Duration,
     /// The VAPID `sub` claim: how a push service's operator reaches ours.
     pub subject: String,

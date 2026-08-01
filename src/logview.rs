@@ -46,7 +46,7 @@ const MAX_LIMIT: u64 = 500;
 /// ordering, which is what makes `level=warn` mean "warnings and worse".
 ///
 /// DEBUG and TRACE are absent because the sink cannot store them (ADR-0011 rule
-/// 5, `LogSinkConfig::LEVELS`), so offering them as filters would offer an
+/// 5, `logsink::StoredLevel::LEVELS`), so offering them as filters would offer an
 /// operator a control that does nothing.
 const STORED_LEVELS: [Level; 3] = [Level::ERROR, Level::WARN, Level::INFO];
 
@@ -143,7 +143,7 @@ fn parse_search(params: &HashMap<String, String>) -> Result<LogSearch, String> {
 /// hide the errors".
 ///
 /// Case-insensitive, unlike the *configuration* spelling of the same levels
-/// (`LogSinkConfig::level_from_str`, which takes one spelling so a file, a flag
+/// (`logsink::StoredLevel`'s `FromStr`, which takes one spelling so a file, a flag
 /// and an environment variable cannot drift). The difference is deliberate and
 /// follows #13: a query parameter is typed into a URL bar as often as it is
 /// generated, and the archive search already accepts `newest`/`desc` for the
@@ -207,7 +207,7 @@ mod tests {
     /// from offering a level no row can have.
     #[test]
     fn the_filterable_levels_are_the_storable_ones() {
-        let storable: Vec<Level> = crate::logsink::LogSinkConfig::LEVELS
+        let storable: Vec<Level> = crate::logsink::StoredLevel::LEVELS
             .into_iter()
             .filter_map(|(_, level)| level)
             .collect();

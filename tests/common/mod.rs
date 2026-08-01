@@ -550,7 +550,7 @@ impl TestApp {
     /// thread's subscriber back. Events land through the real `tracing` layer,
     /// so what a test reads back is what an operator would.
     pub fn store_logs(&self) -> logs::LogCapture {
-        logs::LogCapture::storing(&self.db, radio_scout::logsink::LogSinkConfig::default())
+        logs::LogCapture::storing(&self.db, radio_scout::logsink::StoredLevel::default())
     }
 
     /// Wait until the Logs view has an event whose message is `needle`, and

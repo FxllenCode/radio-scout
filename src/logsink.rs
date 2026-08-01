@@ -18,7 +18,7 @@
 //!   database that is slow, broken or not there yet cannot slow down, fail, or
 //!   be noticed by the request that produced the event.
 //! - **Rule 5 applies to what is stored**, not just to what is printed. The
-//!   sink **refuses to run below INFO** ([`LogSinkConfig::LEVELS`]): a listener's
+//!   sink **refuses to run below INFO** ([`StoredLevel::LEVELS`]): a listener's
 //!   address rides only lines that are already DEBUG (`crate::http_log`), so
 //!   flooring the sink puts them out of reach by construction rather than by a
 //!   redaction pass that could be wrong. It also keeps a Pi from writing a row
@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sea_orm::DatabaseConnection;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender, error::TryRecvError};
 use tracing::field::{Field, Visit};
 use tracing::level_filters::LevelFilter;
@@ -86,27 +87,28 @@ const REQUEST_ID_FIELD: &str = "request_id";
 /// long enough to matter.
 const MAX_BATCH: usize = 128;
 
-/// How the sink is configured (`[log]`, #17).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogSinkConfig {
-    /// The least severe level stored, or `None` for a sink that is off.
-    pub level: Option<Level>,
-    /// How many events may be waiting to be written before arriving ones are
-    /// dropped. Dropping is the point: the alternative is making a log call
-    /// wait on a database.
-    pub capacity: usize,
-}
+/// What the operator log surface stores (`[log] database_level`, #17, #30) —
+/// the least severe level written to the `logs` table, or nothing at all.
+///
+/// A type rather than a `String` that something remembers to check, so a level
+/// this sink refuses is refused wherever it was written (the
+/// [`crate::config::ProxyNet`] move). Since #87 this *is* the setting: the
+/// section holds a `StoredLevel`, and there is no second shape to keep in step.
+///
+/// The queue depth that used to sit beside it is now [`QUEUE_CAPACITY`]. It was
+/// a field of a configuration type with no key, no environment spelling, no
+/// template line and no validation — a knob nobody could turn, which is a worse
+/// thing to leave in a settings type than in a constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredLevel(Option<Level>);
 
-impl Default for LogSinkConfig {
+impl Default for StoredLevel {
     fn default() -> Self {
-        LogSinkConfig {
-            level: Some(Level::INFO),
-            capacity: 1024,
-        }
+        StoredLevel(Some(Level::INFO))
     }
 }
 
-impl LogSinkConfig {
+impl StoredLevel {
     /// The levels the sink may be set to, loudest first — everything ADR-0011
     /// rule 7 says an operator must act on or was told about, and nothing
     /// below.
@@ -124,35 +126,95 @@ impl LogSinkConfig {
         ("info", Some(Level::INFO)),
     ];
 
-    /// The level named by `text`, or `None` if it isn't one this sink accepts.
-    /// `Some(None)` is a sink that is off, which is a valid answer.
-    pub fn level_from_str(text: &str) -> Option<Option<Level>> {
-        Self::LEVELS
-            .iter()
-            .find(|(name, _)| *name == text)
-            .map(|(_, level)| *level)
+    /// A sink that stores nothing.
+    pub const OFF: StoredLevel = StoredLevel(None);
+
+    /// The least severe level stored, or `None` for a sink that is off.
+    pub fn level(self) -> Option<Level> {
+        self.0
     }
 
-    /// How a level is spelled in the file and the environment — the inverse of
-    /// [`LogSinkConfig::level_from_str`], so a written config parses back to
-    /// what wrote it.
-    pub fn level_name(level: Option<Level>) -> &'static str {
+    /// How this level is spelled in the file and the environment — so a written
+    /// config parses back to what wrote it.
+    pub fn name(self) -> &'static str {
         Self::LEVELS
             .iter()
-            .find(|(_, candidate)| *candidate == level)
+            .find(|(_, candidate)| *candidate == self.0)
             .map(|(name, _)| *name)
-            // Unreachable through configuration, which only ever holds a level
-            // that came from `level_from_str`; "off" is the safe reading of a
-            // level this sink cannot store.
+            // Unreachable: the only constructors are `FromStr` and `OFF`, both
+            // of which yield a level in the table. "off" is the safe reading of
+            // a level this sink cannot store.
             .unwrap_or("off")
     }
 }
 
+impl std::str::FromStr for StoredLevel {
+    /// What an unusable level is told it should have been — [`EXPECTED_LEVEL`],
+    /// so the file and the environment cannot describe it differently.
+    type Err = &'static str;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::LEVELS
+            .iter()
+            .find(|(name, _)| *name == text)
+            .map(|(_, level)| StoredLevel(*level))
+            .ok_or(EXPECTED_LEVEL)
+    }
+}
+
+impl Serialize for StoredLevel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for StoredLevel {
+    /// Refused *here*, so a level the sink will not store fails at the line the
+    /// operator wrote it on. The key names itself because a `serde` error is
+    /// rendered by position alone, and this is the section's only setting of
+    /// this type.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(|expected| {
+            serde::de::Error::custom(crate::config::rejected(
+                "log.database_level",
+                format_args!("{text:?}"),
+                expected,
+            ))
+        })
+    }
+}
+
+/// What an unusable `[log] database_level` is told it should have been.
+///
+/// Spelled out rather than built from [`StoredLevel::LEVELS`], because
+/// [`crate::config::ConfigError::Invalid`] carries a `&'static str`; a test
+/// holds it to naming every level the sink accepts. The *reason* rides along
+/// because "why can't I have debug?" is otherwise a mystery an operator would
+/// read as a typo.
+pub const EXPECTED_LEVEL: &str = "\"off\", \"error\", \"warn\" or \"info\" — \
+     DEBUG and below can carry a listener's address, which is never stored (ADR-0011 rule 5)";
+
+/// How many events may be waiting to be written before arriving ones are
+/// dropped. Dropping is the point: the alternative is making a log call wait on
+/// a database.
+///
+/// Not a setting. An operator has no way to know what number to write here, and
+/// the failure it guards against — a writer falling behind — is reported
+/// (`log events dropped`) rather than tuned.
+const QUEUE_CAPACITY: usize = 1024;
+
 /// Make a sink and the writer that drains it, or `None` when `[log]
 /// database_level` is `off`.
-pub fn channel(config: LogSinkConfig) -> Option<(LogSink, LogWriter)> {
-    let level = config.level?;
-    let (tx, rx) = tokio::sync::mpsc::channel(config.capacity.max(1));
+pub fn channel(level: StoredLevel) -> Option<(LogSink, LogWriter)> {
+    channel_sized(level, QUEUE_CAPACITY)
+}
+
+/// [`channel`] with the queue depth spelled out, so the drop path can be driven
+/// by filling a small queue rather than by outrunning a real one.
+fn channel_sized(level: StoredLevel, capacity: usize) -> Option<(LogSink, LogWriter)> {
+    let level = level.level()?;
+    let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
     let dropped = Arc::new(AtomicU64::new(0));
     Some((
         LogSink {
@@ -451,19 +513,20 @@ mod tests {
     /// race with the drain.
     async fn stored_after(
         db: &DatabaseConnection,
-        config: LogSinkConfig,
+        level: StoredLevel,
         emit: impl FnOnce(),
     ) -> Vec<log_event::Model> {
-        drain(db, config, emit).await.0
+        drain(db, level, QUEUE_CAPACITY, emit).await.0
     }
 
     /// [`stored_after`], keeping what the sink logged about itself too.
     async fn drain(
         db: &DatabaseConnection,
-        config: LogSinkConfig,
+        level: StoredLevel,
+        capacity: usize,
         emit: impl FnOnce(),
     ) -> (Vec<log_event::Model>, String) {
-        let console = console_after(db, config, emit).await;
+        let console = console_after(db, level, capacity, emit).await;
         let stored = log_event::Entity::find()
             .order_by_asc(log_event::Column::Id)
             .all(db)
@@ -484,10 +547,11 @@ mod tests {
     /// where the table is gone and there is nothing to read back.
     async fn console_after(
         db: &DatabaseConnection,
-        config: LogSinkConfig,
+        level: StoredLevel,
+        capacity: usize,
         emit: impl FnOnce(),
     ) -> String {
-        let (sink, writer) = channel(config).expect("an enabled sink");
+        let (sink, writer) = channel_sized(level, capacity).expect("an enabled sink");
         let draining = writer.spawn(db.clone());
         {
             let _installed = ScopedSubscriber::install(tracing_subscriber::registry().with(sink));
@@ -507,7 +571,7 @@ mod tests {
     async fn an_event_becomes_a_row() {
         let (db, _tmp) = database().await;
 
-        let stored = stored_after(&db, LogSinkConfig::default(), || {
+        let stored = stored_after(&db, StoredLevel::default(), || {
             info!(reason = "blacklisted", "ingest dropped");
         })
         .await;
@@ -536,7 +600,7 @@ mod tests {
     async fn awkward_text_round_trips_intact(#[case] awkward: &str) {
         let (db, _tmp) = database().await;
 
-        let stored = stored_after(&db, LogSinkConfig::default(), || {
+        let stored = stored_after(&db, StoredLevel::default(), || {
             info!(detail = awkward, "{}", awkward);
         })
         .await;
@@ -555,21 +619,17 @@ mod tests {
     /// The sink stores its own level and everything louder, and nothing quieter
     /// — the knob an operator turns down to keep a Pi's database small.
     #[rstest]
-    #[case(Level::INFO, &["ERROR", "WARN", "INFO"])]
-    #[case(Level::WARN, &["ERROR", "WARN"])]
-    #[case(Level::ERROR, &["ERROR"])]
+    #[case("info", &["ERROR", "WARN", "INFO"])]
+    #[case("warn", &["ERROR", "WARN"])]
+    #[case("error", &["ERROR"])]
     #[tokio::test]
     async fn only_events_at_or_above_the_level_are_stored(
-        #[case] level: Level,
+        #[case] level: &str,
         #[case] expected: &[&str],
     ) {
         let (db, _tmp) = database().await;
-        let config = LogSinkConfig {
-            level: Some(level),
-            ..Default::default()
-        };
-
-        let stored = stored_after(&db, config, || {
+        let level: StoredLevel = level.parse().expect("a level the sink accepts");
+        let stored = stored_after(&db, level, || {
             tracing::error!("an error");
             tracing::warn!("a warning");
             tracing::info!("an info");
@@ -603,10 +663,18 @@ mod tests {
     ) {
         // `None` = not a level this sink accepts; `Some(None)` = off, which it
         // does. The two spellings of "nothing stored" are deliberately distinct.
-        let accepted = LogSinkConfig::level_from_str(text);
+        let accepted = text.parse::<StoredLevel>();
         match text {
-            "off" => assert_eq!(accepted, Some(None), "off is a level, not a refusal"),
-            _ => assert_eq!(accepted, expected.map(Some), "{text:?}"),
+            "off" => assert_eq!(
+                accepted,
+                Ok(StoredLevel::OFF),
+                "off is a level, not a refusal"
+            ),
+            _ => assert_eq!(
+                accepted.map(StoredLevel::level),
+                expected.map(Some).ok_or(EXPECTED_LEVEL),
+                "{text:?}"
+            ),
         }
     }
 
@@ -615,20 +683,29 @@ mod tests {
     /// reads that file back must land on the same sink.
     #[test]
     fn every_level_is_named_by_the_name_it_parses_from() {
-        for (name, level) in LogSinkConfig::LEVELS {
-            assert_eq!(LogSinkConfig::level_name(level), name);
-            assert_eq!(LogSinkConfig::level_from_str(name), Some(level));
+        for (name, level) in StoredLevel::LEVELS {
+            let parsed: StoredLevel = name.parse().expect("a level the sink accepts");
+            assert_eq!(parsed.level(), level);
+            assert_eq!(parsed.name(), name);
+        }
+    }
+
+    /// The refusal names every level that *is* accepted — spelled out as a
+    /// `&'static str`, so nothing but a test keeps it honest as levels change.
+    #[test]
+    fn the_refused_level_names_every_level_that_works() {
+        for (name, _) in StoredLevel::LEVELS {
+            assert!(
+                EXPECTED_LEVEL.contains(name),
+                "{name} missing from {EXPECTED_LEVEL:?}"
+            );
         }
     }
 
     /// A sink set to `off` is not built at all — no queue, no task, no rows.
     #[test]
     fn an_off_sink_is_never_built() {
-        let config = LogSinkConfig {
-            level: None,
-            ..Default::default()
-        };
-        assert!(channel(config).is_none());
+        assert!(channel(StoredLevel::OFF).is_none());
     }
 
     /// **The property the request path depends on.** A writer that has fallen
@@ -639,12 +716,7 @@ mod tests {
     #[tokio::test]
     async fn a_full_queue_drops_events_rather_than_waiting() {
         let (db, _tmp) = database().await;
-        let config = LogSinkConfig {
-            capacity: 2,
-            ..Default::default()
-        };
-
-        let (stored, console) = drain(&db, config, || {
+        let (stored, console) = drain(&db, StoredLevel::default(), 2, || {
             for n in 0..5 {
                 info!(n, "an event");
             }
@@ -672,7 +744,7 @@ mod tests {
             .await
             .expect("take the table away");
 
-        let console = console_after(&db, LogSinkConfig::default(), || {
+        let console = console_after(&db, StoredLevel::default(), QUEUE_CAPACITY, || {
             info!("an event");
             info!("another event");
         })
@@ -746,7 +818,7 @@ mod tests {
         // coverage cannot see into.
         let boom: &dyn std::error::Error = &failure;
 
-        let stored = stored_after(&db, LogSinkConfig::default(), || {
+        let stored = stored_after(&db, StoredLevel::default(), || {
             info!(
                 enabled = true,
                 target_lufs = -16.5,
@@ -781,7 +853,7 @@ mod tests {
     async fn a_message_that_is_not_a_string_is_still_a_message() {
         let (db, _tmp) = database().await;
 
-        let stored = stored_after(&db, LogSinkConfig::default(), || {
+        let stored = stored_after(&db, StoredLevel::default(), || {
             info!(message = 42);
         })
         .await;
@@ -815,7 +887,7 @@ mod tests {
     async fn an_event_inside_a_request_carries_its_id() {
         let (db, _tmp) = database().await;
 
-        let stored = stored_after(&db, LogSinkConfig::default(), || {
+        let stored = stored_after(&db, StoredLevel::default(), || {
             tracing::error_span!("http", request_id = "0123456789abcdef").in_scope(|| {
                 info!("inside the request");
             });
@@ -836,7 +908,7 @@ mod tests {
     async fn a_nested_span_still_finds_the_request_id() {
         let (db, _tmp) = database().await;
 
-        let stored = stored_after(&db, LogSinkConfig::default(), || {
+        let stored = stored_after(&db, StoredLevel::default(), || {
             tracing::error_span!("http", request_id = "fedcba9876543210").in_scope(|| {
                 tracing::error_span!("ingest", system_ref = 11).in_scope(|| {
                     info!("stored call");
@@ -861,7 +933,7 @@ mod tests {
     async fn the_targets_that_would_feed_back_are_never_stored(#[case] target: &str) {
         let (db, _tmp) = database().await;
 
-        let stored = stored_after(&db, LogSinkConfig::default(), || {
+        let stored = stored_after(&db, StoredLevel::default(), || {
             match target {
                 SINK_TARGET => info!(target: SINK_TARGET, "a line about the sink"),
                 _ => info!(target: "sqlx::query", "INSERT INTO logs …"),

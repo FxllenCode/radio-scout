@@ -28,7 +28,7 @@ use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use sea_orm::TransactionTrait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Level, Span, field, info, span, warn};
 
 use crate::db::entities::call;
@@ -39,9 +39,12 @@ use crate::{AppState, now_ms};
 const CALL_IMPORTED: &str = "Call imported successfully.\n";
 const DUPLICATE_REJECTED: &str = "duplicate call rejected\n";
 
-/// Ingest tuning. Built from `[ingest]` by
-/// [`crate::config::Config::ingest`] (#17).
-#[derive(Debug, Clone)]
+/// Ingest tuning — and the `[ingest]` section of `radio-scout.toml` itself
+/// (#17, #87). One type, so the shipped defaults below and the ones
+/// `--write-config` documents are the same values rather than two copies a
+/// translation function keeps in step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct IngestConfig {
     /// Duplicate-detection window in milliseconds (rdio's default is ~500ms).
     pub dedup_window_ms: i64,

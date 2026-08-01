@@ -25,12 +25,23 @@
 //! - **No environment support**, which is how a container is configured.
 //!
 //! Two rules shape the types rather than the code. Secrets never reach a log
-//! line (ADR-0011 rule 2): [`S3`]'s `Debug` redacts the key, [`Loaded::log_summary`]
-//! names the database *dialect* rather than its URL, and [`ConfigError::parse`]
-//! drops the source snippet `toml` would otherwise quote. And an unusable value
-//! is rejected by the type that owns it — [`ProxyNet`] parses in its
-//! `Deserialize`, so a bad entry fails wherever it was written rather than
-//! wherever someone remembered to check.
+//! line (ADR-0011 rule 2): [`crate::blob::S3Config`]'s `Debug` redacts the key,
+//! [`Loaded::log_summary`] names the database *dialect* rather than its URL, and
+//! `ConfigError::parse` drops the source snippet `toml` would otherwise quote.
+//! And an unusable value is rejected by **the type that owns it** — [`ProxyNet`]
+//! parses in its `Deserialize`, as do [`crate::logsink::StoredLevel`] and
+//! `retention::gigabytes` — so a bad entry fails wherever it was written rather
+//! than wherever someone remembered to check.
+//!
+//! **What is *not* here is most of the settings (#87).** A section is its
+//! subsystem's own configuration type — [`crate::admin::AdminConfig`] *is*
+//! `[admin]`, [`crate::retention::RetentionConfig`] *is* `[retention]` — so
+//! there is one type per subsystem rather than a serde twin here and a working
+//! type there, kept in step by hand. This module owns what is genuinely
+//! configuration's: `[server]` and `[database]`, the four-layer resolution, the
+//! validation that spans sections, the template, and [`SETTINGS`] — the table
+//! that *is* the environment layer, and the one place a setting's two spellings
+//! are written down together.
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -43,13 +54,13 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::AdminConfig;
-use crate::blob::{S3Config, StorageConfig};
-use crate::enhance::{EnhancementConfig, Mode, Output};
+use crate::blob::{Backend, Storage, StorageConfig};
+use crate::enhance::{EnhancementConfig, Output};
 use crate::ingest::IngestConfig;
-use crate::logsink::LogSinkConfig;
-use crate::observability;
+use crate::logsink;
+use crate::observability::{self, LogConfig};
 use crate::push::PushConfig;
-use crate::retention::RetentionConfig;
+use crate::retention::{self, RetentionConfig};
 
 /// Radio-Scout's command line. Every flag here overrides the same setting from
 /// the environment, the file, and the default, in that order.
@@ -140,11 +151,9 @@ pub struct ServiceCommand {
 
 /// Everything `radio-scout service …` needs about this configuration (#23).
 ///
-/// This is the same translation every other section gets — [`Config::ingest`],
-/// [`Config::retention`], [`Config::push`] — for the service module, and it
-/// lives here for the same reason: `main.rs` is excluded from coverage, so a
-/// decision made there is a decision nothing tests. There are three, and each
-/// one is a bug if it goes the other way. The base directory and the
+/// It lives here rather than in `main.rs` because `main.rs` is excluded from
+/// coverage, and there are three decisions in it, each of which is a bug if it
+/// goes the other way. The base directory and the
 /// configuration file are made **absolute**, because a service's working
 /// directory is the service manager's rather than the operator's shell's — a
 /// relative `radio-scout-data` in a unit file resolves against `/`, and a
@@ -383,12 +392,12 @@ pub struct Config {
     pub server: Server,
     pub database: Database,
     pub storage: Storage,
-    pub retention: Retention,
-    pub ingest: Ingest,
-    pub admin: Admin,
-    pub push: Push,
-    pub enhancement: Enhancement,
-    pub log: Log,
+    pub retention: RetentionConfig,
+    pub ingest: IngestConfig,
+    pub admin: AdminConfig,
+    pub push: PushConfig,
+    pub enhancement: EnhancementConfig,
+    pub log: LogConfig,
 }
 
 impl Config {
@@ -421,100 +430,16 @@ impl Config {
             .collect()
     }
 
-    /// The audio store to open (ADR-0002). Zero-config is a directory under
-    /// `base_dir`; `storage.path` moves it without moving the database.
+    /// The audio store to open (ADR-0002) — the one section that still needs a
+    /// resolution step, because the filesystem root defaults to a directory
+    /// under `[server] base_dir` and so cannot be read off `[storage]` alone.
     pub fn storage(&self) -> StorageConfig {
-        match self.storage.backend {
-            Backend::Filesystem => StorageConfig::Filesystem {
-                root: match &self.storage.path {
-                    Some(path) => path.clone(),
-                    None => self.server.base_dir.join(DEFAULT_AUDIO_DIR),
-                },
-            },
-            Backend::S3 => StorageConfig::S3(S3Config {
-                bucket: self.storage.s3.bucket.clone(),
-                region: self.storage.s3.region.clone(),
-                endpoint: self.storage.s3.endpoint.clone(),
-                access_key_id: self.storage.s3.access_key_id.clone(),
-                secret_access_key: self.storage.s3.secret_access_key.clone(),
-                allow_http: self.storage.s3.allow_http,
-            }),
-        }
-    }
-
-    /// The retention policy the sweeper runs (#10, US 41), in the units the
-    /// sweeper works in.
-    pub fn retention(&self) -> RetentionConfig {
-        let config = RetentionConfig {
-            days: self.retention.days,
-            max_size_bytes: None,
-            log_days: self.retention.log_days,
-            interval: Duration::from_secs(self.retention.interval_secs),
-            batch_size: self.retention.batch_size,
-            orphan_grace: Duration::from_secs(self.retention.orphan_grace_secs),
-        };
-        match self.retention.max_size_gb {
-            Some(gb) => config.with_max_size_gb(gb),
-            None => config,
-        }
-    }
-
-    /// The operator log surface's sink (#30), or a sink that is off.
-    ///
-    /// The level has already been validated ([`Config::validate`]), so an
-    /// unparseable one here can only mean a `Config` assembled in code rather
-    /// than resolved — which reads as "off", the setting that stores nothing.
-    pub fn log_sink(&self) -> LogSinkConfig {
-        LogSinkConfig {
-            level: LogSinkConfig::level_from_str(&self.log.database_level).unwrap_or(None),
-            ..LogSinkConfig::default()
-        }
+        self.storage.resolve(&self.server.base_dir)
     }
 
     /// The proxies the request log may believe (ADR-0011 rule 5, #28).
     pub fn trusted_proxies(&self) -> TrustedProxies {
         self.server.trusted_proxies.iter().copied().collect()
-    }
-
-    /// The ingest pipeline's tuning (#5, #8).
-    pub fn ingest(&self) -> IngestConfig {
-        IngestConfig {
-            dedup_window_ms: self.ingest.dedup_window_ms,
-            auto_populate: self.ingest.auto_populate,
-        }
-    }
-
-    /// The admin surface's session and lockout policy (#19, ADR-0008).
-    pub fn admin(&self) -> AdminConfig {
-        AdminConfig {
-            session_idle: Duration::from_secs(self.admin.session_idle_secs),
-            session_max: Duration::from_secs(self.admin.session_max_secs),
-            lockout_attempts: self.admin.lockout_attempts,
-            lockout: Duration::from_secs(self.admin.lockout_secs),
-        }
-    }
-
-    /// How Web Push behaves (#16, ADR-0005). The identity it signs with is not
-    /// here: like the ingest key and the admin password, first run *writes* it
-    /// (`RADIO_SCOUT_VAPID_PRIVATE_KEY`).
-    pub fn push(&self) -> PushConfig {
-        PushConfig {
-            coalesce: Duration::from_secs(self.push.coalesce_secs),
-            ttl: Duration::from_secs(self.push.ttl_secs),
-            subject: self.push.subject.clone(),
-        }
-    }
-
-    /// How audio enhancement behaves (#20, ADR-0006 as amended). *Scope* — the
-    /// Systems and Talkgroups it applies to — is not here: it is a column on
-    /// those rows, following the auto-populate precedent (#8).
-    pub fn enhancement(&self) -> EnhancementConfig {
-        EnhancementConfig {
-            mode: self.enhancement.mode,
-            output: self.enhancement.output,
-            target_lufs: self.enhancement.target_lufs,
-            queue_depth: self.enhancement.queue_depth,
-        }
     }
 
     /// Refuse a configuration that parsed but cannot be run.
@@ -540,18 +465,6 @@ impl Config {
                 }
             }
         }
-        // A cap must be a size. `days = 0` is rdio's "keep forever" and stays
-        // legal, but a zero *cap* would mean "prune everything", which nobody
-        // ever means — and `max_size_gb` absent already says "no cap".
-        if let Some(gb) = self.retention.max_size_gb
-            && !(gb.is_finite() && gb > 0.0)
-        {
-            return Err(ConfigError::invalid_key(
-                "retention.max_size_gb",
-                &gb.to_string(),
-                "a positive number of gigabytes, or no key at all for no cap",
-            ));
-        }
         // Zero would page zero Calls at a time: a sweeper that runs forever and
         // deletes nothing, with a disk filling behind it.
         if self.retention.batch_size == 0 {
@@ -570,7 +483,7 @@ impl Config {
             return Err(ConfigError::invalid_key(
                 "push.subject",
                 &self.push.subject,
-                "a contact URI: \"mailto:you@example.com\" or \"https://example.com/contact\"",
+                EXPECTED_SUBJECT,
             ));
         }
         // Zero admits nothing, so enhancement would be configured on and never
@@ -607,15 +520,6 @@ impl Config {
             ));
         }
         validate_directives("log.directives", &self.log.directives)?;
-        // Rule 5, enforced where an operator can be told about it: the sink has
-        // no setting that reaches a level a listener's address may ride on.
-        if LogSinkConfig::level_from_str(&self.log.database_level).is_none() {
-            return Err(ConfigError::invalid_key(
-                "log.database_level",
-                &self.log.database_level,
-                EXPECTED_DATABASE_LEVEL,
-            ));
-        }
         if self.ingest.dedup_window_ms < 0 {
             return Err(ConfigError::invalid_key(
                 "ingest.dedup_window_ms",
@@ -631,17 +535,17 @@ impl Config {
         for (key, value, expected) in [
             (
                 "admin.session_idle_secs",
-                self.admin.session_idle_secs,
+                self.admin.session_idle.as_secs(),
                 "a positive number of seconds",
             ),
             (
                 "admin.session_max_secs",
-                self.admin.session_max_secs,
+                self.admin.session_max.as_secs(),
                 "a positive number of seconds",
             ),
             (
                 "admin.lockout_secs",
-                self.admin.lockout_secs,
+                self.admin.lockout.as_secs(),
                 "a positive number of seconds",
             ),
             (
@@ -658,11 +562,468 @@ impl Config {
     }
 }
 
+/// One setting, in the two spellings every setting has: a key in
+/// `radio-scout.toml` and a `RADIO_SCOUT_*` variable (ADR-0012).
+///
+/// [`SETTINGS`] is the environment layer of [`resolve`] — not a description of
+/// it — so a setting that is not in the table cannot be set from the
+/// environment, and a setting that is cannot be forgotten there. Before #87 the
+/// two were separate: thirty hand-written blocks in `resolve` and a hand-written
+/// case list in the tests, either of which could omit a setting silently.
+pub struct Setting {
+    /// The dotted key in the file, e.g. `admin.session_idle_secs`.
+    pub key: &'static str,
+    /// The environment variable that carries it.
+    pub var: &'static str,
+    /// What an unusable value is told it should have been.
+    pub expected: &'static str,
+    /// A value that is **not** the default — what the tests hand this entry to
+    /// prove it reaches the key it names, which an example equal to the default
+    /// could not do.
+    ///
+    /// Deliberately *not* what `.env.example` shows: that file mostly shows an
+    /// operator the default, which is the more useful thing to read beside a
+    /// commented-out line. The two are held to being *compatible* rather than
+    /// equal — `tests/docs.rs` feeds every value that file shows through
+    /// [`Setting::apply`].
+    pub example: &'static str,
+    /// Put an environment value into the configuration being resolved.
+    set: fn(&Setting, &mut Config, &str) -> Result<(), ConfigError>,
+}
+
+impl Setting {
+    /// Apply an environment value to `config` — exactly what [`resolve`]'s
+    /// environment layer does with this setting.
+    ///
+    /// Public so something outside this module can ask "would this value be
+    /// accepted?" of a value written somewhere else: `tests/docs.rs` asks it of
+    /// every line in `.env.example`, which is the only place the environment
+    /// spelling of a setting is documented.
+    pub fn apply(&self, config: &mut Config, value: &str) -> Result<(), ConfigError> {
+        (self.set)(self, config, value)
+    }
+
+    /// This setting's value, parsed — or a boot refused, naming the variable
+    /// the operator wrote it in rather than the key they didn't.
+    fn parse<T: FromStr>(&self, value: &str) -> Result<T, ConfigError> {
+        value
+            .parse()
+            .map_err(|_| ConfigError::invalid_env(self.var, value, self.expected))
+    }
+
+    /// The same refusal for a value that parsed as the right type and still
+    /// cannot be run.
+    fn invalid(&self, value: &str) -> ConfigError {
+        ConfigError::invalid_env(self.var, value, self.expected)
+    }
+}
+
+/// Every setting, and the environment variable that sets it.
+///
+/// The order is the file's, so this reads as `radio-scout.toml` does. Ten of the
+/// variables do not follow their key mechanically (`RADIO_SCOUT_PORT`, not
+/// `…_SERVER_PORT`; `RADIO_SCOUT_S3_BUCKET`, not `…_STORAGE_S3_BUCKET`;
+/// `RUST_LOG`, which is the variable every Rust operator already reaches for and
+/// which ADR-0011 documents as the control surface). Those spellings shipped in
+/// 0.1.0 and are what an operator's `.env` and `docker-compose.yml` already say,
+/// so they are named here rather than derived — a uniform rule that renamed ten
+/// live settings would be a nicer table and a worse upgrade.
+pub const SETTINGS: &[Setting] = &[
+    Setting {
+        key: "server.port",
+        var: "RADIO_SCOUT_PORT",
+        expected: "a port number 0-65535",
+        example: "9000",
+        set: |setting, config, value| {
+            config.server.port = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "server.base_dir",
+        var: "RADIO_SCOUT_BASE_DIR",
+        expected: "a directory path",
+        example: "/srv/radio-scout",
+        set: |_, config, value| {
+            config.server.base_dir = PathBuf::from(value);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "server.trusted_proxies",
+        var: "RADIO_SCOUT_TRUSTED_PROXIES",
+        expected: EXPECTED_PROXY,
+        example: "127.0.0.1,172.17.0.0/16",
+        set: |setting, config, value| {
+            config.server.trusted_proxies = value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| entry.parse().map_err(|_| setting.invalid(entry)))
+                .collect::<Result<_, _>>()?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "database.url",
+        var: "RADIO_SCOUT_DATABASE_URL",
+        expected: "a SeaORM connection URL",
+        example: "postgres://user:password@host/radio_scout",
+        set: |_, config, value| {
+            config.database.url = Some(value.to_string());
+            Ok(())
+        },
+    },
+    Setting {
+        key: "storage.backend",
+        var: "RADIO_SCOUT_STORAGE_BACKEND",
+        expected: "\"filesystem\" or \"s3\"",
+        example: "s3",
+        set: |setting, config, value| {
+            config.storage.backend = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "storage.path",
+        var: "RADIO_SCOUT_STORAGE_PATH",
+        expected: "a directory path",
+        example: "/mnt/usb/radio-scout-audio",
+        set: |_, config, value| {
+            config.storage.path = Some(PathBuf::from(value));
+            Ok(())
+        },
+    },
+    Setting {
+        key: "storage.s3.bucket",
+        var: "RADIO_SCOUT_S3_BUCKET",
+        expected: "a bucket name",
+        example: "calls",
+        set: |_, config, value| {
+            config.storage.s3.bucket = value.to_string();
+            Ok(())
+        },
+    },
+    Setting {
+        key: "storage.s3.region",
+        var: "RADIO_SCOUT_S3_REGION",
+        expected: "a region name",
+        example: "garage",
+        set: |_, config, value| {
+            config.storage.s3.region = value.to_string();
+            Ok(())
+        },
+    },
+    Setting {
+        key: "storage.s3.endpoint",
+        var: "RADIO_SCOUT_S3_ENDPOINT",
+        expected: "a URL",
+        example: "http://garage.lan:3900",
+        set: |_, config, value| {
+            config.storage.s3.endpoint = Some(value.to_string());
+            Ok(())
+        },
+    },
+    Setting {
+        key: "storage.s3.access_key_id",
+        var: "RADIO_SCOUT_S3_ACCESS_KEY_ID",
+        expected: "an access key id",
+        example: "GK1234",
+        set: |_, config, value| {
+            config.storage.s3.access_key_id = value.to_string();
+            Ok(())
+        },
+    },
+    Setting {
+        key: "storage.s3.secret_access_key",
+        var: "RADIO_SCOUT_S3_SECRET_ACCESS_KEY",
+        expected: "a secret access key",
+        // Never a real-looking credential, even in a test fixture: a
+        // plausible one is a key somebody copies out of a diff.
+        example: "<your-secret-access-key>",
+        set: |_, config, value| {
+            config.storage.s3.secret_access_key = value.to_string();
+            Ok(())
+        },
+    },
+    Setting {
+        key: "storage.s3.allow_http",
+        var: "RADIO_SCOUT_S3_ALLOW_HTTP",
+        expected: "true or false",
+        example: "true",
+        set: |setting, config, value| {
+            config.storage.s3.allow_http = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "retention.days",
+        var: "RADIO_SCOUT_RETENTION_DAYS",
+        expected: "a number of days",
+        example: "30",
+        set: |setting, config, value| {
+            config.retention.days = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "retention.max_size_gb",
+        var: "RADIO_SCOUT_RETENTION_MAX_SIZE_GB",
+        expected: retention::EXPECTED_MAX_SIZE_GB,
+        example: "10",
+        set: |setting, config, value| {
+            let gb: f64 = setting.parse(value)?;
+            config.retention.max_size_bytes = Some(
+                RetentionConfig::max_size_bytes_from_gb(gb).map_err(|_| setting.invalid(value))?,
+            );
+            Ok(())
+        },
+    },
+    Setting {
+        key: "retention.log_days",
+        var: "RADIO_SCOUT_RETENTION_LOG_DAYS",
+        expected: "a number of days",
+        example: "14",
+        set: |setting, config, value| {
+            config.retention.log_days = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "retention.interval_secs",
+        var: "RADIO_SCOUT_RETENTION_INTERVAL_SECS",
+        expected: "a number of seconds",
+        example: "600",
+        set: |setting, config, value| {
+            config.retention.interval = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "retention.batch_size",
+        var: "RADIO_SCOUT_RETENTION_BATCH_SIZE",
+        expected: "a number of Calls per batch",
+        example: "100",
+        set: |setting, config, value| {
+            config.retention.batch_size = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "retention.orphan_grace_secs",
+        var: "RADIO_SCOUT_RETENTION_ORPHAN_GRACE_SECS",
+        expected: "a number of seconds",
+        example: "7200",
+        set: |setting, config, value| {
+            config.retention.orphan_grace = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "ingest.dedup_window_ms",
+        var: "RADIO_SCOUT_INGEST_DEDUP_WINDOW_MS",
+        expected: "a duration in milliseconds",
+        example: "1500",
+        set: |setting, config, value| {
+            config.ingest.dedup_window_ms = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "ingest.auto_populate",
+        var: "RADIO_SCOUT_INGEST_AUTO_POPULATE",
+        expected: "true or false",
+        example: "false",
+        set: |setting, config, value| {
+            config.ingest.auto_populate = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "admin.session_idle_secs",
+        var: "RADIO_SCOUT_ADMIN_SESSION_IDLE_SECS",
+        expected: "a number of seconds",
+        example: "3600",
+        set: |setting, config, value| {
+            config.admin.session_idle = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "admin.session_max_secs",
+        var: "RADIO_SCOUT_ADMIN_SESSION_MAX_SECS",
+        expected: "a number of seconds",
+        example: "86400",
+        set: |setting, config, value| {
+            config.admin.session_max = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "admin.lockout_attempts",
+        var: "RADIO_SCOUT_ADMIN_LOCKOUT_ATTEMPTS",
+        expected: "a number of attempts",
+        example: "3",
+        set: |setting, config, value| {
+            config.admin.lockout_attempts = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "admin.lockout_secs",
+        var: "RADIO_SCOUT_ADMIN_LOCKOUT_SECS",
+        expected: "a number of seconds",
+        example: "300",
+        set: |setting, config, value| {
+            config.admin.lockout = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "push.coalesce_secs",
+        var: "RADIO_SCOUT_PUSH_COALESCE_SECS",
+        expected: "a number of seconds",
+        example: "60",
+        set: |setting, config, value| {
+            config.push.coalesce = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "push.ttl_secs",
+        var: "RADIO_SCOUT_PUSH_TTL_SECS",
+        expected: "a number of seconds",
+        example: "600",
+        set: |setting, config, value| {
+            config.push.ttl = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "push.subject",
+        var: "RADIO_SCOUT_PUSH_SUBJECT",
+        expected: EXPECTED_SUBJECT,
+        example: "mailto:you@example.com",
+        set: |_, config, value| {
+            config.push.subject = value.to_string();
+            Ok(())
+        },
+    },
+    Setting {
+        key: "enhancement.mode",
+        var: "RADIO_SCOUT_ENHANCEMENT_MODE",
+        expected: EXPECTED_MODE,
+        example: "normalize",
+        set: |setting, config, value| {
+            config.enhancement.mode = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "enhancement.output",
+        var: "RADIO_SCOUT_ENHANCEMENT_OUTPUT",
+        expected: EXPECTED_OUTPUT,
+        // The only value that is not the default is one [`Config::validate`]
+        // refuses, because the encoder is unbuilt (#100). That is deliberate:
+        // an example equal to the default would prove nothing about whether
+        // this variable is read at all.
+        example: "opus",
+        set: |setting, config, value| {
+            config.enhancement.output = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "enhancement.target_lufs",
+        var: "RADIO_SCOUT_ENHANCEMENT_TARGET_LUFS",
+        expected: "a loudness in LUFS, e.g. -16",
+        example: "-20.5",
+        set: |setting, config, value| {
+            config.enhancement.target_lufs = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "enhancement.queue_depth",
+        var: "RADIO_SCOUT_ENHANCEMENT_QUEUE_DEPTH",
+        expected: "a number of Calls",
+        example: "64",
+        set: |setting, config, value| {
+            config.enhancement.queue_depth = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "log.directives",
+        // Not a `RADIO_SCOUT_`-prefixed name: it is the variable every Rust
+        // operator already reaches for, and ADR-0011 documents it as the
+        // control surface. The `[log]` section is what survives a reboot.
+        var: "RUST_LOG",
+        expected: EXPECTED_DIRECTIVES,
+        example: "debug",
+        set: |setting, config, value| {
+            if !observability::directives_are_valid(value) {
+                return Err(setting.invalid(value));
+            }
+            config.log.directives = value.to_string();
+            Ok(())
+        },
+    },
+    Setting {
+        // ...whereas the operator log surface's level is ours, so it takes the
+        // prefix every other setting does (#30).
+        key: "log.database_level",
+        var: "RADIO_SCOUT_LOG_DATABASE_LEVEL",
+        expected: logsink::EXPECTED_LEVEL,
+        example: "warn",
+        set: |setting, config, value| {
+            config.log.database_level = setting.parse(value)?;
+            Ok(())
+        },
+    },
+];
+
+/// How a value the *file* carries and cannot run says so.
+///
+/// A type that refuses a value inside its own `Deserialize`
+/// ([`crate::logsink::StoredLevel`], `retention::gigabytes`) is rendered by
+/// `toml` at a position, with no idea which key it was — so the key names
+/// itself, and this is the one place that sentence is written. Read beside
+/// [`ConfigError::Invalid`]'s `Display`, which is the same sentence for the two
+/// layers that *do* know their source; the two must stay the same shape,
+/// because an operator meets them as one message with a different prefix.
+pub fn rejected(key: &str, value: impl std::fmt::Display, expected: &str) -> String {
+    format!("{key}: invalid value {value} (expected {expected})")
+}
+
+/// A whole number of seconds in the file, a [`Duration`] in the type.
+///
+/// Seven settings across `[retention]`, `[admin]` and `[push]` are written by an
+/// operator as seconds and used by the code as a `Duration`. Before #87 each one
+/// was a `u64` field on a mirrored section type plus a `Duration::from_secs` in
+/// a translation function; this is that conversion, once, so a section and the
+/// subsystem it configures can be the same type without either giving up its
+/// own units. The `_secs` suffix stays on the TOML key — it is the unit an
+/// operator is being asked for, and dropping it would rename seven settings.
+///
+/// Sub-second precision is deliberately not offered: nothing here is a timing
+/// knob, and `session_max_secs = 604800.5` is a typo rather than an intention.
+pub mod secs {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(value.as_secs())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+        u64::deserialize(deserializer).map(Duration::from_secs)
+    }
+}
+
 /// The SQLite file zero-config creates inside `base_dir`.
 const DEFAULT_DB_FILE: &str = "radio-scout.db";
-
-/// The audio directory zero-config creates inside `base_dir`.
-const DEFAULT_AUDIO_DIR: &str = "audio";
 
 /// `[database]` — SQLite by default, Postgres by URL (US 40, ADR-0003).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -673,226 +1034,11 @@ pub struct Database {
     pub url: Option<String>,
 }
 
-/// `[storage]` — where Call audio lives (US 39, ADR-0002).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Storage {
-    pub backend: Backend,
-    /// Filesystem root for audio. Unset means `<base_dir>/audio`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-    pub s3: S3,
-}
-
-/// Which audio backend to open.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
-#[clap(rename_all = "lowercase")]
-pub enum Backend {
-    /// The zero-config default: a directory of files.
-    #[default]
-    Filesystem,
-    /// An S3-compatible object store — Garage, MinIO, AWS.
-    S3,
-}
-
-impl Backend {
-    /// The spelling used in the file, the flag and the environment.
-    fn as_str(self) -> &'static str {
-        match self {
-            Backend::Filesystem => "filesystem",
-            Backend::S3 => "s3",
-        }
-    }
-}
-
-impl std::fmt::Display for Backend {
-    /// Unquoted in a log line, so `storage=s3` greps (ADR-0011 rule 6).
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for Backend {
-    type Err = ();
-
-    /// One spelling per backend, shared by the file, the flag and the
-    /// environment — so `RADIO_SCOUT_STORAGE_BACKEND=s3` and
-    /// `backend = "s3"` cannot drift apart.
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        [Backend::Filesystem, Backend::S3]
-            .into_iter()
-            .find(|backend| backend.as_str() == text)
-            .ok_or(())
-    }
-}
-
-/// `[retention]` — how the archive is kept bounded (#10, US 41).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Retention {
-    /// Prune Calls older than this many days. `0` keeps them forever.
-    pub days: u32,
-    /// Optional cap on total stored audio, in binary gigabytes. Absent means
-    /// no cap.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_size_gb: Option<f64>,
-    /// Prune stored log events (#30) older than this many days. `0` keeps them
-    /// forever, the same reading `days` has — and its own setting, because a
-    /// scanner keeping Calls forever must still bound its logs.
-    pub log_days: u32,
-    /// How often the sweeper runs.
-    pub interval_secs: u64,
-    /// Calls deleted per batch, bounding how long a write lock is held.
-    pub batch_size: u64,
-    /// How long an unreferenced audio object is left alone before orphan-GC
-    /// reclaims it.
-    pub orphan_grace_secs: u64,
-}
-
-impl Default for Retention {
-    /// The shipped policy, taken from [`RetentionConfig`] rather than restated,
-    /// so the file's defaults and the code's cannot drift apart.
-    fn default() -> Self {
-        let default = RetentionConfig::default();
-        Retention {
-            days: default.days,
-            max_size_gb: None,
-            log_days: default.log_days,
-            interval_secs: default.interval.as_secs(),
-            batch_size: default.batch_size,
-            orphan_grace_secs: default.orphan_grace.as_secs(),
-        }
-    }
-}
-
-/// `[ingest]` — how uploads from recorders are handled (#5, #8).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Ingest {
-    /// Duplicate-detection window in milliseconds. `0` disables it.
-    pub dedup_window_ms: i64,
-    /// Whether unknown Systems, Talkgroups and Units are created on arrival.
-    pub auto_populate: bool,
-}
-
-impl Default for Ingest {
-    /// As shipped — read off [`IngestConfig`] for the same reason.
-    fn default() -> Self {
-        let default = IngestConfig::default();
-        Ingest {
-            dedup_window_ms: default.dedup_window_ms,
-            auto_populate: default.auto_populate,
-        }
-    }
-}
-
-/// `[admin]` — how the admin surface's sessions and lockout behave (#19,
-/// ADR-0008).
-///
-/// The admin *password* is deliberately not here: like the ingest key, first
-/// run **writes** it, so it lives in the environment and `.env`
-/// (`RADIO_SCOUT_ADMIN_PASSWORD`) rather than in a file `--write-config`
-/// generates. Everything about it that is a knob rather than a secret is here.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Admin {
-    /// How long a session survives without being used, refreshed on each
-    /// authenticated request.
-    pub session_idle_secs: u64,
-    /// How long a session may live at all, however active. Never refreshed.
-    pub session_max_secs: u64,
-    /// Failed logins one address may spend before it is locked out.
-    pub lockout_attempts: u32,
-    /// How long a spent address stays locked out, from its last attempt.
-    pub lockout_secs: u64,
-}
-
-impl Default for Admin {
-    /// As shipped — read off [`AdminConfig`] so the file's defaults and the
-    /// code's cannot drift apart.
-    fn default() -> Self {
-        let default = AdminConfig::default();
-        Admin {
-            session_idle_secs: default.session_idle.as_secs(),
-            session_max_secs: default.session_max.as_secs(),
-            lockout_attempts: default.lockout_attempts,
-            lockout_secs: default.lockout.as_secs(),
-        }
-    }
-}
-
-/// `[push]` — Web Push notifications (#16, spec US 32, ADR-0005).
-///
-/// The VAPID identity itself is deliberately not here, for the same reason the
-/// admin password isn't: first run **writes** it, so it lives in the
-/// environment and `.env` as `RADIO_SCOUT_VAPID_PRIVATE_KEY`. Everything here
-/// is a knob rather than a secret.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Push {
-    /// At most one notification per Talkgroup per device in this window. `0`
-    /// notifies about every Call.
-    pub coalesce_secs: u64,
-    /// How long a push service holds a notification for a device that is
-    /// offline.
-    pub ttl_secs: u64,
-    /// The VAPID `sub` claim: a `mailto:` or `https:` URI a push service's
-    /// operator can reach this instance's operator through.
-    pub subject: String,
-}
-
-impl Default for Push {
-    /// As shipped — read off [`PushConfig`] so the file's defaults and the
-    /// code's cannot drift apart.
-    fn default() -> Self {
-        let default = PushConfig::default();
-        Push {
-            coalesce_secs: default.coalesce.as_secs(),
-            ttl_secs: default.ttl.as_secs(),
-            subject: default.subject,
-        }
-    }
-}
-
-/// `[enhancement]` — audio enhancement (#20, spec US 33-34, ADR-0006 as
-/// amended by #20).
-///
-/// Policy only. **Scope** — which Systems and Talkgroups are enhanced — is a
-/// column on those rows rather than a list here, following the auto-populate
-/// precedent (#8): a setting that names Refs in a file goes stale the moment a
-/// recorder discovers a new one.
-///
-/// rdio-scanner puts the whole thing in its database behind its admin UI (a
-/// four-value `audioConversion`, `server/options.go:56-59`), which is exactly
-/// what this module's header refuses: a headless install cannot configure it
-/// and nothing is version-controllable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Enhancement {
-    /// How far the chain runs. `off` — the default — is passthrough.
-    pub mode: Mode,
-    /// What enhanced audio is encoded as.
-    pub output: Output,
-    /// Integrated loudness every enhanced Call is normalized to, in LUFS.
-    pub target_lufs: f64,
-    /// How many Calls may be waiting to be enhanced.
-    pub queue_depth: usize,
-}
-
-impl Default for Enhancement {
-    /// As shipped — read off [`EnhancementConfig`] so the file's defaults and
-    /// the code's cannot drift apart.
-    fn default() -> Self {
-        let default = EnhancementConfig::default();
-        Enhancement {
-            mode: default.mode,
-            output: default.output,
-            target_lufs: default.target_lufs,
-            queue_depth: default.queue_depth,
-        }
-    }
-}
+/// What an unusable `[push] subject` is told it should have been. RFC 8292
+/// §2.1: `sub` is a contact URI, and a push service that refuses a token over
+/// it fails *every* notification, silently, hours later.
+const EXPECTED_SUBJECT: &str =
+    "a contact URI: \"mailto:you@example.com\" or \"https://example.com/contact\"";
 
 /// What an unusable `[enhancement] mode` is told it should have been.
 ///
@@ -912,86 +1058,6 @@ const EXPECTED_OUTPUT: &str = "\"wav\" or \"opus\"";
 /// on a float range is also how NaN is refused: it compares false against
 /// everything, so a target that is not a number never reaches the gain.
 const LOUDNESS_RANGE_LUFS: std::ops::RangeInclusive<f64> = -70.0..=-5.0;
-
-/// `[log]` — how much the scanner says (ADR-0011).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Log {
-    /// `tracing` filter directives: a bare level (`debug`) or a per-target list
-    /// (`warn,radio_scout::ingest=trace`). `RUST_LOG` overrides this for one
-    /// invocation; this is what survives a reboot.
-    pub directives: String,
-    /// What the operator log surface stores (#30): `off`, `error`, `warn` or
-    /// `info`. Independent of `directives`, which is the console's — turning
-    /// one up or down never moves the other.
-    pub database_level: String,
-}
-
-impl Default for Log {
-    fn default() -> Self {
-        Log {
-            directives: observability::DEFAULT_DIRECTIVES.to_string(),
-            database_level: LogSinkConfig::level_name(LogSinkConfig::default().level).to_string(),
-        }
-    }
-}
-
-/// What an unusable `[log] database_level` is told it should have been.
-///
-/// Spelled out rather than built from [`LogSinkConfig::LEVELS`], because
-/// [`ConfigError::Invalid`] carries a `&'static str`; a test holds it to naming
-/// every level the sink accepts. The *reason* rides along because "why can't I
-/// have debug?" is otherwise a mystery an operator would read as a typo.
-const EXPECTED_DATABASE_LEVEL: &str = "\"off\", \"error\", \"warn\" or \"info\" — \
-     DEBUG and below can carry a listener's address, which is never stored (ADR-0011 rule 5)";
-
-/// `[storage.s3]` — credentials for the S3-compatible backend.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct S3 {
-    pub bucket: String,
-    pub region: String,
-    /// Endpoint for a self-hosted store (Garage/MinIO); unset for AWS.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    /// Allow plain HTTP, for a self-hosted store on a LAN.
-    pub allow_http: bool,
-}
-
-impl Default for S3 {
-    fn default() -> Self {
-        S3 {
-            bucket: String::new(),
-            // What Garage and MinIO answer to when they don't care, and AWS's
-            // oldest region — a value that makes an unconfigured `region` a
-            // non-event rather than a required field.
-            region: "us-east-1".to_string(),
-            endpoint: None,
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            allow_http: false,
-        }
-    }
-}
-
-/// Debug, minus the secret (ADR-0011 rule 2). `Config` derives `Debug`, so
-/// anything that ever `?config`s a boot failure would otherwise put the S3
-/// secret key in a log line. The access key *id* stays: it identifies which
-/// credential is loaded and is not itself a secret.
-impl std::fmt::Debug for S3 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3")
-            .field("bucket", &self.bucket)
-            .field("region", &self.region)
-            .field("endpoint", &self.endpoint)
-            .field("access_key_id", &self.access_key_id)
-            .field("secret_access_key", &"<redacted>")
-            .field("allow_http", &self.allow_http)
-            .finish()
-    }
-}
 
 /// `[server]` — the listening port and where data lives.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1469,185 +1535,12 @@ pub fn resolve(
         None => Config::default(),
     };
 
-    // The environment, over the file.
-    if let Some(port) = parsed_env(&env, "RADIO_SCOUT_PORT", "a port number 0-65535")? {
-        config.server.port = port;
-    }
-    if let Some(base_dir) = set_env(&env, "RADIO_SCOUT_BASE_DIR") {
-        config.server.base_dir = PathBuf::from(base_dir);
-    }
-    if let Some(list) = set_env(&env, "RADIO_SCOUT_TRUSTED_PROXIES") {
-        config.server.trusted_proxies = list
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| {
-                entry.parse().map_err(|_| {
-                    ConfigError::invalid_env("RADIO_SCOUT_TRUSTED_PROXIES", entry, EXPECTED_PROXY)
-                })
-            })
-            .collect::<Result<_, _>>()?;
-    }
-    if let Some(url) = set_env(&env, "RADIO_SCOUT_DATABASE_URL") {
-        config.database.url = Some(url);
-    }
-    if let Some(backend) = set_env(&env, "RADIO_SCOUT_STORAGE_BACKEND") {
-        config.storage.backend = backend.parse().map_err(|_| {
-            ConfigError::invalid_env(
-                "RADIO_SCOUT_STORAGE_BACKEND",
-                &backend,
-                "\"filesystem\" or \"s3\"",
-            )
-        })?;
-    }
-    if let Some(path) = set_env(&env, "RADIO_SCOUT_STORAGE_PATH") {
-        config.storage.path = Some(PathBuf::from(path));
-    }
-    if let Some(bucket) = set_env(&env, "RADIO_SCOUT_S3_BUCKET") {
-        config.storage.s3.bucket = bucket;
-    }
-    if let Some(region) = set_env(&env, "RADIO_SCOUT_S3_REGION") {
-        config.storage.s3.region = region;
-    }
-    if let Some(endpoint) = set_env(&env, "RADIO_SCOUT_S3_ENDPOINT") {
-        config.storage.s3.endpoint = Some(endpoint);
-    }
-    if let Some(id) = set_env(&env, "RADIO_SCOUT_S3_ACCESS_KEY_ID") {
-        config.storage.s3.access_key_id = id;
-    }
-    if let Some(secret) = set_env(&env, "RADIO_SCOUT_S3_SECRET_ACCESS_KEY") {
-        config.storage.s3.secret_access_key = secret;
-    }
-    if let Some(allow_http) = parsed_env(&env, "RADIO_SCOUT_S3_ALLOW_HTTP", "true or false")? {
-        config.storage.s3.allow_http = allow_http;
-    }
-    if let Some(days) = parsed_env(&env, "RADIO_SCOUT_RETENTION_DAYS", "a number of days")? {
-        config.retention.days = days;
-    }
-    if let Some(gb) = parsed_env(
-        &env,
-        "RADIO_SCOUT_RETENTION_MAX_SIZE_GB",
-        "a number of gigabytes",
-    )? {
-        config.retention.max_size_gb = Some(gb);
-    }
-    if let Some(days) = parsed_env(&env, "RADIO_SCOUT_RETENTION_LOG_DAYS", "a number of days")? {
-        config.retention.log_days = days;
-    }
-    if let Some(secs) = parsed_env(
-        &env,
-        "RADIO_SCOUT_RETENTION_INTERVAL_SECS",
-        "a number of seconds",
-    )? {
-        config.retention.interval_secs = secs;
-    }
-    if let Some(batch) = parsed_env(
-        &env,
-        "RADIO_SCOUT_RETENTION_BATCH_SIZE",
-        "a number of Calls per batch",
-    )? {
-        config.retention.batch_size = batch;
-    }
-    if let Some(secs) = parsed_env(
-        &env,
-        "RADIO_SCOUT_PUSH_COALESCE_SECS",
-        "a number of seconds",
-    )? {
-        config.push.coalesce_secs = secs;
-    }
-    if let Some(secs) = parsed_env(&env, "RADIO_SCOUT_PUSH_TTL_SECS", "a number of seconds")? {
-        config.push.ttl_secs = secs;
-    }
-    if let Some(subject) = set_env(&env, "RADIO_SCOUT_PUSH_SUBJECT") {
-        config.push.subject = subject;
-    }
-    if let Some(secs) = parsed_env(
-        &env,
-        "RADIO_SCOUT_RETENTION_ORPHAN_GRACE_SECS",
-        "a number of seconds",
-    )? {
-        config.retention.orphan_grace_secs = secs;
-    }
-    if let Some(ms) = parsed_env(
-        &env,
-        "RADIO_SCOUT_INGEST_DEDUP_WINDOW_MS",
-        "a duration in milliseconds",
-    )? {
-        config.ingest.dedup_window_ms = ms;
-    }
-    if let Some(auto) = parsed_env(&env, "RADIO_SCOUT_INGEST_AUTO_POPULATE", "true or false")? {
-        config.ingest.auto_populate = auto;
-    }
-    if let Some(secs) = parsed_env(
-        &env,
-        "RADIO_SCOUT_ADMIN_SESSION_IDLE_SECS",
-        "a number of seconds",
-    )? {
-        config.admin.session_idle_secs = secs;
-    }
-    if let Some(secs) = parsed_env(
-        &env,
-        "RADIO_SCOUT_ADMIN_SESSION_MAX_SECS",
-        "a number of seconds",
-    )? {
-        config.admin.session_max_secs = secs;
-    }
-    if let Some(attempts) = parsed_env(
-        &env,
-        "RADIO_SCOUT_ADMIN_LOCKOUT_ATTEMPTS",
-        "a number of attempts",
-    )? {
-        config.admin.lockout_attempts = attempts;
-    }
-    if let Some(secs) = parsed_env(
-        &env,
-        "RADIO_SCOUT_ADMIN_LOCKOUT_SECS",
-        "a number of seconds",
-    )? {
-        config.admin.lockout_secs = secs;
-    }
-    if let Some(mode) = set_env(&env, "RADIO_SCOUT_ENHANCEMENT_MODE") {
-        config.enhancement.mode = mode.parse().map_err(|_| {
-            ConfigError::invalid_env("RADIO_SCOUT_ENHANCEMENT_MODE", &mode, EXPECTED_MODE)
-        })?;
-    }
-    if let Some(output) = set_env(&env, "RADIO_SCOUT_ENHANCEMENT_OUTPUT") {
-        config.enhancement.output = output.parse().map_err(|_| {
-            ConfigError::invalid_env("RADIO_SCOUT_ENHANCEMENT_OUTPUT", &output, EXPECTED_OUTPUT)
-        })?;
-    }
-    if let Some(lufs) = parsed_env(
-        &env,
-        "RADIO_SCOUT_ENHANCEMENT_TARGET_LUFS",
-        "a loudness in LUFS, e.g. -16",
-    )? {
-        config.enhancement.target_lufs = lufs;
-    }
-    if let Some(depth) = parsed_env(
-        &env,
-        "RADIO_SCOUT_ENHANCEMENT_QUEUE_DEPTH",
-        "a number of Calls",
-    )? {
-        config.enhancement.queue_depth = depth;
-    }
-    // `RUST_LOG`, not a `RADIO_SCOUT_`-prefixed name: it is the variable every
-    // Rust operator already reaches for, and ADR-0011 documents it as the
-    // control surface. The `[log]` section is what survives a reboot.
-    if let Some(directives) = set_env(&env, "RUST_LOG") {
-        validate_directives("RUST_LOG", &directives)?;
-        config.log.directives = directives;
-    }
-    // ...whereas the operator log surface's level is ours, so it takes the
-    // prefix every other setting does (#30).
-    if let Some(level) = set_env(&env, "RADIO_SCOUT_LOG_DATABASE_LEVEL") {
-        if LogSinkConfig::level_from_str(&level).is_none() {
-            return Err(ConfigError::invalid_env(
-                "RADIO_SCOUT_LOG_DATABASE_LEVEL",
-                &level,
-                EXPECTED_DATABASE_LEVEL,
-            ));
+    // The environment, over the file — every setting, once, from the table
+    // that also proves each one is reachable (#87).
+    for setting in SETTINGS {
+        if let Some(value) = set_env(&env, setting.var) {
+            setting.apply(&mut config, &value)?;
         }
-        config.log.database_level = level;
     }
 
     // The command line, over everything.
@@ -1667,7 +1560,11 @@ pub fn resolve(
         config.retention.days = days;
     }
     if let Some(gb) = cli.retention_max_size_gb {
-        config.retention.max_size_gb = Some(gb);
+        config.retention.max_size_bytes = Some(
+            RetentionConfig::max_size_bytes_from_gb(gb).map_err(|expected| {
+                ConfigError::invalid_key("--retention-max-size-gb", &gb.to_string(), expected)
+            })?,
+        );
     }
     if let Some(proxies) = &cli.trusted_proxies {
         config.server.trusted_proxies.clone_from(proxies);
@@ -1712,10 +1609,16 @@ fn validate_directives(source: &str, directives: &str) -> Result<(), ConfigError
         false => Err(ConfigError::Invalid {
             source: source.to_string(),
             value: directives.to_string(),
-            expected: "tracing filter directives, e.g. \"debug\" or \"warn,radio_scout=trace\"",
+            expected: EXPECTED_DIRECTIVES,
         }),
     }
 }
+
+/// What unusable `[log] directives` are told they should have been — one
+/// string, so `--log`, `RUST_LOG` and the file cannot describe them
+/// differently.
+const EXPECTED_DIRECTIVES: &str =
+    "tracing filter directives, e.g. \"debug\" or \"warn,radio_scout=trace\"";
 
 /// The value of `var`, or `None` when it is unset or blank.
 ///
@@ -1728,24 +1631,11 @@ fn set_env(env: &impl Fn(&str) -> Option<String>, var: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// [`set_env`], parsed — and a boot refused if it doesn't parse.
-fn parsed_env<T: FromStr>(
-    env: &impl Fn(&str) -> Option<String>,
-    var: &str,
-    expected: &'static str,
-) -> Result<Option<T>, ConfigError> {
-    set_env(env, var)
-        .map(|value| {
-            value
-                .parse()
-                .map_err(|_| ConfigError::invalid_env(var, &value, expected))
-        })
-        .transpose()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blob::S3Config;
+    use crate::enhance::Mode;
     use crate::testing::LogCapture;
     use rstest::rstest;
     use std::time::Duration;
@@ -1814,6 +1704,24 @@ mod tests {
     /// The S3 configuration the audio store would open.
     fn s3_of(config: &Config) -> S3Config {
         *store_of(config).expect_err("an S3 store")
+    }
+
+    /// **The shape this module is in (#87).** A section *is* the subsystem's
+    /// own configuration type, so a subsystem's shipped defaults and the ones
+    /// `--write-config` documents cannot drift apart — there is only one of
+    /// them. Every line here would have compiled against a mirrored twin only
+    /// by accident, which is the point: the assertion is the type as much as
+    /// the value.
+    #[test]
+    fn each_section_is_its_subsystems_own_configuration() {
+        let config = Config::default();
+
+        assert_eq!(config.ingest, IngestConfig::default());
+        assert_eq!(config.enhancement, EnhancementConfig::default());
+        assert_eq!(config.storage.s3, S3Config::default());
+        assert_eq!(config.admin, AdminConfig::default());
+        assert_eq!(config.push, PushConfig::default());
+        assert_eq!(config.retention, RetentionConfig::default());
     }
 
     /// Zero-config (US 35): no file, no flags, and the server still knows where
@@ -2091,7 +1999,7 @@ mod tests {
         let file = text.map(file);
         let config = resolve(&cli(args), env(vars), file.as_ref()).expect("resolve");
 
-        let retention = config.retention();
+        let retention = config.retention;
         assert_eq!(retention.days, expected_days);
         assert_eq!(retention.max_size_bytes, expected_cap);
     }
@@ -2108,7 +2016,7 @@ mod tests {
         )
         .expect("resolve");
 
-        let retention = config.retention();
+        let retention = config.retention;
         assert_eq!(retention.interval, Duration::from_secs(60));
         assert_eq!(retention.batch_size, 25);
         assert_eq!(retention.orphan_grace, Duration::from_secs(120));
@@ -2128,6 +2036,84 @@ mod tests {
         assert!(error.to_string().contains(key), "{error}");
     }
 
+    /// **A value the file cannot run is not rescued by a louder layer.**
+    ///
+    /// Precedence decides which *value* wins, not whether a broken file is
+    /// tolerated — and this is already true of everything `serde` refuses: an
+    /// unparseable `port = "nope"`, an unknown key, a `trusted_proxies` entry
+    /// that is not an address. #87 moved two more settings into that family by
+    /// giving them to the type that owns them, so the flag below no longer
+    /// overrides the file's typo; it is told about it instead.
+    ///
+    /// The alternative would be to keep both as raw values validated after
+    /// resolution, which is the mirrored-type shape #87 exists to delete: an
+    /// `f64` of gigabytes beside the bytes the sweeper wants, and a `String`
+    /// beside the level the sink wants.
+    #[rstest]
+    #[case::a_cap_that_is_not_a_size(
+        "[retention]\nmax_size_gb = 0\n",
+        &["--retention-max-size-gb", "5"],
+        &[],
+        "retention.max_size_gb"
+    )]
+    #[case::a_level_rule_5_forbids(
+        "[log]\ndatabase_level = \"debug\"\n",
+        &[],
+        &[("RADIO_SCOUT_LOG_DATABASE_LEVEL", "warn")],
+        "log.database_level"
+    )]
+    // The two that always behaved this way, here so the family is visible as a
+    // family rather than as two rules that happen to agree today.
+    #[case::an_unparseable_value("[server]\nport = \"nope\"\n", &["--port", "8080"], &[], "expected u16")]
+    #[case::an_unusable_proxy(
+        "[server]\ntrusted_proxies = [\"nonsense\"]\n",
+        &["--trusted-proxy", "127.0.0.1"],
+        &[],
+        "nonsense"
+    )]
+    fn a_file_the_scanner_cannot_run_is_not_rescued_by_a_louder_layer(
+        #[case] text: &str,
+        #[case] args: &[&str],
+        #[case] vars: &[(&str, &str)],
+        #[case] says: &str,
+    ) {
+        let error = resolve(&cli(args), env(vars), Some(&file(text)))
+            .expect_err("a file that cannot be run");
+
+        let error = error.to_string();
+        // Named where it was written, down to the line, because the louder
+        // layer is exactly what would otherwise hide it.
+        assert!(error.contains("radio-scout.toml:2:"), "{error}");
+        assert!(error.contains(says), "{error}");
+    }
+
+    /// ...from **every** layer that can carry it, each naming what the operator
+    /// actually wrote.
+    ///
+    /// Since #87 the check lives in the type that owns the value
+    /// ([`RetentionConfig::max_size_bytes_from_gb`]) rather than in a validation
+    /// pass at the end, which is what makes the answer identical across three
+    /// layers — but it also means three call sites, and a layer that forgot to
+    /// ask would quietly read `max_size_gb = 0` as "no cap" and prune nothing.
+    #[rstest]
+    #[case::file(&[], &[], Some("[retention]\nmax_size_gb = 0\n"), "radio-scout.toml")]
+    #[case::environment(&[], &[("RADIO_SCOUT_RETENTION_MAX_SIZE_GB", "0")], None, "RADIO_SCOUT_RETENTION_MAX_SIZE_GB")]
+    #[case::flag(&["--retention-max-size-gb", "0"], &[], None, "--retention-max-size-gb")]
+    fn a_size_cap_that_is_not_a_size_is_refused_wherever_it_was_written(
+        #[case] args: &[&str],
+        #[case] vars: &[(&str, &str)],
+        #[case] text: Option<&str>,
+        #[case] source: &str,
+    ) {
+        let file = text.map(file);
+        let error =
+            resolve(&cli(args), env(vars), file.as_ref()).expect_err("a cap that is not a size");
+
+        let error = error.to_string();
+        assert!(error.contains(source), "{error}");
+        assert!(error.contains(retention::EXPECTED_MAX_SIZE_GB), "{error}");
+    }
+
     /// Ingest tuning (#5, #8) — rdio-scanner keeps both of these in its database
     /// behind the admin UI, so a headless install cannot set them at all.
     #[test]
@@ -2141,7 +2127,7 @@ mod tests {
         )
         .expect("resolve");
 
-        let ingest = config.ingest();
+        let ingest = config.ingest;
         assert_eq!(ingest.dedup_window_ms, 1500);
         assert!(!ingest.auto_populate);
     }
@@ -2160,7 +2146,7 @@ mod tests {
         )
         .expect("resolve");
 
-        let admin = config.admin();
+        let admin = config.admin;
         assert_eq!(admin.session_idle, Duration::from_secs(60));
         assert_eq!(admin.session_max, Duration::from_secs(600));
         assert_eq!(admin.lockout_attempts, 2);
@@ -2181,7 +2167,7 @@ mod tests {
         )
         .expect("resolve");
 
-        let push = config.push();
+        let push = config.push;
         assert_eq!(push.coalesce, Duration::from_secs(60));
         assert_eq!(push.ttl, Duration::from_secs(120));
         assert_eq!(push.subject, "mailto:ops@example.com");
@@ -2218,7 +2204,7 @@ mod tests {
         )
         .expect("resolve");
 
-        assert_eq!(config.push().coalesce, Duration::ZERO);
+        assert_eq!(config.push.coalesce, Duration::ZERO);
     }
 
     /// Every one of these bricks the admin surface at zero — a session already
@@ -2250,7 +2236,7 @@ mod tests {
     fn enhancement_is_off_until_it_is_turned_on(#[case] text: Option<&str>) {
         let config = resolve(&cli(&[]), no_env, text.map(file).as_ref()).expect("resolve");
 
-        assert_eq!(config.enhancement().mode, Mode::Off);
+        assert_eq!(config.enhancement.mode, Mode::Off);
     }
 
     /// US 36 — settable without a UI, in either spelling, with the environment
@@ -2272,7 +2258,7 @@ mod tests {
     ) {
         let config = resolve(&cli(&[]), env(vars), Some(&file(text))).expect("resolve");
 
-        assert_eq!(config.enhancement().mode, expected);
+        assert_eq!(config.enhancement.mode, expected);
     }
 
     /// WAV is the enhanced output because it is the only one that plays on
@@ -2283,7 +2269,7 @@ mod tests {
     fn enhanced_audio_is_wav_unless_told_otherwise() {
         let config = resolve(&cli(&[]), no_env, None).expect("resolve");
 
-        assert_eq!(config.enhancement().output, Output::Wav);
+        assert_eq!(config.enhancement.output, Output::Wav);
     }
 
     /// ADR-0012: boot says what it is configured to do. Enhancement is the one
@@ -2298,9 +2284,9 @@ mod tests {
 
         Loaded {
             config: Config {
-                enhancement: Enhancement {
+                enhancement: EnhancementConfig {
                     mode,
-                    ..Enhancement::default()
+                    ..EnhancementConfig::default()
                 },
                 ..Config::default()
             },
@@ -2325,7 +2311,7 @@ mod tests {
         )
         .expect("resolve");
 
-        let enhancement = config.enhancement();
+        let enhancement = config.enhancement;
         assert_eq!(enhancement.target_lufs, -23.0);
         assert_eq!(enhancement.queue_depth, 64, "the environment is louder");
     }
@@ -2452,13 +2438,13 @@ mod tests {
     fn unconfigured_ingest_and_retention_are_the_shipped_defaults() {
         let config = resolve(&cli(&[]), no_env, None).expect("resolve");
 
-        let ingest = config.ingest();
+        let ingest = &config.ingest;
         assert_eq!(
             ingest.dedup_window_ms,
             IngestConfig::default().dedup_window_ms
         );
         assert_eq!(ingest.auto_populate, IngestConfig::default().auto_populate);
-        let retention = config.retention();
+        let retention = config.retention;
         let default = RetentionConfig::default();
         assert_eq!(retention.days, default.days);
         assert_eq!(retention.max_size_bytes, default.max_size_bytes);
@@ -2495,7 +2481,7 @@ mod tests {
         )
         .expect("0 disables dedup; it is not an error");
 
-        assert_eq!(config.ingest().dedup_window_ms, 0);
+        assert_eq!(config.ingest.dedup_window_ms, 0);
     }
 
     /// `RUST_LOG` was the only way to turn the logs up (ADR-0011); now the
@@ -2556,7 +2542,7 @@ mod tests {
         let file = text.map(file);
         let config = resolve(&cli(&[]), env(vars), file.as_ref()).expect("resolve");
 
-        assert_eq!(config.log_sink().level, expected);
+        assert_eq!(config.log.database_level.level(), expected);
     }
 
     /// **ADR-0011 rule 5 as a boot error.** DEBUG and TRACE are the levels a
@@ -2585,18 +2571,6 @@ mod tests {
         assert!(error.contains("rule 5"), "{error}");
     }
 
-    /// The refusal names every level that *is* accepted — spelled out as a
-    /// `&'static str`, so nothing but a test keeps it honest as levels change.
-    #[test]
-    fn the_refused_level_names_every_level_that_works() {
-        for (name, _) in LogSinkConfig::LEVELS {
-            assert!(
-                EXPECTED_DATABASE_LEVEL.contains(name),
-                "{name} missing from {EXPECTED_DATABASE_LEVEL:?}"
-            );
-        }
-    }
-
     /// Stored logs are bounded like the archive is (#30) — their own window,
     /// because `days = 0` (rdio's "keep Calls forever") must not also mean an
     /// unbounded logs table on a Pi.
@@ -2614,9 +2588,9 @@ mod tests {
         let file = text.map(file);
         let config = resolve(&cli(&[]), env(vars), file.as_ref()).expect("resolve");
 
-        assert_eq!(config.retention().log_days, expected);
+        assert_eq!(config.retention.log_days, expected);
         // ...and it is genuinely separate from the archive's window.
-        assert_eq!(config.retention().days, Retention::default().days);
+        assert_eq!(config.retention.days, RetentionConfig::default().days);
     }
 
     /// Who may be believed when they forward (#28's deferred setting). Bare
@@ -2885,7 +2859,7 @@ mod tests {
         fn a_serialized_configuration_parses_back_unchanged(
             port in 0u16..=u16::MAX,
             days in 0u32..4000,
-            gb in proptest::option::of(0.1f64..1024.0),
+            gb in proptest::option::of(1u64..1 << 50),
             dedup in 0i64..10_000,
             auto_populate in proptest::bool::ANY,
             directives in "(info|debug|warn|trace)",
@@ -2894,9 +2868,17 @@ mod tests {
         ) {
             let config = Config {
                 server: Server { port, ..Default::default() },
-                retention: Retention { days, max_size_gb: gb, log_days, ..Default::default() },
-                ingest: Ingest { dedup_window_ms: dedup, auto_populate },
-                log: Log { directives, database_level },
+                retention: RetentionConfig {
+                    days,
+                    max_size_bytes: gb,
+                    log_days,
+                    ..Default::default()
+                },
+                ingest: IngestConfig { dedup_window_ms: dedup, auto_populate },
+                log: LogConfig {
+                    directives,
+                    database_level: database_level.parse().expect("a storable level"),
+                },
                 ..Default::default()
             };
 
@@ -2988,41 +2970,166 @@ mod tests {
         assert!(logged.contains("storage=s3"), "{logged}");
     }
 
-    /// Every setting reachable from the environment, in one table — because a
-    /// container is configured by environment and nothing else, and a variable
-    /// that silently isn't read is a setting an operator cannot use.
+    /// The dotted keys a configuration serializes to, deepest last —
+    /// `server.port`, `storage.s3.bucket`. What "every setting" *means*, read
+    /// off the type rather than off a list somebody maintains.
+    fn keys_of(config: &Config) -> Vec<String> {
+        fn walk(value: &toml::Value, prefix: &str, into: &mut Vec<String>) {
+            let Some(table) = value.as_table() else {
+                return into.push(prefix.to_string());
+            };
+            for (name, child) in table {
+                let path = match prefix.is_empty() {
+                    true => name.clone(),
+                    false => format!("{prefix}.{name}"),
+                };
+                walk(child, &path, into);
+            }
+        }
+        let mut keys = Vec::new();
+        walk(
+            &toml::Value::try_from(config).expect("serialize"),
+            "",
+            &mut keys,
+        );
+        keys
+    }
+
+    /// What `config` says at a dotted key, or `None` when it says nothing —
+    /// which is itself an answer, for the four settings that serialize to
+    /// nothing until they are set.
+    fn value_at(config: &Config, key: &str) -> Option<toml::Value> {
+        key.split('.').try_fold(
+            toml::Value::try_from(config).expect("serialize"),
+            |at, name| at.get(name).cloned(),
+        )
+    }
+
+    /// A configuration with **every** setting set, built by handing each entry
+    /// of [`SETTINGS`] its own example — so the four that serialize to nothing
+    /// at their default (`database.url`, `storage.path`,
+    /// `retention.max_size_gb`, `storage.s3.endpoint`) are visible here.
+    ///
+    /// Applied rather than resolved, because one example
+    /// (`enhancement.output = "opus"`) is deliberately a value that parses and
+    /// then refuses to boot.
+    fn every_setting_set() -> Config {
+        let mut config = Config::default();
+        for setting in SETTINGS {
+            setting
+                .apply(&mut config, setting.example)
+                .unwrap_or_else(|error| panic!("{}: {error}", setting.var));
+        }
+        config
+    }
+
+    /// **Every setting has an environment spelling.** Walked from the settings
+    /// themselves, both ways: a key nothing in [`SETTINGS`] names is a setting a
+    /// container cannot configure, and an entry naming a key no configuration
+    /// has is a variable that reads nothing.
+    ///
+    /// This is what replaced a hand-written case list per variable, where an
+    /// omission was silently untested and a setting forgotten in resolution
+    /// failed nothing anywhere (#87).
+    ///
+    /// One gap is left honestly open, because Rust has no reflection to close
+    /// it: a *newly added optional* setting — one that serializes to nothing at
+    /// its default — is invisible to both directions until something sets it.
+    /// Every non-optional setting is covered by construction.
+    #[test]
+    fn every_setting_has_an_environment_spelling() {
+        let named: std::collections::BTreeSet<&str> =
+            SETTINGS.iter().map(|setting| setting.key).collect();
+
+        for key in keys_of(&Config::default()) {
+            assert!(
+                named.contains(key.as_str()),
+                "no environment spelling for {key}"
+            );
+        }
+        for key in keys_of(&every_setting_set()) {
+            assert!(
+                named.contains(key.as_str()),
+                "no environment spelling for {key}"
+            );
+        }
+        for setting in SETTINGS {
+            assert!(
+                value_at(&every_setting_set(), setting.key).is_some(),
+                "{} names {}, which no configuration has",
+                setting.var,
+                setting.key
+            );
+        }
+    }
+
+    /// ...and every spelling reaches the setting it names. Two claims per
+    /// entry, because either alone can be true while the setting is unusable:
+    /// the entry writes the key it advertises, and [`resolve`] actually reads
+    /// the variable.
+    #[test]
+    fn every_environment_spelling_reaches_the_setting_it_names() {
+        for setting in SETTINGS {
+            let mut applied = Config::default();
+            setting
+                .apply(&mut applied, setting.example)
+                .expect("the example applies");
+            assert_ne!(
+                value_at(&applied, setting.key),
+                value_at(&Config::default(), setting.key),
+                "{} writes something other than {}",
+                setting.var,
+                setting.key
+            );
+
+            match resolve(&cli(&[]), env(&[(setting.var, setting.example)]), None) {
+                Ok(resolved) => assert_eq!(
+                    value_at(&resolved, setting.key),
+                    value_at(&applied, setting.key),
+                    "resolution does not read {}",
+                    setting.var
+                ),
+                // `enhancement.output = "opus"` is the one example that parses
+                // and *then* refuses to boot, because the encoder is unbuilt
+                // (#100). The refusal is itself proof the variable was read —
+                // nothing else in a default configuration produces it.
+                Err(error) => assert!(
+                    error.to_string().contains(setting.key),
+                    "{} was refused for some other reason: {error}",
+                    setting.var
+                ),
+            }
+        }
+    }
+
+    /// **The units, which coverage cannot see.** Six settings are written in
+    /// one unit and used in another — gigabytes to bytes, seconds to
+    /// `Duration`, a comma-separated list to a trust list, a path to the store
+    /// it opens. [`every_environment_spelling_reaches_the_setting_it_names`]
+    /// compares each setting against its own serialized form, so a conversion
+    /// that is wrong in *both* directions is invisible to it: a `secs` helper
+    /// reading minutes would round-trip perfectly and still give an operator a
+    /// session sixty times too long.
+    ///
+    /// So these cases are deliberately not a list of every variable — that is
+    /// derived now. They are the worked values a conversion is checked against.
     #[rstest]
-    #[case::backend(&[("RADIO_SCOUT_STORAGE_BACKEND", "filesystem")], |c: &Config| assert_eq!(c.storage.backend, Backend::Filesystem))]
-    #[case::path(&[("RADIO_SCOUT_STORAGE_PATH", "/mnt/audio")], |c: &Config| assert_eq!(fs_root(c), PathBuf::from("/mnt/audio")))]
-    #[case::region(&[("RADIO_SCOUT_S3_REGION", "eu-west-1")], |c: &Config| assert_eq!(c.storage.s3.region, "eu-west-1"))]
-    #[case::endpoint(&[("RADIO_SCOUT_S3_ENDPOINT", "http://garage.lan:3900")], |c: &Config| assert_eq!(c.storage.s3.endpoint.as_deref(), Some("http://garage.lan:3900")))]
-    #[case::allow_http(&[("RADIO_SCOUT_S3_ALLOW_HTTP", "true")], |c: &Config| assert!(c.storage.s3.allow_http))]
-    #[case::max_size(&[("RADIO_SCOUT_RETENTION_MAX_SIZE_GB", "0.5")], |c: &Config| assert_eq!(c.retention().max_size_bytes, Some(536_870_912)))]
-    #[case::days(&[("RADIO_SCOUT_RETENTION_DAYS", "3")], |c: &Config| assert_eq!(c.retention().days, 3))]
-    #[case::interval(&[("RADIO_SCOUT_RETENTION_INTERVAL_SECS", "60")], |c: &Config| assert_eq!(c.retention().interval, Duration::from_secs(60)))]
-    #[case::batch_size(&[("RADIO_SCOUT_RETENTION_BATCH_SIZE", "25")], |c: &Config| assert_eq!(c.retention().batch_size, 25))]
-    #[case::orphan_grace(&[("RADIO_SCOUT_RETENTION_ORPHAN_GRACE_SECS", "120")], |c: &Config| assert_eq!(c.retention().orphan_grace, Duration::from_secs(120)))]
-    #[case::dedup(&[("RADIO_SCOUT_INGEST_DEDUP_WINDOW_MS", "1500")], |c: &Config| assert_eq!(c.ingest().dedup_window_ms, 1500))]
-    #[case::auto_populate(&[("RADIO_SCOUT_INGEST_AUTO_POPULATE", "false")], |c: &Config| assert!(!c.ingest().auto_populate))]
-    #[case::port(&[("RADIO_SCOUT_PORT", "9000")], |c: &Config| assert_eq!(c.server.port, 9000))]
-    #[case::base_dir(&[("RADIO_SCOUT_BASE_DIR", "/srv/rs")], |c: &Config| assert_eq!(c.server.base_dir, PathBuf::from("/srv/rs")))]
-    #[case::database(&[("RADIO_SCOUT_DATABASE_URL", "postgres://db/rs")], |c: &Config| assert_eq!(c.database_url(), "postgres://db/rs"))]
-    #[case::log(&[("RUST_LOG", "trace")], |c: &Config| assert_eq!(c.log.directives, "trace"))]
-    #[case::proxies(&[("RADIO_SCOUT_TRUSTED_PROXIES", "10.0.0.1")], |c: &Config| assert!(c.trusted_proxies().trusts(ip("10.0.0.1"))))]
-    #[case::session_idle(&[("RADIO_SCOUT_ADMIN_SESSION_IDLE_SECS", "60")], |c: &Config| assert_eq!(c.admin().session_idle, Duration::from_secs(60)))]
-    #[case::session_max(&[("RADIO_SCOUT_ADMIN_SESSION_MAX_SECS", "600")], |c: &Config| assert_eq!(c.admin().session_max, Duration::from_secs(600)))]
-    #[case::lockout_attempts(&[("RADIO_SCOUT_ADMIN_LOCKOUT_ATTEMPTS", "2")], |c: &Config| assert_eq!(c.admin().lockout_attempts, 2))]
-    #[case::lockout_secs(&[("RADIO_SCOUT_ADMIN_LOCKOUT_SECS", "30")], |c: &Config| assert_eq!(c.admin().lockout, Duration::from_secs(30)))]
-    #[case::push_coalesce(&[("RADIO_SCOUT_PUSH_COALESCE_SECS", "60")], |c: &Config| assert_eq!(c.push().coalesce, Duration::from_secs(60)))]
-    #[case::push_ttl(&[("RADIO_SCOUT_PUSH_TTL_SECS", "120")], |c: &Config| assert_eq!(c.push().ttl, Duration::from_secs(120)))]
-    #[case::push_subject(&[("RADIO_SCOUT_PUSH_SUBJECT", "mailto:ops@example.com")], |c: &Config| assert_eq!(c.push().subject, "mailto:ops@example.com"))]
-    #[case::enhancement_mode(&[("RADIO_SCOUT_ENHANCEMENT_MODE", "normalize")], |c: &Config| assert_eq!(c.enhancement().mode, Mode::Normalize))]
-    #[case::enhancement_lufs(&[("RADIO_SCOUT_ENHANCEMENT_TARGET_LUFS", "-20.5")], |c: &Config| assert_eq!(c.enhancement().target_lufs, -20.5))]
-    #[case::enhancement_queue(&[("RADIO_SCOUT_ENHANCEMENT_QUEUE_DEPTH", "16")], |c: &Config| assert_eq!(c.enhancement().queue_depth, 16))]
-    // `RADIO_SCOUT_ENHANCEMENT_OUTPUT` is absent on purpose: its only non-default
-    // value refuses to boot, so there is nothing here it could resolve *to*.
-    // That it is read is proved by `an_output_that_is_not_built_yet_refuses_to_boot`.
-    fn every_setting_can_come_from_the_environment(
+    #[case::gigabytes(&[("RADIO_SCOUT_RETENTION_MAX_SIZE_GB", "0.5")], |c: &Config| assert_eq!(c.retention.max_size_bytes, Some(536_870_912)))]
+    #[case::retention_secs(&[("RADIO_SCOUT_RETENTION_INTERVAL_SECS", "60")], |c: &Config| assert_eq!(c.retention.interval, Duration::from_secs(60)))]
+    #[case::orphan_grace_secs(&[("RADIO_SCOUT_RETENTION_ORPHAN_GRACE_SECS", "120")], |c: &Config| assert_eq!(c.retention.orphan_grace, Duration::from_secs(120)))]
+    #[case::session_idle_secs(&[("RADIO_SCOUT_ADMIN_SESSION_IDLE_SECS", "60")], |c: &Config| assert_eq!(c.admin.session_idle, Duration::from_secs(60)))]
+    #[case::session_max_secs(&[("RADIO_SCOUT_ADMIN_SESSION_MAX_SECS", "600")], |c: &Config| assert_eq!(c.admin.session_max, Duration::from_secs(600)))]
+    #[case::lockout_secs(&[("RADIO_SCOUT_ADMIN_LOCKOUT_SECS", "30")], |c: &Config| assert_eq!(c.admin.lockout, Duration::from_secs(30)))]
+    #[case::coalesce_secs(&[("RADIO_SCOUT_PUSH_COALESCE_SECS", "60")], |c: &Config| assert_eq!(c.push.coalesce, Duration::from_secs(60)))]
+    #[case::ttl_secs(&[("RADIO_SCOUT_PUSH_TTL_SECS", "120")], |c: &Config| assert_eq!(c.push.ttl, Duration::from_secs(120)))]
+    #[case::database_level(&[("RADIO_SCOUT_LOG_DATABASE_LEVEL", "warn")], |c: &Config| assert_eq!(c.log.database_level.level(), Some(Level::WARN)))]
+    #[case::proxy_list(&[("RADIO_SCOUT_TRUSTED_PROXIES", "10.0.0.1, 172.17.0.0/16")], |c: &Config| {
+        assert!(c.trusted_proxies().trusts(ip("10.0.0.1")));
+        assert!(c.trusted_proxies().trusts(ip("172.17.9.9")));
+    })]
+    #[case::audio_root(&[("RADIO_SCOUT_STORAGE_PATH", "/mnt/audio")], |c: &Config| assert_eq!(fs_root(c), PathBuf::from("/mnt/audio")))]
+    #[case::database_url(&[("RADIO_SCOUT_DATABASE_URL", "postgres://db/rs")], |c: &Config| assert_eq!(c.database_url(), "postgres://db/rs"))]
+    fn a_setting_written_in_operator_units_arrives_in_the_codes_own(
         #[case] vars: &[(&str, &str)],
         #[case] expected: fn(&Config),
     ) {

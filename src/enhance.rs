@@ -41,13 +41,16 @@ use crate::call::CallId;
 use crate::db::entities::call;
 use crate::db::repo;
 
-/// How enhancement behaves, from `[enhancement]` (ADR-0012).
+/// How enhancement behaves — and the `[enhancement]` section itself (ADR-0012,
+/// #87). One type: what the worker reads is what an operator wrote, with no
+/// mirrored twin to keep the defaults in step by hand.
 ///
 /// Policy lives here — in the file, so a headless install can set it and a
 /// deployment can version-control it. *Scope* (which Systems and Talkgroups it
 /// applies to) is deliberately not here: it is a column on the rows themselves,
 /// following the auto-populate precedent (#8).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct EnhancementConfig {
     /// How far the chain runs, and whether it runs at all.
     pub mode: Mode,

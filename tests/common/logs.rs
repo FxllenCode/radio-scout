@@ -30,7 +30,7 @@ use std::io;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
-use radio_scout::logsink::{LogSink, LogSinkConfig};
+use radio_scout::logsink::{LogSink, StoredLevel};
 use sea_orm::DatabaseConnection;
 use tracing::level_filters::LevelFilter;
 use tracing::subscriber::{DefaultGuard, Interest};
@@ -148,8 +148,8 @@ impl LogCapture {
     /// `GET /api/admin/logs`, which is the only place an operator sees it. The
     /// writer task rides the same current-thread runtime as the server, and the
     /// guard keeps both installed for as long as the test holds it.
-    pub fn storing(db: &DatabaseConnection, config: LogSinkConfig) -> Self {
-        let (sink, writer) = radio_scout::logsink::channel(config).expect("an enabled sink");
+    pub fn storing(db: &DatabaseConnection, level: StoredLevel) -> Self {
+        let (sink, writer) = radio_scout::logsink::channel(level).expect("an enabled sink");
         writer.spawn(db.clone());
         Self::install(Some(sink))
     }

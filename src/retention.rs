@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use object_store::Error as ObjectError;
 use sea_orm::{DatabaseConnection, DbErr, TransactionTrait};
+use serde::{Deserialize, Serialize};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 
@@ -47,15 +48,26 @@ const BYTES_PER_GB: f64 = 1_073_741_824.0;
 /// Default sweep cadence, matching rdio-scanner's hourly prune ticker.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
 
-/// Retention policy, as the sweeper works in it. The operator-facing units —
-/// days and gigabytes — are [`crate::config::Retention`]'s (#17).
-#[derive(Debug, Clone)]
+/// Retention policy — and the `[retention]` section itself (#17, #87).
+///
+/// One type, in the units the sweeper works in; the two settings an operator
+/// writes in coarser units keep those units at the serde boundary. `_secs`
+/// fields go through [`crate::config::secs`], and the size cap through
+/// [`gigabytes`] below — nobody sizes an archive in bytes, and nobody prunes in
+/// gigabytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RetentionConfig {
     /// Prune Calls older than this many days. `0` disables age-based pruning
     /// (rdio-scanner's `pruneDays` semantics).
     pub days: u32,
     /// Optional cap on total stored audio; the oldest Calls are pruned until
     /// the archive fits. `None` means no size cap.
+    #[serde(
+        rename = "max_size_gb",
+        with = "gigabytes",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_size_bytes: Option<u64>,
     /// Prune stored log events (#30) older than this many days. `0` keeps them
     /// forever, matching [`RetentionConfig::days`]'s reading.
@@ -67,6 +79,7 @@ pub struct RetentionConfig {
     pub log_days: u32,
     /// How often [`spawn`]'s background task runs a [`sweep`]. Zero is read as
     /// "unset" and falls back to the default cadence.
+    #[serde(rename = "interval_secs", with = "crate::config::secs")]
     pub interval: Duration,
     /// Calls deleted per batch. Bounds how long any single write-lock is held.
     pub batch_size: u64,
@@ -74,6 +87,7 @@ pub struct RetentionConfig {
     /// it. Must comfortably exceed the ingest window between writing an audio
     /// object and committing its row, or the GC would delete audio out from
     /// under a Call that is mid-ingest.
+    #[serde(rename = "orphan_grace_secs", with = "crate::config::secs")]
     pub orphan_grace: Duration,
 }
 
@@ -135,11 +149,64 @@ impl RetentionConfig {
         );
     }
 
-    /// Set the size cap from `retention.max_size_gb` (binary GiB). A
-    /// non-positive or non-finite value disables the cap.
-    pub fn with_max_size_gb(mut self, gb: f64) -> Self {
-        self.max_size_bytes = (gb.is_finite() && gb > 0.0).then_some((gb * BYTES_PER_GB) as u64);
-        self
+    /// The size cap `gb` binary gigabytes asks for, or why it cannot be one.
+    ///
+    /// Shared by the two layers that can carry the setting — the file, through
+    /// [`gigabytes`], and the environment, through the settings table — so an
+    /// operator who wrote `0` is told the same thing whichever they wrote it in.
+    pub fn max_size_bytes_from_gb(gb: f64) -> Result<u64, &'static str> {
+        match gb.is_finite() && gb > 0.0 {
+            // A cap must be a size. `days = 0` is rdio's "keep forever" and
+            // stays legal, but a zero *cap* would mean "prune everything",
+            // which nobody ever means — and no key at all already says "no cap".
+            true => Ok((gb * BYTES_PER_GB) as u64),
+            false => Err(EXPECTED_MAX_SIZE_GB),
+        }
+    }
+}
+
+/// What an unusable `[retention] max_size_gb` is told it should have been.
+pub const EXPECTED_MAX_SIZE_GB: &str =
+    "a positive number of gigabytes, or no key at all for no cap";
+
+/// Binary gigabytes in the file, bytes in the type.
+///
+/// The one place `max_size_gb` becomes `max_size_bytes`, and the one place a
+/// value that cannot be a cap is refused. Rejecting it *here* rather than in a
+/// later validation pass is the [`crate::config::ProxyNet`] move: the type that
+/// owns the value refuses it wherever it was written, so the message carries the
+/// line and column of the key the operator has to edit. The key names itself in
+/// the message because a `serde` error is rendered by position alone, and
+/// `radio-scout.toml:14:15: a positive number of gigabytes` would leave an
+/// operator counting lines.
+mod gigabytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::{BYTES_PER_GB, RetentionConfig};
+
+    pub fn serialize<S: Serializer>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error> {
+        value
+            .map(|bytes| bytes as f64 / BYTES_PER_GB)
+            .serialize(serializer)
+    }
+
+    /// `f64` rather than `Option<f64>`: the struct's own `#[serde(default)]`
+    /// answers an absent key without ever reaching here, and TOML has no null
+    /// for a present one — so "no cap" is a key that isn't written, and an arm
+    /// for it would be unreachable.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u64>, D::Error> {
+        let gb = f64::deserialize(deserializer)?;
+        RetentionConfig::max_size_bytes_from_gb(gb)
+            .map(Some)
+            .map_err(|expected| {
+                serde::de::Error::custom(crate::config::rejected(
+                    "retention.max_size_gb",
+                    gb,
+                    expected,
+                ))
+            })
     }
 }
 
@@ -852,22 +919,25 @@ mod tests {
         assert_eq!(config.cutoff_ms(NOW), expected);
     }
 
+    /// The operator's gigabytes, in the bytes the sweep counts.
+    ///
+    /// A value that cannot be a cap is **refused**, not quietly disabled: an
+    /// absent key already says "no cap", so `max_size_gb = 0` is a typo, and
+    /// reading a typo as a policy is rdio-scanner's failure mode
+    /// (`server/config.go` falls back to a default on anything it can't parse).
+    /// The refusal reaches an operator as a boot error naming the key — through
+    /// [`gigabytes`] for the file, and through the settings table for the
+    /// environment.
     #[rstest]
-    #[case(1.0, Some(1_073_741_824))]
-    #[case(0.5, Some(536_870_912))]
-    #[case(2.5, Some(2_684_354_560))]
-    // Nonsense values disable the cap rather than clamping to something arbitrary.
-    #[case(0.0, None)]
-    #[case(-1.0, None)]
-    #[case(f64::NAN, None)]
-    #[case(f64::INFINITY, None)]
-    fn size_cap_from_gigabytes(#[case] gb: f64, #[case] expected: Option<u64>) {
-        assert_eq!(
-            RetentionConfig::default()
-                .with_max_size_gb(gb)
-                .max_size_bytes,
-            expected
-        );
+    #[case(1.0, Ok(1_073_741_824))]
+    #[case(0.5, Ok(536_870_912))]
+    #[case(2.5, Ok(2_684_354_560))]
+    #[case(0.0, Err(EXPECTED_MAX_SIZE_GB))]
+    #[case(-1.0, Err(EXPECTED_MAX_SIZE_GB))]
+    #[case(f64::NAN, Err(EXPECTED_MAX_SIZE_GB))]
+    #[case(f64::INFINITY, Err(EXPECTED_MAX_SIZE_GB))]
+    fn size_cap_from_gigabytes(#[case] gb: f64, #[case] expected: Result<u64, &'static str>) {
+        assert_eq!(RetentionConfig::max_size_bytes_from_gb(gb), expected);
     }
 
     proptest! {

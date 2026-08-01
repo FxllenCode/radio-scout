@@ -81,7 +81,7 @@ async fn main() -> ExitCode {
     // migration lines an operator most wants to read back are written before
     // anything could have stored them, and they wait in the queue until `serve`
     // hands the writer a database.
-    let (sink, log_writer) = match logsink::channel(loaded.config.log_sink()) {
+    let (sink, log_writer) = match logsink::channel(loaded.config.log.database_level) {
         Some((sink, writer)) => (Some(sink), Some(writer)),
         None => (None, None),
     };
@@ -201,7 +201,7 @@ async fn serve(
     );
     startup::log_vapid_key(&vapid);
     let push = match vapid.key() {
-        Some(key) => Push::new(key, config.push()),
+        Some(key) => Push::new(key, config.push.clone()),
         None => Push::disabled(),
     };
 
@@ -209,15 +209,15 @@ async fn serve(
 
     // Retention (#10): bound the archive so the disk can't fill. Sweeps once
     // now and then on its interval, for the life of the process.
-    let retention = config.retention();
+    let retention = config.retention.clone();
     retention.log();
     retention::spawn(db.clone(), audio.clone(), retention);
 
-    let mut state = AppState::new(audio, db, config.ingest());
+    let mut state = AppState::new(audio, db, config.ingest.clone());
     state.trusted_proxies = config.trusted_proxies();
-    state.admin = AdminAuth::provisioned(&admin, config.admin());
+    state.admin = AdminAuth::provisioned(&admin, config.admin.clone());
     state.push = push;
-    state.enhancer = Enhancer::from_config(config.enhancement());
+    state.enhancer = Enhancer::from_config(config.enhancement.clone());
     // Notifications ride the live-feed fanout (#16), so an ingest never waits
     // on a push service. A server with no identity spawns nothing.
     radio_scout::push::spawn(state.clone());

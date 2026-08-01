@@ -8,7 +8,7 @@
 //! access-scope check, so the app isn't an audio proxy at scale.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +21,7 @@ use object_store::signer::Signer;
 use object_store::{
     BackoffConfig, Error as ObjectError, ObjectStore, ObjectStoreExt, PutPayload, RetryConfig,
 };
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 /// How long a presigned URL stays valid.
@@ -99,14 +100,98 @@ pub fn new_object_key(extension: &str) -> String {
     format!("{}/{}.{}", &uuid[0..2], uuid, extension)
 }
 
-/// S3-compatible backend configuration (Garage / MinIO / AWS).
+/// `[storage]` — where Call audio lives (US 39, ADR-0002), as an operator
+/// writes it.
+///
+/// The section and the store's own configuration are two genuinely different
+/// shapes rather than a mirror, which is why [`Storage::resolve`] survived #87's
+/// merge while six other translation functions did not: the filesystem root
+/// defaults to a directory under `[server] base_dir`, so a section cannot become
+/// a [`StorageConfig`] without being told about another section.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Storage {
+    pub backend: Backend,
+    /// Filesystem root for audio. Unset means `<base_dir>/audio`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    pub s3: S3Config,
+}
+
+/// The audio directory zero-config creates inside `base_dir`.
+const DEFAULT_AUDIO_DIR: &str = "audio";
+
+impl Storage {
+    /// The store to open (ADR-0002). Zero-config is a directory under
+    /// `base_dir`; `path` moves it without moving the database.
+    pub fn resolve(&self, base_dir: &Path) -> StorageConfig {
+        match self.backend {
+            Backend::Filesystem => StorageConfig::Filesystem {
+                root: match &self.path {
+                    Some(path) => path.clone(),
+                    None => base_dir.join(DEFAULT_AUDIO_DIR),
+                },
+            },
+            Backend::S3 => StorageConfig::S3(self.s3.clone()),
+        }
+    }
+}
+
+/// Which audio backend to open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lowercase")]
+pub enum Backend {
+    /// The zero-config default: a directory of files.
+    #[default]
+    Filesystem,
+    /// An S3-compatible object store — Garage, MinIO, AWS.
+    S3,
+}
+
+impl Backend {
+    /// The spelling used in the file, the flag and the environment.
+    fn as_str(self) -> &'static str {
+        match self {
+            Backend::Filesystem => "filesystem",
+            Backend::S3 => "s3",
+        }
+    }
+}
+
+impl std::fmt::Display for Backend {
+    /// Unquoted in a log line, so `storage=s3` greps (ADR-0011 rule 6).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Backend {
+    type Err = ();
+
+    /// One spelling per backend, shared by the file, the flag and the
+    /// environment — so `RADIO_SCOUT_STORAGE_BACKEND=s3` and
+    /// `backend = "s3"` cannot drift apart.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        [Backend::Filesystem, Backend::S3]
+            .into_iter()
+            .find(|backend| backend.as_str() == text)
+            .ok_or(())
+    }
+}
+
+/// `[storage.s3]` — credentials for the S3-compatible backend (Garage / MinIO /
+/// AWS), and what the store is opened from. One type since #87: what an
+/// operator writes is what [`BlobStore::open`] reads.
 ///
 /// `Debug` is hand-written, not derived — see the impl below.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct S3Config {
     pub bucket: String,
     pub region: String,
     /// Custom endpoint for self-hosted stores (Garage/MinIO); `None` for AWS.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     pub access_key_id: String,
     pub secret_access_key: String,
@@ -114,18 +199,30 @@ pub struct S3Config {
     pub allow_http: bool,
 }
 
-/// Debug, minus the secret (ADR-0011 rule 2), exactly as its configuration-layer
-/// twin [`crate::config::S3`] already does. This is the *resolved* form —
-/// [`StorageConfig`] derives `Debug` and so does everything that would carry one
-/// into a message, so a single `?storage` in a boot failure or an S3 incident
-/// would otherwise put the secret access key in a log line. Nothing prints it
-/// today; the point is that the type stops permitting it (#85).
+impl Default for S3Config {
+    fn default() -> Self {
+        S3Config {
+            bucket: String::new(),
+            // What Garage and MinIO answer to when they don't care, and AWS's
+            // oldest region — a value that makes an unconfigured `region` a
+            // non-event rather than a required field.
+            region: "us-east-1".to_string(),
+            endpoint: None,
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            allow_http: false,
+        }
+    }
+}
+
+/// Debug, minus the secret (ADR-0011 rule 2). [`StorageConfig`] derives `Debug`
+/// and so does [`crate::config::Config`], so a single `?storage` in a boot
+/// failure or an S3 incident would otherwise put the secret access key in a log
+/// line. Nothing prints it today; the point is that the type stops permitting it
+/// (#85).
 ///
-/// Two impls rather than one shared newtype because the types are genuinely
-/// different — [`crate::config::S3`] is the serde shape an operator writes, this
-/// is what the store is opened from — and the pair is held together by them
-/// redacting the same field name. The access key *id* stays in both: it
-/// identifies which credential is loaded and is not itself a secret.
+/// The access key *id* stays: it identifies which credential is loaded and is
+/// not itself a secret.
 impl std::fmt::Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Config")
@@ -177,7 +274,7 @@ pub struct PresignedUrl {
 /// can read the object until it expires. ADR-0011 rule 2 forbids a secret in a
 /// log line at any level, and a derived `Debug` would put one there the first
 /// time somebody wrote `?signed` in a `tracing` call. Same reason
-/// `webpush::Recipient` redacts an endpoint and `config::S3` redacts a key.
+/// `webpush::Recipient` redacts an endpoint and [`S3Config`] redacts a key.
 impl std::fmt::Debug for PresignedUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PresignedUrl")

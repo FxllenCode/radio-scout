@@ -24,13 +24,42 @@
 
 use std::io::{self, IsTerminal};
 
+use serde::{Deserialize, Serialize};
 use tracing::Subscriber;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::logsink::LogSink;
+use crate::logsink::{LogSink, StoredLevel};
+
+/// `[log]` — how much the scanner says, and how much of it is kept (ADR-0011).
+///
+/// The one section that configures two subsystems: `directives` is the
+/// console's filter, resolved here, and `database_level` is the operator log
+/// surface's sink (`crate::logsink`). They are deliberately independent —
+/// turning the console up to chase a problem must not change what is stored,
+/// and turning it down must not empty the Logs view — which is why the sink's
+/// level is its own type rather than a second reading of the same string.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LogConfig {
+    /// `tracing` filter directives: a bare level (`debug`) or a per-target list
+    /// (`warn,radio_scout::ingest=trace`). `RUST_LOG` overrides this for one
+    /// invocation; this is what survives a reboot.
+    pub directives: String,
+    /// What the operator log surface stores (#30).
+    pub database_level: StoredLevel,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        LogConfig {
+            directives: DEFAULT_DIRECTIVES.to_string(),
+            database_level: StoredLevel::default(),
+        }
+    }
+}
 
 /// The filter used when `RUST_LOG` says nothing: everything at INFO, with
 /// sqlx's per-statement log and sea-orm's migration narration demoted to the
@@ -111,7 +140,7 @@ where
                 .with_ansi(ansi)
                 .with_filter(filter),
         )
-        // The sink carries its own level (`LogSinkConfig`), so it needs no
+        // The sink carries its own level (`logsink::StoredLevel`), so it needs no
         // filter here — and must not be given the console's.
         .with(sink)
 }
@@ -260,8 +289,8 @@ mod tests {
         let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
             .await
             .expect("db");
-        let (sink, writer) = crate::logsink::channel(crate::logsink::LogSinkConfig::default())
-            .expect("an enabled sink");
+        let (sink, writer) =
+            crate::logsink::channel(StoredLevel::default()).expect("an enabled sink");
         let draining = writer.spawn(db.clone());
 
         let capture = CaptureWriter::default();
