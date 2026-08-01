@@ -46,6 +46,7 @@ use crate::logsink;
 use crate::push::Push;
 use crate::retention;
 use crate::startup;
+use crate::worker::{Worker, Workers};
 use crate::{AppState, BlobStore, Clock, build_app};
 
 /// The env file a generated credential is written to when the boot had none to
@@ -91,10 +92,12 @@ pub struct Wiring {
     /// there is anywhere to store them — and the queue is drained here, once
     /// the database is open.
     ///
-    /// It is deliberately **not** one of [`Running`]'s workers: the subscriber
-    /// feeding it belongs to the process, not to this Instance, so a restart
-    /// leaves it draining into the same database rather than stopping the
-    /// logging of everything that outlives the restart.
+    /// It becomes a [`crate::worker::Worker`] like the other three (#93), but
+    /// deliberately **not** one of [`Running`]'s: the subscriber feeding it
+    /// belongs to the process rather than to a run, so [`Instance::restart`]
+    /// leaves it draining into the same database instead of ending the logging
+    /// of everything that outlives the restart. Only [`Instance::stop`] stops
+    /// it, and then it drains what it already holds first.
     log_writer: Option<logsink::LogWriter>,
 }
 
@@ -271,6 +274,15 @@ pub struct Instance {
     /// The audio store every handler and worker shares.
     pub store: Arc<BlobStore>,
     running: Running,
+    /// Every Worker's reading, shared with the `AppState` handlers are given
+    /// (#93) — the half of a Worker that has to reach a status surface.
+    workers: Workers,
+    /// The operator log writer (#30), which belongs to the **process** rather
+    /// than to a run: the subscriber feeding it outlives a restart, so a
+    /// restart that stopped it would end the logging of everything that
+    /// outlives the restart. Owned here all the same, so a full
+    /// [`Instance::stop`] drains it rather than leaving it to be dropped.
+    log: Option<Worker>,
     /// What it would take to bring this Instance up again — so a **restart** is
     /// stop-then-start on one handle rather than a second Instance assembled
     /// beside the first.
@@ -303,13 +315,9 @@ struct Running {
     /// Tells `axum::serve` to stop accepting and let its connections finish.
     /// `None` once it has been used, because a shutdown is sent once.
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    /// The background workers this run spawned, in the order they were started.
-    ///
-    /// Aborted rather than asked to stop: nothing here holds state that a half
-    /// cycle would corrupt — the enhancement worker settles each Call before
-    /// taking the next, and the sweeper's deletes are transactional — and #93
-    /// replaces this with one lifecycle envelope per worker that can be joined.
-    workers: Vec<JoinHandle<()>>,
+    /// The background workers this run spawned, in the order they were started
+    /// — so stopping them is that order reversed (#93).
+    workers: Vec<Worker>,
 }
 
 impl Instance {
@@ -343,6 +351,23 @@ impl Instance {
     /// closed by the time this returns, so "the old Instance stopped" is
     /// observable rather than a race.
     pub async fn stop(&mut self) {
+        self.stop_run().await;
+        // The log writer outlives a *restart* but not a stop: this is the end
+        // of the process's logging, so it drains what it already holds rather
+        // than dropping the last thing an operator would want to read.
+        if let Some(log) = self.log.take() {
+            log.stop().await;
+        }
+    }
+
+    /// Stop everything belonging to **this run** — the server and its workers —
+    /// leaving anything that spans runs alone.
+    ///
+    /// What [`Instance::restart`] stops. The distinction is the log writer's:
+    /// the subscriber feeding it belongs to the process, not to a run, so a
+    /// restart that stopped it would silently end the logging of everything
+    /// that outlives the restart.
+    async fn stop_run(&mut self) {
         if let Some(shutdown) = self.running.shutdown.take() {
             // The receiver is gone only if the server task has already ended,
             // which is the outcome being asked for.
@@ -350,9 +375,9 @@ impl Instance {
         }
         // Whatever the server has to say about stopping, it was asked to.
         let _ = self.finish_serving().await;
-        for worker in self.running.workers.drain(..) {
-            worker.abort();
-        }
+        // The server first, so nothing new arrives while the workers wind down,
+        // then the workers last-started-first — see [`worker::stop_all`].
+        crate::worker::stop_all(self.running.workers.drain(..).collect()).await;
     }
 
     /// Stop, then start again on the same configuration, the same database and
@@ -378,13 +403,30 @@ impl Instance {
         config: Config,
         store: Option<Arc<BlobStore>>,
     ) -> Result<(), StartError> {
-        self.stop().await;
+        self.stop_run().await;
         let store = store.unwrap_or_else(|| self.store.clone());
-        let run = assemble(config.clone(), self.parts.clone(), None, Some(store)).await?;
+        // A fresh registry: the run's three Workers are new, with new meters,
+        // and carrying the old readings over would be a status page reporting a
+        // queue that no longer exists. The log writer is the exception — it is
+        // still the same running Worker — so it is re-registered first, which
+        // is also where it belongs, being the oldest.
+        let workers = Workers::default();
+        if let Some(log) = &self.log {
+            workers.register(log.name(), log.meter());
+        }
+        let run = assemble(
+            config.clone(),
+            self.parts.clone(),
+            None,
+            Some(store),
+            workers,
+        )
+        .await?;
         self.addr = run.addr;
         self.db = run.db;
         self.store = run.store;
         self.running = run.running;
+        self.workers = run.workers;
         self.config = config;
         Ok(())
     }
@@ -392,6 +434,16 @@ impl Instance {
     /// The configuration this Instance is running on.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Every Worker's reading, by name (#93) — what an Operator-facing status
+    /// surface shows, and what a test awaits instead of sleeping.
+    ///
+    /// The readings, not the handles: stopping belongs to this Instance, which
+    /// is the only thing that knows a run is over, while the readings are
+    /// shared with `AppState` so a handler can serve them.
+    pub fn workers(&self) -> &Workers {
+        &self.workers
     }
 }
 
@@ -403,15 +455,28 @@ pub async fn start(config: Config, wiring: Wiring) -> Result<Instance, StartErro
         bind: wiring.bind,
         heartbeat: wiring.heartbeat,
     };
-    assemble(config, parts, wiring.log_writer, wiring.store.map(Arc::new)).await
+    assemble(
+        config,
+        parts,
+        wiring.log_writer,
+        wiring.store.map(Arc::new),
+        Workers::default(),
+    )
+    .await
 }
 
 /// One run: everything from the base directory to a bound port.
+///
+/// `workers` arrives from outside rather than being made here because a
+/// **restart** carries one Worker across — the log writer — and it has to be
+/// registered before the run's own, so a status surface still lists them oldest
+/// first.
 async fn assemble(
     config: Config,
     parts: Parts,
     log_writer: Option<logsink::LogWriter>,
     store: Option<Arc<BlobStore>>,
+    workers: Workers,
 ) -> Result<Instance, StartError> {
     let base_dir = config.server.base_dir.clone();
     std::fs::create_dir_all(&base_dir).map_err(|source| StartError::BaseDir {
@@ -425,9 +490,7 @@ async fn assemble(
 
     // Now there is somewhere to put them, everything logged since boot — the
     // migrations included — is written out, and the sink keeps up from here.
-    if let Some(writer) = log_writer {
-        writer.spawn(db.clone());
-    }
+    let log = log_writer.map(|writer| workers.adopt(writer.start(db.clone())));
 
     // The three credentials that stay out of the TOML because first run
     // *writes* them (ADR-0008). All of it happens before a port is bound, so
@@ -470,14 +533,13 @@ async fn assemble(
     // now and then on its interval, for the life of the Instance.
     let retention = config.retention.clone();
     retention.log();
-    let mut workers = vec![retention::spawn(
-        db.clone(),
-        audio.clone(),
-        retention,
-        parts.clock,
-    )];
+    let mut running =
+        vec![workers.adopt(
+            retention::Sweeper::new(db.clone(), audio.clone(), retention, parts.clock).start(),
+        )];
 
     let mut state = AppState::new(audio.clone(), db.clone(), config.ingest.clone());
+    state.workers = workers.clone();
     if let Some(heartbeat) = parts.heartbeat {
         state.live = crate::live::LiveFeed::with_heartbeat(heartbeat);
     }
@@ -488,12 +550,12 @@ async fn assemble(
     state.clock = parts.clock;
     // Notifications ride the live-feed fanout (#16), so an ingest never waits
     // on a push service. An Instance with no identity spawns nothing.
-    workers.extend(crate::push::spawn(state.clone()));
+    running.extend(crate::push::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     // Enhancement (#20) runs off its own queue, behind ingest rather than in
     // it. With `[enhancement] mode = "off"` — what ships — this spawns nothing,
     // and the first thing it does when it is on is pick up whatever a previous
     // process was part-way through.
-    workers.extend(crate::enhance::spawn(state.clone()));
+    running.extend(crate::enhance::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     let app = build_app(state);
 
     let bind = parts
@@ -538,8 +600,10 @@ async fn assemble(
         running: Running {
             server: Some(server),
             shutdown: Some(tell_to_stop),
-            workers,
+            workers: running,
         },
+        workers,
+        log,
         config,
         parts,
     })

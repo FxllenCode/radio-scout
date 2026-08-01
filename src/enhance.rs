@@ -22,7 +22,7 @@
 
 use std::fmt::Display;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use audioadapter_buffers::direct::InterleavedSlice;
 use biquad::{Biquad, Coefficients, DirectForm2Transposed, ToHertz, Type};
@@ -40,6 +40,10 @@ use crate::AppState;
 use crate::call::CallId;
 use crate::db::entities::call;
 use crate::db::repo;
+use crate::worker::{Handoff, Meter, Ticket, Worker};
+
+/// What this Worker is called on a status surface (#93).
+pub const WORKER: &str = "enhancement";
 
 /// How enhancement behaves — and the `[enhancement]` section itself (ADR-0012,
 /// #87). One type: what the worker reads is what an operator wrote, with no
@@ -598,10 +602,15 @@ struct Inner {
     /// The **enhancement queue** (CONTEXT.md) — Call ids, never audio. The
     /// object is already written by the time anything lands here, so the worker
     /// reads it back rather than carrying megabytes through a channel.
-    submissions: mpsc::Sender<CallId>,
+    ///
+    /// Each id travels with the [`Ticket`] that settles it, so a Call the queue
+    /// refuses settles by being dropped with the id that would not fit.
+    submissions: mpsc::Sender<(CallId, Ticket)>,
     /// Taken once, by [`spawn`]. A second `spawn` finds it gone and starts no
     /// second worker, which is what keeps "one core" true.
-    inbox: Mutex<Option<mpsc::Receiver<CallId>>>,
+    inbox: Handoff<mpsc::Receiver<(CallId, Ticket)>>,
+    /// The queue depth an Operator reads (#93, #70).
+    meter: Arc<Meter>,
 }
 
 impl Enhancer {
@@ -611,7 +620,8 @@ impl Enhancer {
         Enhancer(Some(Arc::new(Inner {
             config,
             submissions,
-            inbox: Mutex::new(Some(inbox)),
+            inbox: Handoff::new(inbox),
+            meter: Meter::new(),
         })))
     }
 
@@ -657,7 +667,10 @@ impl Enhancer {
         let Some(inner) = &self.0 else {
             return false;
         };
-        match inner.submissions.try_send(call_id) {
+        // Admitted before the send, so a Call is owed from the moment ingest
+        // offered it — never from whenever the worker happens to be polled. The
+        // Ticket rides with the id: a refusal drops both, which settles it.
+        match inner.submissions.try_send((call_id, inner.meter.admit())) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // WARN, because something was dropped (rule 7) and a queue that
@@ -685,17 +698,54 @@ impl Enhancer {
 /// that are also serving audio, taking uploads and running a database; a pool
 /// sized to the machine would make enhancement the thing that makes everything
 /// else slow, which is precisely what US 34 exists to prevent.
-pub fn spawn(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
+pub fn spawn(state: AppState) -> Option<Worker> {
     let inner = state.enhancer.0.clone()?;
-    let mut inbox = inner.inbox.lock().expect("enhancement inbox").take()?;
+    let mut inbox = inner.inbox.take()?;
+    let meter = inner.meter.clone();
+    // The catch-up sweep is owed before this returns, so an Instance can never
+    // be observed idle in the window before it has run. That window is exactly
+    // what `a_restart_leaves_the_existing_archive_alone` used to sleep 300ms
+    // through.
+    let catching_up = meter.admit();
 
-    let worker = tokio::spawn(async move {
-        catch_up(&state).await;
-        while let Some(call_id) = inbox.recv().await {
-            run(&state, &inner.config, call_id).await;
+    Some(Worker::start(WORKER, meter, move |mut stop| async move {
+        {
+            let _catching_up = catching_up;
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => return,
+                _ = catch_up(&state) => {}
+            }
         }
-    });
-    Some(worker)
+        loop {
+            let Some((call_id, _ticket)) = (tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                submitted = inbox.recv() => submitted,
+            }) else {
+                // **Unreachable, and left in deliberately**, the same bargain
+                // `push::spawn` makes: the queue's sending half lives in the
+                // `AppState` this task owns, so it cannot close while the loop
+                // that would notice is running. Without it a closed queue would
+                // spin on `None` forever.
+                break;
+            };
+            // Cancellable *during* the Call, not merely between Calls. One
+            // enhancement is a whole decode, resample and re-encode — seconds
+            // of CPU on a Pi — and a stop that had to wait it out would be a
+            // restart that appears to hang. Cutting it short is what `abort()`
+            // did before this and is safe for the same reason: the row is still
+            // `pending`, and the next boot's catch-up sweep picks it up.
+            //
+            // The Ticket is dropped either way, so a Call cut short leaves no
+            // depth behind claiming it is still being worked on.
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                _ = run(&state, &inner.config, call_id) => {}
+            }
+        }
+    }))
 }
 
 /// Re-queue Calls that were pending when the process last stopped.
@@ -1138,8 +1188,6 @@ mod tests {
                 .as_ref()
                 .expect("an enabled enhancer")
                 .inbox
-                .lock()
-                .expect("inbox")
                 .take(),
         );
 
@@ -1189,6 +1237,37 @@ mod tests {
             "scope still narrows"
         );
         assert!(enhancer.submit(1));
+    }
+
+    /// An `AppState` with enhancement on and nothing else configured.
+    async fn enhancing_state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
+        let store = Arc::new(crate::BlobStore::filesystem(tmp.path()).expect("store"));
+        let mut state = AppState::new(store, db, crate::IngestConfig::default());
+        state.enhancer = Enhancer::from_config(normalizing());
+        (state, tmp)
+    }
+
+    /// **One worker, and only ever one** (#93). Enhancement is deliberately
+    /// single-threaded — a pool sized to a Pi's four cores would make it the
+    /// thing that slows everything else down, which is what US 34 exists to
+    /// prevent — so a second worker would quietly undo the whole design.
+    ///
+    /// The guard is the queue's receiving end: there is one, [`spawn`] takes
+    /// it, and a second call has nothing to work from. That is structural, not
+    /// a check someone has to remember to write.
+    #[tokio::test]
+    async fn a_second_enhancement_worker_cannot_be_started() {
+        let (state, _tmp) = enhancing_state().await;
+
+        let first = spawn(state.clone()).expect("the first worker starts");
+        let second = spawn(state.clone());
+
+        assert!(second.is_none(), "a second enhancement worker was started");
+        first.stop().await;
     }
 
     /// **Scope, resolved.** `NULL` inherits, the more specific row wins, and

@@ -373,7 +373,7 @@ async fn run_pipeline(
 
     // Emit to the live feed.
     match repo::stored_call(&state.db, call.id).await {
-        Ok(Some(view)) => state.live.publish(Arc::new(view)),
+        Ok(Some(view)) => state.publish(Arc::new(view)),
         Ok(None) => {}
         Err(err) => return ServerError::new("build-call-view", err).into_response(),
     }

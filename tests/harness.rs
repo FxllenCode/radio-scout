@@ -733,11 +733,122 @@ async fn a_spawned_app_runs_the_retention_sweeper() {
 
     // A week's policy, and a Call from 1970: the boot sweep prunes it.
     app.restart_with(|config| config.retention.days = 7).await;
+    app.settle().await;
 
-    common::eventually("the sweeper never ran on a spawned app", async || {
-        app.count::<call::Entity>().await == 0
+    assert_eq!(
+        app.count::<call::Entity>().await,
+        0,
+        "the sweeper never ran on a spawned app"
+    );
+}
+
+/// **`settle` is how the suite waits** (#93) — and the reason it can be
+/// believed is that a Worker owes its work from where the work is *handed
+/// over*, not from wherever the runtime gets round to polling it.
+///
+/// So: a Call is offered to enhancement inside the ingest the test already
+/// awaited, and published to the push sender there too. Both are therefore
+/// already owed by the time `upload_ok` has returned, and there is no window in
+/// which an Instance reads idle because a worker has not woken up yet. That is
+/// the whole difference between this and a sleep, and it is what makes a test
+/// that asserts *absence* honest rather than optimistic.
+#[tokio::test]
+async fn work_is_owed_from_the_moment_it_is_handed_over() {
+    let app = TestApp::builder()
+        .enhancement(radio_scout::enhance::EnhancementConfig {
+            mode: radio_scout::enhance::Mode::Normalize,
+            ..Default::default()
+        })
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+
+    app.upload_ok(CallUpload::new()).await;
+    let depth: u64 = app
+        .workers()
+        .loads()
+        .iter()
+        .map(|reading| reading.load.depth)
+        .sum();
+
+    assert!(
+        depth > 0,
+        "an ingested Call left every Worker reading idle: {:?}",
+        app.workers().loads()
+    );
+
+    app.settle().await;
+    assert_ne!(
+        app.the_call().await.enhancement,
+        radio_scout::db::entities::call::EnhancementState::PENDING,
+        "settling returned with the Call still pending"
+    );
+}
+
+/// **A restart does not stop the logging** (#93). The log writer is the one
+/// Worker that belongs to the *process* rather than to a run — the subscriber
+/// feeding it outlives the restart — so `restart` stops the other three and
+/// carries this one across.
+///
+/// Being still *listed* proves nothing; being still *draining* is the claim, so
+/// the assertion is a line written after the restart arriving in the Logs view
+/// an operator reads. Get this wrong and every stored log line after the first
+/// restart disappears, silently, which is exactly the sort of thing a suite
+/// notices years later.
+#[tokio::test]
+async fn a_restart_leaves_the_operator_log_still_being_written() {
+    let mut app = TestApp::spawn().await;
+    let _sink = app.store_logs();
+
+    app.restart().await;
+    app.get("/healthz").await;
+
+    app.await_logged("request").await;
+}
+
+/// **Every Worker is named on the registry**, because a status surface (#70)
+/// reads it through `AppState` and can never see the `Instance` that owns the
+/// handles. An Instance with enhancement off runs three; turning it on is what
+/// adds the fourth — a surface must show what is running, not a row of zeroes
+/// for what is not.
+#[tokio::test]
+async fn the_registry_names_the_workers_this_instance_is_running() {
+    let app = TestApp::spawn().await;
+    let names = |app: &TestApp| -> Vec<&'static str> {
+        app.workers()
+            .loads()
+            .iter()
+            .map(|reading| reading.name)
+            .collect()
+    };
+
+    assert_eq!(
+        names(&app),
+        vec![
+            radio_scout::logsink::WORKER,
+            radio_scout::retention::WORKER,
+            radio_scout::push::WORKER,
+        ],
+        "the shipped default runs three: enhancement is off"
+    );
+
+    let mut app = app;
+    app.restart_with(|config| {
+        config.enhancement.mode = radio_scout::enhance::Mode::Normalize;
     })
     .await;
+
+    assert_eq!(
+        names(&app),
+        vec![
+            // The log writer belongs to the process rather than to a run, so a
+            // restart carries it across — and it stays the oldest.
+            radio_scout::logsink::WORKER,
+            radio_scout::retention::WORKER,
+            radio_scout::push::WORKER,
+            radio_scout::enhance::WORKER,
+        ],
+    );
 }
 
 /// **A restart is one handle**, and it is a real one: the archive and the audio

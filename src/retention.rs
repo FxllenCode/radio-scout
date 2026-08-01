@@ -23,7 +23,8 @@
 //! - **Sweeps at startup, not an hour in** — rdio's ticker fires first at +1h,
 //!   so a box that restarts often never prunes at all.
 //!
-//! [`sweep`] is one pass; [`spawn`] runs it on an interval.
+//! [`sweep`] is one pass; [`Sweeper`] runs it on an interval, as one of the
+//! Instance's Workers (#93).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +39,7 @@ use crate::Clock;
 use crate::blob::{self, BlobStore};
 use crate::call::CallId;
 use crate::db::repo::{self, PrunableCall};
+use crate::worker::{Meter, Worker};
 
 /// Milliseconds in a day.
 const MS_PER_DAY: i64 = 86_400_000;
@@ -77,7 +79,7 @@ pub struct RetentionConfig {
     /// a month of audio is not — and an operator keeping Calls forever
     /// (`days = 0`) must still not accumulate an unbounded logs table.
     pub log_days: u32,
-    /// How often [`spawn`]'s background task runs a [`sweep`]. Zero is read as
+    /// How often [`Sweeper`]'s background task runs a [`sweep`]. Zero is read as
     /// "unset" and falls back to the default cadence.
     #[serde(rename = "interval_secs", with = "crate::config::secs")]
     pub interval: Duration,
@@ -121,7 +123,7 @@ impl RetentionConfig {
         cutoff_for(self.log_days, now_ms)
     }
 
-    /// The cadence [`spawn`] will actually sweep on. A zero interval is read as
+    /// The cadence [`Sweeper`] will actually sweep on. A zero interval is read as
     /// "unset" and falls back to the default rather than panicking the ticker.
     pub fn effective_interval(&self) -> Duration {
         if self.interval.is_zero() {
@@ -364,28 +366,95 @@ pub async fn sweep(
     Ok(report)
 }
 
-/// Run [`sweep`] forever on `config.interval`, starting **immediately** rather
-/// than one interval in — rdio-scanner's hourly ticker first fires at +1h, so an
-/// instance that restarts more often than that never prunes at all.
+/// What this Worker is called on a status surface (#93).
+pub const WORKER: &str = "retention";
+
+/// The retention sweeper, before it is running.
 ///
-/// Returns the task handle so a caller (today: tests) can stop it; the binary
-/// simply lets it run for the process's life.
-pub fn spawn(
+/// Everything one sweep needs, in a value [`Sweeper::start`] **consumes** — so
+/// a second sweeper racing the first over the same archive is a compile error
+/// rather than a thing to remember not to do. That is what "double-spawn is
+/// structurally impossible" means for a worker whose owner is not `Clone`;
+/// [`crate::push`] and [`crate::enhance`] live behind a `Clone` surface and buy
+/// the same guarantee at runtime instead.
+pub struct Sweeper {
     db: DatabaseConnection,
     store: Arc<BlobStore>,
     config: RetentionConfig,
     clock: Clock,
-) -> tokio::task::JoinHandle<()> {
-    let period = config.effective_interval();
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(period);
-        // A sweep that overruns its interval must not then run back-to-back.
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await; // the first tick completes immediately
-            log_sweep(&sweep(&db, &store, &config, clock.now_ms()).await);
+    meter: Arc<Meter>,
+}
+
+impl Sweeper {
+    /// A sweeper for this archive under this policy.
+    pub fn new(
+        db: DatabaseConnection,
+        store: Arc<BlobStore>,
+        config: RetentionConfig,
+        clock: Clock,
+    ) -> Self {
+        Sweeper {
+            db,
+            store,
+            config,
+            clock,
+            meter: Meter::new(),
         }
-    })
+    }
+
+    /// Run [`sweep`] on `config.interval` until the Worker is stopped, starting
+    /// **immediately** rather than one interval in — rdio-scanner's hourly
+    /// ticker first fires at +1h, so an instance that restarts more often than
+    /// that never prunes at all.
+    ///
+    /// Its depth is `1` while a sweep is running and `0` between sweeps, which
+    /// is the health reading a status surface wants from a worker with no
+    /// queue: a depth stuck at `1` is a sweep that never ended. Its settled
+    /// count is the number of sweeps, which is the only way from outside to
+    /// tell the scheduler from its first tick.
+    pub fn start(self) -> Worker {
+        let Sweeper {
+            db,
+            store,
+            config,
+            clock,
+            meter,
+        } = self;
+        let period = config.effective_interval();
+        // The boot sweep is owed from the moment this returns — not from
+        // whenever the runtime first polls the task. Admitted out here, an
+        // Instance can never be *observed* idle in the window before its first
+        // sweep has begun, which is the whole worth of the signal.
+        let mut boot = Some(meter.admit());
+
+        Worker::start(WORKER, meter.clone(), move |mut stop| async move {
+            let mut ticker = tokio::time::interval(period);
+            // A sweep that overruns its interval must not then run back-to-back.
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    // Cancellation first, always: a stop asked for while a tick
+                    // is also ready must not lose a coin toss, or "stopping is
+                    // prompt" would be true only most of the time.
+                    biased;
+                    _ = stop.cancelled() => break,
+                    _ = ticker.tick() => {} // the first tick completes immediately
+                }
+                // Dropped however this iteration ends — finished, or cancelled
+                // part-way through — so a stopped sweeper never leaves a depth
+                // behind claiming it is still working.
+                let _sweeping = boot.take().unwrap_or_else(|| meter.admit());
+                tokio::select! {
+                    biased;
+                    // Cancelled mid-sweep is what `abort()` did before this, and
+                    // is safe for the same reason: the deletes are transactional
+                    // per batch, so the archive is consistent wherever it stops.
+                    _ = stop.cancelled() => break,
+                    outcome = sweep(&db, &store, &config, clock.now_ms()) => log_sweep(&outcome),
+                }
+            }
+        })
+    }
 }
 
 /// Say what one sweep did, at the level it deserves (ADR-0011 rule 7).
@@ -521,21 +590,6 @@ mod tests {
     /// ever runs out when something is actually wrong.
     const WAIT: Duration = Duration::from_secs(5);
 
-    /// Wait for the scheduler to empty the archive, panicking with `context` if
-    /// it never does. The scheduler is a real background task doing real
-    /// database work, so tests wait on its observable effect rather than on a
-    /// clock. (A paused tokio clock is no help here: it auto-advances whenever
-    /// the runtime idles on sqlx I/O, which trips the pool's own timeout.)
-    async fn await_empty_archive(db: &DatabaseConnection, context: &str) {
-        tokio::time::timeout(WAIT, async {
-            while call::Entity::find().count(db).await.unwrap() > 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("{context}"));
-    }
-
     /// rdio-scanner's prune ticker first fires an *hour* after start, so an
     /// instance that restarts more often than that never prunes at all. Ours
     /// sweeps on startup: with an hour-long interval, a prompt prune can only
@@ -549,9 +603,25 @@ mod tests {
             ..Default::default()
         };
 
-        let task = spawn(db.clone(), store.clone(), config, Clock::system());
-        await_empty_archive(&db, "the startup sweep should have pruned the stale call").await;
-        task.abort();
+        let worker = Sweeper::new(db.clone(), store.clone(), config, Clock::system()).start();
+        // The boot sweep is owed before `start` returns, so this is a wait for
+        // that sweep in particular and not for whatever ran first.
+        worker.idle().await;
+        let load = worker.load();
+        worker.stop().await;
+
+        assert_eq!(
+            call::Entity::find().count(&db).await.unwrap(),
+            0,
+            "the startup sweep should have pruned the stale call"
+        );
+        // Exactly one, an hour before the second is due: so the prune above can
+        // only have come from the startup pass.
+        assert_eq!(
+            load,
+            crate::worker::Load { depth: 0, done: 1 },
+            "the archive was emptied, but not by the boot sweep alone"
+        );
     }
 
     /// And it keeps going: a Call that ages out *after* startup is pruned by a
@@ -567,11 +637,22 @@ mod tests {
             ..Default::default()
         };
 
-        let task = spawn(db.clone(), store.clone(), config, Clock::system());
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let worker = Sweeper::new(db.clone(), store.clone(), config, Clock::system()).start();
+        worker.idle().await;
         add_stale_call(&db, &store, 2).await;
-        await_empty_archive(&db, "a later tick should have pruned the new stale call").await;
-        task.abort();
+        // Counted *after* the insert, never before. Two more sweeps from here:
+        // the second cannot start until the first has finished, and the first
+        // finishes after this reading — so the second provably began with the
+        // row already in the archive.
+        let seeded_at = worker.load().done;
+        worker.settled_at_least(seeded_at + 2).await;
+        worker.stop().await;
+
+        assert_eq!(
+            call::Entity::find().count(&db).await.unwrap(),
+            0,
+            "a later tick should have pruned the new stale call"
+        );
     }
 
     /// A zero interval would panic `tokio::time::interval`. An operator who
@@ -586,11 +667,20 @@ mod tests {
             ..Default::default()
         };
 
-        let task = spawn(db.clone(), store.clone(), config, Clock::system());
-        await_empty_archive(&db, "a zero interval should still sweep at startup").await;
-        let alive = !task.is_finished();
-        task.abort();
+        let worker = Sweeper::new(db.clone(), store.clone(), config, Clock::system()).start();
+        worker.idle().await;
+        // Read before stopping, because stopping is what makes it stop.
+        let alive = worker.is_running();
+        worker.stop().await;
 
+        assert_eq!(
+            call::Entity::find().count(&db).await.unwrap(),
+            0,
+            "a zero interval should still sweep at startup"
+        );
+        // A ticker built on `Duration::ZERO` panics; this one fell back to the
+        // hour-long default, so the loop is still there waiting on it. Not a
+        // second sweep — an hour is not a thing to wait for.
         assert!(alive, "the task must not have panicked");
     }
 
@@ -609,8 +699,13 @@ mod tests {
         let probe_store = store.clone();
         let probe_config = config.clone();
         let probe_db = db.clone();
-        let task = spawn(db.clone(), store, config, Clock::system());
-        await_empty_archive(&db, "the startup sweep should have run").await;
+        let worker = Sweeper::new(db.clone(), store, config, Clock::system()).start();
+        worker.idle().await;
+        assert_eq!(
+            call::Entity::find().count(&db).await.unwrap(),
+            0,
+            "the startup sweep should have run"
+        );
 
         // Pull the database out from under the ticker, and confirm sweeps really
         // do fail now — otherwise the rest of this proves nothing.
@@ -622,12 +717,13 @@ mod tests {
             "a closed pool should make sweeps fail"
         );
 
-        // Give the ticker several chances to land on the broken database.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let alive = !task.is_finished();
-        task.abort();
-
-        assert!(alive, "a failing sweep must not kill the scheduler");
+        // Several more sweeps from here, so every one of them lands on the
+        // broken database. A worker that died on the first would never reach
+        // the count, so this is the assertion — no sleep long enough to feel
+        // safe.
+        let broken_at = worker.load().done;
+        worker.settled_at_least(broken_at + 3).await;
+        worker.stop().await;
     }
 
     /// `batch_size = 0` pages forever without ever deleting anything. The sweep

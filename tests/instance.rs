@@ -19,6 +19,7 @@ use radio_scout::db::entities::call;
 use radio_scout::db::repo::{self, NewCall};
 use radio_scout::instance::{self, Credentials, Wiring};
 use radio_scout::logsink::{self, StoredLevel};
+use radio_scout::retention;
 use radio_scout::startup;
 use radio_scout::webpush::VapidKey;
 use radio_scout::{BlobStore, Clock};
@@ -106,30 +107,30 @@ async fn upload(
     );
 }
 
-/// Wait until the Logs view (#30) carries an event whose message is `needle`.
+/// Assert the Logs view (#30) carries an event whose message is `needle`.
 ///
-/// Polling, because the sink is asynchronous by design: a log call never waits
-/// on a database, so there is no completion to await from the outside.
-async fn await_logged(instance: &instance::Instance, client: &reqwest::Client, needle: &str) {
-    common::eventually(
-        &format!("no stored log event ever said {needle:?}"),
-        async || {
-            let page: serde_json::Value = client
-                .get(url(instance, "/api/admin/logs?limit=500"))
-                .send()
-                .await
-                .expect("logs")
-                .json()
-                .await
-                .expect("a logs page");
-            page["results"]
-                .as_array()
-                .expect("a results array")
-                .iter()
-                .any(|event| event["message"] == needle)
-        },
-    )
-    .await;
+/// The sink is asynchronous by design — a log call never waits on a database —
+/// so this waits, on the Workers' own idle signal (#93) rather than by polling
+/// the endpoint. An event is owed from the moment it was offered to the sink,
+/// so a settled Instance has written everything anything had said by then.
+async fn assert_logged(instance: &instance::Instance, client: &reqwest::Client, needle: &str) {
+    instance.workers().idle().await;
+    let page: serde_json::Value = client
+        .get(url(instance, "/api/admin/logs?limit=500"))
+        .send()
+        .await
+        .expect("logs")
+        .json()
+        .await
+        .expect("a logs page");
+    assert!(
+        page["results"]
+            .as_array()
+            .expect("a results array")
+            .iter()
+            .any(|event| event["message"] == needle),
+        "no stored log event ever said {needle:?}; the page holds {page:#}"
+    );
 }
 
 /// The whole of the ticket in one assertion: hand the module a configuration
@@ -236,7 +237,7 @@ async fn boot_lines_written_before_the_database_existed_reach_the_operator_log()
         .expect("start");
 
     let logs = admin_client(&instance, &tmp).await;
-    await_logged(&instance, &logs, "applying schema migrations").await;
+    assert_logged(&instance, &logs, "applying schema migrations").await;
 
     // ...and the line every boot ends with says where to find the thing that
     // just started: the port it actually got, and the directory it is keeping
@@ -293,17 +294,16 @@ async fn the_retention_sweeper_prunes_an_aged_out_call_at_boot() {
         .await
         .expect("start");
 
-    common::eventually(
-        "the boot sweep never ran: a Call from 1970 is still in the archive",
-        async || {
-            call::Entity::find()
-                .count(&instance.db)
-                .await
-                .expect("count calls")
-                == 0
-        },
-    )
-    .await;
+    instance.workers().idle().await;
+
+    assert_eq!(
+        call::Entity::find()
+            .count(&instance.db)
+            .await
+            .expect("count calls"),
+        0,
+        "the boot sweep never ran: a Call from 1970 is still in the archive"
+    );
     assert!(
         instance
             .store
@@ -312,6 +312,121 @@ async fn the_retention_sweeper_prunes_an_aged_out_call_at_boot() {
             .expect("stat")
             .is_none(),
         "the row was pruned but its audio was left on the disk"
+    );
+}
+
+/// **...and it keeps sweeping**, which is a different claim and until #93 an
+/// untestable one.
+///
+/// The boot sweep above is the ticker's *first* tick, which completes
+/// immediately. Everything after it — that there is a scheduler at all, that it
+/// fires again, that an Instance left running for a week goes on bounding its
+/// archive — was unreachable from an integration test, because "it swept again"
+/// is not something an archive can be asked: a second sweep over an archive
+/// already inside its policy looks exactly like no second sweep.
+///
+/// A Worker can be asked. `settled_at_least` counts sweeps, so the Call is
+/// seeded *after* the Instance is up and the wait is for two more sweeps to
+/// have finished — two, so that at least one of them began after the insert.
+#[tokio::test]
+async fn the_sweeper_goes_on_sweeping_after_the_boot_sweep() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = config_in(&tmp).await;
+    // Short enough that the test is not waiting, long enough that a dual-dialect
+    // run is not sweeping Postgres in a tight loop.
+    config.retention.interval = std::time::Duration::from_millis(20);
+
+    let instance = instance::start(config, Wiring::default())
+        .await
+        .expect("start");
+    let sweeper = instance
+        .workers()
+        .meter(retention::WORKER)
+        .expect("a running Instance has a retention worker");
+    sweeper.settled_at_least(1).await;
+
+    // An aged-out Call the boot sweep cannot have seen, because it did not
+    // exist yet.
+    repo::insert_call(
+        &instance.db,
+        &NewCall {
+            system_ref: 1,
+            talkgroup_ref: 2,
+            // 1970, and `[retention] days` defaults to 7.
+            call_at_ms: 0,
+            ..NewCall::default()
+        },
+        true,
+        0,
+    )
+    .await
+    .expect("seed an aged-out Call");
+
+    // Counted *after* the insert, never before: read it first and both of the
+    // sweeps waited for could be ones that had already looked. Two more, so the
+    // second of them provably began after the row was there — it cannot start
+    // until the first finishes, and the first finishes after this reading.
+    let seeded_at = sweeper.load().done;
+    sweeper.settled_at_least(seeded_at + 2).await;
+
+    assert_eq!(
+        call::Entity::find()
+            .count(&instance.db)
+            .await
+            .expect("count calls"),
+        0,
+        "a Call that aged out after boot survived two sweeps: the ticker fired once and stopped"
+    );
+}
+
+/// **Stopping stops the Workers too** (#93), and does not come back until they
+/// have actually ended.
+///
+/// Before this they were `abort()`ed and never joined, so `stop` returned while
+/// a sweeper could still be mid-transaction on the database the caller was
+/// about to reopen. There is no way to observe a task from outside except by
+/// what it still owes and whether it is still going — so that is the assertion:
+/// every Worker has settled and none is running.
+#[tokio::test]
+async fn stopping_an_instance_stops_and_joins_every_worker() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = config_in(&tmp).await;
+    // Something to stop *while it is working*: a sweeper on a tight interval,
+    // and an enhancement worker, which the shipped default does not run.
+    config.retention.interval = std::time::Duration::from_millis(20);
+    config.enhancement.mode = radio_scout::enhance::Mode::Normalize;
+    // ...and the log writer, which is the fourth and the odd one out: it
+    // belongs to the process rather than to a run, so only a full `stop` — not
+    // the `restart` below this test — is allowed to end it.
+    let (sink, writer) = logsink::channel(StoredLevel::default()).expect("an enabled sink");
+    let _capture = common::logs::LogCapture::with_sink(sink);
+    let mut instance = instance::start(config, Wiring::default().log_writer(writer))
+        .await
+        .expect("start");
+    let names: Vec<&str> = instance
+        .workers()
+        .loads()
+        .iter()
+        .map(|reading| reading.name)
+        .collect();
+    assert_eq!(names.len(), 4, "all four Workers are running: {names:?}");
+
+    instance.stop().await;
+
+    assert!(
+        instance
+            .workers()
+            .loads()
+            .iter()
+            .all(|reading| reading.load.is_idle()),
+        "a stopped Instance still owes work: {:?}",
+        instance.workers().loads()
+    );
+    // ...and the port really is free, which is the thing a caller of `stop`
+    // actually depends on.
+    assert!(
+        tokio::net::TcpListener::bind(instance.addr).await.is_ok(),
+        "stop returned before the port was released"
     );
 }
 
@@ -537,9 +652,9 @@ async fn an_ingested_call_is_stamped_by_the_clock_the_instance_was_given() {
 /// clock and one hour old by the Instance's, and `[retention] days = 7` keeps
 /// it.
 ///
-/// The wait is for the sweep to have *happened* — its own line, at DEBUG —
-/// rather than a fixed sleep, so the assertion that nothing was pruned is a
-/// fact rather than a race. (#93 replaces the log line with an idle signal.)
+/// The wait is for the sweep to have *happened* — since #93 its Worker's own
+/// idle signal rather than the DEBUG line it happens to write — so the
+/// assertion that nothing was pruned is a fact rather than a race.
 #[tokio::test]
 async fn the_sweeper_prunes_by_the_clock_the_instance_was_given() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -561,13 +676,11 @@ async fn the_sweeper_prunes_by_the_clock_the_instance_was_given() {
     )
     .await
     .expect("seed");
-    let capture = common::logs::LogCapture::start();
-
     let instance = instance::start(config, Wiring::default().clock(Clock::frozen(AN_HOUR_IN)))
         .await
         .expect("start");
 
-    capture.wait_for("retention sweep").await;
+    instance.workers().idle().await;
     assert_eq!(
         call::Entity::find()
             .count(&instance.db)

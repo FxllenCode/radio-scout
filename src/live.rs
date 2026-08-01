@@ -88,7 +88,14 @@ impl LiveFeed {
 
     /// Publish a stored call to all connected listeners. Sending with no
     /// receivers is not an error — it just means nobody is connected.
-    pub fn publish(&self, call: Arc<StoredCall>) {
+    ///
+    /// Deliberately **not public**: [`crate::AppState::publish`] is the way in,
+    /// because the Web Push sender follows this fanout and has to take on the
+    /// Call as work owed *before* it is handed out (#93). Reaching the fanout
+    /// directly would publish a Call the sender is never recorded as owing, and
+    /// the only symptom would be a test that asserts "nothing was notified"
+    /// passing whether or not that was true.
+    pub(crate) fn publish(&self, call: Arc<StoredCall>) {
         let _ = self.tx.send(call);
     }
 

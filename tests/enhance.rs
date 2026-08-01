@@ -358,9 +358,10 @@ async fn a_restart_leaves_the_existing_archive_alone() {
     app.restart_with(|config| config.enhancement = normalizing())
         .await;
 
-    // Long enough that a catch-up sweep would have finished if it were going to
-    // touch this Call; the assertion is that nothing happened at all.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The catch-up sweep is owed before `restart_with` returns, so settling is
+    // the fact that it ran and found nothing to do — where the 300ms sleep this
+    // replaces could only ever say "nothing has happened yet".
+    app.settle().await;
     let untouched = call_row(&app, id).await;
     assert_eq!(untouched.enhancement, "none");
     assert_eq!(
@@ -511,28 +512,23 @@ async fn a_sweep_that_overflows_the_queue_leaves_nothing_pending() {
     })
     .await;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        let states: Vec<String> = app
-            .calls()
-            .await
-            .into_iter()
-            .map(|c| c.enhancement)
-            .collect();
-        if !states.iter().any(|s| s == EnhancementState::PENDING) {
-            assert_eq!(states.len(), 8);
-            assert!(
-                states.iter().any(|s| s == EnhancementState::SKIPPED),
-                "a one-deep queue offered eight Calls must have refused some: {states:?}"
-            );
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "Calls left pending after the sweep: {states:?}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    app.settle().await;
+
+    let states: Vec<String> = app
+        .calls()
+        .await
+        .into_iter()
+        .map(|c| c.enhancement)
+        .collect();
+    assert_eq!(states.len(), 8);
+    assert!(
+        !states.iter().any(|s| s == EnhancementState::PENDING),
+        "Calls left pending with the worker owing nothing: {states:?}"
+    );
+    assert!(
+        states.iter().any(|s| s == EnhancementState::SKIPPED),
+        "a one-deep queue offered eight Calls must have refused some: {states:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,6 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -173,36 +172,34 @@ impl PushService {
         std::mem::take(&mut *self.state.received.lock().expect("received"))
     }
 
-    /// Wait until `count` requests have arrived, then take them.
+    /// Let `app`'s sender finish with everything it owes, then take exactly
+    /// what arrived, asserting there were `count` of them.
     ///
     /// Sending is asynchronous by design — it happens on the fanout, not on the
-    /// ingest the test awaited — so "it arrived" is a wait, not a read.
-    pub async fn wait_for(&self, count: usize) -> Vec<Pushed> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if self.state.received.lock().expect("received").len() >= count {
-                return self.received();
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "only {} of {count} pushes arrived within the budget",
-                self.state.received.lock().expect("received").len()
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    /// Wait out the window in which a push *would* have arrived, and assert
-    /// none did. Short, because this wait is paid in full every run.
-    pub async fn expect_nothing(&self) {
-        tokio::time::sleep(Duration::from_millis(400)).await;
+    /// ingest the test awaited — so "it arrived" is a wait. Since #93 it is a
+    /// wait on the sender itself: a Call is owed from where it is published,
+    /// and each notification is owed until it has left the process, so a
+    /// settled sender means every request that was ever going to be made has
+    /// been made and answered.
+    pub async fn wait_for(&self, app: &super::TestApp, count: usize) -> Vec<Pushed> {
+        app.settle().await;
         let received = self.received();
-        assert!(
-            received.is_empty(),
-            "expected no push, got {} to {:?}",
+        assert_eq!(
             received.len(),
+            count,
+            "expected {count} pushes, got {:?}",
             received.iter().map(|p| &p.path).collect::<Vec<_>>()
         );
+        received
+    }
+
+    /// The same wait, for the opposite claim: `app`'s sender has considered
+    /// everything published to it, and chose to notify nobody.
+    ///
+    /// This used to sleep 400ms and hope — paid in full on every run, and only
+    /// ever evidence that nothing had happened *yet*.
+    pub async fn expect_nothing(&self, app: &super::TestApp) {
+        self.wait_for(app, 0).await;
     }
 }
 

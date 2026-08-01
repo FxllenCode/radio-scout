@@ -291,7 +291,7 @@ mod tests {
             .expect("db");
         let (sink, writer) =
             crate::logsink::channel(StoredLevel::default()).expect("an enabled sink");
-        let draining = writer.spawn(db.clone());
+        let draining = writer.start(db.clone());
 
         let capture = CaptureWriter::default();
         {
@@ -301,7 +301,7 @@ mod tests {
             info!("an-info-event");
             warn!("a-warn-event");
         }
-        draining.await.expect("the writer drains");
+        draining.join().await;
 
         let console = capture.text();
         assert!(!console.contains("an-info-event"), "{console}");

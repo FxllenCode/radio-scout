@@ -32,6 +32,7 @@ pub mod service;
 pub mod startup;
 pub mod web;
 pub mod webpush;
+pub mod worker;
 
 #[cfg(test)]
 mod testing;
@@ -80,6 +81,10 @@ pub struct AppState {
     pub enhancer: Enhancer,
     /// What time it is, for everything a handler stamps or expires (#90).
     pub clock: Clock,
+    /// What every background Worker owes right now (#93) — the reading half, so
+    /// a status handler (#70) can serve depths it could never reach through the
+    /// `Instance` that owns the handles.
+    pub workers: crate::worker::Workers,
 }
 
 impl AppState {
@@ -97,7 +102,25 @@ impl AppState {
             push: Push::disabled(),
             enhancer: Enhancer::disabled(),
             clock: Clock::system(),
+            workers: crate::worker::Workers::default(),
         }
+    }
+
+    /// Publish a stored Call to everything that follows the live-feed fanout.
+    ///
+    /// One method rather than a bare `live.publish`, because the fanout has two
+    /// kinds of follower and only one of them can be counted from inside it. A
+    /// socket is served and forgotten; the Web Push sender (#16) **owes** the
+    /// Call until it has decided whether to notify, and that debt has to be
+    /// taken on *here* — where there is still one owner — because the fanout
+    /// hands every follower a clone and no clone can carry the ticket.
+    ///
+    /// Without it, "no notification was sent" could only ever be a sleep long
+    /// enough to feel safe: the sender is idle both before it has seen a Call
+    /// and after it has declined one, and nothing outside could tell which.
+    pub fn publish(&self, call: Arc<crate::call::StoredCall>) {
+        self.push.owes_a_call();
+        self.live.publish(call);
     }
 }
 

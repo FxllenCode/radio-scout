@@ -44,6 +44,10 @@ use tracing_subscriber::registry::LookupSpan;
 
 use crate::db::repo::{self, NewLogEvent};
 use crate::now_ms;
+use crate::worker::{Meter, Shutdown, Ticket, Worker};
+
+/// What this Worker is called on a status surface (#93).
+pub const WORKER: &str = "log-sink";
 
 /// This module's own target, which the sink never stores.
 ///
@@ -216,25 +220,32 @@ fn channel_sized(level: StoredLevel, capacity: usize) -> Option<(LogSink, LogWri
     let level = level.level()?;
     let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
     let dropped = Arc::new(AtomicU64::new(0));
+    let meter = Meter::new();
     Some((
         LogSink {
             tx,
             level,
             dropped: dropped.clone(),
+            meter: meter.clone(),
         },
-        LogWriter { rx, dropped },
+        LogWriter { rx, dropped, meter },
     ))
 }
 
 /// The `tracing` layer half: turns an event into a row-to-be and offers it to
 /// the writer, never waiting for one.
 pub struct LogSink {
-    tx: Sender<NewLogEvent>,
+    tx: Sender<(NewLogEvent, Ticket)>,
     level: Level,
     /// Events the queue had no room for. Counted rather than logged where they
     /// happen — a full queue means the writer is behind, and a line per dropped
     /// event would be the hot loop rule 8 forbids.
     dropped: Arc<AtomicU64>,
+    /// How far behind the writer is (#93). A `fetch_add` on the admitting side
+    /// and nothing else, because this side is the path of the log call itself:
+    /// publishing a composite value here would put a lock where rule 1 of this
+    /// module's four says nothing may wait.
+    meter: Arc<Meter>,
 }
 
 impl<S> Layer<S> for LogSink
@@ -286,7 +297,11 @@ where
         // Never `send().await`: a log call must not be a point where a request
         // waits for a database, and an event nobody has room for is worth less
         // than the request that was writing it.
-        if self.tx.try_send(stored).is_err() {
+        //
+        // The Ticket rides with the event, so a full queue settles what it
+        // dropped by dropping it — the depth reads as "behind", never as "owed
+        // forever".
+        if self.tx.try_send((stored, self.meter.admit())).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -294,35 +309,81 @@ where
 
 /// The writing half: drains the queue into the `logs` table.
 pub struct LogWriter {
-    rx: Receiver<NewLogEvent>,
+    rx: Receiver<(NewLogEvent, Ticket)>,
     dropped: Arc<AtomicU64>,
+    meter: Arc<Meter>,
 }
 
 impl LogWriter {
-    /// Start draining into `db`, returning the task's handle.
+    /// Start draining into `db`, as this Instance's log-sink Worker (#93).
     ///
-    /// The task ends when the sink is dropped — which in the binary is never,
-    /// and in a test is the deterministic "everything has been written" moment.
-    pub fn spawn(self, db: DatabaseConnection) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(self.run(db))
+    /// The one Worker that outlives a **restart**: the subscriber feeding it
+    /// belongs to the process rather than to a run, so `Instance::restart`
+    /// carries it across and only a full stop ends it. The loop also ends on
+    /// its own when the sink is dropped — which in the binary is never, and in
+    /// a test is the deterministic "everything has been written" moment.
+    pub fn start(self, db: DatabaseConnection) -> Worker {
+        let meter = self.meter.clone();
+        Worker::start(WORKER, meter, move |stop| self.run(db, stop))
     }
 
-    async fn run(mut self, db: DatabaseConnection) {
+    async fn run(mut self, db: DatabaseConnection, mut stop: Shutdown) {
         // Whether the last write failed, so a database that is down says so
         // once rather than once per batch — and says so again when it comes
         // back, which is the line an operator actually waits for.
         let mut failing = false;
-        while let Some(first) = self.rx.recv().await {
-            let mut batch = vec![first];
-            while batch.len() < MAX_BATCH {
-                match self.rx.try_recv() {
-                    Ok(event) => batch.push(event),
-                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                }
-            }
-            failing = write_batch(&db, &batch, failing).await;
-            self.report_dropped();
+        loop {
+            let first = tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                received = self.rx.recv() => match received {
+                    Some(event) => event,
+                    None => break,
+                },
+            };
+            failing = self.write_batch_from(&db, first, failing).await;
         }
+        // Asked to stop, not asked to forget. Everything the sink was already
+        // holding is written before this returns — a stop is the moment an
+        // operator most wants the last few lines, and they are already accepted
+        // work rather than something new to wait for.
+        //
+        // `close` first, and that is what *makes* this bounded: it refuses new
+        // sends, so a process that is still logging while it shuts down cannot
+        // keep feeding the drain it is waiting on. Without it `try_recv` would
+        // happily pick up events that arrived during the previous batch's
+        // write, and `Instance::stop` would have no upper bound at all. Events
+        // offered after this are dropped and counted, exactly as they are when
+        // the queue is full.
+        self.rx.close();
+        while let Ok(event) = self.rx.try_recv() {
+            failing = self.write_batch_from(&db, event, failing).await;
+        }
+    }
+
+    /// Take up to [`MAX_BATCH`] events starting with one already in hand, write
+    /// them, and settle them.
+    async fn write_batch_from(
+        &mut self,
+        db: &DatabaseConnection,
+        first: (NewLogEvent, Ticket),
+        failing: bool,
+    ) -> bool {
+        let mut batch = vec![first];
+        while batch.len() < MAX_BATCH {
+            match self.rx.try_recv() {
+                Ok(event) => batch.push(event),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        let (events, tickets): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+        let failing = write_batch(db, &events, failing).await;
+        // Settled whether or not the write landed: a failed batch degrades to
+        // console-only (the console already has every one of these), and an
+        // event nobody will ever write is not one the sink still owes.
+        drop(tickets);
+        self.report_dropped();
+        failing
     }
 
     /// Say how many events the queue had no room for, and forget them.
@@ -552,16 +613,52 @@ mod tests {
         emit: impl FnOnce(),
     ) -> String {
         let (sink, writer) = channel_sized(level, capacity).expect("an enabled sink");
-        let draining = writer.spawn(db.clone());
+        let draining = writer.start(db.clone());
         {
             let _installed = ScopedSubscriber::install(tracing_subscriber::registry().with(sink));
             emit();
         }
         let console = LogCapture::start();
-        draining
-            .await
-            .expect("the writer finishes once the sink is dropped");
+        // Ends on its own, because the sink it was draining is gone — the
+        // deterministic "everything that was going to be written has been".
+        draining.join().await;
         console.text()
+    }
+
+    /// **Stopping drains rather than discards** (#93). A stop is the moment an
+    /// operator most wants the last few lines — the shutdown they are about to
+    /// investigate is in them — and the events are already *accepted* work, not
+    /// something new to start waiting for.
+    ///
+    /// The sink is deliberately kept alive across the stop, which is what makes
+    /// this a real test of the drain: the writer's ordinary exit is the sink
+    /// being dropped, and with one still installed the only way out is the
+    /// shutdown path.
+    #[tokio::test]
+    async fn stopping_the_writer_writes_what_it_was_already_holding() {
+        let (db, _tmp) = database().await;
+        let (sink, writer) =
+            channel_sized(StoredLevel::default(), QUEUE_CAPACITY).expect("an enabled sink");
+        let draining = writer.start(db.clone());
+
+        let _installed = ScopedSubscriber::install(tracing_subscriber::registry().with(sink));
+        info!("a line written just before the lights went out");
+
+        // No await between the event and the stop, so a `#[tokio::test]`'s
+        // current-thread runtime has not polled the writer at all: the event is
+        // provably still in the queue, and only the drain can put it in the
+        // table.
+        draining.stop().await;
+
+        let stored = log_event::Entity::find()
+            .all(&db)
+            .await
+            .expect("read stored events");
+        assert_eq!(
+            only(&stored).message,
+            "a line written just before the lights went out",
+            "a stop threw away an event the sink had already accepted"
+        );
     }
 
     /// An event reaches the table as its parts — level, target, message, and the

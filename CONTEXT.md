@@ -242,6 +242,10 @@ _Avoid_: work queue, job queue, backlog, pipeline.
 One running Radio-Scout: a process, its **Archive**, its configuration and its **admin password**. The unit an **Operator** installs, upgrades and points **Recorders** at. Two Instances share nothing unless they are given the same database and object store.
 _Avoid_: scanner, server, deployment, node, site (Site is a tower).
 
+**Worker**:
+A background task an **Instance** owns and can account for. There are four — the **Retention** sweeper, the **Web Push** sender, the **enhancement** worker, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
+_Avoid_: job, task, background thread, daemon (a **Service** is the operating system's).
+
 **Service**:
 The operating system's registration that runs Radio-Scout at boot and restarts it if it dies — a systemd unit, a launchd daemon, or a Windows scheduled task. Installed, removed and controlled by `radio-scout service …`. Distinct from the running process: uninstalling the service leaves the binary, and stopping the process leaves the service.
 _Avoid_: daemon, unit, task (each is one platform's word for it), autostart.

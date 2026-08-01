@@ -44,6 +44,10 @@ use crate::db::repo;
 use crate::failure::ServerError;
 use crate::selection::Selection;
 use crate::webpush::VapidKey;
+use crate::worker::{Handoff, Meter, Worker};
+
+/// What this Worker is called on a status surface (#93).
+pub const WORKER: &str = "push";
 
 /// How Web Push behaves — and the `[push]` section itself (#17, ADR-0012, #87).
 ///
@@ -99,6 +103,15 @@ struct Inner {
     config: PushConfig,
     /// Subscriptions whose listener has a live-feed socket open right now.
     attached: Mutex<HashSet<i64>>,
+    /// What the sender owes: Calls published to the fanout it has not yet
+    /// considered, plus notifications still in flight (#93).
+    meter: Arc<Meter>,
+    /// The coalescer, until [`spawn`] takes it — and with it the right to be
+    /// the sender. Two senders each with a coalescer of their own would each
+    /// admit the first Call of a window, so a phone would be notified twice
+    /// about the same Talkgroup; taking it here is what makes that impossible
+    /// rather than merely unlikely.
+    start: Handoff<Coalescer>,
 }
 
 impl Inner {
@@ -126,11 +139,27 @@ impl Drop for Attached {
 impl Push {
     /// A server that can send notifications.
     pub fn new(key: VapidKey, config: PushConfig) -> Self {
+        let coalescer = Coalescer::new(config.coalesce);
         Push(Some(Arc::new(Inner {
             key,
             config,
             attached: Mutex::new(HashSet::new()),
+            meter: Meter::new(),
+            start: Handoff::new(coalescer),
         })))
+    }
+
+    /// Note that a Call has been published to the fanout, so the sender owes a
+    /// decision about it.
+    ///
+    /// Called from [`crate::AppState::publish`], which is the last place a Call
+    /// has one owner: past it the fanout has handed every follower a clone, and
+    /// a debt taken on there could never be settled exactly once. A server with
+    /// no VAPID identity owes nothing, so this is where that ends.
+    pub fn owes_a_call(&self) {
+        if let Some(inner) = &self.0 {
+            inner.meter.admit_untracked();
+        }
     }
 
     /// Note this listener as connected: while their live-feed socket is open
@@ -354,8 +383,11 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// the other side of the internet, and the Call reaches a notification by
 /// exactly the same broadcast that reaches a socket. A server with no VAPID
 /// identity spawns nothing at all.
-pub fn spawn(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
+pub fn spawn(state: AppState) -> Option<Worker> {
     let inner = state.push.0.clone()?;
+    // The coalescer *is* the right to be the sender (#93): a second call finds
+    // it gone and starts nothing.
+    let mut coalescer = inner.start.take()?;
     let client = reqwest::Client::builder()
         .timeout(SEND_TIMEOUT)
         .build()
@@ -364,20 +396,54 @@ pub fn spawn(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
         // malformed proxy setting, and this configures neither.
         .expect("an HTTP client with only a timeout configured");
     let mut calls = state.live.subscribe();
-    let mut coalescer = Coalescer::new(inner.config.coalesce);
+    let meter = inner.meter.clone();
 
-    let sender = tokio::spawn(async move {
-        loop {
-            match on_broadcast(calls.recv().await) {
-                Fanout::Notify(call) => {
-                    notify(&state, &inner, &client, &mut coalescer, &call).await
+    Some(Worker::start(
+        WORKER,
+        meter.clone(),
+        move |mut stop| async move {
+            // Deliveries still in flight. A set rather than detached spawns so they
+            // are this Worker's to reap and, when it stops, to abort — dropping the
+            // set aborts them, and each one's Ticket settles with it. Nothing is
+            // ever *awaited* here, which is the point: an unreachable push service
+            // must hold up neither the device beside it nor the next Call.
+            let mut deliveries = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => break,
+                    // Reap what has finished, so the set does not grow for the life
+                    // of the process.
+                    Some(_) = deliveries.join_next(), if !deliveries.is_empty() => {}
+                    received = calls.recv() => {
+                        let fanout = on_broadcast(received);
+                        if let Fanout::Notify(call) = &fanout {
+                            // Before the Call is discharged, never after: the
+                            // deliveries are admitted inside `notify`, so the
+                            // depth never dips to zero in the gap between owing
+                            // a decision and owing its consequences.
+                            notify(&state, &inner, &client, &mut coalescer, call, &mut deliveries)
+                                .await;
+                        }
+                        meter.settle_n(fanout.settles());
+                        // **Unreachable, and left in deliberately.** The fanout
+                        // closes when its last sender drops, and the sender
+                        // lives in the `AppState` this very task owns — so the
+                        // channel cannot close while the loop that would notice
+                        // is running. It stays because the alternative to
+                        // breaking on a closed channel is spinning on it
+                        // forever, and because the day something else holds the
+                        // fanout this is what stops a busy loop from shipping.
+                        // The decision itself is covered:
+                        // `every_published_call_is_discharged_exactly_once`.
+                        if matches!(fanout, Fanout::Stop) {
+                            break;
+                        }
+                    }
                 }
-                Fanout::Skip => {}
-                Fanout::Stop => break,
             }
-        }
-    });
-    Some(sender)
+        },
+    ))
 }
 
 /// What the sender does with one fanout result — a pure decision, kept out of
@@ -388,10 +454,33 @@ pub fn spawn(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
 enum Fanout {
     /// Consider this Call for every subscription.
     Notify(Arc<StoredCall>),
-    /// Nothing to do, but keep listening.
-    Skip,
+    /// This many Calls went past unseen: nothing to do about them, but they are
+    /// no longer owed either.
+    Skipped(u64),
     /// The fanout is gone — the process is shutting down.
     Stop,
+}
+
+impl Fanout {
+    /// How many published Calls this result discharges (#93).
+    ///
+    /// A function rather than a line inside the loop because the arm that
+    /// matters is the one that cannot be provoked from a test: a lag needs the
+    /// sender to fall a whole broadcast buffer behind. Get it wrong and the
+    /// count never catches up, so **every** later `settle()` waits forever —
+    /// a failure that would present as the entire suite hanging, from a line
+    /// nothing covered.
+    fn settles(&self) -> u64 {
+        match self {
+            // Considered, whatever was decided about it.
+            Fanout::Notify(_) => 1,
+            // Never seen and never will be. Each was admitted where it was
+            // published, and a Call the sender will not see is not one it owes.
+            Fanout::Skipped(missed) => *missed,
+            // Nothing was taken off the fanout, so nothing is discharged.
+            Fanout::Stop => 0,
+        }
+    }
 }
 
 fn on_broadcast(result: Result<Arc<StoredCall>, broadcast::error::RecvError>) -> Fanout {
@@ -402,7 +491,7 @@ fn on_broadcast(result: Result<Arc<StoredCall>, broadcast::error::RecvError>) ->
         // up is the operator's to know about.
         Err(broadcast::error::RecvError::Lagged(skipped)) => {
             warn!(skipped, "web push sender lagged behind the fanout");
-            Fanout::Skip
+            Fanout::Skipped(skipped)
         }
         Err(broadcast::error::RecvError::Closed) => Fanout::Stop,
     }
@@ -415,6 +504,7 @@ async fn notify(
     client: &reqwest::Client,
     coalescer: &mut Coalescer,
     call: &StoredCall,
+    deliveries: &mut tokio::task::JoinSet<()>,
 ) {
     // Read per Call rather than cached: a listener who subscribed a second ago
     // must be notified, and this is a handful of rows on a table nothing else
@@ -437,7 +527,17 @@ async fn notify(
         // here would put `SEND_TIMEOUT` between a hung service and every
         // notification behind it. Bounded by construction — the coalescer
         // admits at most one per Talkgroup per device per window.
-        tokio::spawn(send(state.db.clone(), client.clone(), delivery));
+        //
+        // Its Ticket rides with it, so the sender is not idle until the last
+        // notification has actually left the process — which is what lets a
+        // test assert "and nothing was sent" without a sleep.
+        let ticket = inner.meter.admit();
+        let db = state.db.clone();
+        let client = client.clone();
+        deliveries.spawn(async move {
+            send(db, client, delivery).await;
+            drop(ticket);
+        });
     }
 }
 
@@ -585,6 +685,31 @@ mod tests {
 
     fn coalescer() -> Coalescer {
         Coalescer::new(WINDOW)
+    }
+
+    /// **One sender, and only ever one** (#93). Two would each hold a coalescer
+    /// of their own, so each would admit the first Call of every window and a
+    /// phone would buzz twice for the same Talkgroup — the exact failure
+    /// [`Coalescer`] exists to prevent, reintroduced by the wiring rather than
+    /// by the logic.
+    ///
+    /// The coalescer *is* the right to be the sender, so a second start has
+    /// nothing to send with.
+    #[tokio::test]
+    async fn a_second_push_sender_cannot_be_started() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
+        let store = Arc::new(crate::BlobStore::filesystem(tmp.path()).expect("store"));
+        let mut state = AppState::new(store, db, crate::IngestConfig::default());
+        state.push = Push::new(VapidKey::generate(), PushConfig::default());
+
+        let first = spawn(state.clone()).expect("the first sender starts");
+        let second = spawn(state.clone());
+
+        assert!(second.is_none(), "a second push sender was started");
+        first.stop().await;
     }
 
     /// A scanner is only useful if it is prompt: the first Call of a quiet
@@ -736,10 +861,28 @@ mod tests {
 
         let action = on_broadcast(Err(broadcast::error::RecvError::Lagged(7)));
 
-        assert!(matches!(action, Fanout::Skip));
+        assert!(matches!(action, Fanout::Skipped(7)));
         let logged = capture.text();
         assert!(logged.contains(" WARN "), "{logged}");
         assert!(logged.contains("skipped=7"), "{logged}");
+    }
+
+    /// **Every published Call is discharged exactly once** (#93), including the
+    /// ones the sender never saw.
+    ///
+    /// A Call is owed from where it is published, so a lag that swallows seven
+    /// of them has to discharge seven — count them as one and the sender's
+    /// depth never returns to zero, which means every later `settle()` in the
+    /// suite waits forever. That is a whole-suite hang originating in an arm no
+    /// integration test can provoke: a lag needs the sender to fall an entire
+    /// broadcast buffer behind.
+    #[test]
+    fn every_published_call_is_discharged_exactly_once() {
+        assert_eq!(Fanout::Notify(a_call()).settles(), 1);
+        assert_eq!(Fanout::Skipped(7).settles(), 7);
+        // Nothing was taken off the fanout, so nothing is discharged — the
+        // process is ending and the Calls still owed go with it.
+        assert_eq!(Fanout::Stop.settles(), 0);
     }
 
     #[test]

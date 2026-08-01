@@ -148,6 +148,28 @@ impl TestApp {
         self.tmp.path()
     }
 
+    /// This Instance's background Workers, by name (#93) — the sweeper, the
+    /// push sender, the enhancement worker and the log sink.
+    ///
+    /// What a test waits on instead of sleeping. Most callers want
+    /// [`TestApp::settle`]; reach for a named one when the wait is for a count
+    /// rather than for quiet.
+    pub fn workers(&self) -> &radio_scout::worker::Workers {
+        self.instance.workers()
+    }
+
+    /// Wait until every Worker owes nothing.
+    ///
+    /// The single most useful line in the harness, and the one that replaced
+    /// four bespoke pollers and two fixed sleeps. **This is what "and nothing
+    /// happened" is made of**: a sleep can only ever say "not yet", and gets
+    /// longer every time a loaded CI runner disagrees with it. Settling says
+    /// the work was picked up, considered, and finished — so an assertion after
+    /// it is about a decision the Instance actually made.
+    pub async fn settle(&self) {
+        self.workers().idle().await;
+    }
+
     /// Stop this Instance and start it again on the same configuration, the
     /// same database and the same store (#90).
     ///
@@ -509,31 +531,25 @@ impl TestApp {
     /// Wait for a Call to leave the `pending` enhancement state, and hand back
     /// the row as it ended up.
     ///
-    /// Polls, because enhancement is deliberately asynchronous: the whole point
-    /// of #20 is that ingest answers before any of it starts, so there is no
-    /// synchronous moment for a test to hook. Polling the *observable* state —
-    /// the row — rather than reaching into the worker keeps this an assertion
-    /// about what an operator could see.
-    ///
-    /// Fails rather than hanging: a worker that never finishes should be a
-    /// named failure, not a test run that times out with no explanation.
+    /// Enhancement is deliberately asynchronous — the whole point of #20 is
+    /// that ingest answers before any of it starts — so this is a wait. Since
+    /// #93 it is a wait on the worker's own idle signal rather than a poll of
+    /// the row: the Call is owed from the moment ingest offered it, so settling
+    /// means it has been enhanced, skipped, or refused, and the row can be read
+    /// once and believed.
     pub async fn await_enhancement(&self, id: i64) -> call::Model {
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        loop {
-            let call = call::Entity::find_by_id(id)
-                .one(&self.db)
-                .await
-                .expect("read call")
-                .expect("the Call still exists");
-            if call.enhancement != radio_scout::db::entities::call::EnhancementState::PENDING {
-                return call;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "Call {id} was still pending enhancement after 20s"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        self.settle().await;
+        let call = call::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .expect("read call")
+            .expect("the Call still exists");
+        assert_ne!(
+            call.enhancement,
+            radio_scout::db::entities::call::EnhancementState::PENDING,
+            "Call {id} is still pending with the enhancement worker owing nothing"
+        );
+        call
     }
 
     /// The System a Call belongs to.
@@ -607,30 +623,32 @@ impl TestApp {
     /// Wait until the Logs view has an event whose message is `needle`, and
     /// hand back the page it appeared on (logged in as admin on the way past).
     ///
-    /// Polling, because the sink is deliberately asynchronous: there is no
-    /// completion for a test to await from the outside, which is the whole
-    /// point of a log call that never waits on a database.
+    /// The sink is deliberately asynchronous — a log call must never wait on a
+    /// database — so this is a wait. Since #93 it waits on the sink Worker's
+    /// idle signal: an event is owed from the moment it was offered, so a
+    /// settled sink has written everything anything had said by then.
+    ///
+    /// [`TestApp::settle`] rather than the sink alone, because the line being
+    /// waited for is often written *by* another Worker — the sweeper's report,
+    /// the enhancement worker's refusal — and a sink with nothing left to write
+    /// says nothing about whether the thing that would write it has run.
     pub async fn await_logged(&self, needle: &str) -> serde_json::Value {
         if self.session.lock().expect("session").is_none() {
             self.login().await;
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        loop {
-            let page = self.get_json("/api/admin/logs?limit=500").await;
-            let found = page["results"]
-                .as_array()
-                .expect("a results array")
-                .iter()
-                .any(|event| event["message"] == needle);
-            if found {
-                return page;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "no stored log event said {needle:?} within 20s; the page holds {page:#}"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        self.settle().await;
+        let page = self.get_json("/api/admin/logs?limit=500").await;
+        let found = page["results"]
+            .as_array()
+            .expect("a results array")
+            .iter()
+            .any(|event| event["message"] == needle);
+        assert!(
+            found,
+            "no stored log event said {needle:?} once every Worker had settled; \
+             the page holds {page:#}"
+        );
+        page
     }
 
     /// Insert a System row with an explicit ingest policy. No admin surface sets
@@ -1212,20 +1230,6 @@ pub fn env_value(env_file: &Path, var: &str) -> String {
         .find_map(|line| line.strip_prefix(&format!("{var}=")))
         .unwrap_or_else(|| panic!("{var} was never written to {}", env_file.display()))
         .to_string()
-}
-
-/// Poll until `check` is true, failing with `what` rather than hanging.
-///
-/// Several things an Instance does are deliberately asynchronous — the sweeper,
-/// the enhancement worker, the log sink — so there is no completion to await
-/// from outside. Polling the *observable* state keeps the assertion about what
-/// an Operator could see; #93's idle signals replace this with a real one.
-pub async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !check().await {
-        assert!(std::time::Instant::now() < deadline, "{what}");
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
 }
 
 /// Where a spawned app listens: an ephemeral loopback port.

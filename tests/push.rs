@@ -103,7 +103,7 @@ async fn a_matching_call_notifies_the_subscribed_device() {
 
     app.upload_ok(CallUpload::new()).await;
 
-    let pushed = service.wait_for(1).await;
+    let pushed = service.wait_for(&app, 1).await;
     let sent = &pushed[0];
     assert_eq!(sent.header("content-encoding"), Some("aes128gcm"));
     assert_eq!(sent.header("ttl"), Some("3600"));
@@ -156,7 +156,7 @@ async fn a_listener_with_a_live_socket_is_not_notified() {
     // The feed delivered it...
     assert_eq!(common::next_json(&mut ws).await["t"], "call");
     // ...so the phone was left alone.
-    service.expect_nothing().await;
+    service.expect_nothing(&app).await;
 }
 
 /// And the moment that socket goes — a closed tab, the heartbeat reaping a phone
@@ -185,7 +185,7 @@ async fn a_dropped_socket_hands_the_listener_back_to_push() {
 
     app.upload_ok(CallUpload::new()).await;
 
-    let pushed = service.wait_for(1).await;
+    let pushed = service.wait_for(&app, 1).await;
     assert_eq!(pushed[0].payload()["talkgroupRef"], 54241);
 }
 
@@ -206,7 +206,7 @@ async fn a_call_outside_the_selection_notifies_nobody() {
 
     app.upload_ok(CallUpload::new()).await; // Talkgroup 54241
 
-    service.expect_nothing().await;
+    service.expect_nothing(&app).await;
 }
 
 /// A Call reaches a listener through a Talkgroup it is **patched** to, and the
@@ -230,7 +230,7 @@ async fn a_patched_call_notifies_through_the_watched_talkgroup() {
     app.upload_ok(CallUpload::new().talkgroup(100).set("patches", "[300]"))
         .await;
 
-    let pushed = service.wait_for(1).await;
+    let pushed = service.wait_for(&app, 1).await;
     assert_eq!(pushed[0].payload()["talkgroupRef"], 300);
     assert_eq!(pushed[0].header("topic"), Some("t11-300"));
 }
@@ -247,11 +247,11 @@ async fn a_burst_on_one_talkgroup_notifies_once() {
         app.upload_ok(CallUpload::new().at(at)).await;
     }
 
-    let pushed = service.wait_for(1).await;
+    let pushed = service.wait_for(&app, 1).await;
     assert_eq!(pushed.len(), 1, "three Calls, one notification");
     // ...and the two it stands for are not lost: they are counted into the
     // next one, which the unit tests pin without waiting out a window.
-    service.expect_nothing().await;
+    service.expect_nothing(&app).await;
 }
 
 /// `410 Gone` is a push service saying the device unsubscribed behind our back
@@ -265,16 +265,16 @@ async fn a_gone_subscription_is_forgotten() {
     service.answer_with(410);
 
     app.upload_ok(CallUpload::new()).await;
-    service.wait_for(1).await;
+    service.wait_for(&app, 1).await;
 
-    // The row goes with it, so the next Call doesn't try again.
-    for _ in 0..50 {
-        if app.count::<push_subscription::Entity>().await == 0 {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("a gone subscription was kept");
+    // The row goes with it, so the next Call doesn't try again. `wait_for` has
+    // already settled the sender, and a delivery is owed until it has finished
+    // acting on the answer it got — so the deletion has happened by here.
+    assert_eq!(
+        app.count::<push_subscription::Entity>().await,
+        0,
+        "a gone subscription was kept"
+    );
 }
 
 /// Re-subscribing is how a listener syncs a changed Selection, so the same
@@ -305,7 +305,7 @@ async fn re_subscribing_updates_the_same_device() {
     assert_eq!(app.count::<push_subscription::Entity>().await, 1);
     // The new Selection is the one that decides.
     app.upload_ok(CallUpload::new()).await; // Talkgroup 54241, no longer watched
-    service.expect_nothing().await;
+    service.expect_nothing(&app).await;
 }
 
 /// Turning notifications off has to actually stop them.
@@ -322,7 +322,7 @@ async fn unsubscribing_forgets_the_device() {
     assert_eq!(response.status(), 204);
     assert_eq!(app.count::<push_subscription::Entity>().await, 0);
     app.upload_ok(CallUpload::new()).await;
-    service.expect_nothing().await;
+    service.expect_nothing(&app).await;
     // Idempotent: a browser that unsubscribes twice, or one whose row a `410`
     // already removed, is not an error.
     assert_eq!(
@@ -404,7 +404,7 @@ async fn a_refused_push_is_logged_and_the_device_is_kept() {
     service.answer_with(500);
 
     app.upload_ok(CallUpload::new()).await;
-    service.wait_for(1).await;
+    service.wait_for(&app, 1).await;
 
     let line = capture.wait_for("web push refused").await;
     assert!(line.contains(" WARN "), "{line}");
@@ -482,7 +482,7 @@ async fn a_sender_that_cannot_read_its_subscriptions_says_so_and_keeps_running()
         line.contains(&app.missing_table_cause("push_subscriptions")),
         "{line}"
     );
-    service.expect_nothing().await;
+    service.expect_nothing(&app).await;
 }
 
 /// The handle a socket presents is unguessable on purpose. With a sequential
@@ -499,7 +499,7 @@ async fn a_socket_cannot_silence_a_subscription_it_does_not_hold() {
     common::subscribe(&mut ws, r#"{"t":"sub","all":true,"push":"1"}"#).await;
     app.upload_ok(CallUpload::new()).await;
 
-    let pushed = service.wait_for(1).await;
+    let pushed = service.wait_for(&app, 1).await;
     assert_eq!(
         pushed.len(),
         1,
@@ -537,5 +537,5 @@ async fn re_subscribing_without_a_selection_keeps_the_stored_one() {
     assert_eq!(response.status(), 200);
 
     app.upload_ok(CallUpload::new()).await; // Talkgroup 54241, not watched
-    service.expect_nothing().await;
+    service.expect_nothing(&app).await;
 }
