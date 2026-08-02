@@ -270,10 +270,44 @@ async fn a_store_that_refuses_to_read_is_a_server_error_not_a_missing_call(
     assert_eq!(resp.status(), 500, "a broken store is not a missing Call");
     let request_id = common::request_id_of(&resp);
     let body = resp.text().await.expect("body");
-    assert_eq!(body, format!("internal error (ref: {request_id})\n"));
+    assert_eq!(body, format!("internal error (request id: {request_id})\n"));
 
     let line = capture.only_line_containing("server error");
     assert!(line.contains(&format!("stage={stage}")), "{line}");
+    assert!(
+        line.contains(common::INJECTED_IO),
+        "the cause travels: {line}"
+    );
+}
+
+/// The other way an object store can fail a listener: it is reachable, it holds
+/// the object, and it will not **sign** a URL for it — a clock too far out for
+/// SigV4, or credentials revoked under a running process.
+///
+/// A 500, not a 404 and not a silent fall-through to proxying: the Call exists,
+/// so telling the client it is gone would be a lie, and quietly serving the
+/// bytes ourselves would put an object store's whole egress through the Pi that
+/// ADR-0002's S3 backend exists to keep it off. `stage=sign-audio-url` is the
+/// only thing that says which of the two store failures happened.
+#[tokio::test]
+async fn a_store_that_cannot_sign_a_url_is_a_server_error_not_a_missing_call() {
+    let capture = common::logs::LogCapture::start();
+    let (store, faults) = common::faults_over_store(s3_store());
+    let app = TestApp::builder().store(store).spawn().await;
+    let id = insert_call(&app, "ab/deadbeef.m4a", Some("audio/mp4")).await;
+
+    faults.fail_presigning();
+    let resp = app.get_without_redirects(&audio(id)).await;
+
+    assert_eq!(resp.status(), 500, "the Call is here; the signature is not");
+    let request_id = common::request_id_of(&resp);
+    assert_eq!(
+        resp.text().await.expect("body"),
+        format!("internal error (request id: {request_id})\n")
+    );
+
+    let line = capture.only_line_containing("server error");
+    assert!(line.contains("stage=sign-audio-url"), "{line}");
     assert!(
         line.contains(common::INJECTED_IO),
         "the cause travels: {line}"

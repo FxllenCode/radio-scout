@@ -27,8 +27,8 @@ const controlClass =
  * rdio-scanner has this page and operators expect it; this one differs in three
  * ways that matter at 2am. `level` is a **floor** ("warnings and worse"), not
  * one level at a time. An event shows its **structured fields** and its
- * **correlation ref**, because ours stores an event's parts rather than a
- * rendered sentence — so the `internal error (ref: …)` a listener read out over
+ * **request id**, because ours stores an event's parts rather than a rendered
+ * sentence — so the `internal error (request id: …)` a listener read out over
  * the phone is findable here. And what is stored obeys ADR-0011 rule 5: no
  * listener's address is in this table at any level, which is enforced by the
  * sink refusing to run below INFO rather than by anything on this page.
@@ -247,7 +247,7 @@ function EventRow({ event }: { event: LogEvent }) {
           {event.requestId && (
             <span className="text-muted-foreground/70">
               {fields.length > 0 ? ' · ' : ''}
-              ref {event.requestId}
+              request id {event.requestId}
             </span>
           )}
         </p>

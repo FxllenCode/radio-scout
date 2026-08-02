@@ -32,11 +32,8 @@ use tracing::{Instrument, Level, Span, field, info, span, warn};
 
 use crate::db::entities::call;
 use crate::db::repo::{self, NewCall, NewCallFrequency, NewCallUnit};
-use crate::failure::ServerError;
+use crate::failure::{Failure, Incomplete, Reason, Stage};
 use crate::{AppState, now_ms};
-
-const CALL_IMPORTED: &str = "Call imported successfully.\n";
-const DUPLICATE_REJECTED: &str = "duplicate call rejected\n";
 
 /// Ingest tuning — and the `[ingest]` section of `radio-scout.toml` itself
 /// (#17, #87). One type, so the shipped defaults below and the ones
@@ -97,14 +94,17 @@ struct RawUpload {
 }
 
 /// `POST /api/call-upload` — accept a call from a recorder.
-pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart) -> Response {
+pub async fn call_upload(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Imported, Failure> {
     let mut upload = RawUpload::default();
 
     loop {
         let part = match multipart.next_field().await {
             Ok(Some(part)) => part,
             Ok(None) => break,
-            Err(_) => return incomplete("malformed-multipart-body"),
+            Err(_) => return Err(Incomplete::MalformedMultipartBody.into()),
         };
 
         // Borrow-then-consume: capture metadata off the field before its body is
@@ -115,14 +115,14 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
             upload.audio_mime = part.content_type().map(str::to_string);
             match part.bytes().await {
                 Ok(bytes) => upload.audio = Some(bytes.to_vec()),
-                Err(_) => return incomplete("could-not-read-audio"),
+                Err(_) => return Err(Incomplete::CouldNotReadAudio.into()),
             }
             continue;
         }
 
         let value = match part.text().await {
             Ok(value) => value,
-            Err(_) => return incomplete("could-not-read-field"),
+            Err(_) => return Err(Incomplete::CouldNotReadField.into()),
         };
         match name.as_str() {
             "key" => upload.key = Some(value),
@@ -154,20 +154,19 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
 
     // A talkgroup is mandatory (the load-bearing health-check string).
     let Some(talkgroup_ref) = upload.talkgroup.as_deref().and_then(parse_i64) else {
-        return incomplete("no-talkgroup");
+        return Err(Incomplete::NoTalkgroup.into());
     };
     let audio = match upload.audio.take() {
         Some(audio) if !audio.is_empty() => audio,
-        _ => return incomplete("no-audio"),
+        _ => return Err(Incomplete::NoAudio.into()),
     };
     // A recorder normally sends a numeric `system`; if it doesn't (or sends a
     // non-positive value), give the new System the lowest-free Ref (#8).
     let system_ref = match upload.system.as_deref().and_then(parse_i64) {
         Some(system_ref) if system_ref > 0 => system_ref,
-        _ => match repo::lowest_free_system_ref(&state.db).await {
-            Ok(system_ref) => system_ref,
-            Err(err) => return ServerError::new("assign-system-ref", err).into_response(),
-        },
+        _ => repo::lowest_free_system_ref(&state.db)
+            .await
+            .map_err(Stage::AssignSystemRef.failed())?,
     };
     let key = upload.key.take().unwrap_or_default();
     let call_at_ms = parse_call_time(upload.timestamp.as_deref(), upload.date_time.as_deref())
@@ -232,7 +231,12 @@ pub async fn call_upload(State(state): State<AppState>, mut multipart: Multipart
 /// upload first has an identity: a body too malformed to yield a System and a
 /// Talkgroup is rejected before it, and those lines carry the request id alone —
 /// which is the whole of what is known about them.
-async fn ingest_call(state: &AppState, key: &str, new_call: NewCall, audio: Vec<u8>) -> Response {
+async fn ingest_call(
+    state: &AppState,
+    key: &str,
+    new_call: NewCall,
+    audio: Vec<u8>,
+) -> Result<Imported, Failure> {
     let span = span!(
         Level::ERROR,
         "ingest",
@@ -251,26 +255,20 @@ async fn run_pipeline(
     key: &str,
     mut new_call: NewCall,
     audio: Vec<u8>,
-) -> Response {
+) -> Result<Imported, Failure> {
     // Auth (ADR-0008): recorders always require a valid, in-scope API key.
-    match repo::authorize_ingest(&state.db, key, new_call.system_ref).await {
-        Ok(true) => {}
-        // The key itself is never logged, at any level, in any form (rule 2) —
-        // and an unknown key has no row to name it by anyway.
-        Ok(false) => {
-            return rejected(
-                "invalid-api-key",
-                (
-                    StatusCode::UNAUTHORIZED,
-                    format!(
-                        "Invalid API key for system {} talkgroup {}.\n",
-                        new_call.system_ref, new_call.talkgroup_ref
-                    ),
-                )
-                    .into_response(),
-            );
+    //
+    // The key itself is never logged, at any level, in any form (rule 2) — and
+    // an unknown key has no row to name it by anyway.
+    if !repo::authorize_ingest(&state.db, key, new_call.system_ref)
+        .await
+        .map_err(Stage::Auth.failed())?
+    {
+        return Err(Reason::InvalidApiKey {
+            system_ref: new_call.system_ref,
+            talkgroup_ref: new_call.talkgroup_ref,
         }
-        Err(err) => return ServerError::new("auth", err).into_response(),
+        .into());
     }
 
     // Auto-populate + blacklist policy (#8): decide before any audio is written.
@@ -283,39 +281,28 @@ async fn run_pipeline(
         state.ingest.auto_populate,
     )
     .await
+    .map_err(Stage::AutoPopulatePolicy.failed())?
     {
-        Ok(repo::Disposition::Store {
+        repo::Disposition::Store {
             auto_populate,
             talkgroup_id,
-        }) => (auto_populate, talkgroup_id),
-        Ok(repo::Disposition::Drop(reason)) => {
-            return rejected(
-                drop_reason(reason),
-                (StatusCode::OK, CALL_IMPORTED).into_response(),
-            );
-        }
-        Err(err) => return ServerError::new("auto-populate-policy", err).into_response(),
+        } => (auto_populate, talkgroup_id),
+        repo::Disposition::Drop(reason) => return Err(dropped(reason).into()),
     };
 
     // Dedup (ADR-0001): the same *channel* within the window — the Talkgroup the
     // Ref resolved to a moment ago, not the Ref itself (#45), so a transmission
     // uploaded once per member Ref is stored once.
-    match repo::is_duplicate_call(
+    if repo::is_duplicate_call(
         &state.db,
         talkgroup_id,
         new_call.call_at_ms,
         state.ingest.dedup_window_ms,
     )
     .await
+    .map_err(Stage::Dedup.failed())?
     {
-        Ok(true) => {
-            return rejected(
-                "duplicate",
-                (StatusCode::OK, DUPLICATE_REJECTED).into_response(),
-            );
-        }
-        Ok(false) => {}
-        Err(err) => return ServerError::new("dedup", err).into_response(),
+        return Err(Reason::Duplicate.into());
     }
 
     // The *playing* length, so a one-second kerchunk and a forty-second
@@ -351,30 +338,27 @@ async fn run_pipeline(
 
         // Write the audio object first (ADR-0001); a failed DB insert afterward
         // leaves an orphan the GC sweep reclaims (#10).
-        if let Err(err) = state
+        state
             .audio
             .put(&new_call.object_key, bytes::Bytes::from(audio))
             .await
-        {
-            return ServerError::new("store-audio", err).into_response();
-        }
+            .map_err(Stage::StoreAudio.failed())?;
     }
     let audio_bytes = new_call.audio_size.unwrap_or_default();
 
     // Insert the row (+ children) atomically.
-    let call = match insert_in_txn(&state.db, &new_call, auto_populate, state.clock.now_ms()).await
-    {
-        Ok(call) => call,
-        Err(err) => return ServerError::new("store-call", err).into_response(),
-    };
+    let call = insert_in_txn(&state.db, &new_call, auto_populate, state.clock.now_ms())
+        .await
+        .map_err(Stage::StoreCall.failed())?;
     // Everything this upload says from here on names the row it became.
     Span::current().record("call_id", call.id);
 
     // Emit to the live feed.
-    match repo::stored_call(&state.db, call.id).await {
-        Ok(Some(view)) => state.publish(Arc::new(view)),
-        Ok(None) => {}
-        Err(err) => return ServerError::new("build-call-view", err).into_response(),
+    if let Some(view) = repo::stored_call(&state.db, call.id)
+        .await
+        .map_err(Stage::BuildCallView.failed())?
+    {
+        state.publish(Arc::new(view));
     }
 
     // Enhancement (#20) starts *here* — after the recorder has its answer and
@@ -397,7 +381,22 @@ async fn run_pipeline(
     // normal event, so "nothing is arriving" is answerable without waiting for
     // something to go wrong. Per-Call, never per-anything-smaller (rule 8).
     info!(audio_bytes, "call stored");
-    (StatusCode::OK, CALL_IMPORTED).into_response()
+    Ok(Imported)
+}
+
+/// The Call became a row — the one answer this endpoint gives that isn't a
+/// [`Failure`].
+///
+/// Its string is a wire contract (ADR-0001): SDRTrunk reads the body on a 200
+/// and branches on it. Two *rejections* answer with the same string so that a
+/// recorder never retries a Call we deliberately dropped — which is why they
+/// carry a WARN line and this carries an INFO one.
+pub struct Imported;
+
+impl IntoResponse for Imported {
+    fn into_response(self) -> Response {
+        (StatusCode::OK, crate::failure::CALL_IMPORTED).into_response()
+    }
 }
 
 /// Offer a stored Call to the enhancement queue, if this instance enhances it.
@@ -462,7 +461,7 @@ async fn insert_in_txn(
 pub async fn trunk_recorder_call_upload(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Response {
+) -> Result<Imported, Failure> {
     let mut key = String::new();
     let mut meta_json: Option<String> = None;
     let mut audio: Option<Vec<u8>> = None;
@@ -473,7 +472,7 @@ pub async fn trunk_recorder_call_upload(
         let part = match multipart.next_field().await {
             Ok(Some(part)) => part,
             Ok(None) => break,
-            Err(_) => return incomplete("malformed-multipart-body"),
+            Err(_) => return Err(Incomplete::MalformedMultipartBody.into()),
         };
         let name = part.name().unwrap_or("").to_string();
         match name.as_str() {
@@ -482,7 +481,7 @@ pub async fn trunk_recorder_call_upload(
                 audio_mime = part.content_type().map(str::to_string);
                 match part.bytes().await {
                     Ok(bytes) => audio = Some(bytes.to_vec()),
-                    Err(_) => return incomplete("could-not-read-audio"),
+                    Err(_) => return Err(Incomplete::CouldNotReadAudio.into()),
                 }
             }
             "key" => key = part.text().await.unwrap_or_default(),
@@ -491,36 +490,26 @@ pub async fn trunk_recorder_call_upload(
         }
     }
 
-    let Some(meta_json) = meta_json else {
-        return incomplete("no-meta");
-    };
-    let meta: TrMeta = match serde_json::from_str(&meta_json) {
-        Ok(meta) => meta,
-        // TR's own dialect has its own string; unlike the `incomplete` family it
-        // is not "Incomplete call data: …", so it is spelled out here.
-        Err(_) => {
-            return rejected(
-                "invalid-meta",
-                (StatusCode::EXPECTATION_FAILED, "Invalid call data\n").into_response(),
-            );
-        }
-    };
+    let meta_json = meta_json.ok_or(Incomplete::NoMeta)?;
+    // TR's own dialect has its own wire string; unlike the `Incomplete` family
+    // it is not "Incomplete call data: …", so it is a `Reason` of its own.
+    let meta: TrMeta = serde_json::from_str(&meta_json).map_err(|_| Reason::InvalidMeta)?;
 
-    let Some(talkgroup_ref) = meta.talkgroup.filter(|tg| *tg > 0) else {
-        return incomplete("no-talkgroup");
-    };
+    let talkgroup_ref = meta
+        .talkgroup
+        .filter(|tg| *tg > 0)
+        .ok_or(Incomplete::NoTalkgroup)?;
     let audio = match audio {
         Some(audio) if !audio.is_empty() => audio,
-        _ => return incomplete("no-audio"),
+        _ => return Err(Incomplete::NoAudio.into()),
     };
 
     // TR has no numeric system ref — resolve one from `short_name`.
     let short_name = clean(meta.short_name.clone());
     let system_ref = match &short_name {
-        Some(name) => match repo::system_ref_for_short_name(&state.db, name).await {
-            Ok(system_ref) => system_ref,
-            Err(err) => return ServerError::new("resolve-system", err).into_response(),
-        },
+        Some(name) => repo::system_ref_for_short_name(&state.db, name)
+            .await
+            .map_err(Stage::ResolveSystem.failed())?,
         None => 0,
     };
 
@@ -756,49 +745,16 @@ fn is_set(flag: Option<i64>) -> bool {
     flag.is_some_and(|value| value != 0)
 }
 
-/// Record that a Call did not become a row, and hand back what the recorder is
-/// told (ADR-0011 rule 3).
+/// Why the auto-populate/blacklist policy dropped a Call (#8), as the
+/// [`Reason`] that carries its wire form and its log line.
 ///
-/// One funnel, so the rule is structural rather than remembered: a rejection
-/// that forgets to log is a rejection that didn't call this. `reason` is a
-/// machine-readable slug an operator greps (`reason=blacklisted`), never a
-/// sentence (rule 6); the System, Talkgroup and request id ride the surrounding
-/// spans. WARN because something was dropped — including on the two paths that
-/// answer HTTP 200 so the recorder never retries.
-fn rejected(reason: &'static str, response: Response) -> Response {
-    // `%reason` rather than the default: `reason=duplicate` greps, and
-    // `reason="duplicate"` does not — the same reason the request log renders
-    // its path bare.
-    warn!(reason = %reason, "ingest rejected");
-    response
-}
-
-/// The rdio-scanner incomplete-data response: HTTP 417 + `Incomplete call data:
-/// <detail>\n`.
-///
-/// The wire detail *is* the machine-readable reason with its dashes spelled as
-/// spaces — one string rather than two, so the line an operator greps
-/// (`reason=no-talkgroup`) and the string a recorder branches on (`Incomplete
-/// call data: no talkgroup`) can never drift apart. The consequence is that a
-/// renamed slug rewrites a recorder-facing string, so every one of these bodies
-/// is pinned verbatim in `tests/instrumentation.rs`.
-fn incomplete(reason: &'static str) -> Response {
-    let detail = reason.replace('-', " ");
-    rejected(
-        reason,
-        (
-            StatusCode::EXPECTATION_FAILED,
-            format!("Incomplete call data: {detail}\n"),
-        )
-            .into_response(),
-    )
-}
-
-/// The `reason` slug for a Call the auto-populate/blacklist policy dropped (#8).
-fn drop_reason(reason: repo::DropReason) -> &'static str {
+/// Both answer HTTP 200 `Call imported successfully.` so the recorder never
+/// retries — which is exactly why the WARN line beside them is the only record
+/// they happened at all.
+fn dropped(reason: repo::DropReason) -> Reason {
     match reason {
-        repo::DropReason::Blacklisted => "blacklisted",
-        repo::DropReason::NotPopulated => "not-populated",
+        repo::DropReason::Blacklisted => Reason::Blacklisted,
+        repo::DropReason::NotPopulated => Reason::NotPopulated,
     }
 }
 

@@ -156,7 +156,7 @@ async fn every_rejected_upload_logs_at_warn_with_a_machine_readable_reason(
 
     assert_eq!(status, expected_status, "{body:?}");
     assert_eq!(body, expected_body, "the recorder's wire contract");
-    let line = capture.only_line_containing("ingest rejected");
+    let line = capture.only_line_containing("request refused");
     assert!(line.contains(" WARN "), "{line}");
     assert!(line.contains(&format!("reason={reason}")), "{line}");
 }
@@ -245,7 +245,7 @@ async fn a_body_our_reader_cannot_parse_says_which_part_it_choked_on(
 
     assert_eq!(status, 417, "{body:?}");
     assert_eq!(body, expected_body, "the recorder's wire contract");
-    let line = capture.only_line_containing("ingest rejected");
+    let line = capture.only_line_containing("request refused");
     assert!(line.contains(" WARN "), "{line}");
     assert!(line.contains(&format!("reason={reason}")), "{line}");
 }
@@ -304,7 +304,7 @@ async fn the_trunk_recorder_dialect_reports_its_own_rejections(
 
     assert_eq!(status, 417, "{body:?}");
     assert_eq!(body, expected_body, "the recorder's wire contract");
-    let line = capture.only_line_containing("ingest rejected");
+    let line = capture.only_line_containing("request refused");
     assert!(line.contains(&format!("reason={reason}")), "{line}");
 }
 
@@ -335,7 +335,7 @@ async fn one_upload_is_one_span_carrying_system_talkgroup_and_call_id() {
     // A Call that never became a row has no id — and still names its System and
     // Talkgroup, which is what makes a rejection actionable.
     assert_eq!(app.upload(form(RECORDER_KEY, 11, 54241, 1000)).await.0, 200);
-    let rejected = capture.only_line_containing("ingest rejected");
+    let rejected = capture.only_line_containing("request refused");
     assert!(rejected.contains("system_ref=11"), "{rejected}");
     assert!(rejected.contains("talkgroup_ref=54241"), "{rejected}");
     assert!(!rejected.contains("call_id"), "no row, no id: {rejected}");
@@ -442,7 +442,7 @@ async fn a_rejection_before_an_upload_has_an_identity_is_attributable_by_request
         .await;
     assert_eq!(status, 417);
 
-    let rejected = capture.only_line_containing("ingest rejected");
+    let rejected = capture.only_line_containing("request refused");
     assert!(rejected.contains("request_id="), "{rejected}");
     assert!(
         !rejected.contains("system_ref"),
@@ -494,7 +494,7 @@ async fn a_5xx_gives_the_client_a_ref_and_the_operator_the_cause() {
 
     // The client gets the ref and nothing else.
     let refusal = common::REFUSED;
-    assert_eq!(body, format!("internal error (ref: {request_id})\n"));
+    assert_eq!(body, format!("internal error (request id: {request_id})\n"));
     assert!(
         !body.contains(refusal),
         "the cause must not travel: {body:?}"
@@ -590,7 +590,7 @@ async fn an_unwritable_audio_store_is_a_server_error_not_a_row() {
     let (status, body) = app.upload(form(RECORDER_KEY, 11, 54241, 1000)).await;
 
     assert_eq!(status, 500, "{body:?}");
-    assert!(body.starts_with("internal error (ref: "), "{body:?}");
+    assert!(body.starts_with("internal error (request id: "), "{body:?}");
     let line = capture.only_line_containing("server error");
     assert!(line.contains("stage=store-audio"), "{line}");
     assert_eq!(
@@ -629,7 +629,7 @@ async fn an_unreadable_audio_store_is_a_server_error_not_a_missing_call() {
         resp.text()
             .await
             .expect("body")
-            .starts_with("internal error (ref: "),
+            .starts_with("internal error (request id: "),
         "the store's own words stay here"
     );
     let line = capture.only_line_containing("server error");
@@ -649,7 +649,7 @@ async fn a_read_path_5xx_carries_only_a_ref_as_well() {
     let request_id = request_id_of(&resp);
     assert_eq!(
         resp.text().await.expect("body"),
-        format!("internal error (ref: {request_id})\n")
+        format!("internal error (request id: {request_id})\n")
     );
 
     let line = capture.only_line_containing("server error");
@@ -764,9 +764,14 @@ async fn a_refused_push_subscription_says_why_without_naming_the_device() {
         .await;
 
     assert_eq!(response.status(), 400);
-    let line = capture.only_line_containing("push subscription rejected");
+    let line = capture.only_line_containing("request refused");
     assert!(line.contains(" WARN "), "{line}");
-    assert!(line.contains(r#"reason="bad-key""#), "{line}");
+    // Bare, not quoted. This is the line #92 fixed: `push::rejected` used to
+    // render its reason with `Debug`, so `reason="bad-key"` was pinned here
+    // while three other funnels rendered `reason=…` bare — and only one of the
+    // two spellings is greppable (ADR-0011 rule 6).
+    assert!(line.contains("reason=bad-key"), "{line}");
+    assert!(!line.contains("reason=\""), "quoted: {line}");
     capture.assert_never_logged(endpoint);
 }
 

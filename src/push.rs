@@ -41,7 +41,7 @@ use crate::AppState;
 use crate::call::StoredCall;
 use crate::db::entities::push_subscription;
 use crate::db::repo;
-use crate::failure::ServerError;
+use crate::failure::{Failure, Reason, Stage};
 use crate::selection::Selection;
 use crate::webpush::VapidKey;
 use crate::worker::{Handoff, Meter, Worker};
@@ -202,13 +202,20 @@ impl Push {
     }
 }
 
+/// The server's VAPID public key, as a browser's `applicationServerKey`.
+#[derive(Debug, Serialize)]
+pub struct PublicKey {
+    key: String,
+}
+
 /// `GET /api/push/key` — the server's VAPID public key, or 404 when push is not
 /// configured, which is how the client knows not to offer it.
-pub async fn key(State(state): State<AppState>) -> Response {
-    match state.push.public_key() {
-        Some(key) => Json(serde_json::json!({ "key": key })).into_response(),
-        None => (StatusCode::NOT_FOUND, "push is not configured\n").into_response(),
-    }
+pub async fn key(State(state): State<AppState>) -> Result<PublicKey, Failure> {
+    state
+        .push
+        .public_key()
+        .map(|key| PublicKey { key })
+        .ok_or(Reason::PushNotConfigured.into())
 }
 
 /// A browser's `PushSubscription.toJSON()`, plus the Selection it wants to be
@@ -235,23 +242,29 @@ struct SubscriptionKeys {
 /// The same route is the *sync* path: a listener who changes their Selection
 /// posts the subscription again, and the endpoint's row is updated rather than
 /// duplicated.
-pub async fn subscribe(State(state): State<AppState>, Json(body): Json<SubscribeBody>) -> Response {
+pub async fn subscribe(
+    State(state): State<AppState>,
+    Json(body): Json<SubscribeBody>,
+) -> Result<SubscriptionToken, Failure> {
     if state.push.public_key().is_none() {
-        return rejected("not-configured", StatusCode::NOT_FOUND);
+        return Err(Reason::PushNotConfigured.into());
     }
     // Validated before it is stored, so every stored subscription is one we can
-    // actually deliver to.
-    if let Err(invalid) =
-        crate::webpush::Subscription::parse(&body.endpoint, &body.keys.p256dh, &body.keys.auth)
-    {
-        return rejected(invalid.reason(), StatusCode::BAD_REQUEST);
-    }
+    // actually deliver to. The endpoint is deliberately not named anywhere in
+    // the refusal: it is a stable per-device identifier, which is exactly what
+    // ADR-0011 rule 5 keeps out of an operator's log.
+    crate::webpush::Subscription::parse(&body.endpoint, &body.keys.p256dh, &body.keys.auth)
+        .map_err(Reason::BadSubscription)?;
 
     let selection = body
         .selection
         .as_ref()
         .map(|selection| serde_json::to_string(selection).unwrap_or_else(|_| "{}".to_string()));
-    match repo::upsert_push_subscription(
+    // The token, never the Id: it is what the socket and the unsubscribe prove
+    // themselves with, and a sequential Id would let anyone silence anyone
+    // else's notifications by counting (CONTEXT.md — an Id is never shown to a
+    // client).
+    let token = repo::upsert_push_subscription(
         &state.db,
         &body.endpoint,
         &body.keys.p256dh,
@@ -260,15 +273,19 @@ pub async fn subscribe(State(state): State<AppState>, Json(body): Json<Subscribe
         state.clock.now_ms(),
     )
     .await
-    {
-        // The token, never the Id: it is what the socket and the unsubscribe
-        // prove themselves with, and a sequential Id would let anyone silence
-        // anyone else's notifications by counting (CONTEXT.md — an Id is never
-        // shown to a client).
-        Ok(token) => Json(serde_json::json!({ "token": token })).into_response(),
-        Err(err) => ServerError::new("store-push-subscription", err).into_response(),
-    }
+    .map_err(Stage::StorePushSubscription.failed())?;
+
+    Ok(SubscriptionToken { token })
 }
+
+/// What a device proves itself with when it re-subscribes or unsubscribes.
+#[derive(Debug, Serialize)]
+pub struct SubscriptionToken {
+    token: String,
+}
+
+// Both of the listener-facing push answers are JSON objects of one field.
+crate::answers_json!(PublicKey, SubscriptionToken);
 
 /// What a listener turning notifications off sends: the token subscribing gave
 /// them, so one device cannot unsubscribe another.
@@ -285,10 +302,19 @@ pub struct UnsubscribeBody {
 pub async fn unsubscribe(
     State(state): State<AppState>,
     Json(body): Json<UnsubscribeBody>,
-) -> Response {
-    match repo::delete_push_subscription(&state.db, &body.token).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => ServerError::new("delete-push-subscription", err).into_response(),
+) -> Result<Unsubscribed, Failure> {
+    repo::delete_push_subscription(&state.db, &body.token)
+        .await
+        .map(|()| Unsubscribed)
+        .map_err(Stage::DeletePushSubscription.failed())
+}
+
+/// This device is forgotten — nothing to say, and no body to say it in.
+pub struct Unsubscribed;
+
+impl IntoResponse for Unsubscribed {
+    fn into_response(self) -> Response {
+        StatusCode::NO_CONTENT.into_response()
     }
 }
 
@@ -661,16 +687,6 @@ async fn send(db: crate::db::Db, client: reqwest::Client, delivery: Delivery) {
             "web push failed"
         ),
     }
-}
-
-/// Refuse a subscription, saying why in one place (ADR-0011 rule 3's shape: a
-/// machine-readable `reason`, and the same slug in the body).
-///
-/// The endpoint is deliberately not logged: it is a stable per-device
-/// identifier, which is exactly what rule 5 keeps out of an operator's log.
-fn rejected(reason: &'static str, status: StatusCode) -> Response {
-    warn!(reason, "push subscription rejected");
-    (status, format!("{reason}\n")).into_response()
 }
 
 #[cfg(test)]

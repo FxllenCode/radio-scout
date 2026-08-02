@@ -200,7 +200,9 @@ describe('the log itself (#30)', () => {
     const only = within(list).getAllByRole('listitem')[0]
 
     expect(within(only).getByText('NOTICE')).toBeInTheDocument()
-    expect(within(only).getByText(/ref abcdef0123456789/)).toBeInTheDocument()
+    expect(
+      within(only).getByText(/request id abcdef0123456789/),
+    ).toBeInTheDocument()
   })
 
   it('filters by level', async () => {

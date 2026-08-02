@@ -678,7 +678,7 @@ impl Enhancer {
                 // this hardware cannot enhance at the rate this System talks.
                 // `%reason`, not the default: `reason=queue-full` greps and
                 // `reason="queue-full"` does not — the same rule every other
-                // rejection slug follows (`ingest::rejected`, rule 6).
+                // slug follows ([`crate::failure::Reason`], rule 6).
                 warn!(
                     reason = %"queue-full",
                     call_id, "enhancement skipped; Call keeps the audio it arrived with"
@@ -866,10 +866,13 @@ pub async fn step(archive: &dyn Archive, config: &EnhancementConfig, call_id: Ca
 
 /// Act on how a Call's enhancement ended: say it, and settle the row.
 ///
-/// One funnel, the shape [`crate::ingest::rejected`] uses and for the same
-/// reason: a Call that quietly stopped being enhanced with nothing in the log is
-/// indistinguishable from one that was never queued. The Call keeps the audio it
-/// arrived with, so nothing a listener can reach is broken by a skip.
+/// One funnel, the shape [`crate::failure::Reason`] takes for a request and for
+/// the same reason — a Call that quietly stopped being enhanced with nothing in
+/// the log is indistinguishable from one that was never queued. It stays its own
+/// vocabulary rather than joining that one, though: a `Reason` is what a *caller*
+/// did wrong, and there is no caller here — this is work nobody is waiting on.
+/// The Call keeps the audio it arrived with, so nothing a listener can reach is
+/// broken by a skip.
 async fn record(archive: &dyn Archive, call_id: CallId, settled: Settled) {
     match settled {
         Settled::Enhanced { bytes, duration_ms } => debug!(bytes, duration_ms, "call enhanced"),

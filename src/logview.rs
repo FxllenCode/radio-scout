@@ -19,20 +19,19 @@
 //! - **An event is its parts.** rdio stores a rendered sentence, so its page can
 //!   only substring-match it. Ours carries `target`, the structured `fields`
 //!   ADR-0011 rule 6 insists on, and #28's `requestId` — so the ref in an
-//!   `internal error (ref: …)` a listener read out over the phone is findable
-//!   without a shell, which is the whole point of the ref.
+//!   `internal error (request id: …)` a listener read out over the phone is findable
+//!   without a shell, which is the whole point of the id.
 
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
-use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use tracing::Level;
 
 use crate::AppState;
 use crate::db::repo::{self, LogSearch};
-use crate::failure::ServerError;
-use crate::query::{Page, Params, bad_request};
+use crate::failure::{Failure, Stage};
+use crate::query::{Filtered, Page, Params, bad};
 
 /// Page size when the client asks for none — a screenful and then some.
 const DEFAULT_LIMIT: u64 = 100;
@@ -96,16 +95,12 @@ impl From<crate::db::entities::log_event::Model> for LogView {
 pub async fn search(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let search = match parse_search(&params) {
-        Ok(search) => search,
-        Err(message) => return bad_request(&message),
-    };
+) -> Result<LogPage, Failure> {
+    let search = parse_search(&params)?;
 
-    match load_page(&state.db, &search).await {
-        Ok(page) => axum::Json(page).into_response(),
-        Err(err) => ServerError::new("search-logs", err).into_response(),
-    }
+    load_page(&state.db, &search)
+        .await
+        .map_err(Stage::SearchLogs.failed())
 }
 
 /// The page and the total behind it.
@@ -123,7 +118,7 @@ async fn load_page(db: &crate::db::Db, search: &LogSearch) -> Result<LogPage, se
 /// Read the filters out of a query string, or say which parameter was wrong.
 /// Blank is absent and bad input is named — [`crate::query`]'s conventions,
 /// which the archive search follows too.
-fn parse_search(params: &HashMap<String, String>) -> Result<LogSearch, String> {
+fn parse_search(params: &HashMap<String, String>) -> Filtered<LogSearch> {
     let params = Params::new(params);
     Ok(LogSearch {
         after_ms: params.time("after")?,
@@ -145,7 +140,7 @@ fn parse_search(params: &HashMap<String, String>) -> Result<LogSearch, String> {
 /// follows #13: a query parameter is typed into a URL bar as often as it is
 /// generated, and the archive search already accepts `newest`/`desc` for the
 /// same reason. Configuration is strict; a read surface is forgiving.
-fn levels_from(floor: &str) -> Result<Vec<String>, String> {
+fn levels_from(floor: &str) -> Filtered<Vec<String>> {
     let floor = STORED_LEVELS
         .into_iter()
         .find(|level| level.as_str().eq_ignore_ascii_case(floor))
@@ -154,7 +149,10 @@ fn levels_from(floor: &str) -> Result<Vec<String>, String> {
                 .into_iter()
                 .map(|level| level.as_str().to_ascii_lowercase())
                 .collect();
-            format!("level must be one of {} (got {floor:?})", names.join(", "))
+            bad(format!(
+                "level must be one of {} (got {floor:?})",
+                names.join(", ")
+            ))
         })?;
     Ok(STORED_LEVELS
         .into_iter()
@@ -220,9 +218,9 @@ mod tests {
     #[case("off")]
     #[case("chatty")]
     fn a_level_that_is_never_stored_is_refused(#[case] floor: &str) {
-        let error = levels_from(floor).expect_err("refused");
-        assert!(error.contains("level must be one of"), "{error}");
-        assert!(error.contains("error, warn, info"), "{error}");
+        let told = levels_from(floor).expect_err("refused").told();
+        assert!(told.contains("level must be one of"), "{told}");
+        assert!(told.contains("error, warn, info"), "{told}");
     }
 
     /// Blank is absent, not an error: the client builds this query from form
@@ -270,7 +268,7 @@ mod tests {
     #[case("offset=-1", "offset")]
     #[case("level=chatty", "level")]
     fn a_bad_filter_names_itself(#[case] query: &str, #[case] parameter: &str) {
-        let error = parse_search(&params(query)).expect_err("refused");
-        assert!(error.contains(parameter), "{error}");
+        let told = parse_search(&params(query)).expect_err("refused").told();
+        assert!(told.contains(parameter), "{told}");
     }
 }

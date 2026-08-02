@@ -14,14 +14,14 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::AppState;
-use crate::call::{CallId, StoredCall};
+use crate::call::{CallDetail, CallId, StoredCall};
 use crate::db::repo::{self, CallSearch, CallSort};
-use crate::failure::ServerError;
-use crate::query::{Page, Params, bad_request};
+use crate::failure::{Failure, Reason, Stage};
+use crate::query::{Filtered, Page, Params, bad};
 
 // The cascading filter-option view types live in `crate::call` beside
 // `StoredCall`, so the data layer can build them without depending on this one.
@@ -46,16 +46,16 @@ pub type SearchPage = Page<StoredCall>;
 /// Read the archive-search filters out of a query string, or say which
 /// parameter was wrong. Blank is absent and bad input is named — see
 /// [`crate::query`], which both read surfaces share.
-fn parse_search(params: &HashMap<String, String>) -> Result<CallSearch, String> {
+fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
     let params = Params::new(params);
 
     let sort = match params.raw("sort") {
         None | Some("newest") | Some("desc") => CallSort::Newest,
         Some("oldest") | Some("asc") => CallSort::Oldest,
         Some(other) => {
-            return Err(format!(
+            return Err(bad(format!(
                 "sort must be one of newest, oldest, desc, asc (got {other:?})"
-            ));
+            )));
         }
     };
 
@@ -90,11 +90,11 @@ fn parse_search(params: &HashMap<String, String>) -> Result<CallSearch, String> 
 /// stores — or the same named-parameter rejection every other bad value here
 /// gets. Refuses a negative value too: a Call cannot be shorter than no time at
 /// all, and `-1` would otherwise match everything with a duration.
-fn seconds_to_ms(seconds: i64) -> Result<i64, String> {
+fn seconds_to_ms(seconds: i64) -> Filtered<i64> {
     seconds
         .checked_mul(1000)
         .filter(|ms| *ms >= 0)
-        .ok_or_else(|| "minDuration must be a duration in whole seconds".to_string())
+        .ok_or_else(|| bad("minDuration must be a duration in whole seconds"))
 }
 
 // ---------------------------------------------------------------------------
@@ -105,16 +105,12 @@ fn seconds_to_ms(seconds: i64) -> Result<i64, String> {
 pub async fn search(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let search = match parse_search(&params) {
-        Ok(search) => search,
-        Err(message) => return bad_request(&message),
-    };
+) -> Result<SearchPage, Failure> {
+    let search = parse_search(&params)?;
 
-    match load_page(&state.db, &search).await {
-        Ok(page) => axum::Json(page).into_response(),
-        Err(err) => ServerError::new("search-calls", err).into_response(),
-    }
+    load_page(&state.db, &search)
+        .await
+        .map_err(Stage::SearchCalls.failed())
 }
 
 /// The three queries behind a result page: the page itself, its denormalized
@@ -133,15 +129,12 @@ async fn load_page(db: &crate::db::Db, search: &CallSearch) -> Result<SearchPage
 pub async fn filters(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let search = match parse_search(&params) {
-        Ok(search) => search,
-        Err(message) => return bad_request(&message),
-    };
-    match repo::filter_options(&state.db, &search).await {
-        Ok(options) => axum::Json(options).into_response(),
-        Err(err) => ServerError::new("load-filter-options", err).into_response(),
-    }
+) -> Result<FilterOptions, Failure> {
+    let search = parse_search(&params)?;
+
+    repo::filter_options(&state.db, &search)
+        .await
+        .map_err(Stage::LoadFilterOptions.failed())
 }
 
 /// `GET /api/call/{id}` — one Call, with everything the recorder said about it
@@ -150,65 +143,82 @@ pub async fn filters(
 /// The home of the per-frequency and per-source detail: the search page and the
 /// live feed carry what a *list* needs, and this carries what one Call is. See
 /// [`crate::call::CallDetail`] for why the split is where it is.
-pub async fn detail(State(state): State<AppState>, Path(id): Path<CallId>) -> Response {
-    match repo::call_detail(&state.db, id).await {
-        Ok(Some(call)) => axum::Json(call).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "call not found\n").into_response(),
-        Err(err) => ServerError::new("load-call-detail", err).into_response(),
-    }
+pub async fn detail(
+    State(state): State<AppState>,
+    Path(id): Path<CallId>,
+) -> Result<CallDetail, Failure> {
+    repo::call_detail(&state.db, id)
+        .await
+        .map_err(Stage::LoadCallDetail.failed())?
+        .ok_or(Reason::CallNotFound.into())
 }
 
 /// `GET /api/call/{id}/download` — the Call's audio as a named file attachment
 /// (spec US 27).
 ///
-/// Unlike [`crate::serve_audio`], this always proxies the bytes, even on an S3
+/// Unlike [`crate::serve::audio`], this always proxies the bytes, even on an S3
 /// backend that could redirect to a presigned URL: the browser would then save
 /// the file under the opaque object key, which is precisely what this endpoint
 /// exists to avoid. Downloads are occasional and a Call is seconds of audio, so
 /// the proxy costs little.
-pub async fn download(State(state): State<AppState>, Path(id): Path<CallId>) -> Response {
-    let (view, audio_name) = match load_call(&state.db, id).await {
-        Ok(Some(found)) => found,
-        Ok(None) => return (StatusCode::NOT_FOUND, "call not found\n").into_response(),
-        Err(err) => return ServerError::new("look-up-call", err).into_response(),
-    };
+pub async fn download(
+    State(state): State<AppState>,
+    Path(id): Path<CallId>,
+) -> Result<Attachment, Failure> {
+    let (view, audio_name) = load_call(&state.db, id)
+        .await
+        .map_err(Stage::LookUpCall.failed())?
+        .ok_or(Reason::CallNotFound)?;
 
     // An encrypted Call has no object behind it (#42, spec US 9) — the same
     // answer the streaming path gives, for the same reason.
     if view.object_key.is_empty() {
-        return (StatusCode::NOT_FOUND, "call has no audio\n").into_response();
+        return Err(Reason::CallHasNoAudio.into());
     }
 
-    let bytes = match state.audio.get(&view.object_key).await {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
-        Err(err) => return ServerError::new("read-audio", err).into_response(),
-    };
+    let bytes = state
+        .audio
+        .get(&view.object_key)
+        .await
+        .map_err(Stage::ReadAudio.failed())?
+        .ok_or(Reason::AudioNotFound)?;
 
-    let filename = download_filename(&view, audio_name.as_deref());
-    let mime = view
-        .audio_mime
-        .as_deref()
-        .unwrap_or("application/octet-stream");
-
-    (
-        StatusCode::OK,
-        [
-            (
-                header::CONTENT_TYPE,
-                header_value(mime, "application/octet-stream"),
-            ),
-            (
-                header::CONTENT_DISPOSITION,
-                header_value(
-                    &format!("attachment; filename=\"{filename}\""),
-                    "attachment",
-                ),
-            ),
-        ],
+    Ok(Attachment {
+        filename: download_filename(&view, audio_name.as_deref()),
+        mime: view
+            .audio_mime
+            .unwrap_or_else(|| "application/octet-stream".to_string()),
         bytes,
-    )
-        .into_response()
+    })
+}
+
+/// A Call's audio as a named file a browser saves rather than plays.
+pub struct Attachment {
+    filename: String,
+    mime: String,
+    bytes: bytes::Bytes,
+}
+
+impl IntoResponse for Attachment {
+    fn into_response(self) -> Response {
+        (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    header_value(&self.mime, "application/octet-stream"),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    header_value(
+                        &format!("attachment; filename=\"{}\"", self.filename),
+                        "attachment",
+                    ),
+                ),
+            ],
+            self.bytes,
+        )
+            .into_response()
+    }
 }
 
 /// A Call's denormalized view plus the recorder's own filename (the one column
@@ -460,11 +470,8 @@ mod tests {
             assert!(result.is_ok(), "blank {key} is absent, not malformed");
             return;
         }
-        let message = result.expect_err("should reject");
-        assert!(
-            message.contains(key),
-            "error {message:?} should name {key:?}"
-        );
+        let told = result.expect_err("should reject").told();
+        assert!(told.contains(key), "refusal {told:?} should name {key:?}");
     }
 
     // `parse_time_ms`'s own cases live with it in `crate::query`, which both

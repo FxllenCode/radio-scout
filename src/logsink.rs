@@ -979,8 +979,8 @@ mod tests {
     }
 
     /// An event logged while serving a request carries that request's id (#28),
-    /// so the `internal error (ref: …)` a listener reads out over the phone
-    /// finds its cause in the Logs view — which is the whole point of the ref
+    /// so the `internal error (request id: …)` a listener reads out over the phone
+    /// finds its cause in the Logs view — which is the whole point of that id
     /// for an operator who has no shell to grep from.
     #[tokio::test]
     async fn an_event_inside_a_request_carries_its_id() {

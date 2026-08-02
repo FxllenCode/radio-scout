@@ -17,9 +17,18 @@
 
 use std::collections::HashMap;
 
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+
+use crate::failure::Reason;
+
+/// A filter that could not be read, in the one shape a handler returns.
+///
+/// Every reading below yields this rather than a bare `String`, so the three
+/// read surfaces cannot each decide for themselves what a bad parameter is worth
+/// on the wire — which is what they did before #92, in three copies of the same
+/// four lines.
+pub(crate) type Filtered<T> = Result<T, Reason>;
 
 /// A request's query string, read as filters.
 pub(crate) struct Params<'a>(&'a HashMap<String, String>);
@@ -39,23 +48,26 @@ impl<'a> Params<'a> {
 
     /// A signed number — a Ref, which is the recorder's own numbering and has
     /// no width we get to choose.
-    pub(crate) fn number(&self, key: &str) -> Result<Option<i64>, String> {
+    pub(crate) fn number(&self, key: &str) -> Filtered<Option<i64>> {
         self.parsed(key, "an integer")
     }
 
     /// An unsigned count — a limit, an offset.
-    pub(crate) fn count(&self, key: &str) -> Result<Option<u64>, String> {
+    pub(crate) fn count(&self, key: &str) -> Filtered<Option<u64>> {
         self.parsed(key, "a non-negative integer")
     }
 
     /// A time boundary as unix milliseconds (what we store) or an RFC3339 time
     /// (so a human or a script can hand-write a query — the client sends ms,
     /// since only it knows the listener's timezone).
-    pub(crate) fn time(&self, key: &str) -> Result<Option<i64>, String> {
+    pub(crate) fn time(&self, key: &str) -> Filtered<Option<i64>> {
         self.raw(key)
             .map(|value| {
-                parse_time_ms(value)
-                    .ok_or_else(|| format!("{key} must be unix milliseconds or an RFC3339 time"))
+                parse_time_ms(value).ok_or_else(|| {
+                    bad(format!(
+                        "{key} must be unix milliseconds or an RFC3339 time"
+                    ))
+                })
             })
             .transpose()
     }
@@ -63,7 +75,7 @@ impl<'a> Params<'a> {
     /// A page size, defaulted and **clamped** rather than refused: one request
     /// must not be able to ask a Pi to serialize the whole table. Zero is read
     /// as "unset", never as "an empty page".
-    pub(crate) fn limit(&self, default: u64, max: u64) -> Result<u64, String> {
+    pub(crate) fn limit(&self, default: u64, max: u64) -> Filtered<u64> {
         Ok(self
             .count("limit")?
             .filter(|limit| *limit > 0)
@@ -72,19 +84,24 @@ impl<'a> Params<'a> {
     }
 
     /// How far into the results this page starts.
-    pub(crate) fn offset(&self) -> Result<u64, String> {
+    pub(crate) fn offset(&self) -> Filtered<u64> {
         Ok(self.count("offset")?.unwrap_or(0))
     }
 
-    fn parsed<T: std::str::FromStr>(&self, key: &str, expected: &str) -> Result<Option<T>, String> {
+    fn parsed<T: std::str::FromStr>(&self, key: &str, expected: &str) -> Filtered<Option<T>> {
         self.raw(key)
             .map(|value| {
                 value
                     .parse::<T>()
-                    .map_err(|_| format!("{key} must be {expected}"))
+                    .map_err(|_| bad(format!("{key} must be {expected}")))
             })
             .transpose()
     }
+}
+
+/// Turn a filter down, saying which parameter was wrong.
+pub(crate) fn bad(detail: impl Into<String>) -> Reason {
+    Reason::BadQuery(detail.into())
 }
 
 /// A time boundary as unix milliseconds or an RFC3339 timestamp.
@@ -97,11 +114,6 @@ pub(crate) fn parse_time_ms(raw: &str) -> Option<i64> {
     OffsetDateTime::parse(raw, &Rfc3339)
         .ok()
         .map(|dt| (dt.unix_timestamp_nanos() / 1_000_000) as i64)
-}
-
-/// Turn a filter down, saying which parameter was wrong.
-pub(crate) fn bad_request(message: &str) -> Response {
-    (StatusCode::BAD_REQUEST, format!("{message}\n")).into_response()
 }
 
 /// One page of results, plus what the client needs to page through the rest.
@@ -130,6 +142,15 @@ impl<T> Page<T> {
             offset,
             results,
         }
+    }
+}
+
+/// How a page reaches a client — one decision, shared by both read surfaces,
+/// so neither handler names a JSON wrapper (#92). Generic, so it is the one
+/// answer the macro cannot spell.
+impl<T: Serialize> IntoResponse for Page<T> {
+    fn into_response(self) -> Response {
+        axum::Json(self).into_response()
     }
 }
 
@@ -175,19 +196,19 @@ mod tests {
         let params = Params::new(&params);
 
         assert_eq!(
-            params.count("limit").expect_err("a bad limit"),
+            params.count("limit").expect_err("a bad limit").told(),
             "limit must be a non-negative integer"
         );
         assert_eq!(
-            params.count("offset").expect_err("a bad offset"),
+            params.count("offset").expect_err("a bad offset").told(),
             "offset must be a non-negative integer"
         );
         assert_eq!(
-            params.number("system").expect_err("a bad Ref"),
+            params.number("system").expect_err("a bad Ref").told(),
             "system must be an integer"
         );
         assert_eq!(
-            params.time("after").expect_err("a bad boundary"),
+            params.time("after").expect_err("a bad boundary").told(),
             "after must be unix milliseconds or an RFC3339 time"
         );
     }

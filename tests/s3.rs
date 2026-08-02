@@ -237,7 +237,7 @@ async fn the_presigned_redirect_is_followable_to_the_real_audio() {
 ///
 /// A stable signed URL is necessary and not sufficient. With a presigned
 /// redirect the store answers the client directly, so the `Cache-Control`
-/// `serve_audio` puts on its own responses is never seen — and a browser given
+/// `serve::audio` puts on its own responses is never seen — and a browser given
 /// no freshness information falls back to a heuristic, which for an object
 /// written moments ago is zero. The element would then revalidate every
 /// prefetched Call rather than playing it from cache, and all the stable URL

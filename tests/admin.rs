@@ -340,8 +340,8 @@ async fn a_refused_login_logs_its_reason_and_its_source_but_never_the_password()
     // ...and one more, now that the address is spent.
     app.login_as("hunter2").await;
 
-    // `reason=invalid-password` unquoted, matching `ingest::rejected` — the
-    // spelling that greps (ADR-0011 rule 6).
+    // `reason=invalid-password` unquoted — the spelling that greps, which
+    // since #92 is the only one there is (ADR-0011 rule 6).
     let refusals = capture.lines_containing("reason=invalid-password");
     assert_eq!(refusals.len(), 3, "one line per wrong guess: {refusals:#?}");
     for (guess, line) in refusals.iter().enumerate() {

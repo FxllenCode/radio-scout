@@ -304,7 +304,7 @@ fn redact_query(url: &str) -> String {
 /// enhancement worker settling a Call as `skipped`, serving telling "gone" from
 /// "broken" — is unreachable while the only store is a filesystem that works.
 /// Before this the seam was *under* the store: a decorator implementing seven
-/// methods of `object_store`'s trait, which had to know that `serve_audio` stats
+/// methods of `object_store`'s trait, which had to know that `serve::audio` stats
 /// an object before it reads it (a `head` was never failed, only a `get`) — the
 /// audio path's internal call order, written into the fault machinery, where a
 /// rewrite of the handler would have silently stopped reaching the arm. Naming
@@ -431,12 +431,12 @@ impl BlobStore {
     /// `object_store` specifies that a backend which cannot honour an attribute
     /// returns an error, and `LocalFileSystem` cannot store one. It needs none
     /// either — nothing fetches a local object directly, so the caching promise
-    /// is made by `serve_audio`'s own response header.
+    /// is made by `serve::audio`'s own response header.
     fn object_attributes(&self) -> object_store::Attributes {
         match self.is_presigning() {
             true => object_store::Attributes::from_iter([(
                 object_store::Attribute::CacheControl,
-                object_store::AttributeValue::from(crate::AUDIO_CACHE_CONTROL),
+                object_store::AttributeValue::from(crate::serve::AUDIO_CACHE_CONTROL),
             )]),
             false => object_store::Attributes::new(),
         }
@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     /// The bytes are written carrying the caching promise on an S3 backend —
-    /// the store answers the client directly there, so a header `serve_audio`
+    /// the store answers the client directly there, so a header `serve::audio`
     /// puts on its own response is never seen (#31). The filesystem backend
     /// gets none: `object_store` errors on an attribute a backend cannot store,
     /// and nothing fetches a local object directly anyway.
@@ -1075,7 +1075,7 @@ mod tests {
         assert_eq!(
             attributes.get(&object_store::Attribute::CacheControl),
             Some(&object_store::AttributeValue::from(
-                crate::AUDIO_CACHE_CONTROL
+                crate::serve::AUDIO_CACHE_CONTROL
             )),
             "the same promise the proxied path makes"
         );

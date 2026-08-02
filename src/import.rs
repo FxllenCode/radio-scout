@@ -42,8 +42,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, Set,
 };
@@ -52,6 +51,7 @@ use serde::Serialize;
 use crate::AppState;
 use crate::db::entities::{group, system, tag, talkgroup, talkgroup_group};
 use crate::db::repo;
+use crate::failure::{Failure, Reason, Stage};
 
 /// The LED colors a Talkgroup may be painted, mirroring the client palette in
 /// `client/src/lib/led.ts`. An import is the only way a Talkgroup gets one, so
@@ -561,6 +561,11 @@ pub struct ImportReport {
     /// Every row that was not applied, in file order.
     pub rejected: Vec<RejectedRow>,
 }
+
+// How a report reaches an operator. The refused case is JSON too
+// ([`crate::failure::Reason::BadImport`]), so the client renders one shape
+// whichever way the import went.
+crate::answers_json!(ImportReport);
 
 /// How the caller wants the import run.
 #[derive(Debug, Clone, Default)]
@@ -1109,7 +1114,7 @@ pub async fn import_talkgroups(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     body: bytes::Bytes,
-) -> Response {
+) -> Result<ImportReport, Failure> {
     let options = ImportOptions {
         default_system: params
             .get("system")
@@ -1121,20 +1126,14 @@ pub async fn import_talkgroups(
             .is_some_and(|value| !matches!(value.trim(), "false" | "0" | "no" | "off")),
     };
 
-    match import(&state.db, &body, &options, state.clock.now_ms()).await {
-        Ok(report) => (StatusCode::OK, axum::Json(report)).into_response(),
-        Err(ImportError::Parse(err)) => (
-            StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({
-                "error": err.reason(),
-                "detail": err.to_string(),
-            })),
-        )
-            .into_response(),
-        Err(ImportError::Db(err)) => {
-            crate::failure::ServerError::new("import-talkgroups", err).into_response()
-        }
-    }
+    import(&state.db, &body, &options, state.clock.now_ms())
+        .await
+        .map_err(|error| match error {
+            // A CSV we could not read at all is the operator's, and they are
+            // told which of the three things was wrong with it.
+            ImportError::Parse(err) => Reason::BadImport(err).into(),
+            ImportError::Db(err) => Failure::broke(Stage::ImportTalkgroups, err),
+        })
 }
 
 #[cfg(test)]

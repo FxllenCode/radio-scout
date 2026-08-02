@@ -176,7 +176,7 @@ async fn a_broken_database_is_a_server_error_not_an_empty_catalog() {
     let request_id = request_id_of(&resp);
     assert_eq!(
         resp.text().await.expect("body"),
-        format!("internal error (ref: {request_id})\n"),
+        format!("internal error (request id: {request_id})\n"),
         "the client is told the ref and nothing else"
     );
 

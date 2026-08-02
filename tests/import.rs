@@ -710,7 +710,7 @@ async fn a_broken_database_is_a_server_error_not_a_false_report() {
         )
         .await;
     assert_eq!(status, 500);
-    assert!(body.starts_with("internal error (ref: "), "{body:?}");
+    assert!(body.starts_with("internal error (request id: "), "{body:?}");
 
     let line = capture.only_line_containing("stage=import-talkgroups");
     assert!(

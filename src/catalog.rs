@@ -20,12 +20,11 @@
 //! [`crate::db::repo::catalog`].
 
 use axum::extract::State;
-use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::AppState;
 use crate::db::repo;
-use crate::failure::ServerError;
+use crate::failure::{Failure, Stage};
 
 /// One Talkgroup a listener can select. Nested under its System, so the Ref
 /// pair the selection is keyed by is the row's position in the document rather
@@ -69,12 +68,15 @@ pub struct Catalog {
     pub systems: Vec<CatalogSystem>,
 }
 
+// How a catalog reaches a listener, decided beside the type rather than at the
+// handler (#92).
+crate::answers_json!(Catalog);
+
 /// `GET /api/catalog` — the Systems and Talkgroups a listener can select.
-pub async fn catalog(State(state): State<AppState>) -> Response {
-    match repo::catalog(&state.db).await {
-        Ok(catalog) => axum::Json(catalog).into_response(),
-        Err(err) => ServerError::new("load-catalog", err).into_response(),
-    }
+pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> {
+    repo::catalog(&state.db)
+        .await
+        .map_err(Stage::LoadCatalog.failed())
 }
 
 /// How the panel is ordered: by what the listener reads, then by Ref.

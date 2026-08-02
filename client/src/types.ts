@@ -126,9 +126,9 @@ export interface FilterOptions {
 /** One stored log event (#30, ADR-0011), as `GET /api/admin/logs` serves it.
  *
  *  Its *parts*, never a rendered sentence: `fields` is the structured half rule
- *  6 insists on, and `requestId` is #28's correlation ref — the value in an
- *  `internal error (ref: …)` a listener read out, so an operator with no shell
- *  can still find the cause. */
+ *  6 insists on, and `requestId` is #28's correlation id — the value in an
+ *  `internal error (request id: …)` a listener read out, so an operator with no
+ *  shell can still find the cause. */
 export interface LogEvent {
   id: number
   /** When it was recorded, unix milliseconds. */

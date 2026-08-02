@@ -28,6 +28,7 @@ pub mod push;
 pub mod query;
 pub mod retention;
 pub mod selection;
+pub mod serve;
 pub mod service;
 pub mod startup;
 pub mod web;
@@ -41,18 +42,12 @@ use std::sync::Arc;
 
 use crate::db::Db;
 use axum::Router;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 
 use crate::admin::AdminAuth;
 use crate::blob::AudioStore;
-use crate::call::CallId;
 use crate::config::TrustedProxies;
-use crate::db::repo;
 use crate::enhance::Enhancer;
-use crate::failure::ServerError;
 use crate::live::LiveFeed;
 use crate::push::Push;
 
@@ -146,7 +141,7 @@ pub fn build_app(state: AppState) -> Router {
         // (#42). Declared before the `/audio` and `/download` children only for
         // readability — the router matches on the whole path, not on order.
         .route("/api/call/{id}", get(archive::detail))
-        .route("/api/call/{id}/audio", get(serve_audio))
+        .route("/api/call/{id}/audio", get(serve::audio))
         .route("/api/call/{id}/download", get(archive::download))
         // Web Push (#16): the listener-facing half. Unauthenticated like the
         // rest of listening (ADR-0008) — what it grants is notifications to a
@@ -198,217 +193,6 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
             admin,
             admin::require_session,
         ))
-}
-
-/// How long a client may keep a Call's audio. The bytes behind a settled Call
-/// never change, so this is `immutable`; `private` keeps it out of shared
-/// proxies, since listening will become access-scoped (ADR-0008). A week is long
-/// enough for the client's next-Call prefetch (#14) and for re-listening within
-/// a session, without pinning audio that retention has since pruned.
-pub(crate) const AUDIO_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
-
-/// ...and how long it may keep audio that is **queued for enhancement** (#20).
-///
-/// `immutable` is a promise the bytes behind this URL will never change, and for
-/// a pending Call that promise is exactly false: the worker is about to point
-/// the row at a different object. A client that cached it in the window would
-/// keep the un-levelled version for a week and never learn otherwise, so the
-/// promise is withheld until there is nothing left to replace. Short rather than
-/// `no-store`, because the Call still has to play now — and a range request
-/// mid-playback should not re-fetch the whole object.
-const PENDING_AUDIO_CACHE_CONTROL: &str = "private, max-age=30";
-
-/// ...as a number, because the S3 backend's redirect has to take the smaller of
-/// this and what its signature has left (#31).
-const PENDING_AUDIO_MAX_AGE_SECS: u64 = 30;
-
-/// How long a *redirect* to this Call's audio may be cached: the signature's
-/// budget, but never past the point the object key itself may change (#31).
-///
-/// The two limits are unrelated and both bind. `signature_budget` is how long
-/// the presigned URL stays usable — exceed it and the listener gets a 403. The
-/// enhancement state is about the row: a pending Call is one the worker is about
-/// to point at a *different object*, so a redirect cached for the signature's
-/// full life would keep sending the listener to the un-levelled audio long after
-/// the levelled version existed. A settled Call has no second limit, because the
-/// key behind it never changes again.
-fn redirect_max_age(enhancement: &str, signature_budget: u64) -> u64 {
-    match enhancement == db::entities::call::EnhancementState::PENDING {
-        true => signature_budget.min(PENDING_AUDIO_MAX_AGE_SECS),
-        false => signature_budget,
-    }
-}
-
-/// The `Cache-Control` a Call's audio is served with, given its enhancement
-/// state.
-fn audio_cache_control(enhancement: &str) -> &'static str {
-    match enhancement == db::entities::call::EnhancementState::PENDING {
-        true => PENDING_AUDIO_CACHE_CONTROL,
-        false => AUDIO_CACHE_CONTROL,
-    }
-}
-
-/// `GET /api/call/{id}/audio` — serve a stored call's audio (ADR-0002).
-///
-/// The filesystem backend proxies with HTTP range support (iOS `<audio>` needs
-/// it). The S3 backend instead redirects to a short-lived presigned URL after an
-/// access-scope check (listening is open in v1, so the check is a no-op).
-async fn serve_audio(
-    State(state): State<AppState>,
-    Path(id): Path<CallId>,
-    headers: HeaderMap,
-) -> Response {
-    let audio = match repo::get_call_audio(&state.db, id).await {
-        Ok(Some(audio)) => audio,
-        Ok(None) => return (StatusCode::NOT_FOUND, "call not found\n").into_response(),
-        Err(err) => return ServerError::new("look-up-call", err).into_response(),
-    };
-
-    let cache_control = audio_cache_control(&audio.enhancement);
-    let object_key = audio.object_key;
-    // An encrypted Call is a row with no object behind it (#42, spec US 9).
-    // Answered here rather than left to the store, which would be asked for an
-    // object named by the empty string and fail as a 500 — the wire already
-    // omits `audioUrl` for these, so anything arriving here is a hand-built URL
-    // or a stale link, and both deserve the truth.
-    if object_key.is_empty() {
-        return (StatusCode::NOT_FOUND, "call has no audio\n").into_response();
-    }
-    if state.audio.is_presigning() {
-        match state.audio.presigned_get_url(&object_key).await {
-            Some(Ok(signed)) => {
-                let max_age = redirect_max_age(&audio.enhancement, signed.max_age_secs);
-                return (
-                    StatusCode::TEMPORARY_REDIRECT,
-                    [
-                        (header::LOCATION, signed.url),
-                        (header::CACHE_CONTROL, format!("private, max-age={max_age}")),
-                    ],
-                )
-                    .into_response();
-            }
-            Some(Err(err)) => return ServerError::new("sign-audio-url", err).into_response(),
-            None => {}
-        }
-    }
-
-    let size = match state.audio.size(&object_key).await {
-        Ok(Some(size)) => size,
-        Ok(None) => return (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
-        Err(err) => return ServerError::new("stat-audio", err).into_response(),
-    };
-    let mime = audio
-        .mime
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-
-    match parse_range_header(headers.get(header::RANGE), size) {
-        RangeOutcome::None => match state.audio.get(&object_key).await {
-            Ok(Some(bytes)) => (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, mime),
-                    (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (header::CACHE_CONTROL, cache_control.to_string()),
-                ],
-                bytes,
-            )
-                .into_response(),
-            Ok(None) => (StatusCode::NOT_FOUND, "audio not found\n").into_response(),
-            Err(err) => ServerError::new("read-audio", err).into_response(),
-        },
-        RangeOutcome::Range { start, end } => {
-            match state.audio.get_range(&object_key, start, end + 1).await {
-                Ok(bytes) => (
-                    StatusCode::PARTIAL_CONTENT,
-                    [
-                        (header::CONTENT_TYPE, mime),
-                        (header::ACCEPT_RANGES, "bytes".to_string()),
-                        (header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}")),
-                        (header::CACHE_CONTROL, cache_control.to_string()),
-                    ],
-                    bytes,
-                )
-                    .into_response(),
-                Err(err) => ServerError::new("read-audio-range", err).into_response(),
-            }
-        }
-        RangeOutcome::Unsatisfiable => (
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            [(header::CONTENT_RANGE, format!("bytes */{size}"))],
-            "range not satisfiable\n",
-        )
-            .into_response(),
-    }
-}
-
-/// The parsed outcome of a `Range` request header.
-#[derive(Debug, PartialEq, Eq)]
-enum RangeOutcome {
-    /// No (usable) range header — serve the whole object.
-    None,
-    /// A satisfiable single byte range, inclusive `[start, end]`.
-    Range { start: u64, end: u64 },
-    /// A malformed or unsatisfiable range.
-    Unsatisfiable,
-}
-
-/// Parse a single-range `Range: bytes=...` header against an object of `size`
-/// bytes. Multi-range requests are treated as unsatisfiable (we don't emit
-/// multipart/byteranges).
-fn parse_range_header(value: Option<&HeaderValue>, size: u64) -> RangeOutcome {
-    let Some(value) = value else {
-        return RangeOutcome::None;
-    };
-    let Ok(text) = value.to_str() else {
-        return RangeOutcome::Unsatisfiable;
-    };
-    let Some(spec) = text.trim().strip_prefix("bytes=") else {
-        return RangeOutcome::Unsatisfiable;
-    };
-    let spec = spec.trim();
-    // Multi-range (`a-b,c-d`) and empty specs need no explicit guard: a comma
-    // makes one side fail to parse below, and an empty spec has no `-` to split.
-    // (Keeping the guard would be an equivalent mutant — dead by construction.)
-    let Some((raw_start, raw_end)) = spec.split_once('-') else {
-        return RangeOutcome::Unsatisfiable;
-    };
-    if size == 0 {
-        return RangeOutcome::Unsatisfiable;
-    }
-
-    let (start, end) = match (raw_start.trim(), raw_end.trim()) {
-        ("", "") => return RangeOutcome::Unsatisfiable,
-        // Suffix range: the last N bytes.
-        ("", suffix) => {
-            let Ok(n) = suffix.parse::<u64>() else {
-                return RangeOutcome::Unsatisfiable;
-            };
-            if n == 0 {
-                return RangeOutcome::Unsatisfiable;
-            }
-            let n = n.min(size);
-            (size - n, size - 1)
-        }
-        // Open-ended: from `start` to the end.
-        (start, "") => {
-            let Ok(start) = start.parse::<u64>() else {
-                return RangeOutcome::Unsatisfiable;
-            };
-            (start, size - 1)
-        }
-        // Closed range.
-        (start, end) => {
-            let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
-                return RangeOutcome::Unsatisfiable;
-            };
-            (start, end.min(size - 1))
-        }
-    };
-
-    if start > end || start >= size {
-        return RangeOutcome::Unsatisfiable;
-    }
-    RangeOutcome::Range { start, end }
 }
 
 /// `GET /healthz` — liveness probe.
@@ -469,8 +253,6 @@ impl Default for Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use rstest::rstest;
 
     /// A frozen clock stays where it was put — which is what lets a test say
     /// "this Call is an hour old" instead of sleeping for an hour — and the
@@ -482,107 +264,5 @@ mod tests {
         let real = Clock::default().now_ms();
 
         assert!(real > 1_700_000_000_000, "that is not a real wall clock");
-    }
-
-    /// The pending Call's ceiling is written twice — once as a header string
-    /// for the proxied response, once as a number the S3 redirect takes the
-    /// minimum against (#31) — so they are held to being the same number.
-    /// Letting them drift would leave the two serving paths promising different
-    /// things about the same Call, with nothing to notice.
-    #[test]
-    fn the_two_spellings_of_the_pending_ceiling_agree() {
-        assert_eq!(
-            PENDING_AUDIO_CACHE_CONTROL,
-            format!("private, max-age={PENDING_AUDIO_MAX_AGE_SECS}")
-        );
-    }
-
-    fn parse(header: &str, size: u64) -> RangeOutcome {
-        parse_range_header(Some(&HeaderValue::from_str(header).unwrap()), size)
-    }
-
-    #[rstest]
-    // Satisfiable ranges (size = 10 unless noted).
-    #[case("bytes=0-9", 10, RangeOutcome::Range { start: 0, end: 9 })]
-    #[case("bytes=4-9", 10, RangeOutcome::Range { start: 4, end: 9 })]
-    #[case("bytes=0-0", 10, RangeOutcome::Range { start: 0, end: 0 })]
-    // Closed end past EOF clamps to size-1.
-    #[case("bytes=4-100", 10, RangeOutcome::Range { start: 4, end: 9 })]
-    // Open-ended runs to EOF.
-    #[case("bytes=5-", 10, RangeOutcome::Range { start: 5, end: 9 })]
-    // Suffix = last N bytes; over-long suffix clamps to the whole object.
-    #[case("bytes=-4", 10, RangeOutcome::Range { start: 6, end: 9 })]
-    #[case("bytes=-100", 10, RangeOutcome::Range { start: 0, end: 9 })]
-    // Whitespace around the numbers is tolerated.
-    #[case("bytes= 4 - 9 ", 10, RangeOutcome::Range { start: 4, end: 9 })]
-    // Unsatisfiable / malformed.
-    #[case("bytes=9-4", 10, RangeOutcome::Unsatisfiable)] // start > end
-    #[case("bytes=10-20", 10, RangeOutcome::Unsatisfiable)] // start >= size
-    #[case("bytes=a-9", 10, RangeOutcome::Unsatisfiable)] // non-numeric start
-    #[case("bytes=4-b", 10, RangeOutcome::Unsatisfiable)] // non-numeric end
-    #[case("bytes=x-", 10, RangeOutcome::Unsatisfiable)] // non-numeric open-ended
-    #[case("bytes=-x", 10, RangeOutcome::Unsatisfiable)] // non-numeric suffix
-    #[case("bytes=5", 10, RangeOutcome::Unsatisfiable)] // missing '-'
-    #[case("bytes=", 10, RangeOutcome::Unsatisfiable)] // empty spec
-    #[case("bytes=-", 10, RangeOutcome::Unsatisfiable)] // both empty
-    #[case("bytes=-0", 10, RangeOutcome::Unsatisfiable)] // zero-length suffix
-    #[case("bytes=0-1,2-3", 10, RangeOutcome::Unsatisfiable)] // multi-range not emitted
-    #[case("items=0-9", 10, RangeOutcome::Unsatisfiable)] // wrong unit prefix
-    #[case("bytes=0-9", 0, RangeOutcome::Unsatisfiable)] // zero-length object
-    fn range_header_cases(#[case] header: &str, #[case] size: u64, #[case] expected: RangeOutcome) {
-        assert_eq!(
-            parse(header, size),
-            expected,
-            "header={header:?} size={size}"
-        );
-    }
-
-    #[test]
-    fn no_range_header_serves_the_whole_object() {
-        assert_eq!(parse_range_header(None, 10), RangeOutcome::None);
-    }
-
-    #[test]
-    fn non_ascii_range_header_is_unsatisfiable() {
-        // A header value that isn't valid UTF-8 -> `to_str()` fails.
-        let value = HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap();
-        assert_eq!(
-            parse_range_header(Some(&value), 10),
-            RangeOutcome::Unsatisfiable
-        );
-    }
-
-    proptest! {
-        /// A well-formed closed range fully inside the object round-trips exactly.
-        #[test]
-        fn closed_range_within_bounds_round_trips(
-            size in 1u64..10_000,
-            start in 0u64..10_000,
-            len in 0u64..10_000,
-        ) {
-            prop_assume!(start < size);
-            let end = (start + len).min(size - 1);
-            let header = format!("bytes={start}-{end}");
-            prop_assert_eq!(
-                parse(&header, size),
-                RangeOutcome::Range { start, end }
-            );
-        }
-
-        /// Whatever the input, a `Range` outcome is always a valid slice: no
-        /// panic, `start <= end`, and `end` inside the object.
-        #[test]
-        fn parsed_range_is_always_a_valid_slice(
-            size in 1u64..10_000,
-            body in "[ -~]{0,24}",
-        ) {
-            let header = format!("bytes={body}");
-            if let Ok(value) = HeaderValue::from_str(&header)
-                && let RangeOutcome::Range { start, end } = parse_range_header(Some(&value), size)
-            {
-                prop_assert!(start <= end, "start {start} > end {end}");
-                prop_assert!(end < size, "end {end} >= size {size}");
-            }
-        }
     }
 }

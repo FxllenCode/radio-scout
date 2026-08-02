@@ -16,7 +16,7 @@
 //!   by matching each driver's own wording.
 //! - [`FaultyStore`] answers for an [`AudioStore`], delegating to a real one
 //!   until told to fail. It replaced a decorator over `object_store`'s own
-//!   trait, which had to know that `serve_audio` stats an object before it
+//!   trait, which had to know that `serve::audio` stats an object before it
 //!   reads it — the audio path's internal call order, written into the fault
 //!   machinery, where a rewrite of the handler would have silently stopped
 //!   reaching the arm.
@@ -218,6 +218,7 @@ impl Transaction for Refusing<Txn> {
 #[derive(Default)]
 struct Script {
     fail_puts: AtomicBool,
+    fail_presigning: AtomicBool,
     /// What a read of an object's bytes does. One value rather than a flag
     /// each, because "broken" and "gone" are alternatives: a store cannot both
     /// refuse a read and answer it with nothing, and two flags would make the
@@ -250,6 +251,16 @@ impl Faults {
         self.0.fail_puts.store(true, Ordering::SeqCst);
     }
 
+    /// Refuse to sign a URL from now on — a clock too far out for SigV4, or
+    /// credentials revoked under a running process.
+    ///
+    /// Only an S3-shaped store ever signs, so this is the one fault that needs
+    /// [`faults_over_store`] with an S3 store under it rather than the
+    /// filesystem one [`faulty_store`] provides.
+    pub fn fail_presigning(&self) {
+        self.0.fail_presigning.store(true, Ordering::SeqCst);
+    }
+
     /// Refuse every read of an object's bytes from now on, while still
     /// answering for its size — a store that says it has the object and then
     /// will not hand it over.
@@ -275,6 +286,10 @@ impl Faults {
 
     fn reads(&self) -> Reads {
         *self.0.reads.lock().expect("the read mode")
+    }
+
+    fn presigning_fails(&self) -> bool {
+        self.0.fail_presigning.load(Ordering::SeqCst)
     }
 
     fn check_puts(&self) -> Result<(), ObjectError> {
@@ -317,7 +332,7 @@ impl AudioStore for FaultyStore {
     /// were one backend call and failing both would have made the read arms
     /// unreachable — the handler's call order, encoded here. Nothing forces
     /// that now: `size` is simply an operation no test has needed to fail,
-    /// because `serve_audio`'s `stat-audio` arm is reached by a store that is
+    /// because `serve::audio`'s `stat-audio` arm is reached by a store that is
     /// genuinely broken (`tests/instrumentation.rs` puts a file where the audio
     /// directory should be). Adding a switch is the four lines `put` spends.
     async fn size(&self, key: &str) -> Result<Option<u64>, ObjectError> {
@@ -351,17 +366,24 @@ impl AudioStore for FaultyStore {
         self.inner.list_objects().await
     }
 
+    /// Not switchable: whether a store presigns at all is what backend it *is*
+    /// (ADR-0002), not something that fails. Failing the signing itself is
+    /// [`Faults::fail_presigning`], below.
     fn is_presigning(&self) -> bool {
         self.inner.is_presigning()
     }
 
     async fn presigned_get_url(&self, key: &str) -> Option<Result<PresignedUrl, ObjectError>> {
-        self.inner.presigned_get_url(key).await
+        match self.faults.presigning_fails() {
+            true => Some(Err(refused("presign"))),
+            false => self.inner.presigned_get_url(key).await,
+        }
     }
 }
 
-/// Any store, with a [`Faults`] handle onto it.
-fn faults_over(store: impl AudioStore + 'static) -> (FaultyStore, Faults) {
+/// Any store, with a [`Faults`] handle onto it — for the faults only some
+/// backends can have, [`Faults::fail_presigning`] being the one.
+pub fn faults_over_store(store: impl AudioStore + 'static) -> (FaultyStore, Faults) {
     let faults = Faults::default();
     (
         FaultyStore {
@@ -375,5 +397,7 @@ fn faults_over(store: impl AudioStore + 'static) -> (FaultyStore, Faults) {
 /// A real filesystem store under `dir`, with a [`Faults`] handle onto it — the
 /// one line most fault-injecting tests need.
 pub fn faulty_store(dir: &std::path::Path) -> (FaultyStore, Faults) {
-    faults_over(radio_scout::BlobStore::filesystem(dir.join("audio")).expect("a filesystem store"))
+    faults_over_store(
+        radio_scout::BlobStore::filesystem(dir.join("audio")).expect("a filesystem store"),
+    )
 }

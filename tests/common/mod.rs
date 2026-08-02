@@ -47,9 +47,10 @@
 //! and [`TestApp::refuse_updates_to`], which is how a 5xx path or a worker's
 //! error arm is reached without damaging a schema — and
 //! [`faulty_store`] hands over an audio store that can be told to fail a write,
-//! refuse a read, or answer one with "no such object". Both substitute at an
-//! interface Radio-Scout owns; see `faults.rs` for why that is not the same as
-//! decorating what is underneath.
+//! refuse a read, or answer one with "no such object" ([`faults_over_store`]
+//! does the same over a store of your own, which is what failing a *presign*
+//! needs). Both substitute at an interface Radio-Scout owns; see `faults.rs` for
+//! why that is not the same as decorating what is underneath.
 //!
 //! Included via `mod common;` from each `tests/*.rs` binary. Every binary is its
 //! own crate and recompiles this module whole while using a subset of it, so an
@@ -73,7 +74,7 @@ mod ws;
 #[allow(unused_imports)]
 pub use audio::{silence_ms, wav};
 #[allow(unused_imports)]
-pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faulty_store};
+pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faults_over_store, faulty_store};
 #[allow(unused_imports)]
 pub use push::{PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRIBER_PUBLIC};
 #[allow(unused_imports)]

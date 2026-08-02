@@ -52,16 +52,17 @@ use std::time::{Duration, Instant};
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use axum::Json;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
 use crate::config::TrustedProxies;
+use crate::failure::{Failure, Reason};
 use crate::startup::AdminPassword;
 
 /// The header a reverse proxy names the original client in — the same one the
@@ -485,6 +486,8 @@ pub struct SessionResponse {
     expires_in_secs: u64,
 }
 
+crate::answers_json!(SessionResponse);
+
 /// `POST /api/admin/login` — exchange the admin password for a session.
 ///
 /// The order is the security design: the lockout is consulted **before** the
@@ -502,7 +505,7 @@ pub async fn login(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
-) -> Response {
+) -> Result<OpenedSession, Failure> {
     let now = Instant::now();
     // The address the network established, not the one the request claims —
     // unless the operator named that peer as a proxy (#17). Believing
@@ -516,59 +519,84 @@ pub async fn login(
     );
 
     if let Some(retry_after) = state.admin.locked_for(client_addr, now) {
-        // One reading, used twice: the operator's log and the client's
-        // `Retry-After` must not be able to disagree.
-        let retry_after_secs = retry_after.as_secs();
-        tracing::warn!(
-            reason = %"admin-locked-out",
-            %client_addr,
-            retry_after_secs,
-            "admin login refused"
-        );
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [(header::RETRY_AFTER, retry_after_secs.to_string())],
-            "too many failed logins; try again later\n",
-        )
-            .into_response();
+        return Err(Reason::AdminLockedOut {
+            client_addr,
+            // One reading, spent twice: `Reason` puts it in the operator's log
+            // *and* in the client's `Retry-After`, so the two cannot disagree.
+            retry_after_secs: retry_after.as_secs(),
+        }
+        .into());
     }
 
     if !state.admin.verify(&body.password) {
-        let failures = state.admin.record_failure(client_addr, now);
-        tracing::warn!(
-            reason = %"invalid-password",
-            %client_addr,
-            failures,
-            "admin login refused"
-        );
-        return (StatusCode::UNAUTHORIZED, "invalid password\n").into_response();
+        return Err(Reason::InvalidPassword {
+            client_addr,
+            failures: state.admin.record_failure(client_addr, now),
+        }
+        .into());
     }
 
     // Only this address's record, unlike rdio's whole-ledger sweep.
     state.admin.clear_failures(client_addr);
-    let (id, body) = state.admin.open_session(now);
-    (
-        StatusCode::OK,
-        [(
-            header::SET_COOKIE,
-            session_cookie(
-                &id,
-                state.admin.config(),
-                arrived_over_tls(&headers, peer.ip(), &state.trusted_proxies),
-            ),
-        )],
-        Json(body),
-    )
-        .into_response()
+    let (id, session) = state.admin.open_session(now);
+    Ok(OpenedSession {
+        cookie: session_cookie(
+            &id,
+            state.admin.config(),
+            arrived_over_tls(&headers, peer.ip(), &state.trusted_proxies),
+        ),
+        session,
+    })
+}
+
+/// A session that has just been opened: the cookie that carries it, and what the
+/// client is told about it.
+pub struct OpenedSession {
+    cookie: String,
+    session: SessionResponse,
+}
+
+impl IntoResponse for OpenedSession {
+    fn into_response(self) -> Response {
+        ([(header::SET_COOKIE, self.cookie)], Json(self.session)).into_response()
+    }
 }
 
 /// `GET /api/admin/session` — what the live session is, for a page that has
 /// just been reloaded and holds the cookie but not the token.
 ///
-/// Safe, so it needs no CSRF token of its own; the guard has already proved the
-/// session is live by the time this runs.
-pub async fn session(Extension(session): Extension<SessionResponse>) -> Response {
-    (StatusCode::OK, Json(session)).into_response()
+/// Safe, so it needs no CSRF token of its own. It asks [`AdminAuth`] itself
+/// rather than being handed the guard's answer through the request extensions
+/// (#92): an extension is a hand-off nothing type-checks, so a route registered
+/// outside the guard would have compiled and 500ed at the first request. Asking
+/// costs a second `touch_session`, which is the same idempotent call the guard
+/// just made — one more lock on a map, on the one admin route that exists to
+/// answer this question.
+pub async fn session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<SessionResponse, Failure> {
+    live_session(&state.admin, &headers, Instant::now())
+}
+
+/// The session a request proves it holds, or the refusal it has earned.
+///
+/// Split out from the handler because its two refusals are unreachable *behind*
+/// [`require_session`] — which has already turned both away — and are exactly
+/// what makes the route safe to mount anywhere. That is not a hypothetical: the
+/// hand-off this replaced was a request extension, and a route registered
+/// outside the guard would have compiled fine and then 500ed on a missing
+/// extension. Here it 401s, and this is where that is proven, since no request
+/// through the real router can reach it.
+fn live_session(
+    admin: &AdminAuth,
+    headers: &HeaderMap,
+    now: Instant,
+) -> Result<SessionResponse, Failure> {
+    let id = session_id_of(headers).ok_or(Reason::NoSession)?;
+    admin
+        .touch_session(&id, now)
+        .ok_or(Reason::UnknownSession.into())
 }
 
 /// `POST /api/admin/logout` — revoke this session.
@@ -577,15 +605,24 @@ pub async fn session(Extension(session): Extension<SessionResponse>) -> Response
 /// over a JWT precisely so that revocation is real. rdio-scanner's logout drops
 /// the token from an in-memory slice, which is the same idea — but its slice
 /// holds five, so logging in a sixth time revokes somebody else instead.
-pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> LoggedOut {
     if let Some(id) = session_id_of(&headers) {
         state.admin.revoke_session(&id);
     }
-    (
-        StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, cleared_session_cookie())],
-    )
-        .into_response()
+    LoggedOut
+}
+
+/// The session is revoked and the cookie removed — nothing left to say.
+pub struct LoggedOut;
+
+impl IntoResponse for LoggedOut {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::NO_CONTENT,
+            [(header::SET_COOKIE, cleared_session_cookie())],
+        )
+            .into_response()
+    }
 }
 
 /// Middleware over `/api/admin/` (bar the login route): every request must
@@ -596,28 +633,19 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Respon
 /// mistake #18 had to be shipped around.
 pub async fn require_session(
     State(admin): State<AdminAuth>,
-    mut request: Request,
+    request: Request,
     next: Next,
-) -> Response {
-    let Some(id) = session_id_of(request.headers()) else {
-        return refused("no-session");
-    };
-    let Some(session) = admin.touch_session(&id, Instant::now()) else {
-        return refused("unknown-session");
-    };
+) -> Result<Response, Failure> {
+    let id = session_id_of(request.headers()).ok_or(Reason::NoSession)?;
+    let session = admin
+        .touch_session(&id, Instant::now())
+        .ok_or(Reason::UnknownSession)?;
     if changes_state(request.method())
         && !csrf_token_matches(request.headers(), &session.csrf_token)
     {
-        return refused_with(
-            StatusCode::FORBIDDEN,
-            "csrf-mismatch",
-            "csrf token required\n",
-        );
+        return Err(Reason::CsrfMismatch.into());
     }
-    // Handed on rather than looked up again: `GET /api/admin/session` answers
-    // from this, so there is no second lookup to disagree with the first.
-    request.extensions_mut().insert(session);
-    next.run(request).await
+    Ok(next.run(request).await)
 }
 
 /// Whether a method may change anything. The safe methods (RFC 9110 §9.2.1)
@@ -651,31 +679,6 @@ fn csrf_token_matches(headers: &HeaderMap, expected: &str) -> bool {
 /// loop is one the optimiser is entitled to turn back into an early exit.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && bool::from(a.ct_eq(b))
-}
-
-/// Turn away an unauthenticated admin request, saying why.
-///
-/// DEBUG rather than WARN, deliberately: the request log already emits a WARN
-/// line for the 4xx (#28), and a session that has merely expired — a tab left
-/// open overnight, or an internet-facing instance being probed for `/admin` —
-/// is not news an operator must act on. What *is* news is a failed
-/// **authentication**, and [`login`] logs that at WARN with its source.
-///
-/// The body says only that authentication is required; which of the reasons
-/// applied is for the operator's log, not for whoever is knocking.
-fn refused(reason: &'static str) -> Response {
-    refused_with(StatusCode::UNAUTHORIZED, reason, "admin session required\n")
-}
-
-/// [`refused`], for a guard rejection that is not a missing session — the CSRF
-/// check, which has one. Every refusal in this module goes through here, so the
-/// line cannot be the thing a new rejection path forgets.
-///
-/// `%reason` rather than the default `Debug`, matching [`crate::ingest::rejected`]:
-/// `reason=csrf-mismatch` greps and `reason="csrf-mismatch"` does not.
-fn refused_with(status: StatusCode, reason: &'static str, body: &'static str) -> Response {
-    tracing::debug!(reason = %reason, "admin request refused");
-    (status, body).into_response()
 }
 
 /// The session id carried by the `Cookie` header, if there is one.
@@ -775,6 +778,59 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use rstest::rstest;
+
+    /// A `Cookie` header carrying `id` as the session cookie.
+    fn cookie(id: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={id}").parse().expect("a cookie"),
+        );
+        headers
+    }
+
+    /// `GET /api/admin/session` refuses rather than breaking when it is reached
+    /// without a live session.
+    ///
+    /// Unreachable through the real router — [`require_session`] turns both of
+    /// these away first — and that is the point. The hand-off this replaced was
+    /// a request extension, so the same route registered *outside* the guard
+    /// would have compiled and then 500ed on a missing extension, which is a
+    /// server error for something the caller did (#92). Now it is a 401 either
+    /// way, and this is the only place that can say so.
+    #[rstest]
+    #[case::no_cookie_at_all(None, "no-session")]
+    #[case::a_session_nobody_opened(Some("00".repeat(32)), "unknown-session")]
+    #[tokio::test]
+    async fn the_session_route_refuses_without_one_wherever_it_is_mounted(
+        #[case] id: Option<String>,
+        #[case] reason: &str,
+    ) {
+        let capture = crate::testing::LogCapture::start();
+        let admin = AdminAuth::new("hunter2", config());
+        let headers = id.map(|id| cookie(&id)).unwrap_or_default();
+
+        let refused = live_session(&admin, &headers, Instant::now()).expect_err("no session");
+
+        let response = refused.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let logged = capture.text();
+        assert!(logged.contains(&format!("reason={reason}")), "{logged}");
+    }
+
+    /// ...and hands the session back when there is one, so the split from the
+    /// handler did not lose the only thing it does.
+    #[tokio::test]
+    async fn the_session_route_reports_a_live_session() {
+        let admin = AdminAuth::new("hunter2", config());
+        let now = Instant::now();
+        let (id, opened) = admin.open_session(now);
+
+        let live = live_session(&admin, &cookie(&id), now).expect("a live session");
+
+        assert_eq!(live.csrf_token, opened.csrf_token);
+        assert!(live.expires_in_secs > 0);
+    }
 
     /// A config whose windows are small enough to step over by hand.
     fn config() -> AdminConfig {

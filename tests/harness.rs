@@ -509,7 +509,7 @@ async fn a_store_can_be_told_to_fail_its_writes() {
 /// Neither is reachable through a store that works, and **no real store can be
 /// made to fail one and not the other**: a filesystem object made unreadable
 /// fails its stat too, because `LocalFileSystem` opens the file to size it.
-/// Under the store, the previous answer had to encode `serve_audio`'s own call
+/// Under the store, the previous answer had to encode `serve::audio`'s own call
 /// order ("a `head` is never failed, only a `get`") and park a real read while a
 /// real object was pruned. Named at the interface, it is two lines and no
 /// timing.

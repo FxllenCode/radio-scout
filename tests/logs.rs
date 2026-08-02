@@ -85,7 +85,7 @@ async fn an_event_carries_its_parts() {
         at_ms: NOW,
         level: "WARN".into(),
         target: "radio_scout::ingest".into(),
-        message: "ingest rejected".into(),
+        message: "request refused".into(),
         fields: Some(r#"{"reason":"duplicate"}"#.into()),
         request_id: Some("0123456789abcdef".into()),
     })
@@ -98,12 +98,12 @@ async fn an_event_carries_its_parts() {
     assert_eq!(event["atMs"], NOW);
     assert_eq!(event["level"], "WARN");
     assert_eq!(event["target"], "radio_scout::ingest");
-    assert_eq!(event["message"], "ingest rejected");
+    assert_eq!(event["message"], "request refused");
     // The fields arrive as an object, not as the text they are stored as — the
     // client shows `reason=duplicate`, and a string would make it parse JSON to
     // do it.
     assert_eq!(event["fields"]["reason"], "duplicate");
-    // #29's correlation ref: the `internal error (ref: …)` a listener reads out
+    // #29's correlation id: the `internal error (request id: …)` a listener reads out
     // is findable here, which is what the ref is *for* when there is no shell.
     assert_eq!(event["requestId"], "0123456789abcdef");
 }
@@ -347,7 +347,7 @@ async fn the_addresses_rule_5_permits_are_the_ones_stored(
     app.await_logged(if uploads {
         "call stored"
     } else {
-        "admin login refused"
+        "request refused"
     })
     .await;
 
@@ -391,7 +391,7 @@ async fn a_log_that_cannot_be_read_keeps_its_cause_on_the_server() {
     assert_eq!(response.status(), 500);
     let request_id = request_id_of(&response);
     let body = response.text().await.expect("a body");
-    assert_eq!(body, format!("internal error (ref: {request_id})\n"));
+    assert_eq!(body, format!("internal error (request id: {request_id})\n"));
     assert!(
         !body.contains("logs"),
         "the driver's own words never travel to the client: {body:?}"

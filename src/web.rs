@@ -23,6 +23,13 @@ pub fn spa_is_embedded() -> bool {
 /// client-side routes. Registered as the router `fallback`, so it only runs when
 /// no explicit API/WS/health route matched — and it still refuses to answer for
 /// the `api`/`healthz` namespaces, so an unknown `/api/*` stays a clean 404.
+///
+/// **The one handler that still returns a `Response`** (#92), deliberately. Its
+/// 404 is a *routing* answer — "that namespace is reserved" — not a refusal with
+/// a reason an operator would ever grep for, and routing a `Reason` through here
+/// would cover only half the 404s an unrouted URL can get: axum's own fallback
+/// for everything outside `/api` never reaches this function at all. A
+/// vocabulary that covers half a case is worse than one that declines it.
 pub async fn spa_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
 

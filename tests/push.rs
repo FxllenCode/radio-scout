@@ -356,11 +356,19 @@ async fn an_unusable_subscription_is_refused_and_says_why(
 
 /// A server with no VAPID identity says so, rather than accepting
 /// subscriptions it could never deliver to.
+///
+/// **Both routes answer the same way** — one condition, one answer (#92). They
+/// used to disagree about the body (`push is not configured` from `key`,
+/// `not-configured` from `subscribe`), which nothing pinned and nothing would
+/// have noticed drifting further.
 #[tokio::test]
 async fn a_server_without_push_configured_refuses_it() {
     let app = TestApp::builder().without_push().spawn().await;
 
-    assert_eq!(app.get("/api/push/key").await.status(), 404);
+    let key = app.get("/api/push/key").await;
+    assert_eq!(key.status(), 404);
+    assert_eq!(key.text().await.expect("body"), "not-configured\n");
+
     let response = app
         .post_json(
             "/api/push/subscribe",
@@ -368,6 +376,7 @@ async fn a_server_without_push_configured_refuses_it() {
         )
         .await;
     assert_eq!(response.status(), 404);
+    assert_eq!(response.text().await.expect("body"), "not-configured\n");
     assert_eq!(app.count::<push_subscription::Entity>().await, 0);
 }
 
@@ -454,7 +463,7 @@ async fn a_broken_database_keeps_its_cause_on_the_server(#[case] path: &str, #[c
     assert_eq!(response.status(), 500);
     let reference = common::request_id_of(&response);
     let body = response.text().await.expect("body");
-    assert_eq!(body, format!("internal error (ref: {reference})\n"));
+    assert_eq!(body, format!("internal error (request id: {reference})\n"));
     let line = capture.wait_for(stage).await;
     assert!(line.contains(" ERROR "), "{line}");
     assert!(line.contains(common::REFUSED), "why it failed: {line}");

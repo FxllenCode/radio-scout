@@ -256,9 +256,10 @@ What you can rely on:
   echoed back as `x-request-id`. Chatty routes (audio range requests, health probes, SPA
   assets) sit at DEBUG so a Pi is not writing a line per range request; a 4xx or 5xx escalates
   whatever the route.
-- **Every rejected upload says why**, with a machine-readable `reason=` — `invalid-api-key`,
-  `duplicate`, `blacklisted`, `no-talkgroup`. A Call that does not become a row leaves a line
-  explaining itself.
+- **Every refused request says why**, with a machine-readable `reason=` — `invalid-api-key`,
+  `duplicate`, `blacklisted`, `no-talkgroup`, and the same for the admin and notification
+  surfaces. A Call that does not become a row leaves a line explaining itself. The message is
+  always `request refused`; what it was is the `reason=`, so one grep finds all of them.
 - **Every 5xx logs its cause against that request id**, and the response body carries only the
   id. The cause goes to you, never to the client.
 - **Secrets are never logged**, at any level, in any form. Nor are listener IP addresses above
@@ -302,7 +303,7 @@ Four things worth knowing about it:
 
 An event is stored as its **parts** — level, time, target, message, its structured fields, and
 the request id — so the Logs view can filter and you can search it. That request id is the same
-one in an `internal error (ref: …)` a listener reads out to you, which is what makes the ref
+one in an `internal error (request id: …)` a listener reads out to you, which is what makes it
 useful when you have no shell to grep.
 
 ## Behind a reverse proxy

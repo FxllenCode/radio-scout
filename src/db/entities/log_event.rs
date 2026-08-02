@@ -11,7 +11,7 @@
 //! all: `level` and `at_ms` are what the Logs view filters on, `message` is the
 //! static string ADR-0011 rule 6 asks for, and `fields` is the variable half as
 //! a JSON object. `request_id` is #28's correlation id, so a 5xx reported to a
-//! listener as `internal error (ref: …)` can be found here by that ref alone.
+//! listener as `internal error (request id: …)` can be found here by that id alone.
 
 use sea_orm::entity::prelude::*;
 

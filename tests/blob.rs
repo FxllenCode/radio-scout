@@ -179,7 +179,7 @@ async fn s3_backend_presigns_get_urls_offline() {
 /// **What a write puts on the object** (#31).
 ///
 /// With a presigned redirect the store answers the listener directly, so the
-/// `Cache-Control` `serve_audio` puts on its own responses is never seen — and a
+/// `Cache-Control` `serve::audio` puts on its own responses is never seen — and a
 /// browser given no freshness information revalidates, which is what the whole
 /// prefetch exists to avoid. The promise has to travel *on the object*.
 ///

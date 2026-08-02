@@ -137,6 +137,10 @@ pub struct CallDetail {
     pub units: Vec<CallUnitDetail>,
 }
 
+// How one Call, and the cascading filter options beside it, reach a client —
+// decided beside the types rather than at the handlers (#92).
+crate::answers_json!(CallDetail, FilterOptions);
+
 /// One frequency segment of a Call: where it sat and how badly it decoded.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

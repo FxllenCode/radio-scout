@@ -369,7 +369,7 @@ async fn a_broken_database_is_a_server_error_not_an_empty_archive() {
         let request_id = request_id_of(&resp);
         assert_eq!(
             resp.text().await.unwrap(),
-            format!("internal error (ref: {request_id})\n"),
+            format!("internal error (request id: {request_id})\n"),
             "GET {path} tells the client the ref and nothing else"
         );
 
@@ -424,7 +424,7 @@ async fn download_reports_an_unreachable_object_store() {
     let resp = app.get(&format!("/api/call/{id}/download")).await;
     assert_eq!(resp.status(), 500);
     let body = resp.text().await.unwrap();
-    assert!(body.starts_with("internal error (ref: "), "{body:?}");
+    assert!(body.starts_with("internal error (request id: "), "{body:?}");
 
     let line = capture.only_line_containing("stage=read-audio");
     assert!(line.contains(" ERROR "), "{line}");
