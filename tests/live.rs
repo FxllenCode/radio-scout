@@ -314,6 +314,56 @@ async fn fresh_subscription_without_cursor_does_not_replay() {
     );
 }
 
+/// A **Backfill** costs a fixed handful of database round-trips however many
+/// Calls it carries (#86) — the property an N+1 hides, because the frames it
+/// sends are correct either way and only the cost behind them is wrong.
+///
+/// It used to denormalize one Call at a time, so a Listener whose phone woke up
+/// on a network blip charged a Pi seven round-trips per Call and up to seven
+/// hundred per reconnect. rdio-scanner is worse still: it returns bare ids and
+/// makes the client re-request each Call over its own WebSocket.
+///
+/// Two sizes and not a pinned number, deliberately: what must hold is that the
+/// cost does not grow per Call, and a pinned constant would make a legitimately
+/// added query look like this regression.
+#[tokio::test]
+async fn backfill_costs_the_same_queries_however_many_calls_it_carries() {
+    let few = backfill_statements(2).await;
+    let many = backfill_statements(20).await;
+
+    // A Backfill costs *something*, or the two below are equal because nothing
+    // is being counted rather than because nothing grows.
+    assert!(few > 0, "a Backfill reads the archive");
+    assert_eq!(
+        few, many,
+        "a Backfill of 20 Calls must cost what a Backfill of 2 does"
+    );
+}
+
+/// Backfill `calls` Calls to a reconnecting Listener, and answer with the number
+/// of statements the Instance issued doing it.
+async fn backfill_statements(calls: i64) -> u64 {
+    let app = feed_app().await;
+    // Distinct Talkgroups, so each is its own Call rather than a duplicate — and
+    // so the batched lookups have more than one row to resolve.
+    for talkgroup in 0..calls {
+        post_call(&app, 11, 100 + talkgroup).await;
+    }
+    // Every Worker owes nothing (#93), so the statements counted below are the
+    // Backfill's own and not an ingest still being finished behind it.
+    app.settle().await;
+
+    let mut ws = app.connect_ws().await;
+    let before = app.statements_issued();
+    subscribe(&mut ws, r#"{"t":"sub","all":true,"since":0}"#).await;
+    for _ in 0..calls {
+        received(&mut ws).await.expect("a backfilled Call");
+    }
+    // Every statement the Backfill issues precedes the first frame it sends, so
+    // by here they are all counted.
+    app.statements_issued() - before
+}
+
 /// Patch fanout (#9, spec story 18): a Call on a Talkgroup the listener didn't
 /// select still reaches them when they subscribe to one it's patched to, and the
 /// patch list rides the wire for display.

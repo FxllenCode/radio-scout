@@ -885,6 +885,22 @@ impl TestApp {
         self.statements.refuse_updates(table);
     }
 
+    /// How many database statements this Instance has issued since it opened
+    /// its database (#86) — the same seam, counting instead of refusing.
+    ///
+    /// What it is for is an N+1, which is invisible from outside: the answer is
+    /// right, and only the number of round-trips behind it is wrong. Sample
+    /// either side of the work and the difference is what that work cost; run
+    /// it at two sizes and the difference between *those* is whether the cost
+    /// grows per Call.
+    ///
+    /// It counts this test's own queries too, for the same reason
+    /// [`TestApp::refuse_statements_on`] applies to them — one handle. So take
+    /// the samples around the app's work and nothing else.
+    pub fn statements_issued(&self) -> u64 {
+        self.statements.issued()
+    }
+
     // -- Stored objects -----------------------------------------------------
 
     /// Write an object directly to the store the app reads from.

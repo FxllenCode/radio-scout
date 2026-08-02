@@ -725,6 +725,36 @@ async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() 
     assert!(line.contains(common::REFUSED), "why it failed: {line}");
 }
 
+/// The other half of the same swallow (#86). A Backfill is two queries now — the
+/// page, then the batch that denormalizes it — so the second needs the line the
+/// first has. What it replaced said nothing at all: the loop dropped any Call
+/// whose view failed to build and carried on, which is the shape of bug an
+/// operator can only ever report as "some calls go missing sometimes".
+#[tokio::test]
+async fn a_catch_up_that_cannot_build_its_view_says_so_and_keeps_the_socket() {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+    // Arranged through the front door first, then refused: the denormalizer
+    // reads `systems`, and so does the ingest that puts a Call there to
+    // denormalize. The page read itself only names `calls`, so it still
+    // succeeds — which is what puts the failure on the second query.
+    app.upload_ok(form(RECORDER_KEY, 11, 100, 1000)).await;
+    app.refuse_statements_on("systems");
+
+    let mut ws = app.connect_ws().await;
+    ws.send(WsMessage::Text(
+        r#"{"t":"sub","sel":{"11":{"100":true}},"since":0}"#.into(),
+    ))
+    .await
+    .expect("send sub");
+    assert_eq!(next_json(&mut ws).await["t"], "subscribed");
+
+    let line = capture.wait_for("live-feed catch-up view failed").await;
+    assert!(line.contains(" WARN "), "{line}");
+    assert!(line.contains("since=0"), "{line}");
+    assert!(line.contains(common::REFUSED), "why it failed: {line}");
+}
+
 /// A half-open connection being reaped is a listener that silently stopped
 /// hearing anything — WARN, not silence (rdio leaves such connections lingering
 /// and says nothing at all).

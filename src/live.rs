@@ -486,6 +486,23 @@ async fn handle_text(
 /// `catchup`. Best-effort — a DB error is swallowed so a transient failure never
 /// kills the live connection; only a dead socket propagates.
 ///
+/// **Seven queries for the whole page, not seven per Call** (#86). The page is
+/// denormalized in one batch by [`repo::stored_calls`], which costs the same six
+/// lookups whether it is handed one Call or the whole bound; asking per Call
+/// instead cost a Pi seven round-trips for every Call on every network blip and
+/// every phone unlock, which is exactly rdio-scanner's archive N+1 moved to the
+/// live socket.
+///
+/// Two consequences of batching, both deliberate. A failure now loses the whole
+/// page where the loop lost one Call — but the loop could only lose one Call to
+/// a *per-Call* error, and a batch is one query per table, so anything that
+/// fails one Call's lookup fails every Call's; what actually changed is that the
+/// same empty Backfill now says why. And the page is a **snapshot**: a Call
+/// pruned between the two queries is still sent, where the re-fetch would have
+/// skipped it. That race was never closed, only narrowed — retention can prune a
+/// Call a microsecond after the frame goes out either way — and ADR-0004 already
+/// makes this delivery best-effort.
+///
 /// Delivery is **at-least-once**: a Call ingested in the window between the
 /// client's connect and this query can be delivered both here (catch-up) and via
 /// the live stream. Call ids are unique, so the client dedups by id — which it
@@ -509,19 +526,27 @@ async fn send_catchup(
         }
     };
     // Hitting the bound means the client's history has a gap only archive search
-    // (#13) can fill — the one fact about a backfill worth reading.
+    // (#13) can fill — the one fact about a backfill worth reading. Read off the
+    // page rather than off what is sent, because the selection filters below it.
     let truncated = models.len() as u64 == CATCHUP_MAX_CALLS;
-    let mut sent = 0u64;
-    for model in models {
-        if let Ok(Some(view)) = repo::stored_call(db, model.id).await
-            && conn.wants(&view)
-        {
-            socket
-                .send(Message::Text(catchup_frame(&view).into()))
-                .await
-                .map_err(|_| Disconnected)?;
-            sent += 1;
+    // Same swallow, and for the same reason it is not a *silent* one: the loop
+    // this replaced dropped a Call whose view failed to build without saying so,
+    // which is the shape of bug an operator can only ever report as "some calls
+    // are missing sometimes".
+    let views = match repo::stored_calls(db, &models).await {
+        Ok(views) => views,
+        Err(error) => {
+            warn!(%error, since, "live-feed catch-up view failed");
+            return Ok(());
         }
+    };
+    let mut sent = 0u64;
+    for view in views.iter().filter(|view| conn.wants(view)) {
+        socket
+            .send(Message::Text(catchup_frame(view).into()))
+            .await
+            .map_err(|_| Disconnected)?;
+        sent += 1;
     }
     // One line per reconnect, never one per Call (rule 8).
     debug!(since, sent, truncated, "live-feed catch-up sent");

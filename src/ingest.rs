@@ -353,8 +353,12 @@ async fn run_pipeline(
     // Everything this upload says from here on names the row it became.
     Span::current().record("call_id", call.id);
 
-    // Emit to the live feed.
-    if let Some(view) = repo::stored_call(&state.db, call.id)
+    // Emit to the live feed, denormalizing the row already in hand rather than
+    // re-fetching it by id (#86). Iterated rather than unwrapped: one row in
+    // gives one view out, so an `if let Some` here would be a branch whose empty
+    // arm no test can reach — the same case `repo::call_detail` resolves with a
+    // `.map` for the same reason.
+    for view in repo::stored_calls(&state.db, std::slice::from_ref(&call))
         .await
         .map_err(Stage::BuildCallView.failed())?
     {

@@ -13,7 +13,9 @@
 //!   table it has been told to refuse. It is what replaced `DROP TABLE` plus a
 //!   trigger written twice in two dialects' procedural SQL — which could only
 //!   fail the *first* statement touching a table, and could only be recognised
-//!   by matching each driver's own wording.
+//!   by matching each driver's own wording. It also **counts** what goes
+//!   through it (#86), because the one decorator that sees every statement is
+//!   the only place that can say how many there have been.
 //! - [`FaultyStore`] answers for an [`AudioStore`], delegating to a real one
 //!   until told to fail. It replaced a decorator over `object_store`'s own
 //!   trait, which had to know that `serve::audio` stats an object before it
@@ -52,10 +54,15 @@ pub const INJECTED_IO: &str = "injected";
 // The statement seam
 // ---------------------------------------------------------------------------
 
-/// Which statements are being refused. Shared by a [`Db`] and every transaction
-/// begun on it, so a rule armed after the app started reaches both.
+/// What the seam knows about the statements going through it: which are refused,
+/// and how many there have been. Shared by a [`Db`] and every transaction begun
+/// on it, so a rule armed after the app started reaches both — and so a count is
+/// of every statement the app issued, inside a transaction or out of one.
 #[derive(Default)]
-struct Refusals(std::sync::Mutex<Vec<Rule>>);
+struct Ledger {
+    rules: std::sync::Mutex<Vec<Rule>>,
+    issued: std::sync::atomic::AtomicU64,
+}
 
 /// One table, and how much of what touches it is refused.
 struct Rule {
@@ -68,11 +75,22 @@ struct Rule {
     updates_only: bool,
 }
 
-impl Refusals {
-    /// The refusal `sql` earns, or `Ok(())` to let it through.
-    fn judge(&self, sql: &str) -> Result<(), DbErr> {
+impl Ledger {
+    /// Record `sql`, and answer with the refusal it earns — or `Ok(())` to let
+    /// it through.
+    ///
+    /// Both jobs in one place because there is only one place that sees every
+    /// statement; a counter bolted on beside it would be four call sites to keep
+    /// in step with these.
+    ///
+    /// Counted *before* it is judged, and therefore whether or not it is
+    /// refused: what a count answers is "how many statements did the
+    /// application issue", and a statement the harness took away is still one
+    /// the application asked for.
+    fn record_and_judge(&self, sql: &str) -> Result<(), DbErr> {
+        self.issued.fetch_add(1, Ordering::SeqCst);
         let refused = self
-            .0
+            .rules
             .lock()
             .expect("the refusal list")
             .iter()
@@ -100,7 +118,7 @@ fn is_an_update(sql: &str) -> bool {
 /// A handle onto the statements an app issues. Cheap to clone; every clone
 /// governs the same handle.
 #[derive(Clone, Default)]
-pub struct Statements(Arc<Refusals>);
+pub struct Statements(Arc<Ledger>);
 
 impl Statements {
     /// Refuse every statement naming `table`, from now on.
@@ -114,8 +132,18 @@ impl Statements {
         self.add(table, true);
     }
 
+    /// How many statements have gone through this handle since the app opened
+    /// its database. [`crate::common::TestApp::statements_issued`] is what a
+    /// test calls, and says what it is for.
+    ///
+    /// Monotonic, and nothing resets it: a reset shared by every clone is a race
+    /// between two things measuring at once.
+    pub fn issued(&self) -> u64 {
+        self.0.issued.load(Ordering::SeqCst)
+    }
+
     fn add(&self, table: &str, updates_only: bool) {
-        self.0.0.lock().expect("the refusal list").push(Rule {
+        self.0.rules.lock().expect("the refusal list").push(Rule {
             // Quoted the way sea-orm writes an identifier, so `calls` cannot
             // match a column called `calls_id` or a table called `call_patches`.
             table: format!("\"{table}\""),
@@ -128,7 +156,7 @@ impl Statements {
 /// otherwise.
 struct Refusing<C> {
     inner: C,
-    refusals: Arc<Refusals>,
+    ledger: Arc<Ledger>,
 }
 
 /// Something to compose around an Instance's database handle, and the handle
@@ -138,16 +166,16 @@ struct Refusing<C> {
 /// migrates its own database exactly as a boot does; this only wraps the
 /// result, and wraps it again after a restart.
 pub fn refusals() -> (Decorate, Statements) {
-    let refusals = Arc::new(Refusals::default());
-    let composed = refusals.clone();
+    let ledger = Arc::new(Ledger::default());
+    let composed = ledger.clone();
     (
         Arc::new(move |db| {
             Db::new(Refusing {
                 inner: db,
-                refusals: composed.clone(),
+                ledger: composed.clone(),
             })
         }),
-        Statements(refusals),
+        Statements(ledger),
     )
 }
 
@@ -158,22 +186,22 @@ impl<C: ConnectionTrait + Send + Sync> ConnectionTrait for Refusing<C> {
     }
 
     async fn execute(&self, statement: Statement) -> Result<ExecResult, DbErr> {
-        self.refusals.judge(&statement.sql)?;
+        self.ledger.record_and_judge(&statement.sql)?;
         self.inner.execute(statement).await
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
-        self.refusals.judge(sql)?;
+        self.ledger.record_and_judge(sql)?;
         self.inner.execute_unprepared(sql).await
     }
 
     async fn query_one(&self, statement: Statement) -> Result<Option<QueryResult>, DbErr> {
-        self.refusals.judge(&statement.sql)?;
+        self.ledger.record_and_judge(&statement.sql)?;
         self.inner.query_one(statement).await
     }
 
     async fn query_all(&self, statement: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        self.refusals.judge(&statement.sql)?;
+        self.ledger.record_and_judge(&statement.sql)?;
         self.inner.query_all(statement).await
     }
 
@@ -190,7 +218,7 @@ impl Connection for Refusing<Db> {
     async fn begin(&self) -> Result<Txn, DbErr> {
         Ok(Txn::new(Refusing {
             inner: self.inner.begin().await?,
-            refusals: self.refusals.clone(),
+            ledger: self.ledger.clone(),
         }))
     }
 

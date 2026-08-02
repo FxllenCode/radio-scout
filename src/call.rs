@@ -5,7 +5,8 @@
 //! transmission (audio + metadata). **Ref** is the external, recorder-supplied
 //! numeric id (`systemRef`, `talkgroupRef`, …); **Id** is Radio-Scout's internal
 //! primary key, never sent by recorders. `StoredCall` is the denormalized view
-//! built from the SeaORM rows (`crate::db::repo::stored_call`).
+//! built from the SeaORM rows (`crate::db::repo::stored_calls`, which builds a
+//! whole page of them in a fixed number of queries — there is no per-Call form).
 //!
 //! These live here rather than beside their handlers so the data layer can build
 //! them without depending on the HTTP layer.

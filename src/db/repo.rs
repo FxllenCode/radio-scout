@@ -2035,26 +2035,20 @@ pub async fn calls_pending_enhancement<C: ConnectionTrait>(db: &C) -> Result<Vec
         .collect())
 }
 
-/// Build the denormalized `StoredCall` view (the live-feed / serve DTO) for a
-/// stored call by joining its System, Talkgroup, Tag, and Groups.
-pub async fn stored_call<C: ConnectionTrait>(
-    db: &C,
-    id: CallId,
-) -> Result<Option<StoredCall>, DbErr> {
-    let Some(call) = call::Entity::find_by_id(id).one(db).await? else {
-        return Ok(None);
-    };
-    Ok(stored_calls(db, std::slice::from_ref(&call)).await?.pop())
-}
-
-/// Denormalize a whole page of Calls in a fixed number of queries — five, no
-/// matter how many Calls — rather than five *per Call*.
+/// Denormalize a whole page of Calls in a fixed number of queries — six, no
+/// matter how many Calls — rather than six *per Call*.
 ///
 /// This is what lets `GET /api/calls` answer with ready-to-render, ready-to-play
 /// results. rdio-scanner instead returns bare ids and has the client re-request
 /// every Call it wants to display, which is an N+1 over its WebSocket and the
 /// single worst part of its archive UX on a Pi. Results come back in the order
 /// they were given.
+///
+/// **The only denormalizer** (#86). A single-Call form used to sit here too, and
+/// every caller of it already held the row it re-fetched — so what it really
+/// bought was the chance to write a loop, which the live-feed Backfill did:
+/// seven round-trips per Call, up to seven hundred per reconnect on a Pi. A
+/// caller with one Call passes `std::slice::from_ref(&call)`.
 pub async fn stored_calls<C: ConnectionTrait>(
     db: &C,
     calls: &[call::Model],
@@ -2176,7 +2170,7 @@ pub async fn stored_calls<C: ConnectionTrait>(
 /// One Call with everything the recorder said about it (#42) — the query behind
 /// `GET /api/call/{id}`.
 ///
-/// Three statements past [`stored_call`]'s, and only ever for one Call: this is
+/// Three statements past [`stored_calls`]'s, and only ever for one Call: this is
 /// the detail deliberately kept off the live-feed frame and the search page, so
 /// it is paid for exactly when somebody opens a Call.
 pub async fn call_detail<C: ConnectionTrait>(

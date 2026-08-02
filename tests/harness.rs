@@ -609,6 +609,48 @@ async fn a_table_can_be_told_to_refuse_its_updates() {
     );
 }
 
+/// **Counting statements** (#86), the other half of the same seam: the decorator
+/// that can refuse a statement is also the one thing that sees every statement,
+/// so it is what can say how many there have been.
+///
+/// This is what makes "does this path cost more per Call?" a question a test can
+/// ask at all — an N+1 is invisible from outside, because the answer is right
+/// and only the number of round-trips behind it is wrong. Monotonic, so a test
+/// measures a stretch of the app's life by sampling either side of it.
+#[tokio::test]
+async fn the_statements_an_app_issues_are_counted() {
+    let app = TestApp::with_key("k").await;
+
+    let before = app.statements_issued();
+    app.upload_ok(CallUpload::new()).await;
+    let after_ingest = app.statements_issued();
+    assert!(
+        after_ingest > before,
+        "ingesting a Call issues statements: {before} -> {after_ingest}"
+    );
+
+    // A request that touches no row moves nothing, so the count is of what the
+    // app really asked the database and not of how long it has been up.
+    app.get("/healthz").await;
+    assert_eq!(
+        app.statements_issued(),
+        after_ingest,
+        "a request that reads no row costs no statement"
+    );
+
+    // Statements inside a transaction are counted too — ingest's insert is one,
+    // so a seam that missed them would undercount exactly where the writes are.
+    let txn = app.db.begin().await.expect("begin");
+    radio_scout::db::repo::count_api_keys(&txn)
+        .await
+        .expect("a statement inside the transaction");
+    txn.rollback().await.expect("rollback");
+    assert!(
+        app.statements_issued() > after_ingest,
+        "a statement issued inside a transaction is still a statement"
+    );
+}
+
 /// The dual-dialect run (#22, ADR-0003/0009) is the *whole* suite a second time,
 /// not one hand-written Postgres test: with `TEST_POSTGRES_URL` set, every
 /// `TestApp::spawn` in every binary lands on Postgres; with it unset — the

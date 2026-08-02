@@ -484,7 +484,7 @@ async fn run_search_suite(db: &Db) {
     let (a, b, c, d) = seed_search_dataset(db).await;
     assert_search_filters(db, a, b, c, d).await;
     assert_sort_and_count(db, a, b, c, d).await;
-    assert_batched_call_view(db).await;
+    assert_batched_call_view(db, a, b, c, d).await;
     assert_cascading_filter_options(db).await;
 }
 
@@ -1311,39 +1311,52 @@ async fn assert_sort_and_count(db: &Db, a: i64, b: i64, c: i64, d: i64) {
 /// A search page is denormalized in one batch rather than per Call. rdio-scanner
 /// returns bare ids and makes the client fetch each Call separately (N+1 over
 /// its WebSocket); a page here arrives ready to render and play.
-async fn assert_batched_call_view(db: &Db) {
+///
+/// Asserted against what [`seed_search_dataset`] wrote, rather than against a
+/// second denormalizer. It used to compare each entry with a single-Call form
+/// that has since been deleted (#86, whose whole point was that every caller of
+/// it already held its row) — and that comparison was always the weaker one
+/// anyway: an oracle that resolves the same joins the same way can only ever
+/// agree, including about a join both get wrong.
+async fn assert_batched_call_view(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     let page = repo::search_calls(db, &repo::CallSearch::default())
         .await
         .unwrap();
     let batched = repo::stored_calls(db, &page).await.unwrap();
 
-    // Same order as the page, and each entry equals the single-Call view.
-    assert_eq!(batched.len(), page.len());
-    for (row, view) in page.iter().zip(&batched) {
-        let single = repo::stored_call(db, row.id).await.unwrap().unwrap();
-        assert_eq!(view.id, row.id);
-        assert_eq!(view.system_ref, single.system_ref);
-        assert_eq!(view.system_label, single.system_label);
-        assert_eq!(view.talkgroup_ref, single.talkgroup_ref);
-        assert_eq!(view.talkgroup_label, single.talkgroup_label);
-        assert_eq!(view.talkgroup_tag, single.talkgroup_tag);
-        assert_eq!(view.talkgroup_group, single.talkgroup_group);
-        assert_eq!(view.patches, single.patches);
-        assert_eq!(view.audio_url, single.audio_url);
-        assert_eq!(view.timestamp, single.timestamp);
-    }
+    // In the order they were given, which here is the page's own newest-first.
+    assert_eq!(
+        batched.iter().map(|view| view.id).collect::<Vec<_>>(),
+        vec![d, c, b, a],
+        "a batch comes back in the order it was handed"
+    );
 
-    // Spot-check the join actually resolved (not just "both are empty").
+    // The newest Call, field by field against the row that was seeded: the
+    // System's label off the System, the Tag off the Talkgroup, the Group off
+    // the join table, the URL off the object key.
     let newest = &batched[0];
+    assert_eq!(newest.system_ref, 100);
     assert_eq!(newest.system_label.as_deref(), Some("Alpha"));
+    assert_eq!(newest.talkgroup_ref, 1);
     assert_eq!(newest.talkgroup_tag.as_deref(), Some("Fire"));
     assert_eq!(newest.talkgroup_group.as_deref(), Some("Emergency"));
+    assert_eq!(newest.timestamp, Some(4000));
+    assert_eq!(newest.audio_url, Some(format!("/api/call/{d}/audio")));
+    assert!(newest.patches.is_empty(), "nothing seeded a patch");
+
+    // The Call under the *other* System resolves that System's own row — so one
+    // batch keys per Call, rather than resolving the page once and sharing it.
+    assert_eq!(batched[1].system_ref, 200);
+    assert_eq!(batched[1].system_label.as_deref(), Some("Beta"));
+
+    // A Talkgroup in several Groups carries the alphabetically-first, which is
+    // the stable pick: `b` is in {Emergency, Public}.
+    assert_eq!(batched[2].talkgroup_ref, 2);
+    assert_eq!(batched[2].talkgroup_tag.as_deref(), Some("Law"));
+    assert_eq!(batched[2].talkgroup_group.as_deref(), Some("Emergency"));
 
     // An empty page needs no queries and yields nothing.
     assert!(repo::stored_calls(db, &[]).await.unwrap().is_empty());
-
-    // A Call that isn't there has no view (the live feed's not-found path).
-    assert!(repo::stored_call(db, 999_999).await.unwrap().is_none());
 }
 
 /// Patches ride along on a batched page, keyed to the right Call.
