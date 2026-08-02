@@ -40,7 +40,7 @@ function call(id: number, systemRef = 11, talkgroupRef = 100): Call {
 /** A store with the live feed playing `calls`, in order. */
 function listening(...calls: Call[]): AppStore {
   const store = makeStore()
-  for (const one of calls) store.dispatch(received({ call: one }))
+  for (const one of calls) store.dispatch(received(one))
   return store
 }
 
@@ -108,7 +108,7 @@ describe('transport', () => {
       const store = listening(call(1))
       store.dispatch(pause())
 
-      store.dispatch(received({ call: call(2) }))
+      store.dispatch(received(call(2)))
 
       expect(selectIsPaused(store.getState())).toBe(true)
       expect(selectNowPlaying(store.getState())).toEqual(call(1))
@@ -284,7 +284,7 @@ describe('transport', () => {
       const store = inTheGap()
       store.dispatch(keepAliveExpired())
 
-      store.dispatch(received({ call: call(2) }))
+      store.dispatch(received(call(2)))
       store.dispatch(advance())
 
       expect(selectIsBridging(store.getState())).toBe(true)

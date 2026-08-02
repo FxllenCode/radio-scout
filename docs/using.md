@@ -76,6 +76,29 @@ Your choice is remembered per **Profile** (the `?id=` in the URL), so reloading 
 not blast you with audio you switched off. Anyone who never touches the toggle gets the feed
 live and playing, as before.
 
+### What the dot is telling you
+
+The header always names *why* the feed is or is not playing, because those reasons call for
+different reactions — and only some of them are yours to fix:
+
+| Dot | Reads | What it means |
+| --- | --- | --- |
+| Green, pulsing | **connected** | Calls are arriving. This is the only green there is. |
+| Red, pulsing | **linking…** | Connecting, or reconnecting after a drop. Wait. |
+| Red, steady | **NO LINK** | The server is not reachable. It keeps retrying; a brief gap is filled in for you when it comes back. |
+| Amber, steady | **FEED OFF** | You switched the feed off. Nothing is arriving, by your choice. |
+| Amber, steady | **PLAYBACK** | You are playing the archive, which the live feed is mutually exclusive with. |
+
+The two amber states are the two silences you asked for; the red ones are the two you didn't.
+When nothing is playing, the panel spells the same thing out in words and says what to do about
+it.
+
+The Live screen's controls follow the dot: with the feed off or the archive playing, the
+per-Call controls are out of reach rather than present and inert. The **LIVE FEED** switch stays
+usable throughout — on **FEED OFF** it is the way back, and on **PLAYBACK** it still means what
+it says, so pressing it there switches the feed off rather than leaving playback. You leave
+playback mode from **Search**, where you entered it.
+
 **Hold and Avoid are opposites, and both are temporary.** Hold means "only this"; Avoid means
 "anything but this". A timed Avoid is the one to reach for when a Talkgroup is having a busy
 half hour but you do not want to forget you silenced it — which is exactly how a permanent mute

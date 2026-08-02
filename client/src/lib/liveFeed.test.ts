@@ -48,7 +48,7 @@ function call(id: number): Call {
 
 interface Recorder {
   statuses: LiveStatus[]
-  calls: { call: Call; catchup: boolean }[]
+  calls: Call[]
   lagged: number[]
   /** The cursor the client reads when it re-subscribes after a drop. */
   since: number | undefined
@@ -65,7 +65,7 @@ function connect(options?: { retryMs?: number }): Recorder {
   handle = connectLiveFeed(
     {
       onStatus: (status) => recorder.statuses.push(status),
-      onCall: (received, catchup) => recorder.calls.push({ call: received, catchup }),
+      onCall: (received) => recorder.calls.push(received),
       onLagged: (skipped) => recorder.lagged.push(skipped),
       since: () => recorder.since,
     },
@@ -141,7 +141,16 @@ describe('live feed client', () => {
     ])
   })
 
-  it('hands over live Calls, and flags the backfilled ones', async () => {
+  /**
+   * A **Backfill** Call is handed over exactly like a live one (#88).
+   *
+   * The server still flags it on the wire (ADR-0004) and something may yet want
+   * to know — but nothing here does: the store plays a Call the listener missed
+   * for the same reason it plays one that just happened, and it dedups by id
+   * either way. Plumbing the flag through three layers to be destructured and
+   * dropped only made it look like a decision somebody was taking.
+   */
+  it('hands over Calls, backfilled or live, with nothing to tell them apart', async () => {
     onConnect = (client) => {
       client.send(JSON.stringify({ t: 'call', call: call(1) }))
       client.send(JSON.stringify({ t: 'call', call: call(2), catchup: true }))
@@ -149,8 +158,7 @@ describe('live feed client', () => {
     const recorder = connect()
 
     await vi.waitFor(() => expect(recorder.calls).toHaveLength(2))
-    expect(recorder.calls[0]).toEqual({ call: call(1), catchup: false })
-    expect(recorder.calls[1]).toEqual({ call: call(2), catchup: true })
+    expect(recorder.calls).toEqual([call(1), call(2)])
   })
 
   it('reports how many Calls a lagging connection cost', async () => {
@@ -175,7 +183,7 @@ describe('live feed client', () => {
     const recorder = connect()
 
     await vi.waitFor(() => expect(recorder.calls).toHaveLength(1))
-    expect(recorder.calls[0].call).toEqual(call(1))
+    expect(recorder.calls[0]).toEqual(call(1))
   })
 
   describe('when the connection drops', () => {

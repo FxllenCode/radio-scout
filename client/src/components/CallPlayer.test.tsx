@@ -284,7 +284,7 @@ describe('CallPlayer', () => {
       const store = makeStore()
       renderWithProviders(<CallPlayer />, { store })
       act(() => {
-        store.dispatch(received({ call: ARCHIVE[0] }))
+        store.dispatch(received(ARCHIVE[0]))
       })
       const audio = player()
       Object.defineProperty(audio, 'currentTime', {
@@ -347,7 +347,7 @@ describe('CallPlayer', () => {
     function afterTheLastCall(store = makeStore()) {
       renderWithProviders(<CallPlayer />, { store })
       act(() => {
-        store.dispatch(received({ call: ARCHIVE[0] }))
+        store.dispatch(received(ARCHIVE[0]))
       })
       act(() => {
         store.dispatch(advance())
@@ -370,7 +370,7 @@ describe('CallPlayer', () => {
       const store = afterTheLastCall()
 
       act(() => {
-        store.dispatch(received({ call: ARCHIVE[1] }))
+        store.dispatch(received(ARCHIVE[1]))
       })
 
       expect(player().src).toContain(ARCHIVE[1].audioUrl)
@@ -383,7 +383,7 @@ describe('CallPlayer', () => {
       const store = makeStore()
       renderWithProviders(<CallPlayer />, { store })
       act(() => {
-        store.dispatch(received({ call: ARCHIVE[0] }))
+        store.dispatch(received(ARCHIVE[0]))
       })
 
       playhead({ currentTime: 7.9, duration: 8 })
@@ -396,8 +396,8 @@ describe('CallPlayer', () => {
       const store = makeStore()
       renderWithProviders(<CallPlayer />, { store })
       act(() => {
-        store.dispatch(received({ call: ARCHIVE[0] }))
-        store.dispatch(received({ call: ARCHIVE[1] }))
+        store.dispatch(received(ARCHIVE[0]))
+        store.dispatch(received(ARCHIVE[1]))
       })
 
       playhead({ currentTime: 7.9, duration: 8 })
@@ -511,7 +511,7 @@ describe('CallPlayer', () => {
       const store = makeStore()
       renderWithProviders(<CallPlayer />, { store })
       act(() => {
-        store.dispatch(received({ call: ARCHIVE[0] }))
+        store.dispatch(received(ARCHIVE[0]))
       })
       Object.defineProperty(player(), 'duration', {
         value: 8,

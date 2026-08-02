@@ -26,7 +26,11 @@ export interface Subscription {
 
 export interface LiveFeedHandlers {
   onStatus(status: LiveStatus): void
-  onCall(call: Call, catchup: boolean): void
+  /** A Call to play. A **Backfill** Call (the server flags one `catchup`)
+   *  arrives through here identically and deliberately unmarked: the listener
+   *  wants to hear what they missed for the same reason they want to hear what
+   *  just happened, and the store dedups by id either way. */
+  onCall(call: Call): void
   onLagged(skipped: number): void
   /** The highest Call id seen so far, read at send time. It is sent **only**
    *  when re-subscribing after a drop, as the catch-up cursor — a cursor on an
@@ -138,7 +142,7 @@ export function connectLiveFeed(
 function receive(handlers: LiveFeedHandlers, data: unknown) {
   if (typeof data !== 'string') return
 
-  let frame: { t?: string; call?: Call; catchup?: boolean; skipped?: number }
+  let frame: { t?: string; call?: Call; skipped?: number }
   try {
     frame = JSON.parse(data)
   } catch {
@@ -146,7 +150,7 @@ function receive(handlers: LiveFeedHandlers, data: unknown) {
   }
 
   if (frame.t === 'call' && frame.call) {
-    handlers.onCall(frame.call, frame.catchup === true)
+    handlers.onCall(frame.call)
     return
   }
   if (frame.t === 'lagged' && typeof frame.skipped === 'number') {

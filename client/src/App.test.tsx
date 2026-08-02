@@ -6,14 +6,16 @@ import { deploy, installServiceWorker } from '@/test/serviceWorker'
 import { renderApp } from '@/test/utils'
 
 describe('App', () => {
-  it('renders the Live screen and primary nav at the root route', () => {
+  it('renders the Live screen and primary nav at the root route', async () => {
     renderApp('/')
 
     expect(
       screen.getByRole('navigation', { name: 'Primary' }),
     ).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'LIVE' })).toBeInTheDocument()
-    expect(screen.getByText(/waiting for the first call/i)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/waiting for the first call/i),
+    ).toBeInTheDocument()
   })
 
   it('offers to install from the shell, so every screen can be asked from', () => {

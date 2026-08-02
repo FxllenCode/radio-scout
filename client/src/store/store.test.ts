@@ -6,12 +6,18 @@ import { EVERYTHING, setTalkgroups } from '@/lib/selection'
 import {
   chooseTalkgroups,
   received,
-  selectIsFeedOff,
+  selectFeedStatus,
   selectSelection,
   turnFeedOff,
   turnFeedOn,
 } from './live'
-import { makeStore } from './store'
+import {
+  enterLiveFeed,
+  enterPlaybackMode,
+  playbackActions,
+  selectPlaybackMode,
+} from './playback'
+import { makeStore, type AppStore } from './store'
 
 /** An in-memory `Storage` that also counts what was written, so a test can say
  *  "nothing was persisted" and mean it. */
@@ -91,9 +97,7 @@ describe('makeStore', () => {
     const store = makeStore({ storage, namespace: 'default' })
 
     store.dispatch(
-      received({
-        call: { id: 1, systemRef: 11, talkgroupRef: 100, audioUrl: '/api/call/1/audio' },
-      }),
+      received({ id: 1, systemRef: 11, talkgroupRef: 100, audioUrl: '/api/call/1/audio' }),
     )
 
     expect(writes).toEqual([])
@@ -126,12 +130,18 @@ describe('makeStore', () => {
    *  the feed off and reloaded must not be blasted with audio for having done
    *  so — the choice outlives the tab, exactly as their Selection does. */
   describe('the feed-off choice (#80)', () => {
+    /** A store built here has never opened a socket, so "the feed is on" reads
+     *  as **Feed down** rather than live (#88). What is being remembered is
+     *  whether the Listener switched it **off**, which is the one arm of the
+     *  derived status that persists. */
+    const isOff = (store: AppStore) => selectFeedStatus(store.getState()) === 'off'
+
     it('starts on, so a Listener who never touched it hears the feed', () => {
       const { storage } = fakeStorage()
 
       const store = makeStore({ storage, namespace: 'default' })
 
-      expect(selectIsFeedOff(store.getState())).toBe(false)
+      expect(isOff(store)).toBe(false)
     })
 
     it('remembers being switched off, and being switched back on', () => {
@@ -150,7 +160,7 @@ describe('makeStore', () => {
 
       const store = makeStore({ storage, namespace: 'default' })
 
-      expect(selectIsFeedOff(store.getState())).toBe(true)
+      expect(isOff(store)).toBe(true)
     })
 
     /** Two Profiles in one browser (`?id=`) are two independent choices, the
@@ -159,10 +169,10 @@ describe('makeStore', () => {
       const { storage } = fakeStorage({ [feedOffKey('truck')]: 'true' })
 
       expect(
-        selectIsFeedOff(makeStore({ storage, namespace: 'default' }).getState()),
+        isOff(makeStore({ storage, namespace: 'default' })),
       ).toBe(false)
       expect(
-        selectIsFeedOff(makeStore({ storage, namespace: 'truck' }).getState()),
+        isOff(makeStore({ storage, namespace: 'truck' })),
       ).toBe(true)
     })
 
@@ -173,7 +183,7 @@ describe('makeStore', () => {
 
       const store = makeStore({ storage, namespace: 'default' })
 
-      expect(selectIsFeedOff(store.getState())).toBe(false)
+      expect(isOff(store)).toBe(false)
     })
 
     it('runs unremembered when the browser has no storage', () => {
@@ -181,8 +191,70 @@ describe('makeStore', () => {
 
       store.dispatch(turnFeedOff())
 
-      expect(selectIsFeedOff(store.getState())).toBe(true)
+      expect(isOff(store)).toBe(true)
       expect(ambient.writes).toEqual([])
+    })
+
+    /** Playback mode is the other reason the feed goes quiet, and it is
+     *  deliberately *not* remembered: a reload comes back on the live feed,
+     *  which is what the app is for. */
+    it('does not remember playback mode along with it', () => {
+      const { storage, writes } = fakeStorage()
+      const store = makeStore({ storage, namespace: 'default' })
+
+      store.dispatch(enterPlaybackMode())
+
+      expect(writes).toEqual([])
+      expect(isOff(makeStore({ storage, namespace: 'default' }))).toBe(false)
+    })
+  })
+
+  /**
+   * The live slice keeps its own record of playback mode (#88), because a
+   * reducer can see no other slice and the guard that refuses a Call has to be
+   * in the reducer to cover every route in.
+   *
+   * That record is only as good as its agreement with the slice that owns the
+   * mode, so both halves are pinned: that the two actions keep them in step,
+   * and — the half that actually holds the line — that those two are still the
+   * only actions the playback slice has. A third one that moved `mode` would
+   * desync the mirror silently, and no test driving the existing two could
+   * notice.
+   */
+  describe('the feed and playback mode, which cannot disagree', () => {
+    it.each([
+      { what: 'entering playback mode', actions: [enterPlaybackMode()] },
+      { what: 'leaving it again', actions: [enterPlaybackMode(), enterLiveFeed()] },
+      {
+        what: 'switching modes twice',
+        actions: [enterPlaybackMode(), enterLiveFeed(), enterPlaybackMode()],
+      },
+    ])('agrees after $what', ({ actions }) => {
+      const store = makeStore({ storage: undefined })
+
+      for (const action of actions) store.dispatch(action)
+
+      const state = store.getState()
+      expect(selectFeedStatus(state) === 'playback').toBe(
+        selectPlaybackMode(state) === 'playback',
+      )
+    })
+
+    /**
+     * The structural half. `enterPlaybackMode` and `enterLiveFeed` are the only
+     * two the live slice mirrors, so a new action here is a decision somebody
+     * has to take: either it cannot change `mode`, or the mirror must learn it.
+     * Failing this test *is* that decision being asked for.
+     */
+    it('has no third way to change modes for the mirror to miss', () => {
+      expect(Object.keys(playbackActions).sort()).toEqual([
+        'enterLiveFeed',
+        'enterPlaybackMode',
+        'next',
+        'playResults',
+        'previous',
+        'stop',
+      ])
     })
   })
 })

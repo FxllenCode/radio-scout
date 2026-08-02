@@ -42,13 +42,11 @@ it('records a refused play() as paused, rather than showing it as playing', asyn
 
   store.dispatch(
     received({
-      call: {
-        id: 1,
-        systemRef: 11,
-        talkgroupRef: 54241,
-        talkgroupLabel: 'FD Dispatch',
-        audioUrl: wavDataUrl(0.4, 440),
-      },
+      id: 1,
+      systemRef: 11,
+      talkgroupRef: 54241,
+      talkgroupLabel: 'FD Dispatch',
+      audioUrl: wavDataUrl(0.4, 440),
     }),
   )
 

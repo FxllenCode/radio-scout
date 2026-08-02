@@ -1,5 +1,12 @@
-import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
+import { createSelector, createSlice, type PayloadAction } from '@reduxjs/toolkit'
 
+import {
+  controlsFor,
+  feedPlays,
+  feedStatus,
+  type Controls,
+  type FeedStatus,
+} from '@/lib/feed'
 import type { LiveStatus, Subscription } from '@/lib/liveFeed'
 import {
   EVERYTHING,
@@ -14,7 +21,7 @@ import {
 } from '@/lib/selection'
 import type { Call } from '@/types'
 
-import { enterPlaybackMode } from './playback'
+import { enterLiveFeed, enterPlaybackMode } from './playback'
 
 /** What the listener has narrowed the feed to: a whole System, or one
  *  Talkgroup within it (CONTEXT.md **Hold**). */
@@ -83,6 +90,19 @@ export interface LiveState {
    *  says not to confuse this with. Held here so it persists beside the
    *  Selection, and so nothing arriving can override a choice. */
   feedOff: boolean
+  /**
+   * The listener is playing the Archive instead (CONTEXT.md **Playback mode**).
+   *
+   * Not a mirror of the `playback` slice so much as this slice remembering
+   * *why* it went quiet: it already emptied itself when playback mode began and
+   * then forgot the reason immediately, which is how a Call landing a moment
+   * later started playing over the archive (#88). Set by the two actions that
+   * are the only way to change modes, so the two cannot disagree — and a
+   * reducer, which can see no other slice, can still refuse.
+   *
+   * Not persisted, unlike [`feedOff`]: a reload starts on the live feed.
+   */
+  inPlayback: boolean
 }
 
 /** The state a listener who has never touched anything starts from. Exported
@@ -101,7 +121,18 @@ export const initialLiveState: LiveState = {
   // On. A Listener who has never touched the toggle gets audio playing, which
   // is what the app is for.
   feedOff: false,
+  inPlayback: false,
 }
+
+/**
+ * Why the live feed is or is not delivering, from this slice alone (#88).
+ *
+ * The whole of the answer is here — the listener's switch, the mode they are
+ * in, and the socket's condition — so the reducers below and the display read
+ * one derived value rather than each assembling their own from the parts.
+ */
+const statusOf = (state: LiveState): FeedStatus =>
+  feedStatus({ off: state.feedOff, playback: state.inPlayback, link: state.status })
 
 const avoidKey = (systemRef: number, talkgroupRef: number) =>
   `${systemRef}:${talkgroupRef}`
@@ -296,14 +327,15 @@ const liveSlice = createSlice({
     },
 
     /** A Call arrived over the feed: play it if the feed is quiet, else queue
-     *  it. `catchup` Calls (ADR-0004 reconnect backfill) arrive the same way —
-     *  a listener coming back wants to hear what they missed. */
-    received(state, action: PayloadAction<{ call: Call; catchup?: boolean }>) {
-      const { call } = action.payload
-      // Off means off (#80). A Call still in flight when the socket closed, or
-      // one the server sent before it noticed, is not played and not counted:
-      // the listener asked for silence, and this is what that costs.
-      if (state.feedOff) return
+     *  it. A **Backfill** Call (ADR-0004) arrives the same way — a listener
+     *  coming back wants to hear what they missed. */
+    received(state, action: PayloadAction<Call>) {
+      const call = action.payload
+      // A silence the listener asked for is not interrupted (#88). A Call still
+      // in flight when the socket closed, or one the server sent before it saw
+      // the new matrix, is not played and not counted: they asked for silence,
+      // and this is what that costs.
+      if (!feedPlays(statusOf(state))) return
       // Catch-up is at-least-once (ADR-0004): a Call ingested in the window
       // between connect and the backfill query arrives twice, and hearing it
       // twice is the listener's problem to be spared.
@@ -353,12 +385,12 @@ const liveSlice = createSlice({
     /** Play a Call again — the one playing, or one from the history (spec
      *  US 13). The queue behind it is untouched. */
     replay(state, action: PayloadAction<number>) {
-      // Nothing plays while the feed is off (#80). The Replay control is
-      // disabled there, but replay is reachable from the RECENT list and from
-      // the lock screen's previous button (`previousCall`), and a Call started
-      // from either would be audio playing under a FEED OFF header with the
-      // socket shut.
-      if (state.feedOff) return
+      // Nothing plays while the listener has the feed off or is playing the
+      // archive (#80, #88). The Replay control is disabled there, but replay is
+      // reachable from the RECENT list and from the lock screen's previous
+      // button (`previousCall`), and a Call started from either would be audio
+      // playing under a FEED OFF header with the socket shut.
+      if (!feedPlays(statusOf(state))) return
       const again =
         state.current?.id === action.payload
           ? state.current
@@ -437,7 +469,7 @@ const liveSlice = createSlice({
       // listener *wanted* and did not get. A notice buffered on the socket, or
       // in flight while it closes, arrives after the switch — and charging them
       // for silence they chose would make the counter a lie.
-      if (state.feedOff) return
+      if (!feedPlays(statusOf(state))) return
       state.missed += action.payload
     },
   },
@@ -447,11 +479,21 @@ const liveSlice = createSlice({
     // to the archive silences the feed here *and*, via the matrix, stops the
     // server sending it. The cursor survives so coming back doesn't refetch the
     // world.
+    //
+    // Recording the mode is what makes that exclusion *hold* rather than happen
+    // once (#88): the subscription goes empty but the socket stays open, so a
+    // Call in flight lands after this sweep and would find nothing playing.
     builder.addCase(enterPlaybackMode, (state) => {
+      state.inPlayback = true
       state.queue = []
       state.current = null
       state.history = []
       state.playId += 1
+    })
+
+    // ...and released, or the feed would never come back.
+    builder.addCase(enterLiveFeed, (state) => {
+      state.inPlayback = false
     })
   },
 })
@@ -507,9 +549,40 @@ export const selectSince = (state: WithLive): number | undefined => state.live.s
 
 export const selectMissed = (state: WithLive): number => state.live.missed
 
-/** Whether the listener has switched the live feed off (#80). Distinct from
- *  `status === 'offline'`, which is the network's answer rather than theirs. */
-export const selectIsFeedOff = (state: WithLive): boolean => state.live.feedOff
+/**
+ * Why the live feed is or is not delivering (#88) — the one answer the banner,
+ * the LED, the controls and the reducers' guards all read.
+ *
+ * Distinct from [`selectLiveStatus`], which is what the *socket* is doing and
+ * knows nothing of the listener's choices.
+ */
+export const selectFeedStatus = (state: WithLive): FeedStatus =>
+  statusOf(state.live)
+
+/**
+ * Which Live-screen controls the listener can reach, given the feed's standing
+ * and what there is to act on (#88).
+ *
+ * Memoized, so the record keeps its identity between renders: the Live screen
+ * re-renders several times a second while a Call plays (the waveform's
+ * progress), and a fresh object each time would defeat every downstream
+ * comparison.
+ */
+export const selectLiveControls: (state: WithLive) => Controls = createSelector(
+  [
+    selectFeedStatus,
+    (state: WithLive) => state.live.current,
+    (state: WithLive) => state.live.hold,
+    (state: WithLive) => state.live.history,
+  ],
+  (status, current, hold, history) =>
+    controlsFor(status, {
+      onAir: current !== null,
+      systemHold: isSystemHold(hold),
+      talkgroupHold: isTalkgroupHold(hold),
+      hasRecent: history.length > 0,
+    }),
+)
 
 export const selectIsAvoided = (
   state: WithLive,

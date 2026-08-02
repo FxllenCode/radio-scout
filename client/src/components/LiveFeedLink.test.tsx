@@ -188,7 +188,7 @@ describe('the live-feed link', () => {
     try {
       const store = makeStore()
       renderApp('/', store)
-      store.dispatch(received({ call }))
+      store.dispatch(received(call))
       store.dispatch(avoid({ until: Date.now() + 30 * 60_000 }))
       expect(selectLiveMatrix(store.getState()).sel).toEqual({
         '11': { '54241': false },

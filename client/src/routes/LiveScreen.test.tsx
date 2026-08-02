@@ -4,7 +4,7 @@ import { axe } from 'vitest-axe'
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import { lagged, received, selectLiveMatrix, selectQueueDepth } from '@/store/live'
-import { playResults } from '@/store/playback'
+import { enterPlaybackMode, playResults } from '@/store/playback'
 import { progressed, selectProgress } from '@/store/transport'
 import { makeStore, type AppStore } from '@/store/store'
 import { liveFeed } from '@/test/handlers'
@@ -53,19 +53,46 @@ function listening(...calls: Call[]): AppStore {
   const store = makeStore()
   renderApp('/', store)
   act(() => {
-    for (const one of calls) store.dispatch(received({ call: one }))
+    for (const one of calls) store.dispatch(received(one))
   })
   return store
 }
 
 const display = () => screen.getByRole('region', { name: 'Scanner display' })
 
+/**
+ * The accessible name of every control on the screen the listener can actually
+ * press — the derived enablement (#88) read back off the rendered page.
+ *
+ * Scoped to `main` so the tab bar and the docked banner, which belong to the
+ * shell and not to the feed, stay out of it. The RECENT rows are in here too:
+ * they replay a Call, so they are feed-dependent controls like any other, and
+ * they are the ones most easily forgotten because they are generated.
+ */
+const reachable = () =>
+  within(screen.getByRole('main'))
+    .getAllByRole('button')
+    .filter((button) => !button.hasAttribute('disabled'))
+    .map((button) => button.getAttribute('aria-label') ?? button.textContent?.trim())
+
+/** The feed's master switch is never out of reach, or there is no way back. */
+const ALWAYS_REACHABLE = ['Live feed']
+
+const toggle = () => screen.getByRole('button', { name: 'Live feed' })
+
 describe('LiveScreen', () => {
   describe('before anything has been heard', () => {
-    it('says it is waiting rather than showing an empty display', () => {
+    /** Two different silences, and the screen distinguishes them (#88): a
+     *  connection being *made* is not one that has gone, and it is the state
+     *  every visit opens in. Saying "no link" there would make the words
+     *  worthless the rest of the time. */
+    it('says it is connecting, then that it is waiting', async () => {
       renderApp('/')
 
-      expect(screen.getByText(/waiting for the first call/i)).toBeInTheDocument()
+      expect(screen.getByText(/connecting to the server/i)).toBeInTheDocument()
+      expect(
+        await screen.findByText(/waiting for the first call/i),
+      ).toBeInTheDocument()
     })
 
     /** A listener staring at a silent scanner needs to know whether it's quiet
@@ -293,8 +320,6 @@ describe('LiveScreen', () => {
    * streaming and the queue keeps filling behind it. This is the hard off.
    */
   describe('the live feed toggle (#80)', () => {
-    const toggle = () => screen.getByRole('button', { name: 'Live feed' })
-
     it('reads as on, and says the feed is live', async () => {
       renderApp('/')
 
@@ -345,33 +370,24 @@ describe('LiveScreen', () => {
       expect(screen.getByText(/switched off/i)).toBeInTheDocument()
     })
 
-    /** Nothing that acts on a Call makes sense with no feed and no Call — and a
-     *  control that looks available but does nothing is worse than one that is
-     *  plainly out of reach. */
-    it('disables the feed-dependent controls while off', async () => {
+    /**
+     * Nothing that acts on a Call makes sense with no feed and no Call — and a
+     * control that looks available but does nothing is worse than one plainly
+     * out of reach.
+     *
+     * Asserted as "everything except the two that must stay reachable" rather
+     * than as a list of the nine that must not (#88). A hand-written list is
+     * silent about the control somebody adds next, which is the mistake this
+     * exists to catch; the complement covers it by construction.
+     */
+    it('puts every control except the way back out of reach while off', async () => {
       const user = userEvent.setup()
       listening(call())
       expect(screen.getByRole('button', { name: 'Skip' })).toBeEnabled()
 
       await user.click(toggle())
 
-      // Every control that acts on a live Call — enumerated, because adding one
-      // and forgetting to gate it is exactly the mistake this catches.
-      for (const name of [
-        'Hold system',
-        'Hold talkgroup',
-        'Skip',
-        'Replay',
-        'Pause',
-        'Avoid',
-        'Avoid for 30 minutes',
-        'Avoid for 60 minutes',
-        'Avoid for 120 minutes',
-      ]) {
-        expect(screen.getByRole('button', { name })).toBeDisabled()
-      }
-      // ...and the toggle itself stays reachable, or there is no way back.
-      expect(toggle()).toBeEnabled()
+      expect(reachable()).toEqual(ALWAYS_REACHABLE)
     })
 
     /** The RECENT list replays a Call, so it is a feed-dependent control too —
@@ -399,7 +415,7 @@ describe('LiveScreen', () => {
       await user.click(toggle())
 
       expect(toggle()).toHaveAttribute('aria-pressed', 'true')
-      act(() => void store.dispatch(received({ call: call({ id: 9 }) })))
+      act(() => void store.dispatch(received(call({ id: 9 }))))
       expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
     })
 
@@ -409,6 +425,62 @@ describe('LiveScreen', () => {
       await user.click(toggle())
 
       expect(await axe(container)).toHaveNoViolations()
+    })
+  })
+
+  /**
+   * The second reason the feed can be quiet (#88). Playback mode and the live
+   * feed are mutually exclusive (CONTEXT.md), so the screen has to say which of
+   * the two silences this is — a green light over a feed that is deliberately
+   * not delivering is the same lie FEED OFF was invented to stop telling.
+   *
+   * The banner, the mini-player and the one-tap way back belong to #56; this is
+   * the header and the controls telling the truth about the derived cause.
+   */
+  describe('playback mode', () => {
+    const playArchive = () => {
+      const store = listening(call())
+      act(() => void store.dispatch(enterPlaybackMode()))
+      return store
+    }
+
+    it('says the archive has the audio, rather than showing a live feed', async () => {
+      const store = listening(call())
+      await screen.findByText(/^connected$/i)
+
+      act(() => void store.dispatch(enterPlaybackMode()))
+
+      expect(screen.getByText('PLAYBACK')).toBeInTheDocument()
+      expect(screen.queryByText(/^connected$/i)).not.toBeInTheDocument()
+      expect(screen.getByText(/playing from the archive/i)).toBeInTheDocument()
+    })
+
+    /** The socket stays open with an empty subscription — this is not FEED OFF,
+     *  and offering the way back to a feed that was never switched off would be
+     *  a different lie. */
+    it('leaves the feed switched on, because it was never switched off', () => {
+      playArchive()
+
+      expect(toggle()).toHaveAttribute('aria-pressed', 'true')
+      expect(screen.queryByText('FEED OFF')).not.toBeInTheDocument()
+    })
+
+    /**
+     * A **Hold** outlives the Call it was placed on, and entering playback mode
+     * does not lift it — so this is the one control that would still be
+     * reachable without the gate, and the only version of this test that bites.
+     * Everything else is disabled anyway once `enterPlaybackMode` clears the
+     * Call and the RECENT list.
+     */
+    it('puts the live controls out of reach, as an off feed does', async () => {
+      const user = userEvent.setup()
+      const store = listening(call())
+      await user.click(screen.getByRole('button', { name: 'Hold system' }))
+      expect(screen.getByRole('button', { name: 'Hold system' })).toBeEnabled()
+
+      act(() => void store.dispatch(enterPlaybackMode()))
+
+      expect(reachable()).toEqual(ALWAYS_REACHABLE)
     })
   })
 
@@ -492,7 +564,7 @@ describe('LiveScreen', () => {
     const store = makeStore()
     const { container } = renderApp('/', store)
     act(() => {
-      store.dispatch(received({ call: call() }))
+      store.dispatch(received(call()))
     })
 
     expect(await axe(container)).toHaveNoViolations()

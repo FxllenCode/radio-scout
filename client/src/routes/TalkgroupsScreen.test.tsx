@@ -47,9 +47,7 @@ const summary = () => screen.getByTestId('selection-summary')
 function withAvoided(until: number): AppStore {
   const store = scannerStore()
   store.dispatch(
-    received({
-      call: { id: 1, systemRef: 100, talkgroupRef: 1, audioUrl: '/api/call/1/audio' },
-    }),
+    received({ id: 1, systemRef: 100, talkgroupRef: 1, audioUrl: '/api/call/1/audio' }),
   )
   store.dispatch(avoid({ until }))
   return store

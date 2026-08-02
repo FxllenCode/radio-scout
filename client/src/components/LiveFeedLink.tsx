@@ -15,7 +15,7 @@ import {
   expireAvoids,
   lagged,
   received,
-  selectIsFeedOff,
+  selectFeedStatus,
   selectSince,
 } from '@/store/live'
 import { selectSubscription } from '@/store/transport'
@@ -52,18 +52,23 @@ export function LiveFeedLink() {
   const matrix = useAppSelector((state) =>
     JSON.stringify(selectSubscription(state)),
   )
-  const feedOff = useAppSelector(selectIsFeedOff)
+  const feedOff = useAppSelector(selectFeedStatus) === 'off'
 
   useEffect(() => {
     // Feed off is a **hard** off (#80): no socket at all, so bandwidth and
     // battery go to zero and Web Push takes over — the server's "an open socket
     // means someone is listening" rule then tells the truth about a listener who
-    // stopped listening. Not merely an empty subscription, which is what
-    // playback mode sends and which keeps the connection up.
+    // stopped listening.
+    //
+    // The one place that reads the *particular* cause rather than
+    // `feedPlays` (#88), because the two silences differ here and nowhere else:
+    // playback mode keeps the connection up and sends an empty subscription, so
+    // a listener browsing the archive is still reachable the moment they come
+    // back.
     //
     // Guarded here rather than by closing after connecting, so a listener whose
     // browser remembered the choice never opens one: no round trip, and no
-    // burst of catch-up audio arriving before the choice is applied.
+    // burst of backfilled audio arriving before the choice is applied.
     if (feedOff) {
       // Nothing is connected, and the display must not keep saying otherwise.
       dispatch(disconnected())
@@ -71,7 +76,7 @@ export function LiveFeedLink() {
     }
     const handle = connectLiveFeed({
       onStatus: (status) => dispatch(STATUS_ACTION[status]()),
-      onCall: (call, catchup) => dispatch(received({ call, catchup })),
+      onCall: (call) => dispatch(received(call)),
       onLagged: (skipped) => dispatch(lagged(skipped)),
       // Read at send time, not subscribe time: the cursor moves with every Call
       // and only matters when the socket comes back (ADR-0004). Turning the feed

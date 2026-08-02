@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { Call } from '@/types'
 
-import { enterPlaybackMode } from './playback'
+import { enterLiveFeed, enterPlaybackMode } from './playback'
 import {
   HISTORY_DEPTH,
   QUEUE_LIMIT,
@@ -31,7 +31,7 @@ import {
   selectMissed,
   selectPlayId,
   selectQueueDepth,
-  selectIsFeedOff,
+  selectFeedStatus,
   selectSelection,
   selectSince,
   toggleHoldSystem,
@@ -64,7 +64,7 @@ function rootState(live: LiveState) {
 }
 
 /** Play `call` and let it arrive as the live feed would. */
-const arrive = (...calls: Call[]) => calls.map((one) => received({ call: one }))
+const arrive = (...calls: Call[]) => calls.map((one) => received(one))
 
 /** A Call on an encrypted talkgroup: flagged, and with no audio to fetch — the
  *  shape `GET /api/calls` and the live feed both deliver for one (#42). */
@@ -119,9 +119,9 @@ describe('live slice', () => {
    */
   describe('feed off (#80)', () => {
     it('is on until the listener says otherwise, so nobody has to opt in', () => {
-      const state = reduce({ type: '@@INIT' })
+      const state = reduce(connected())
 
-      expect(selectIsFeedOff(rootState(state))).toBe(false)
+      expect(selectFeedStatus(rootState(state))).toBe('live')
     })
 
     /** A deliberate off is not "missed". The counter admits traffic the listener
@@ -133,7 +133,7 @@ describe('live slice', () => {
 
       const off = liveReducer(listening, turnFeedOff())
 
-      expect(selectIsFeedOff(rootState(off))).toBe(true)
+      expect(selectFeedStatus(rootState(off))).toBe('off')
       expect(selectLiveCall(rootState(off))).toBeNull()
       expect(selectQueueDepth(rootState(off))).toBe(0)
       expect(selectMissed(rootState(off))).toBe(4)
@@ -159,11 +159,11 @@ describe('live slice', () => {
     })
 
     it('comes back on, and the feed can fill again', () => {
-      let state = reduce(...arrive(call(1)), turnFeedOff())
+      let state = reduce(connected(), ...arrive(call(1)), turnFeedOff())
       state = liveReducer(state, turnFeedOn())
 
-      expect(selectIsFeedOff(rootState(state))).toBe(false)
-      state = liveReducer(state, received({ call: call(5) }))
+      expect(selectFeedStatus(rootState(state))).toBe('live')
+      state = liveReducer(state, received(call(5)))
       expect(selectLiveCall(rootState(state))).toEqual(call(5))
     })
 
@@ -447,7 +447,7 @@ describe('live slice', () => {
    *  twice is what the client dedups away. */
   describe('a Call that arrives twice', () => {
     it('is played once', () => {
-      const state = reduce(...arrive(call(1), call(2)), received({ call: call(2) }))
+      const state = reduce(...arrive(call(1), call(2)), received(call(2)))
 
       expect(selectQueueDepth(rootState(state))).toBe(1)
       expect(selectLiveCall(rootState(state))).toEqual(call(1))
@@ -685,14 +685,37 @@ describe('live slice', () => {
 
   /** CONTEXT.md: the live feed and playback mode are mutually exclusive. Going
    *  to the archive silences the feed *and* stops the server sending it. */
-  it('goes quiet when the listener switches to playback mode', () => {
-    const state = reduce(...arrive(call(1), call(2)), enterPlaybackMode())
+  describe('playback mode, which the feed is mutually exclusive with', () => {
+    it('goes quiet when the listener switches to playback mode', () => {
+      const state = reduce(...arrive(call(1), call(2)), enterPlaybackMode())
 
-    expect(selectLiveCall(rootState(state))).toBeNull()
-    expect(selectQueueDepth(rootState(state))).toBe(0)
-    // The catch-up cursor survives, so returning to the feed doesn't refetch
-    // the world.
-    expect(selectSince(rootState(state))).toBe(2)
+      expect(selectLiveCall(rootState(state))).toBeNull()
+      expect(selectQueueDepth(rootState(state))).toBe(0)
+      // The catch-up cursor survives, so returning to the feed doesn't refetch
+      // the world.
+      expect(selectSince(rootState(state))).toBe(2)
+    })
+
+    /**
+     * Emptying the queue on the way in is not enough (#88): the subscription
+     * goes empty but the socket stays open, so a Call already in flight — or one
+     * the server sent before it saw the new matrix — lands *after* the clear,
+     * finds nothing playing, and starts playing over the archive the listener
+     * chose. Mutual exclusion has to be a standing state, not a one-off sweep.
+     */
+    it('will not start a Call that lands after the switch', () => {
+      const state = reduce(enterPlaybackMode(), ...arrive(call(1)))
+
+      expect(selectLiveCall(rootState(state))).toBeNull()
+      expect(selectQueueDepth(rootState(state))).toBe(0)
+    })
+
+    /** Returning to the live feed lifts it, or the feed would never come back. */
+    it('takes the Calls again once the listener returns to the feed', () => {
+      const state = reduce(enterPlaybackMode(), enterLiveFeed(), ...arrive(call(1)))
+
+      expect(selectLiveCall(rootState(state))?.id).toBe(1)
+    })
   })
 })
 
@@ -811,7 +834,7 @@ describe('selection (spec US 19–22)', () => {
     const state = reduce(
       chooseEverything(false),
       chooseTalkgroups({ keys: [tg(11, 100)], on: true }),
-      received({ call: patched }),
+      received(patched),
     )
 
     expect(selectLiveCall(rootState(state))).toEqual(patched)

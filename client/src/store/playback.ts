@@ -175,6 +175,13 @@ export const {
   stop,
 } = playbackSlice.actions
 
+/** Every action this slice has, as a set rather than as six names. The live
+ *  slice mirrors two of them (#88) so a reducer that can see no other slice can
+ *  still refuse a Call while the archive is playing; `store.test.ts` holds this
+ *  to its known contents, so adding a seventh is a decision taken rather than a
+ *  mirror silently going stale. */
+export const playbackActions = playbackSlice.actions
+
 export const playbackReducer = playbackSlice.reducer
 
 /** The slice of the store this module owns. */
