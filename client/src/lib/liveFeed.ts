@@ -26,16 +26,26 @@ export interface Subscription {
 
 export interface LiveFeedHandlers {
   onStatus(status: LiveStatus): void
-  /** A Call to play. A **Backfill** Call (the server flags one `catchup`)
-   *  arrives through here identically and deliberately unmarked: the listener
-   *  wants to hear what they missed for the same reason they want to hear what
-   *  just happened, and the store dedups by id either way. */
-  onCall(call: Call): void
+  /** A Call to play, and the **emission** it went out as (#94). A **Backfill**
+   *  Call (the server flags one `catchup`) arrives through here identically and
+   *  deliberately unmarked: the listener wants to hear what they missed for the
+   *  same reason they want to hear what just happened, and the store dedups by
+   *  id either way.
+   *
+   *  The emission is what becomes the cursor, and it is deliberately not the
+   *  Call's id: a Call a **Delay** held back is stored early and goes out late,
+   *  so its id says nothing about what this listener has already heard. */
+  onCall(call: Call, seq: number): void
   onLagged(skipped: number): void
-  /** The highest Call id seen so far, read at send time. It is sent **only**
-   *  when re-subscribing after a drop, as the catch-up cursor — a cursor on an
-   *  ordinary matrix change would ask the server to backfill traffic the
-   *  listener just chose to stop hearing. */
+  /** The server's **Backfill** could not reach back as far as we asked: there
+   *  are Calls in the gap only archive search can find. Told rather than left to
+   *  assume, because a silent truncation looks exactly like having missed
+   *  nothing. */
+  onGap(): void
+  /** The highest **emission** seen so far, read at send time. It is sent
+   *  **only** when re-subscribing after a drop, as the Backfill cursor — a
+   *  cursor on an ordinary matrix change would ask the server to backfill
+   *  traffic the listener just chose to stop hearing. */
   since(): number | undefined
   /** The token of the listener's push subscription (#16), read at send time
    *  because notifications can be turned on while the socket is already open.
@@ -142,19 +152,26 @@ export function connectLiveFeed(
 function receive(handlers: LiveFeedHandlers, data: unknown) {
   if (typeof data !== 'string') return
 
-  let frame: { t?: string; call?: Call; skipped?: number }
+  let frame: { t?: string; call?: Call; seq?: number; skipped?: number }
   try {
     frame = JSON.parse(data)
   } catch {
     return
   }
 
-  if (frame.t === 'call' && frame.call) {
-    handlers.onCall(frame.call)
+  // A Call without its emission is a frame we cannot use: taking it would move
+  // the listener's history on without moving their cursor, so the next reconnect
+  // would ask for it all over again.
+  if (frame.t === 'call' && frame.call && typeof frame.seq === 'number') {
+    handlers.onCall(frame.call, frame.seq)
     return
   }
   if (frame.t === 'lagged' && typeof frame.skipped === 'number') {
     handlers.onLagged(frame.skipped)
+    return
+  }
+  if (frame.t === 'gap') {
+    handlers.onGap()
   }
   // `hello` and `subscribed` need no action: the greeting's heartbeat cadence
   // is the server's business (the browser answers its pings), and the ack only

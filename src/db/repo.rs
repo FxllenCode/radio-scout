@@ -21,7 +21,7 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
 };
 
-use crate::call::{CallId, FilterOptions, StoredCall, SystemOption, TalkgroupOption};
+use crate::call::{CallId, Emission, FilterOptions, StoredCall, SystemOption, TalkgroupOption};
 use crate::catalog::{Catalog, CatalogSystem, CatalogTalkgroup, display_order};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
@@ -1476,32 +1476,82 @@ pub async fn catalog<C: ConnectionTrait>(db: &C) -> Result<Catalog, DbErr> {
     Ok(Catalog { systems })
 }
 
-/// The most-recent up-to-`limit` Calls with `id > since_id`, returned in
-/// ascending id order (ready to enqueue oldest-first).
+/// The most-recent up-to-`limit` Calls emitted after `since`, returned in
+/// ascending emission order (ready to enqueue oldest-first).
 ///
-/// This backs the live feed's **reconnect catch-up** (#9, an improvement over
-/// rdio, which drops any Call that arrives while a listener is briefly
-/// disconnected). A reconnecting client sends the last Call id it saw as `since`;
-/// the server backfills what it missed, bounded to `limit` so a client returning
-/// after a long gap replays a recent slice (not the whole archive) and falls back
-/// to archive search (#13) for more. Ordering by `id` (monotonic insert order),
-/// not `call_at_ms`, keeps "since the last one I saw" exact even if recorder
-/// timestamps are out of order. The caller filters the result through the
-/// connection's subscription + access scope, so this deliberately does no
-/// matrix filtering of its own.
-pub async fn recent_calls_since<C: ConnectionTrait>(
+/// This backs the live feed's **Backfill** (#9, an improvement over rdio, which
+/// drops any Call that arrives while a listener is briefly disconnected). A
+/// reconnecting Listener sends the last emission they saw as `since`; the server
+/// backfills what it missed, bounded to `limit` so a client returning after a
+/// long gap replays a recent slice (not the whole archive) and falls back to
+/// archive search (#13) for more.
+///
+/// **Emission order, not storage order and not `call_at_ms`** (#94). A recorder
+/// timestamp can arrive out of order, so `call_at_ms` was never a cursor; `id`
+/// was one only for as long as every Call is emitted the instant it is stored.
+/// A Call still being held — a **Delay** (#73), or one whose emission could not
+/// be recorded — has no emission yet and is not backfilled, which is the honest
+/// answer: it has not gone out.
+///
+/// The caller filters the result through the connection's Selection and access
+/// scope, so this deliberately does no matrix filtering of its own.
+pub async fn calls_emitted_since<C: ConnectionTrait>(
     db: &C,
-    since_id: CallId,
+    since: Emission,
     limit: u64,
 ) -> Result<Vec<call::Model>, DbErr> {
     let mut newest = call::Entity::find()
-        .filter(call::Column::Id.gt(since_id))
-        .order_by_desc(call::Column::Id)
+        .filter(call::Column::EmittedSeq.gt(since))
+        .order_by_desc(call::Column::EmittedSeq)
         .limit(limit)
         .all(db)
         .await?;
     newest.reverse(); // newest-first query -> ascending for oldest-first delivery
     Ok(newest)
+}
+
+/// Record that `call_id` went out on the live feed as emission `seq`.
+///
+/// The one place a Call stops being merely stored and becomes emitted. Ingest
+/// does it a breath after the insert; a **Delay** (#73) does it whenever its
+/// policy releases the Call — and either way this is what a **Backfill** reads.
+pub async fn emit_call<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+    seq: Emission,
+) -> Result<(), DbErr> {
+    call::Entity::update_many()
+        .col_expr(call::Column::EmittedSeq, Expr::value(seq))
+        .filter(call::Column::Id.eq(call_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// The highest emission this archive has recorded, or `0` for one that has never
+/// emitted anything.
+///
+/// Read once at boot, to resume the sequence where the last process left it. A
+/// sequence that restarted at `1` would hand newly emitted Calls numbers a
+/// Listener's cursor is already past, so their next reconnect would backfill
+/// nothing at all until the counter had climbed back over the archive.
+///
+/// **The `IS NOT NULL` is load-bearing, and it is a dialect difference** (#22).
+/// A Call that is stored but not yet emitted has no emission, and the two
+/// dialects disagree about where that sorts: SQLite treats `NULL` as smallest,
+/// so a descending sort puts it last, while Postgres treats it as largest and
+/// puts it *first*. Without the filter, one held Call — a **Delay** (#73), or
+/// one whose emission could not be recorded — would make this answer `0` on
+/// Postgres and the right number on SQLite, and every Listener's Backfill would
+/// come back empty after the next restart.
+pub async fn latest_emission<C: ConnectionTrait>(db: &C) -> Result<Emission, DbErr> {
+    Ok(call::Entity::find()
+        .filter(call::Column::EmittedSeq.is_not_null())
+        .order_by_desc(call::Column::EmittedSeq)
+        .one(db)
+        .await?
+        .and_then(|call| call.emitted_seq)
+        .unwrap_or(0))
 }
 
 /// Calls that reach `talkgroup_ref` via a patch (full patch resolution for the
@@ -2503,6 +2553,54 @@ pub struct NewLogEvent {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    /// A database with the schema on it, and nothing in it.
+    async fn db(dir: &tempfile::TempDir) -> crate::db::Db {
+        crate::db::connect(&crate::testing::sqlite_url(dir))
+            .await
+            .expect("db")
+    }
+
+    /// The least a Call needs to be storable.
+    fn a_call(talkgroup_ref: i64) -> NewCall {
+        NewCall {
+            system_ref: 11,
+            talkgroup_ref,
+            call_at_ms: 1_000 + talkgroup_ref,
+            object_key: format!("k{talkgroup_ref}"),
+            ..Default::default()
+        }
+    }
+
+    /// A **Backfill** is ordered by *emission*, never by storage (CONTEXT.md's
+    /// **Backfill**). #73's **Delay** stores a Call on arrival and emits it
+    /// later, so a Call stored first can be emitted second — and a cursor over
+    /// storage order steps straight past it, silently, for the one Listener who
+    /// was away when it went out.
+    #[tokio::test]
+    async fn a_backfill_reads_emission_order_not_storage_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = db(&tmp).await;
+        let early = insert_call(&db, &a_call(100), true, 0)
+            .await
+            .expect("early");
+        let late = insert_call(&db, &a_call(200), true, 0).await.expect("late");
+
+        // Emitted in the other order: the Call stored second goes out first, and
+        // the one stored first is held back the way a Delay holds one.
+        emit_call(&db, late.id, 1).await.expect("emit the late one");
+        emit_call(&db, early.id, 2)
+            .await
+            .expect("emit the early one");
+
+        let backfilled = calls_emitted_since(&db, 0, 10).await.expect("backfill");
+
+        assert_eq!(
+            backfilled.iter().map(|call| call.id).collect::<Vec<_>>(),
+            vec![late.id, early.id],
+            "emission order, not the order the rows were written"
+        );
+    }
 
     /// An empty batch is a no-op, not a statement. [`crate::logsink`]'s writer
     /// never sends one — it batches at least the event it woke up for — but an

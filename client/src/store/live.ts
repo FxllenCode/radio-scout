@@ -56,7 +56,10 @@ export interface LiveState {
   /** Bumped whenever playback (re)starts, so replaying the Call already loaded
    *  still restarts the element, whose `src` never changed. */
   playId: number
-  /** Highest Call id seen: the `since` cursor for reconnect catch-up. */
+  /** Highest **emission** the server has sent: the `since` cursor for a
+   *  **Backfill** (#94). Not the highest Call id — a Call a **Delay** held back
+   *  is stored early and goes out late, so its id says nothing about what this
+   *  listener has already heard. */
   since?: number
   /** Recently seen Call ids, oldest first — what makes at-least-once delivery
    *  idempotent for the listener. */
@@ -72,6 +75,14 @@ export interface LiveState {
   /** Calls the listener will not hear: dropped by the server's `lagged` notice
    *  or by the queue cap. The display admits them rather than hiding them. */
   missed: number
+  /** A **Backfill** could not reach back as far as we asked, so there is a hole
+   *  in this listener's history that only archive search can fill (ADR-0004).
+   *
+   *  A flag rather than a count, because the server cannot say how many it could
+   *  not carry without counting the whole archive — and "some" is what the
+   *  listener needs to know either way. It does not clear: a gap in what someone
+   *  heard does not heal. */
+  gap: boolean
   /** The listener has switched the live feed **off** (CONTEXT.md **Feed off**,
    *  #80) — a hard off, not a pause.
    *
@@ -108,6 +119,7 @@ export const initialLiveState: LiveState = {
   hold: null,
   avoided: {},
   missed: 0,
+  gap: false,
   // On. A Listener who has never touched the toggle gets audio playing, which
   // is what the app is for.
   feedOff: false,
@@ -347,10 +359,12 @@ const liveSlice = createSlice({
      * it.
      */
     received: {
-      prepare: (call: Call, at: number = Date.now()) => ({ payload: { call, at } }),
+      prepare: (call: Call, seq: number, at: number = Date.now()) => ({
+        payload: { call, seq, at },
+      }),
 
-      reducer(state, action: PayloadAction<{ call: Call; at: number }>) {
-        const { call, at } = action.payload
+      reducer(state, action: PayloadAction<{ call: Call; seq: number; at: number }>) {
+        const { call, seq, at } = action.payload
         // Asked before the Call is judged, so it is judged against the Avoids
         // that are actually in force — and so the matrix the socket re-sends
         // is the one that lets the Talkgroup through again.
@@ -369,8 +383,10 @@ const liveSlice = createSlice({
         if (state.seen.length > SEEN_LIMIT) state.seen.shift()
 
         // The cursor counts every Call the server sent, even one filtered out
-        // here, or a reconnect would ask for it again.
-        state.since = Math.max(state.since ?? 0, call.id)
+        // here, or a reconnect would ask for it again. The **emission**, not the
+        // Call's id (#94): the two are different orderings of the same Calls,
+        // and a cursor over ids would step past a Call that was held back.
+        state.since = Math.max(state.since ?? 0, seq)
 
         if (!wanted(state, call)) return
 
@@ -488,6 +504,17 @@ const liveSlice = createSlice({
       expire(state, action.payload)
     },
 
+    /** The server's **Backfill** left a hole: it could not reach back as far as
+     *  we asked, and only archive search can fill the rest (ADR-0004 `gap`).
+     *
+     *  Unconditional, unlike `lagged` below. A gap is a fact about what this
+     *  listener has already missed, not about traffic arriving now — so a
+     *  listener who turned the feed off between asking and being answered has
+     *  the same hole in their history either way. */
+    gapped(state) {
+      state.gap = true
+    },
+
     /** The server told us a slow connection cost us Calls (ADR-0004 `lagged`). */
     lagged(state, action: PayloadAction<number>) {
       // Same promise `turnFeedOff` keeps (#80): `missed` admits traffic the
@@ -534,6 +561,7 @@ export const {
   connecting,
   disconnected,
   expireAvoids,
+  gapped,
   lagged,
   received,
   replay,
@@ -577,6 +605,9 @@ export const selectAvoidedCount = (state: WithLive): number =>
 export const selectSince = (state: WithLive): number | undefined => state.live.since
 
 export const selectMissed = (state: WithLive): number => state.live.missed
+
+/** Does this listener's history have a hole a **Backfill** could not fill? */
+export const selectHasGap = (state: WithLive): boolean => state.live.gap
 
 /**
  * Why the live feed is or is not delivering (#88) — the one answer the banner,

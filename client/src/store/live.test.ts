@@ -71,7 +71,9 @@ function rootState(live: LiveState) {
 const NOW = 1_000
 
 /** Play `call` and let it arrive as the live feed would. */
-const arrive = (...calls: Call[]) => calls.map((one) => received(one, NOW))
+/** Calls arriving live, each at the emission its id happens to match — these
+ *  tests are about what the store does with a Call, not about the cursor. */
+const arrive = (...calls: Call[]) => calls.map((one) => received(one, one.id, NOW))
 
 /** A Call on an encrypted talkgroup: flagged, and with no audio to fetch — the
  *  shape `GET /api/calls` and the live feed both deliver for one (#42). */
@@ -103,11 +105,19 @@ describe('live slice', () => {
     })
 
     /** The cursor the client hands back as `since` on reconnect, so the server
-     *  can backfill what it missed (ADR-0004 catch-up). */
-    it('tracks the highest Call id it has seen', () => {
-      const state = reduce(...arrive(call(7), call(9), call(8)))
+     *  can backfill what it missed (ADR-0004).
+     *
+     *  The **emission**, never the Call's id (#94): the Call arriving last here
+     *  carries the *lowest* id, exactly as one a **Delay** held back would — and
+     *  a cursor over ids would ask the server to send it all over again. */
+    it('tracks the highest emission it has been sent', () => {
+      const state = reduce(
+        received(call(7), 1, NOW),
+        received(call(9), 2, NOW),
+        received(call(2), 3, NOW),
+      )
 
-      expect(selectSince(rootState(state))).toBe(9)
+      expect(selectSince(rootState(state))).toBe(3)
     })
 
     it('counts Calls the server says it dropped, so the UI can admit the gap', () => {
@@ -170,7 +180,7 @@ describe('live slice', () => {
       state = liveReducer(state, turnFeedOn())
 
       expect(selectFeedStatus(rootState(state))).toBe('live')
-      state = liveReducer(state, received(call(5)))
+      state = liveReducer(state, received(call(5), 5))
       expect(selectLiveCall(rootState(state))).toEqual(call(5))
     })
 
@@ -454,7 +464,7 @@ describe('live slice', () => {
    *  twice is what the client dedups away. */
   describe('a Call that arrives twice', () => {
     it('is played once', () => {
-      const state = reduce(...arrive(call(1), call(2)), received(call(2)))
+      const state = reduce(...arrive(call(1), call(2)), received(call(2), 2))
 
       expect(selectQueueDepth(rootState(state))).toBe(1)
       expect(selectLiveCall(rootState(state))).toEqual(call(1))
@@ -841,7 +851,7 @@ describe('selection (spec US 19–22)', () => {
     const state = reduce(
       chooseEverything(false),
       chooseTalkgroups({ keys: [tg(11, 100)], on: true }),
-      received(patched),
+      received(patched, 1),
     )
 
     expect(selectLiveCall(rootState(state))).toEqual(patched)

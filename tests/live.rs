@@ -5,11 +5,9 @@
 
 mod common;
 use common::{
-    CallUpload, Drained, FILTER_BUDGET, TestApp, Ws, drain_until, expect_ping,
-    expect_server_closed, frame_within, subscribe,
+    CallUpload, FILTER_BUDGET, TestApp, Ws, expect_server_closed, frame_within, subscribe,
 };
-
-use std::time::Duration;
+use radio_scout::db::repo::NewCall;
 
 use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -22,14 +20,6 @@ async fn received(ws: &mut Ws) -> Option<serde_json::Value> {
 /// An app with the live-feed test key registered.
 async fn feed_app() -> TestApp {
     TestApp::with_key("test-key").await
-}
-
-/// The same, with a heartbeat short enough that reaping is observable in
-/// milliseconds rather than the production 30 s (#9).
-async fn feed_app_with_heartbeat(heartbeat: Duration) -> TestApp {
-    let app = TestApp::builder().heartbeat(heartbeat).spawn().await;
-    app.create_api_key("test-key").await;
-    app
 }
 
 /// Post a Call for `system`/`talkgroup`, timestamped so each talkgroup is its
@@ -204,63 +194,17 @@ async fn hello_greeting_announces_protocol_and_heartbeat() {
 
     let (_ws, hello) = app.connect_ws_with_hello().await;
     assert_eq!(hello["t"], "hello");
-    assert_eq!(hello["protocol"], 1);
-    assert_eq!(hello["heartbeatMs"], 30_000, "default heartbeat period");
+    assert_eq!(hello["protocol"], 2, "#94's emission cursor is protocol 2");
+    assert_eq!(hello["heartbeatMs"], 30_000, "the shipped heartbeat period");
 }
 
-/// The server pings on the heartbeat interval, and a client that answers (via
-/// tokio-tungstenite's auto-pong) stays fully functional across heartbeats.
-#[tokio::test]
-async fn heartbeat_pings_and_keeps_a_responsive_client_alive() {
-    let app = feed_app_with_heartbeat(Duration::from_millis(150)).await;
-    let mut ws = app.connect_ws().await;
-
-    expect_ping(&mut ws).await; // heartbeat fired; reading it auto-ponged
-
-    // We answered the ping, so the connection is alive and still delivers.
-    subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
-    post_call(&app, 11, 54241).await;
-    let call = received(&mut ws)
-        .await
-        .expect("still delivering after a heartbeat");
-    assert_eq!(call["call"]["talkgroupRef"], 54241);
-}
-
-/// The first heartbeat waits a full period — the server does not ping on connect.
-/// A tokio timer can only fire late, never early, so "no ping within the first
-/// fraction of a period" is deterministic, not a flaky race.
-#[tokio::test]
-async fn no_heartbeat_ping_on_connect() {
-    let app = feed_app_with_heartbeat(Duration::from_millis(400)).await;
-    let mut ws = app.connect_ws().await; // consumes the hello at ~t=0
-
-    // A tokio timer only fires late, never early, so within the first fraction of
-    // a period no ping can have arrived — deterministic, not a flaky race.
-    assert_eq!(
-        drain_until(&mut ws, Duration::from_millis(150), |msg| matches!(
-            msg,
-            WsMessage::Ping(_)
-        ))
-        .await,
-        Drained::TimedOut,
-        "no heartbeat ping should arrive before the first full period",
-    );
-}
-
-/// A client that goes silent (never answers the heartbeat) is reaped after two
-/// unanswered pings — rdio leaves such half-open connections lingering.
-#[tokio::test]
-async fn silent_connection_is_reaped_by_the_heartbeat() {
-    let heartbeat = Duration::from_millis(100);
-    let app = feed_app_with_heartbeat(heartbeat).await;
-    let (mut ws, _hello) = app.connect_ws_with_hello().await;
-
-    // Go silent: never read, so no auto-pong is ever sent. Two missed heartbeats
-    // later the server must have closed us.
-    tokio::time::sleep(heartbeat * 4).await;
-
-    expect_server_closed(&mut ws).await;
-}
+// The heartbeat, the ping-on-connect delay and the reaping that follows an
+// unanswered ping are `src/live.rs`'s own tests since #94: they are rows in the
+// connection's table and a run of its loop under a paused clock, which is why
+// the harness no longer has a knob for shortening the shipped period. What lived
+// here instead was three tests that shortened it and then slept through it —
+// ~750 ms of wall clock to observe two decisions, and the only assertion a sleep
+// can make about something that should *not* happen is "not yet".
 
 /// Reconnect catch-up (#9): a client that reconnects with a `since` cursor is
 /// backfilled the matching Calls it missed, oldest-first and flagged `catchup`,
@@ -362,6 +306,263 @@ async fn backfill_statements(calls: i64) -> u64 {
     // Every statement the Backfill issues precedes the first frame it sends, so
     // by here they are all counted.
     app.statements_issued() - before
+}
+
+/// Every Call goes out carrying the **emission** it was sent as (#94), and the
+/// archive records the same number — so the cursor a Listener hands back as
+/// `since` is one the server can order a Backfill by.
+///
+/// Not the Call's id, though on this path they coincide: ingest stores and emits
+/// in one breath, so the first Call of an empty archive is row 1 and emission 1.
+/// They stop coinciding the moment a **Delay** (#73) holds one back.
+#[tokio::test]
+async fn a_live_frame_carries_the_emission_it_went_out_as() {
+    let app = feed_app().await;
+    let mut ws = app.connect_ws().await;
+    subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
+
+    post_call(&app, 11, 54241).await;
+
+    let frame = received(&mut ws).await.expect("the Call reaches the feed");
+    assert_eq!(frame["seq"], 1, "the first emission of an empty archive");
+    assert_eq!(
+        app.the_call().await.emitted_seq,
+        Some(1),
+        "and the archive records the emission it went out as"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #94: the Backfill cursor is an emission sequence, distinct from the Call id.
+// ---------------------------------------------------------------------------
+
+/// **The hole an emission cursor closes.** A Call stored *before* another but
+/// emitted *after* it must still reach a Listener who reconnects in between —
+/// and a cursor over storage order steps straight past it, because the late Call
+/// carries the lower id.
+///
+/// This is #73's **Delay** in miniature: a safety policy stores a Call on arrival
+/// and releases it seconds later. Settled here rather than inside #73, because a
+/// protocol change arriving as the side effect of a policy feature is how a
+/// Listener ends up never hearing the one Call somebody decided to hold.
+#[tokio::test]
+async fn a_call_stored_early_and_emitted_late_is_backfilled() {
+    let app = feed_app().await;
+    // Stored first, held back: no emission yet, and the lowest id in the archive.
+    let held = app
+        .seed_call(NewCall {
+            system_ref: 11,
+            talkgroup_ref: 100,
+            call_at_ms: 1_000,
+            object_key: "held.wav".into(),
+            ..Default::default()
+        })
+        .await;
+    // Stored second and emitted immediately, the ordinary path.
+    post_call(&app, 11, 200).await;
+    // And now the policy releases the first one.
+    app.emit(held).await;
+
+    let mut ws = app.connect_ws().await;
+    subscribe(&mut ws, r#"{"t":"sub","all":true,"since":0}"#).await;
+
+    let first = received(&mut ws).await.expect("the Call emitted first");
+    let second = received(&mut ws).await.expect("the Call emitted second");
+    assert_eq!(first["call"]["talkgroupRef"], 200);
+    assert_eq!(
+        second["call"]["talkgroupRef"], 100,
+        "the held Call is delivered, and after the Call that went out before it"
+    );
+    assert!(
+        second["call"]["id"].as_i64() < first["call"]["id"].as_i64(),
+        "it really does carry the lower id: a cursor over ids would have skipped it"
+    );
+    assert_eq!(second["seq"], 2, "emitted second, so it is emission 2");
+}
+
+/// A **Backfill** that could not reach back as far as the Listener asked says so,
+/// because a silent truncation is indistinguishable from having missed nothing —
+/// and the Listener needs to know to go and search the archive (#13).
+#[tokio::test]
+async fn a_truncated_backfill_tells_the_listener_their_history_has_a_gap() {
+    let app = feed_app().await;
+    // One past the bound, so the oldest Call cannot be carried. Seeded and
+    // emitted rather than uploaded: this is about the size of the page, and a
+    // hundred and one multipart posts would say nothing more about it.
+    for talkgroup in 0..101 {
+        let id = app
+            .seed_call(NewCall {
+                system_ref: 11,
+                talkgroup_ref: 100 + talkgroup,
+                call_at_ms: 1_000 + talkgroup,
+                object_key: format!("k{talkgroup}.wav"),
+                ..Default::default()
+            })
+            .await;
+        app.emit(id).await;
+    }
+
+    let mut ws = app.connect_ws().await;
+    subscribe(&mut ws, r#"{"t":"sub","all":true,"since":0}"#).await;
+
+    let gap = received(&mut ws).await.expect("the gap notice");
+    assert_eq!(
+        gap["t"], "gap",
+        "and it arrives before the page it is about"
+    );
+    assert_eq!(gap["since"], 0);
+    let first = received(&mut ws).await.expect("the oldest Call that fit");
+    assert_eq!(
+        first["seq"], 2,
+        "emission 1 is the Call that did not fit, which is what the gap is"
+    );
+}
+
+/// A Backfill that reached far enough says nothing about gaps: a `gap` on every
+/// reconnect is a notice a client learns to ignore.
+#[tokio::test]
+async fn an_untruncated_backfill_says_nothing_about_gaps() {
+    let app = feed_app().await;
+    post_call(&app, 11, 100).await;
+
+    let mut ws = app.connect_ws().await;
+    subscribe(&mut ws, r#"{"t":"sub","all":true,"since":0}"#).await;
+
+    let frame = received(&mut ws).await.expect("the backfilled Call");
+    assert_eq!(frame["t"], "call", "no gap preceded it");
+}
+
+/// The emission sequence **survives a restart**. Starting over at 1 would hand
+/// new Calls numbers every reconnecting Listener's cursor is already past, so
+/// their Backfills would come back empty until the counter had climbed back over
+/// the archive — a hole that opens on restart and closes on its own.
+#[tokio::test]
+async fn the_emission_sequence_resumes_where_the_last_process_left_it() {
+    let mut app = feed_app().await;
+    post_call(&app, 11, 100).await;
+    post_call(&app, 11, 200).await;
+
+    // A restart, not a new app: the archive — and the ingest key registered on
+    // it — are the ones the last run left behind.
+    app.restart().await;
+    post_call(&app, 11, 300).await;
+
+    let after = app.calls().await;
+    assert_eq!(
+        after.last().expect("the newest Call").emitted_seq,
+        Some(3),
+        "the third emission of this archive, not the first of this process"
+    );
+}
+
+/// A boot that cannot read the archive's high-water mark **still boots** — the
+/// same posture a Retention sweep that cannot run takes, because a scanner an
+/// operator can still reach the Logs view of is worth more than one that refuses
+/// to start.
+///
+/// ERROR rather than the WARN its per-Call sibling uses (ADR-0011 rule 7): a
+/// Call that could not record its emission costs one Listener one replay, where
+/// a sequence that could not be resumed would mis-number *every* Call this
+/// process emits.
+#[tokio::test]
+async fn a_boot_that_cannot_read_the_emission_sequence_still_serves() {
+    let mut app = feed_app().await;
+    let logged = app.store_logs();
+    app.refuse_statements_on("calls");
+
+    app.restart().await;
+
+    assert_eq!(
+        app.get("/healthz").await.status(),
+        200,
+        "an unreadable archive took the scanner down with it"
+    );
+    assert!(
+        logged
+            .wait_for("could not read the emission sequence")
+            .await
+            .contains("ERROR")
+    );
+}
+
+/// An emission that cannot be written down costs the Listener a replay, never
+/// the Call: everyone connected still hears it, the row keeps no emission (so
+/// nothing backfills a Call that may never have gone out), and the operator is
+/// told — because a Call missing from one Listener's Backfill and present in
+/// everyone else's is only ever reported as "some calls go missing sometimes".
+#[tokio::test]
+async fn an_emission_that_cannot_be_recorded_still_reaches_the_feed() {
+    let app = feed_app().await;
+    let logged = app.store_logs();
+    let mut ws = app.connect_ws().await;
+    subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
+    // Only the update: the insert and the read-backs an ingest needs still work,
+    // so the Call is genuinely stored and genuinely answered.
+    app.refuse_updates_to("calls");
+
+    post_call(&app, 11, 54241).await;
+
+    let frame = received(&mut ws).await.expect("the Call still goes out");
+    assert_eq!(frame["call"]["talkgroupRef"], 54241);
+    assert_eq!(
+        app.the_call().await.emitted_seq,
+        None,
+        "and the row does not claim an emission it never recorded"
+    );
+    assert!(
+        logged
+            .wait_for("emission could not be recorded")
+            .await
+            .contains("WARN")
+    );
+}
+
+/// A Backfill whose query fails costs the Listener their history, never their
+/// connection — and never silently.
+#[tokio::test]
+async fn a_backfill_that_cannot_be_read_leaves_the_connection_serving() {
+    let app = feed_app().await;
+    let logged = app.store_logs();
+    let mut ws = app.connect_ws().await;
+    app.refuse_statements_on("calls");
+
+    subscribe(&mut ws, r#"{"t":"sub","all":true,"since":0}"#).await;
+
+    assert!(
+        received(&mut ws).await.is_none(),
+        "an unreadable page carries no Calls"
+    );
+    // The connection is still there: it acks a second subscribe.
+    subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
+    assert!(
+        logged
+            .wait_for("live-feed Backfill query failed")
+            .await
+            .contains("WARN")
+    );
+}
+
+/// The same, one query later: the page was read but could not be denormalized —
+/// the Systems and Talkgroups a Call's view is built from are gone.
+#[tokio::test]
+async fn a_backfill_whose_view_cannot_be_built_leaves_the_connection_serving() {
+    let app = feed_app().await;
+    post_call(&app, 11, 100).await;
+    let logged = app.store_logs();
+    let mut ws = app.connect_ws().await;
+    // `calls` still answers, so the page is read; `systems` does not, so the view
+    // cannot be built.
+    app.refuse_statements_on("systems");
+
+    subscribe(&mut ws, r#"{"t":"sub","all":true,"since":0}"#).await;
+
+    assert!(received(&mut ws).await.is_none(), "no half-built page");
+    assert!(
+        logged
+            .wait_for("live-feed Backfill view failed")
+            .await
+            .contains("WARN")
+    );
 }
 
 /// Patch fanout (#9, spec story 18): a Call on a Talkgroup the listener didn't

@@ -509,9 +509,12 @@ impl Fanout {
     }
 }
 
-fn on_broadcast(result: Result<Arc<StoredCall>, broadcast::error::RecvError>) -> Fanout {
+fn on_broadcast(result: Result<crate::live::Emitted, broadcast::error::RecvError>) -> Fanout {
     match result {
-        Ok(call) => Fanout::Notify(call),
+        // The emission a Call went out as is the live feed's cursor (#94), and
+        // means nothing to a notification: a phone that was asleep is told what
+        // is happening now, not where it is in a sequence.
+        Ok(emitted) => Fanout::Notify(emitted.call),
         // Falling behind the fanout costs notifications, not correctness — the
         // next Call notifies. Said out loud because a sender that cannot keep
         // up is the operator's to know about.
@@ -864,9 +867,15 @@ mod tests {
         })
     }
 
+    /// The emission a Call went out as is the live feed's cursor and nothing to
+    /// a notification (#94) — what matters here is the Call under it.
     #[test]
     fn a_broadcast_call_is_considered_for_notification() {
-        assert!(matches!(on_broadcast(Ok(a_call())), Fanout::Notify(_)));
+        let emitted = crate::live::Emitted {
+            seq: 7,
+            call: a_call(),
+        };
+        assert!(matches!(on_broadcast(Ok(emitted)), Fanout::Notify(_)));
     }
 
     /// A sender that cannot keep up loses notifications, not Calls — but the
@@ -914,7 +923,10 @@ mod tests {
     fn an_ordinary_broadcast_logs_nothing() {
         let capture = LogCapture::start();
 
-        on_broadcast(Ok(a_call()));
+        on_broadcast(Ok(crate::live::Emitted {
+            seq: 1,
+            call: a_call(),
+        }));
 
         assert_eq!(capture.text(), "");
     }

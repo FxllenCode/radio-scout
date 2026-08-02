@@ -111,7 +111,7 @@ describe('makeStore', () => {
     const store = makeStore({ storage, namespace: 'default' })
 
     store.dispatch(
-      received({ id: 1, systemRef: 11, talkgroupRef: 100, audioUrl: '/api/call/1/audio' }),
+      received({ id: 1, systemRef: 11, talkgroupRef: 100, audioUrl: '/api/call/1/audio' }, 1),
     )
 
     expect(writes).toEqual([])
@@ -259,7 +259,7 @@ describe('makeStore', () => {
       const { storage } = fakeStorage()
       const store = makeStore({ storage, namespace: 'truck' })
 
-      store.dispatch(received(CALL, NOW))
+      store.dispatch(received(CALL, 1, NOW))
       store.dispatch(toggleHoldSystem())
       store.dispatch(avoid({ until: NOW + 30 * 60_000 }))
 
@@ -289,7 +289,7 @@ describe('makeStore', () => {
     it('comes back holding nothing once the Listener lets go', () => {
       const { storage } = fakeStorage()
       const store = makeStore({ storage, namespace: 'default' })
-      store.dispatch(received(CALL, NOW))
+      store.dispatch(received(CALL, 1, NOW))
       store.dispatch(toggleHoldSystem())
       store.dispatch(toggleHoldSystem())
 
@@ -343,7 +343,7 @@ describe('makeStore', () => {
     it('runs unremembered when the browser has no storage', () => {
       const store = makeStore({ storage: undefined, namespace: 'default' })
 
-      store.dispatch(received(CALL, NOW))
+      store.dispatch(received(CALL, 1, NOW))
       store.dispatch(avoid({ until: 0 }))
 
       expect(avoided(store)).toEqual({ '11:100': 0 })

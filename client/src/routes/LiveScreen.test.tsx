@@ -3,7 +3,13 @@ import userEvent from '@testing-library/user-event'
 import { axe } from 'vitest-axe'
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { lagged, received, selectLiveMatrix, selectQueueDepth } from '@/store/live'
+import {
+  gapped,
+  lagged,
+  received,
+  selectLiveMatrix,
+  selectQueueDepth,
+} from '@/store/live'
 import { enterPlaybackMode, playResults } from '@/store/playback'
 import { progressed, selectProgress } from '@/store/transport'
 import { makeStore, type AppStore } from '@/store/store'
@@ -53,7 +59,7 @@ function listening(...calls: Call[]): AppStore {
   const store = makeStore()
   renderApp('/', store)
   act(() => {
-    for (const one of calls) store.dispatch(received(one))
+    for (const one of calls) store.dispatch(received(one, one.id))
   })
   return store
 }
@@ -161,6 +167,31 @@ describe('LiveScreen', () => {
       })
 
       expect(screen.getByText(/3 missed/i)).toBeInTheDocument()
+    })
+
+    /** ADR-0004's `gap`: a **Backfill** could not reach back far enough, so the
+     *  listener's history has a hole nobody can count. Saying "some" is what
+     *  stops a silent truncation reading as having missed nothing. */
+    it('admits a Backfill that could not reach back far enough', () => {
+      const store = listening(call())
+
+      act(() => {
+        store.dispatch(gapped())
+      })
+
+      expect(screen.getByText(/some missed/i)).toBeInTheDocument()
+    })
+
+    /** Both at once: a number that is known to be an undercount. */
+    it('marks a counted gap as a floor when there is one it could not count', () => {
+      const store = listening(call())
+
+      act(() => {
+        store.dispatch(lagged(3))
+        store.dispatch(gapped())
+      })
+
+      expect(screen.getByText(/3\+ missed/i)).toBeInTheDocument()
     })
   })
 
@@ -415,7 +446,7 @@ describe('LiveScreen', () => {
       await user.click(toggle())
 
       expect(toggle()).toHaveAttribute('aria-pressed', 'true')
-      act(() => void store.dispatch(received(call({ id: 9 }))))
+      act(() => void store.dispatch(received(call({ id: 9 }), 9)))
       expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
     })
 
@@ -564,7 +595,7 @@ describe('LiveScreen', () => {
     const store = makeStore()
     const { container } = renderApp('/', store)
     act(() => {
-      store.dispatch(received(call()))
+      store.dispatch(received(call(), 1))
     })
 
     expect(await axe(container)).toHaveNoViolations()

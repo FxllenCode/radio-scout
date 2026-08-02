@@ -41,13 +41,16 @@ it('records a refused play() as paused, rather than showing it as playing', asyn
   if (!audio) throw new Error('the player renders one <audio> element')
 
   store.dispatch(
-    received({
-      id: 1,
-      systemRef: 11,
-      talkgroupRef: 54241,
-      talkgroupLabel: 'FD Dispatch',
-      audioUrl: wavDataUrl(0.4, 440),
-    }),
+    received(
+      {
+        id: 1,
+        systemRef: 11,
+        talkgroupRef: 54241,
+        talkgroupLabel: 'FD Dispatch',
+        audioUrl: wavDataUrl(0.4, 440),
+      },
+      1,
+    ),
   )
 
   await expect.poll(() => selectIsPaused(store.getState())).toBe(true)

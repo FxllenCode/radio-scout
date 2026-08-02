@@ -21,23 +21,24 @@
 //! own startup. `main.rs` is bootstrap glue that is excluded from coverage; a
 //! subsystem wired there is a subsystem no test can reach.
 //!
-//! [`Wiring`] is deliberately small, and five of its seven entries earn their
+//! [`Wiring`] is deliberately small, and five of its six entries earn their
 //! place by varying between two *real* runs: the object store (a filesystem
 //! directory, an S3 bucket, a substitute that can be made to fail), what is
 //! composed around the database handle (the same move, one level up — #97),
 //! the clock, the credential
 //! **sources**, and the draining half of the log sink, which is there because
-//! of an ordering rather than a value. The other two are on borrowed time and
-//! say so where they are declared: `bind`, because the suite listens on
-//! loopback where a scanner listens on every interface, and `heartbeat`, which
-//! #94 removes along with the need for it.
+//! of an ordering rather than a value. The sixth is on borrowed time and says
+//! so where it is declared: `bind`, because the suite listens on loopback where
+//! a scanner listens on every interface. `heartbeat` used to be a seventh, and
+//! #94 removed it along with the need for it — reaping is a row in the live
+//! connection's own table now, so nothing has to shorten a period from outside
+//! in order to watch one happen.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::db::Db;
+use crate::db::{Db, repo};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -100,12 +101,6 @@ pub struct Wiring {
     /// The suite asks for loopback; an operator-facing bind-address setting is
     /// a separate ask, and would be `[server]`'s rather than this.
     bind: Option<SocketAddr>,
-    /// How often the live feed pings an idle connection (#9).
-    ///
-    /// The one knob here that varies between *tests* rather than between real
-    /// runs, and it is on borrowed time: #94 makes reaping and heartbeat
-    /// testable as a table of state and event, and takes this with it.
-    heartbeat: Option<Duration>,
     /// The draining half of the operator log sink (#30), when one is on.
     ///
     /// It arrives from outside because of the order it has to be built in: the
@@ -152,13 +147,6 @@ impl Wiring {
     /// Listen here rather than on every interface.
     pub fn bind(mut self, addr: SocketAddr) -> Self {
         self.bind = Some(addr);
-        self
-    }
-
-    /// Ping idle live-feed connections this often, rather than on the shipped
-    /// period.
-    pub fn heartbeat(mut self, heartbeat: Duration) -> Self {
-        self.heartbeat = Some(heartbeat);
         self
     }
 
@@ -301,6 +289,17 @@ pub struct Instance {
     pub db: Db,
     /// The audio store every handler and worker shares.
     pub store: Arc<dyn AudioStore>,
+    /// The state every handler is given — the way *into* the running
+    /// application, where `db` and `store` above are ways to look at what it
+    /// keeps.
+    ///
+    /// Public for the one thing an outside caller genuinely has to be able to
+    /// do and cannot reach through HTTP: **emit** a Call that is already stored
+    /// (#94). Ingest stores and emits in one breath, so nothing over the wire
+    /// can produce a Call that was stored early and went out late — which is
+    /// exactly the case a **Backfill** ordered by emission exists for, and
+    /// exactly what a **Delay** (#73) will do through this same call.
+    pub state: AppState,
     running: Running,
     /// Every Worker's reading, shared with the `AppState` handlers are given
     /// (#93) — the half of a Worker that has to reach a status surface.
@@ -328,9 +327,8 @@ pub struct Instance {
 struct Parts {
     credentials: Credentials,
     clock: Clock,
-    /// Where to listen and how often to ping, neither of which is a setting.
+    /// Where to listen, which is not a setting.
     bind: Option<SocketAddr>,
-    heartbeat: Option<Duration>,
     /// What to compose around the database handle, if a caller asked for
     /// anything — kept because a restart re-opens the database and whatever was
     /// composed around it has to survive that.
@@ -457,6 +455,7 @@ impl Instance {
         self.addr = run.addr;
         self.db = run.db;
         self.store = run.store;
+        self.state = run.state;
         self.running = run.running;
         self.workers = run.workers;
         self.config = config;
@@ -485,7 +484,6 @@ pub async fn start(config: Config, wiring: Wiring) -> Result<Instance, StartErro
         credentials: wiring.credentials,
         clock: wiring.clock,
         bind: wiring.bind,
-        heartbeat: wiring.heartbeat,
         db: wiring.db,
     };
     assemble(
@@ -577,8 +575,24 @@ async fn assemble(
 
     let mut state = AppState::new(audio.clone(), db.clone(), config.ingest.clone());
     state.workers = workers.clone();
-    if let Some(heartbeat) = parts.heartbeat {
-        state.live = crate::live::LiveFeed::with_heartbeat(heartbeat);
+    // Pick the emission sequence up where the last process left it (#94). Read
+    // once, here, because it is the archive's own high-water mark: a sequence
+    // that restarted at 1 would hand new Calls numbers every reconnecting
+    // Listener's cursor is already past, and their Backfills would come back
+    // empty until it had climbed over the archive again.
+    //
+    // A read that fails does **not** stop the boot, for the same reason a sweep
+    // that cannot run does not: a scanner that refuses to start is worth less
+    // than one an operator can still reach the Logs view of. And an unreadable
+    // `calls` table cannot produce a wrong emission anyway — a Call is emitted
+    // only after it has been stored in that same table, so nothing will be
+    // emitted at all until it answers again.
+    match repo::latest_emission(&db).await {
+        Ok(latest) => state.live.resume_from(latest),
+        Err(error) => error!(
+            %error,
+            "could not read the emission sequence; a reconnecting Listener may be backfilled nothing"
+        ),
     }
     state.trusted_proxies = config.trusted_proxies();
     state.admin = AdminAuth::provisioned(&admin, config.admin.clone());
@@ -593,7 +607,7 @@ async fn assemble(
     // and the first thing it does when it is on is pick up whatever a previous
     // process was part-way through.
     running.extend(crate::enhance::spawn(state.clone()).map(|worker| workers.adopt(worker)));
-    let app = build_app(state);
+    let app = build_app(state.clone());
 
     let bind = parts
         .bind
@@ -634,6 +648,7 @@ async fn assemble(
         addr,
         db,
         store: audio,
+        state,
         running: Running {
             server: Some(server),
             shutdown: Some(tell_to_stop),

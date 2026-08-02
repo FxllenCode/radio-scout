@@ -17,7 +17,7 @@ const scanner = (): AppStore => makeStore({ storage: undefined })
 
 /** Avoid the Talkgroup `talkgroupRef` is on until `until`. */
 function avoidUntil(store: AppStore, talkgroupRef: number, until: number) {
-  store.dispatch(received(call(talkgroupRef)))
+  store.dispatch(received(call(talkgroupRef), 1))
   store.dispatch(avoid({ until }))
 }
 
@@ -88,7 +88,7 @@ describe('an Avoid lapsing on its own (#91, spec US 14)', () => {
     avoidUntil(store, 100, 30 * 60_000)
     vi.setSystemTime(31 * 60_000)
 
-    store.dispatch(received({ ...call(100), id: 999 }))
+    store.dispatch(received({ ...call(100), id: 999 }, 2))
 
     expect(store.getState().live.current?.id).toBe(999)
     // ...and the server is told, so it resumes sending the Talkgroup rather

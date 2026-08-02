@@ -418,20 +418,11 @@ async fn the_builder_plumbs_the_ingest_config() {
     );
 }
 
-/// The heartbeat period reaches the app, which the client learns from the
-/// greeting — so a test can drive reaping in milliseconds instead of the
-/// production 30 s.
-#[tokio::test]
-async fn the_builder_plumbs_the_heartbeat_period() {
-    let app = TestApp::builder()
-        .heartbeat(Duration::from_millis(120))
-        .spawn()
-        .await;
-
-    let (_ws, hello) = app.connect_ws_with_hello().await;
-
-    assert_eq!(hello["heartbeatMs"], 120);
-}
+// The builder used to plumb a heartbeat period, so that a test could drive
+// reaping in milliseconds rather than the shipped 30 s. #94 retired the knob
+// along with the need for it: the heartbeat is a row in the live connection's
+// own table and a run of its loop under a paused clock, neither of which needs
+// the period shortened from outside.
 
 /// A caller-supplied blob store replaces the temp filesystem one — this is how
 /// the S3 serving mode gets an end-to-end test without a running S3.

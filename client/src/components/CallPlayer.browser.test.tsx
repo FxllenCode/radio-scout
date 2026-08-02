@@ -89,7 +89,7 @@ describe('the one reused element', () => {
     await listenerIsHere()
     const { store, audio } = mount()
 
-    store.dispatch(received(call(1, 0.4)))
+    store.dispatch(received(call(1, 0.4), 1))
 
     await playing(audio)
     // Decoded, not declared: nothing in this test told it 0.4.
@@ -112,11 +112,11 @@ describe('the one reused element', () => {
   it('restarts playback on the same element when the Call changes', async () => {
     await listenerIsHere()
     const { store, audio } = mount()
-    store.dispatch(received(call(1, 0.4)))
+    store.dispatch(received(call(1, 0.4), 1))
     await playing(audio)
     const first = audio.src
 
-    store.dispatch(received(call(2, 0.4)))
+    store.dispatch(received(call(2, 0.4), 2))
 
     await expect.poll(() => audio.src).not.toBe(first)
     await playing(audio)
@@ -134,7 +134,7 @@ describe('the one reused element', () => {
   it('rewinds a Call it is already holding, rather than playing its end', async () => {
     await listenerIsHere()
     const { store, audio } = mount()
-    store.dispatch(received(call(1, 0.4)))
+    store.dispatch(received(call(1, 0.4), 1))
     await playing(audio)
     // Let it get somewhere before asking for it again.
     await expect.poll(() => audio.currentTime).toBeGreaterThan(0.1)
@@ -197,7 +197,7 @@ describe('the keep-alive loop', () => {
     await listenerIsHere()
     const { store, audio } = mount()
     // The gap it bridges: a Call has played, and nothing is behind it.
-    store.dispatch(received(call(1, 0.4)))
+    store.dispatch(received(call(1, 0.4), 1))
     await playing(audio)
     store.dispatch(advance())
 
@@ -220,7 +220,7 @@ describe('the Media Session', () => {
     await listenerIsHere()
     const { store, audio } = mount()
 
-    store.dispatch(received(call(1, 0.4)))
+    store.dispatch(received(call(1, 0.4), 1))
     await playing(audio)
 
     const metadata = navigator.mediaSession.metadata
@@ -252,7 +252,7 @@ describe('the Media Session', () => {
     await listenerIsHere()
     const { store, audio } = mount()
 
-    store.dispatch(received(call(1, 0.4)))
+    store.dispatch(received(call(1, 0.4), 1))
     await playing(audio)
 
     const artwork = [...(navigator.mediaSession.metadata?.artwork ?? [])]
@@ -289,7 +289,7 @@ describe('the Media Session', () => {
     )
     const { store, audio } = mount()
 
-    store.dispatch(received(call(1, 0.4)))
+    store.dispatch(received(call(1, 0.4), 1))
     await playing(audio)
     await expect.poll(() => audio.duration).toBeGreaterThan(0)
 

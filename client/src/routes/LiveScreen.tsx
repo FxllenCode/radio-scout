@@ -30,6 +30,7 @@ import {
   selectFeedStatus,
   selectHistory,
   selectHold,
+  selectHasGap,
   selectLiveCall,
   selectLiveControls,
   selectLiveStatus,
@@ -79,6 +80,7 @@ export function LiveScreen() {
   const status = useAppSelector(selectLiveStatus)
   const queued = useAppSelector(selectQueueDepth)
   const missed = useAppSelector(selectMissed)
+  const gap = useAppSelector(selectHasGap)
   const history = useAppSelector(selectHistory)
   const hold = useAppSelector(selectHold)
   const avoiding = useAppSelector(selectAvoidedCount)
@@ -117,9 +119,15 @@ export function LiveScreen() {
       }
     >
       {call ? (
-        <Display call={call} progress={progress} paused={paused} missed={missed} />
+        <Display
+          call={call}
+          progress={progress}
+          paused={paused}
+          missed={missed}
+          gap={gap}
+        />
       ) : (
-        <Idle empty={readout.empty} missed={missed} />
+        <Idle empty={readout.empty} missed={missed} gap={gap} />
       )}
 
       {/* The master switch (#80). First, and its own row, because it governs
@@ -245,11 +253,13 @@ function Display({
   progress,
   paused,
   missed,
+  gap,
 }: {
   call: Call
   progress: number
   paused: boolean
   missed: number
+  gap: boolean
 }) {
   const color = ledForCall(call)
 
@@ -307,7 +317,7 @@ function Display({
         </Stat>
       </dl>
 
-      {missed > 0 && <Missed count={missed} />}
+      <Missed count={missed} gap={gap} />
     </section>
   )
 }
@@ -321,23 +331,42 @@ function Display({
  * can only act on one of them. Two readers of one answer, so they cannot
  * describe two different situations.
  */
-function Idle({ empty, missed }: { empty: FeedEmpty; missed: number }) {
+function Idle({
+  empty,
+  missed,
+  gap,
+}: {
+  empty: FeedEmpty
+  missed: number
+  gap: boolean
+}) {
   return (
     <div className="flex flex-col items-center gap-3 rounded-xl border border-border bg-card px-6 py-12 text-center">
       <Radio className="size-6 text-muted-foreground" aria-hidden />
       <p className="font-mono text-sm text-muted-foreground">{empty.headline}</p>
       <p className="max-w-xs text-xs text-muted-foreground/70">{empty.detail}</p>
-      {missed > 0 && <Missed count={missed} />}
+      <Missed count={missed} gap={gap} />
     </div>
   )
 }
 
-/** Calls the listener will not hear, said out loud — rdio drops them silently
- *  (ADR-0004 `lagged`). */
-function Missed({ count }: { count: number }) {
+/**
+ * Calls the listener will not hear, said out loud — rdio drops them silently
+ * (ADR-0004's `lagged` and `gap`).
+ *
+ * Two ways to miss traffic, and the difference is whether anyone can count it.
+ * A lagging connection drops a known number; a **Backfill** that could not reach
+ * back far enough leaves a hole the server cannot size without walking the whole
+ * archive. So a gap says "some", and a gap *on top of* a count says the count is
+ * a floor — because "3 missed" when it was really thirty is worse than admitting
+ * the number is not the whole story.
+ */
+function Missed({ count, gap }: { count: number; gap: boolean }) {
+  if (count === 0 && !gap) return null
+  const how = count > 0 ? `${count}${gap ? '+' : ''}` : 'some'
   return (
     <p className="mt-3 font-mono text-[11px] text-led-red/80" role="status">
-      {count} missed — search the archive to catch up
+      {how} missed — search the archive to catch up
     </p>
   )
 }

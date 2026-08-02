@@ -11,6 +11,7 @@ import {
   connected,
   connecting,
   disconnected,
+  gapped,
   lagged,
   received,
   selectFeedStatus,
@@ -69,8 +70,9 @@ export function LiveFeedLink() {
     }
     const handle = connectLiveFeed({
       onStatus: (status) => dispatch(STATUS_ACTION[status]()),
-      onCall: (call) => dispatch(received(call)),
+      onCall: (call, seq) => dispatch(received(call, seq)),
       onLagged: (skipped) => dispatch(lagged(skipped)),
+      onGap: () => dispatch(gapped()),
       // Read at send time, not subscribe time: the cursor moves with every Call
       // and only matters when the socket comes back (ADR-0004). Turning the feed
       // off clears it, so coming back subscribes from now.

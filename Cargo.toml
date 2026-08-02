@@ -110,6 +110,12 @@ print_stderr = "deny"
 dbg_macro = "deny"
 
 [dev-dependencies]
+# `test-util` is what `#[tokio::test(start_paused = true)]` needs: it pauses the
+# clock and advances it only when the runtime has nothing else to do, so the
+# live-feed loop's thirty-second heartbeat is proven in microseconds and with no
+# sleep to be flaky about (#94). A dev-dependency, so a release build never
+# carries the mock clock.
+tokio = { version = "1", features = ["full", "test-util"] }
 # The same major the library sends push notifications with (and the same one
 # `object_store` already pulls in): two versions of reqwest in one package makes
 # the name ambiguous in test targets.

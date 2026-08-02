@@ -362,7 +362,7 @@ async fn run_pipeline(
         .await
         .map_err(Stage::BuildCallView.failed())?
     {
-        state.publish(Arc::new(view));
+        state.publish(Arc::new(view)).await;
     }
 
     // Enhancement (#20) starts *here* — after the recorder has its answer and

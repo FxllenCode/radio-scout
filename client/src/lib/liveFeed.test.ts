@@ -49,7 +49,11 @@ function call(id: number): Call {
 interface Recorder {
   statuses: LiveStatus[]
   calls: Call[]
+  /** The **emission** each Call arrived as (#94) — what becomes the cursor. */
+  emissions: (number | undefined)[]
   lagged: number[]
+  /** How many times the server said the Backfill left a hole. */
+  gaps: number
   /** The cursor the client reads when it re-subscribes after a drop. */
   since: number | undefined
 }
@@ -59,14 +63,20 @@ function connect(options?: { retryMs?: number }): Recorder {
   const recorder: Recorder = {
     statuses: [],
     calls: [],
+    emissions: [],
     lagged: [],
+    gaps: 0,
     since: undefined,
   }
   handle = connectLiveFeed(
     {
       onStatus: (status) => recorder.statuses.push(status),
-      onCall: (received) => recorder.calls.push(received),
+      onCall: (received, seq) => {
+        recorder.calls.push(received)
+        recorder.emissions.push(seq)
+      },
       onLagged: (skipped) => recorder.lagged.push(skipped),
+      onGap: () => (recorder.gaps += 1),
       since: () => recorder.since,
     },
     options,
@@ -152,13 +162,36 @@ describe('live feed client', () => {
    */
   it('hands over Calls, backfilled or live, with nothing to tell them apart', async () => {
     onConnect = (client) => {
-      client.send(JSON.stringify({ t: 'call', call: call(1) }))
-      client.send(JSON.stringify({ t: 'call', call: call(2), catchup: true }))
+      client.send(JSON.stringify({ t: 'call', call: call(1), seq: 1 }))
+      client.send(
+        JSON.stringify({ t: 'call', call: call(2), seq: 2, catchup: true }),
+      )
     }
     const recorder = connect()
 
     await vi.waitFor(() => expect(recorder.calls).toHaveLength(2))
     expect(recorder.calls).toEqual([call(1), call(2)])
+  })
+
+  /** The cursor is the **emission**, not the Call's id (#94): a Call held back
+   *  by a **Delay** is stored early and goes out late, so its id says nothing
+   *  about what a Listener has already heard. */
+  it('hands over the emission each Call went out as', async () => {
+    onConnect = (client) => {
+      client.send(JSON.stringify({ t: 'call', call: call(9), seq: 41 }))
+    }
+    const recorder = connect()
+
+    await vi.waitFor(() => expect(recorder.emissions).toEqual([41]))
+  })
+
+  /** A Backfill that could not reach back far enough says so, and the listener
+   *  is told rather than left to assume they missed nothing (ADR-0004). */
+  it('reports a Backfill that left a hole in the history', async () => {
+    onConnect = (client) => client.send(JSON.stringify({ t: 'gap', since: 3 }))
+    const recorder = connect()
+
+    await vi.waitFor(() => expect(recorder.gaps).toBe(1))
   })
 
   it('reports how many Calls a lagging connection cost', async () => {
@@ -178,12 +211,13 @@ describe('live feed client', () => {
       client.send('not json at all')
       client.send(JSON.stringify({ t: 'something-new' }))
       client.send(JSON.stringify({ t: 'call' })) // no call in it
-      client.send(JSON.stringify({ t: 'call', call: call(1) }))
+      client.send(JSON.stringify({ t: 'call', call: call(1) })) // no emission
+      client.send(JSON.stringify({ t: 'call', call: call(2), seq: 2 }))
     }
     const recorder = connect()
 
     await vi.waitFor(() => expect(recorder.calls).toHaveLength(1))
-    expect(recorder.calls[0]).toEqual(call(1))
+    expect(recorder.calls[0]).toEqual(call(2))
   })
 
   describe('when the connection drops', () => {

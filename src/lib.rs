@@ -102,21 +102,53 @@ impl AppState {
         }
     }
 
-    /// Publish a stored Call to everything that follows the live-feed fanout.
+    /// **Emit** a stored Call: give it its place in the emission sequence,
+    /// record that on the row, and hand it to everything that follows the
+    /// live-feed fanout.
     ///
-    /// One method rather than a bare `live.publish`, because the fanout has two
-    /// kinds of follower and only one of them can be counted from inside it. A
-    /// socket is served and forgotten; the Web Push sender (#16) **owes** the
-    /// Call until it has decided whether to notify, and that debt has to be
-    /// taken on *here* — where there is still one owner — because the fanout
-    /// hands every follower a clone and no clone can carry the ticket.
+    /// One method rather than a bare `live.publish`, for two reasons that have
+    /// converged on the same place.
     ///
-    /// Without it, "no notification was sent" could only ever be a sleep long
-    /// enough to feel safe: the sender is idle both before it has seen a Call
-    /// and after it has declined one, and nothing outside could tell which.
-    pub fn publish(&self, call: Arc<crate::call::StoredCall>) {
+    /// The fanout has two kinds of follower and only one of them can be counted
+    /// from inside it. A socket is served and forgotten; the Web Push sender
+    /// (#16) **owes** the Call until it has decided whether to notify, and that
+    /// debt has to be taken on *here* — where there is still one owner —
+    /// because the fanout hands every follower a clone and no clone can carry
+    /// the ticket. Without it, "no notification was sent" could only ever be a
+    /// sleep long enough to feel safe: the sender is idle both before it has
+    /// seen a Call and after it has declined one, and nothing outside could tell
+    /// which.
+    ///
+    /// And this is where a Call stops being merely *stored* and becomes
+    /// *emitted* (#94). Ingest reaches here a breath after the insert; a
+    /// **Delay** (#73) will reach here whenever its policy releases the Call.
+    /// Either way the emission is allocated and written down at the moment the
+    /// Call goes out, which is what makes a **Backfill** replayable in the order
+    /// Listeners actually heard things.
+    ///
+    /// A failed stamp **degrades rather than fails**: everyone connected still
+    /// hears the Call, and the row keeps `emitted_seq = NULL`, which reads as
+    /// "not emitted" and so is left out of Backfills. Refusing to deliver a Call
+    /// that is already stored, over a bookkeeping write, would cost the Listener
+    /// far more than the missed replay does.
+    pub async fn publish(&self, call: Arc<crate::call::StoredCall>) {
         self.push.owes_a_call();
-        self.live.publish(call);
+        let emitted = crate::live::Emitted {
+            seq: self.live.next_emission(),
+            call,
+        };
+        if let Err(error) = db::repo::emit_call(&self.db, emitted.call.id, emitted.seq).await {
+            // Never silent: a Call missing from one Listener's Backfill and
+            // present in everyone else's is a bug that can only ever be
+            // reported as "some calls go missing sometimes" (ADR-0011 rule 3).
+            tracing::warn!(
+                %error,
+                call_id = emitted.call.id,
+                seq = emitted.seq,
+                "emission could not be recorded"
+            );
+        }
+        self.live.publish(emitted);
     }
 }
 

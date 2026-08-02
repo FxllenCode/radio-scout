@@ -147,6 +147,10 @@ _Avoid_: fast-forward, smart speed (a product's trademark), time compression, ba
 The **Calls** a **Listener** missed while **Feed down**, sent on reconnect so the **live feed** resumes without a hole. Ordered by when a Call was *emitted*, never by when it was stored — a **Delay**ed Call is stored early and emitted late, so a cursor over storage order would skip it silently. Bounded — past the bound the Listener is told their history has a gap only archive search can fill, because a silent truncation is indistinguishable from having missed nothing.
 _Avoid_: catch-up (the Listener draining a queue, not the server refilling one), replay, resync, history.
 
+**Emission**:
+A **Call**'s place in the order Calls went out on the **live feed** — what a **Backfill** is read in and what a **Listener**'s cursor names. Deliberately distinct from the Call's identifier, which is the order rows were *stored*: the two coincide until something holds a Call back, and a **Delay** is exactly that. A Call that has been stored but not yet emitted has no emission at all, which is the honest reading — nobody has heard it.
+_Avoid_: sequence number, offset, cursor (a Listener *holds* a cursor; its value is an emission), call id.
+
 **DVR**:
 The archive surface that plays one talkgroup (or a **Selection**) gaplessly across a time range, scrubbable on a call-density timeline. Oldest-first by construction — a DVR that plays backwards is a search result, not a DVR.
 _Avoid_: time machine, rewind mode, tape.

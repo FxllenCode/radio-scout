@@ -1052,9 +1052,10 @@ async fn lowest_free_system_ref_ignores_non_positive_refs() {
 
 /// `recent_calls_since` backs the live-feed reconnect catch-up (#9): only Calls
 /// with `id > since`, capped to the **newest** `limit`, returned oldest-first.
-/// Pins the `CATCHUP_MAX_CALLS` bound the live socket relies on.
+/// Pins the `CATCHUP_MAX_CALLS` bound the live socket relies on, over the
+/// **emission** sequence a Backfill is ordered by (#94) rather than over row ids.
 #[tokio::test]
-async fn recent_calls_since_is_bounded_newest_and_ascending() {
+async fn calls_emitted_since_is_bounded_newest_and_ascending() {
     let (db, _dir) = sqlite().await;
     // Five calls on distinct talkgroups -> sequential ids 1..=5.
     let mut ids = vec![];
@@ -1074,29 +1075,129 @@ async fn recent_calls_since_is_bounded_newest_and_ascending() {
         );
     }
     assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+    // Emitted in the order they were stored, which is the ordinary case: ingest
+    // stores and emits in one breath.
+    for (id, seq) in ids.iter().zip(1..) {
+        repo::emit_call(&db, *id, seq).await.unwrap();
+    }
 
-    // `id > since`, ascending.
-    let after = repo::recent_calls_since(&db, 2, 10).await.unwrap();
+    // `emitted_seq > since`, ascending.
+    let after = repo::calls_emitted_since(&db, 2, 10).await.unwrap();
     assert_eq!(
         after.iter().map(|c| c.id).collect::<Vec<_>>(),
         vec![3, 4, 5]
     );
 
     // The limit keeps the NEWEST `limit` (not the oldest), still ascending.
-    let capped = repo::recent_calls_since(&db, 0, 2).await.unwrap();
+    let capped = repo::calls_emitted_since(&db, 0, 2).await.unwrap();
     assert_eq!(
         capped.iter().map(|c| c.id).collect::<Vec<_>>(),
         vec![4, 5],
         "newest-2, delivered oldest-first"
     );
 
-    // Nothing newer than the last id.
+    // Nothing newer than the last emission.
     assert!(
-        repo::recent_calls_since(&db, 5, 10)
+        repo::calls_emitted_since(&db, 5, 10)
             .await
             .unwrap()
             .is_empty()
     );
+}
+
+/// A Call that is stored but has not gone out yet is **not** backfilled — a
+/// **Delay** (#73) holding one back, or a Call whose emission could not be
+/// recorded. Nothing has heard it, so a Listener catching up has not missed it.
+#[tokio::test]
+async fn a_stored_but_unemitted_call_is_not_backfilled() {
+    let (db, _dir) = sqlite().await;
+    let held = seed_call(&db, 11, "sys", 100, "Tag", &["Grp"], NOW, "k1").await;
+
+    assert!(
+        repo::calls_emitted_since(&db, 0, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a stored Call with no emission has not gone out"
+    );
+
+    repo::emit_call(&db, held, 1).await.unwrap();
+
+    assert_eq!(
+        repo::calls_emitted_since(&db, 0, 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect::<Vec<_>>(),
+        vec![held],
+        "and once it has, it backfills like any other"
+    );
+}
+
+/// The sequence resumes where the last process left it, so a restart cannot hand
+/// out emissions a connected Listener's cursor is already past.
+#[tokio::test]
+async fn the_latest_emission_is_what_the_archive_holds() {
+    let (db, _dir) = sqlite().await;
+    assert_eq!(
+        repo::latest_emission(&db).await.unwrap(),
+        0,
+        "an archive that has emitted nothing starts the sequence at 1"
+    );
+
+    let call = seed_call(&db, 11, "sys", 100, "Tag", &["Grp"], NOW, "k1").await;
+    repo::emit_call(&db, call, 42).await.unwrap();
+
+    assert_eq!(repo::latest_emission(&db).await.unwrap(), 42);
+
+    // A Call that is stored but not yet emitted has no emission, and the two
+    // dialects disagree about where that sorts: SQLite puts a `NULL` last in a
+    // descending sort, Postgres puts it *first*. Unfiltered, one held Call would
+    // make this `0` on Postgres — and every Listener's Backfill would come back
+    // empty after the next restart.
+    seed_call(&db, 11, "sys", 200, "Tag", &["Grp"], NOW + 1, "k2").await;
+
+    assert_eq!(
+        repo::latest_emission(&db).await.unwrap(),
+        42,
+        "a Call still being held is not the archive's high-water mark"
+    );
+}
+
+/// **A migration's `down` has to run**, and the newest one is the first here to
+/// index a column it also drops — which SQLite refuses and Postgres allows, so
+/// getting it wrong would be green on the everyday loop and red only in CI's
+/// second dialect (ADR-0003, #22).
+///
+/// Rolled back one step and applied again, because a `down` that leaves the
+/// schema unusable is the same bug as one that fails outright.
+///
+/// **SQLite deliberately**, not the dialect switch: Postgres drops an index with
+/// the column it belongs to, so it is green whichever order the two statements
+/// are written in. This is only a test on the dialect that refuses.
+#[tokio::test]
+async fn the_newest_migration_rolls_back_and_reapplies() {
+    use sea_orm_migration::MigratorTrait;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+    let db = db::connect(&url).await.expect("connect + migrate sqlite");
+    // The migrator takes sea-orm's own handle rather than the composed one
+    // every statement goes through (#97), so it gets a connection of its own.
+    let migrating = sea_orm::Database::connect(&url).await.expect("connect");
+
+    radio_scout::db::migration::Migrator::down(&migrating, Some(1))
+        .await
+        .expect("the newest migration rolls back");
+    radio_scout::db::migration::Migrator::up(&migrating, None)
+        .await
+        .expect("and applies again");
+
+    // Usable afterwards, not merely present: a `down` that leaves a schema
+    // nothing can write to is the same bug as one that fails outright.
+    let call = seed_call(&db, 11, "sys", 100, "Tag", &["Grp"], NOW, "k1").await;
+    repo::emit_call(&db, call, 1).await.expect("emit");
+    assert_eq!(repo::latest_emission(&db).await.unwrap(), 1);
 }
 
 /// Retention's batch delete is fed a page at a time, and an empty page must be a

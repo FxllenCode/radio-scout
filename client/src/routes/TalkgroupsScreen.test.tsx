@@ -51,7 +51,7 @@ const summary = () => screen.getByTestId('selection-summary')
 function withAvoided(until: number): AppStore {
   const store = scannerStore()
   store.dispatch(
-    received({ id: 1, systemRef: 100, talkgroupRef: 1, audioUrl: '/api/call/1/audio' }),
+    received({ id: 1, systemRef: 100, talkgroupRef: 1, audioUrl: '/api/call/1/audio' }, 1),
   )
   store.dispatch(avoid({ until }))
   return store
@@ -364,7 +364,7 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
 
     act(() => {
       store.dispatch(
-        received({ id: 7, systemRef: 100, talkgroupRef: 2, audioUrl: '/api/call/7/audio' }),
+        received({ id: 7, systemRef: 100, talkgroupRef: 2, audioUrl: '/api/call/7/audio' }, 7),
       )
       for (const position of [0.5, 1, 1.5, 2]) {
         store.dispatch(progressed({ position, duration: 9 }))

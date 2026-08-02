@@ -26,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0007_logs::Migration),
             Box::new(m0008_recorder_truth::Migration),
             Box::new(m0009_channel_merge::Migration),
+            Box::new(m0010_emission_sequence::Migration),
         ]
     }
 }
@@ -881,6 +882,112 @@ mod m0009_channel_merge {
                     Table::alter()
                         .table(call::Entity)
                         .drop_column(call::Column::TalkgroupRef)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+}
+
+/// The **Backfill** cursor becomes an emission sequence distinct from the Call's
+/// identifier (#94).
+///
+/// `id` is the order rows were *written*; `emitted_seq` is the order Calls went
+/// out on the live feed. They coincide while ingest stores and emits in one
+/// breath, and stop the moment a **Delay** (#73) holds a Call back — stored
+/// early under a low `id`, emitted late after Calls that already went out. A
+/// cursor over `id` would step past exactly that Call, and only for the Listener
+/// who was away when it went out, which is the shape of hole nobody reports.
+///
+/// **Existing rows are stamped with their own `id`.** Every Call stored before
+/// this column existed was emitted the instant it was stored, so `id` *is* its
+/// emission order — and starting the sequence above the highest one keeps a
+/// cursor a client is already holding meaning what it meant. A `NULL` left
+/// behind instead would have made the whole archive unbackfillable.
+///
+/// Guarded like m0003's, and for the reason m0003 wrote down: `m0001_init`
+/// generates its DDL from the *live* entity, so a fresh database already has the
+/// column by the time this runs.
+mod m0010_emission_sequence {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0010_emission_sequence"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("calls", "emitted_seq").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(
+                                ColumnDef::new(call::Column::EmittedSeq)
+                                    .big_integer()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // A Backfill reads this column and nothing else, on every reconnect
+            // and every phone unlock. Without the index that is a scan of the
+            // whole archive, on the Pi, for a listener whose train went into a
+            // tunnel.
+            if !manager.has_index("calls", "idx_calls_emitted_seq").await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name("idx_calls_emitted_seq")
+                            .table(call::Entity)
+                            .col(call::Column::EmittedSeq)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // Unconditional: on a fresh database the table is empty and this is
+            // a no-op, and on an upgraded one it is the whole point.
+            manager
+                .exec_stmt(
+                    Query::update()
+                        .table(call::Entity)
+                        .value(
+                            call::Column::EmittedSeq,
+                            Expr::col((call::Entity, call::Column::Id)),
+                        )
+                        .and_where(Expr::col(call::Column::EmittedSeq).is_null())
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // The index goes **first**, and that is not tidiness: SQLite refuses
+            // to drop a column an index still names, where Postgres drops the
+            // index along with it. Dropping the column first therefore works on
+            // one dialect and fails on the other — this is the first migration
+            // here to index a column it also drops, so there was no precedent to
+            // copy (ADR-0003, #22), and `the_newest_migration_rolls_back_and_reapplies`
+            // is what noticed.
+            manager
+                .drop_index(
+                    Index::drop()
+                        .name("idx_calls_emitted_seq")
+                        .table(call::Entity)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call::Entity)
+                        .drop_column(call::Column::EmittedSeq)
                         .to_owned(),
                 )
                 .await

@@ -16,6 +16,16 @@ use serde::Serialize;
 /// Radio-Scout's internal primary key for a stored Call (matches the DB `i64`).
 pub type CallId = i64;
 
+/// A Call's place in the **emission** sequence — the order Calls went out on the
+/// live feed (#94).
+///
+/// Deliberately its own name rather than a second `CallId`, because they are two
+/// different orderings of the same Calls and the whole point is that they
+/// diverge: a **Delay** (#73) stores a Call early and emits it late. A
+/// **Backfill** is read in this order and a Listener's cursor is a value of this
+/// type; `0` is the cursor of a Listener who has heard nothing.
+pub type Emission = i64;
+
 /// A stored Call as delivered over the live feed and referenced by the audio
 /// endpoint. Serializes with the compact camelCase keys the live-feed protocol
 /// uses (ADR-0004). `object_key` is internal and never sent to clients.

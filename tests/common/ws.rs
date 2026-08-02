@@ -127,18 +127,12 @@ pub async fn drain_until(
 }
 
 /// How long a control-frame assertion waits. Generous, because it only bounds a
-/// failure: the test drives the heartbeat period itself.
+/// failure: nothing here waits on wall-clock time.
+///
+/// There used to be an `expect_ping` beside this, and #94 took it: the heartbeat
+/// is a row in the live connection's own table and a run of its loop under a
+/// paused clock, so a real socket is never the thing waiting for a ping.
 const CONTROL_BUDGET: Duration = Duration::from_secs(2);
-
-/// Assert the server heartbeat fired (a Ping arrived). Reading it also keeps the
-/// connection alive via the automatic pong.
-pub async fn expect_ping(ws: &mut Ws) {
-    assert_eq!(
-        drain_until(ws, CONTROL_BUDGET, |msg| matches!(msg, WsMessage::Ping(_))).await,
-        Drained::Matched,
-        "expected a heartbeat ping",
-    );
-}
 
 /// Assert the server closed the connection (a Close frame or a stream end)
 /// rather than leaving it hanging.

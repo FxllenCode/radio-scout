@@ -38,7 +38,7 @@
 //! (It does *not* own the `axum::serve` task: that runs until the test binary
 //! exits, exactly as it did before #21. Harmless — the process is about to go —
 //! but "owns everything" would be a lie.) Non-default wiring goes through
-//! [`TestApp::builder`]: an [`IngestConfig`], a short live-feed heartbeat, a
+//! [`TestApp::builder`]: an [`IngestConfig`], a
 //! caller-supplied blob store (the S3 serving mode), or a caller-supplied
 //! database URL.
 //!
@@ -81,14 +81,13 @@ pub use push::{PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRI
 pub use upload::CallUpload;
 #[allow(unused_imports)]
 pub use ws::{
-    Drained, FILTER_BUDGET, Ws, drain_until, expect_ping, expect_server_closed, frame_within,
-    next_json, next_text, no_frame_within, subscribe,
+    Drained, FILTER_BUDGET, Ws, drain_until, expect_server_closed, frame_within, next_json,
+    next_text, no_frame_within, subscribe,
 };
 
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use clap::Parser;
 use radio_scout::admin::CSRF_HEADER;
@@ -613,6 +612,31 @@ impl TestApp {
             .id
     }
 
+    /// **Emit** a Call that is already stored: give it its place in the emission
+    /// sequence and push it to everything that follows the live-feed fanout
+    /// (#94).
+    ///
+    /// The application's own `AppState::publish`, which is what ingest calls a
+    /// breath after the insert and what a **Delay** (#73) will call whenever its
+    /// policy releases a Call. It is here because nothing over the wire can
+    /// produce the case a **Backfill** ordered by emission exists for — a Call
+    /// stored early and emitted late — since ingest does both in one breath.
+    ///
+    /// Pair it with [`TestApp::seed_call`], which stores without emitting.
+    pub async fn emit(&self, call_id: i64) {
+        let row = call::Entity::find_by_id(call_id)
+            .one(&self.db)
+            .await
+            .expect("read the Call")
+            .expect("a Call to emit");
+        let view = repo::stored_calls(&self.db, std::slice::from_ref(&row))
+            .await
+            .expect("denormalize the Call")
+            .pop()
+            .expect("one row in, one view out");
+        self.instance.state.publish(std::sync::Arc::new(view)).await;
+    }
+
     // -- The operator log surface (#30) --------------------------------------
 
     /// Store a log event directly, for the tests about the *read* surface —
@@ -969,9 +993,10 @@ impl TestApp {
 /// one-line sugar over that `Config`, beside [`TestAppBuilder::config`] for
 /// anything without sugar and [`TestAppBuilder::toml`] for the file itself.
 ///
-/// Three knobs are not configuration and so are still knobs: the object store,
-/// the clock, and the live-feed heartbeat that #94 retires once reaping can be
-/// driven without shortening it.
+/// Two knobs are not configuration and so are still knobs: the object store and
+/// the clock. A third — the live-feed heartbeat — went away with #94: reaping is
+/// a row in the live connection's own table now, so nothing has to shorten a
+/// period from outside in order to watch one happen.
 ///
 /// What went away: `.admin(AdminAuth)` and `.push(Push)`. Both handed the app a
 /// finished subsystem, which is precisely how the old harness could be green
@@ -983,7 +1008,6 @@ pub struct TestAppBuilder {
     toml: Option<String>,
     edits: Vec<ConfigEdit>,
     store: Option<Arc<dyn AudioStore>>,
-    heartbeat: Option<Duration>,
     clock: Option<Clock>,
     vapid: Option<String>,
     unwritable_env: bool,
@@ -1031,14 +1055,6 @@ impl TestAppBuilder {
     /// (#5, #8).
     pub fn ingest(self, ingest: IngestConfig) -> Self {
         self.config(move |config| config.ingest = ingest)
-    }
-
-    /// Live-feed heartbeat period. Drive it short so heartbeat and
-    /// dead-connection reaping (#9) are observable without waiting the
-    /// production 30 s. #94 removes this, along with the need for it.
-    pub fn heartbeat(mut self, heartbeat: Duration) -> Self {
-        self.heartbeat = Some(heartbeat);
-        self
     }
 
     /// Read the time from here rather than from the machine's clock (#90).
@@ -1177,9 +1193,6 @@ impl TestAppBuilder {
         }
         if let Some(clock) = self.clock {
             wiring = wiring.clock(clock);
-        }
-        if let Some(heartbeat) = self.heartbeat {
-            wiring = wiring.heartbeat(heartbeat);
         }
 
         let instance = instance::start(config, wiring).await.expect("start");

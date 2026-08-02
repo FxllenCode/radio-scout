@@ -85,6 +85,22 @@ pub struct Model {
     /// a `SELECT` is readable by a human debugging a stuck queue, and so a
     /// value added later cannot silently collide with an existing number.
     pub enhancement: String,
+    /// This Call's place in the **emission** sequence (#94) — the order Calls
+    /// went out on the live feed, which is what a **Backfill** replays and what
+    /// a Listener's cursor names.
+    ///
+    /// Distinct from `id`, which is the order rows were *written*. The two
+    /// coincide today because ingest stores and emits in one breath, and they
+    /// stop coinciding the moment a **Delay** (#73) holds a Call back: it is
+    /// stored on arrival and emitted later, so it carries a lower `id` than
+    /// Calls already sent. A cursor over `id` would step past it silently, and
+    /// the Listener who reconnected would simply never receive the Call a
+    /// safety policy delayed.
+    ///
+    /// `NULL` means **stored but not yet emitted** — a Call being held, and a
+    /// Call whose emission could not be recorded. Nothing backfills one, which
+    /// is the right reading either way: it has not gone out yet.
+    pub emitted_seq: Option<i64>,
     pub created_at_ms: i64,
 }
 

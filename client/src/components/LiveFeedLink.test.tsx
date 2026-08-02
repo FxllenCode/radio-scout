@@ -150,7 +150,7 @@ describe('the live-feed link', () => {
    *  every one of them — the bandwidth server-side filtering exists to save,
    *  spent on saying nothing changed. */
   it.each([
-    ['the live feed', received(call), chooseEverything(false)],
+    ['the live feed', received(call, 1), chooseEverything(false)],
     ['the archive', enterPlaybackMode(), enterLiveFeed()],
   ])(
     'does not re-subscribe while %s is playing',
@@ -184,7 +184,7 @@ describe('the live-feed link', () => {
   /** The whole point of the feed: a Call pushed by the server plays, with no
    *  request from the client (spec US 9). */
   it('plays a Call the server pushes', async () => {
-    greeting = [{ t: 'call', call }]
+    greeting = [{ t: 'call', call, seq: 1 }]
 
     renderApp('/')
 
@@ -201,8 +201,8 @@ describe('the live-feed link', () => {
    *  dropped — rdio loses it. */
   it('takes the backfill a reconnect brings with it', async () => {
     greeting = [
-      { t: 'call', call, catchup: true },
-      { t: 'call', call: { ...call, id: 43, talkgroupLabel: 'PD Dispatch' } },
+      { t: 'call', call, seq: 1, catchup: true },
+      { t: 'call', call: { ...call, id: 43, talkgroupLabel: 'PD Dispatch' }, seq: 2 },
     ]
 
     renderApp('/')
@@ -213,11 +213,22 @@ describe('the live-feed link', () => {
 
   /** ADR-0004's `lagged` notice: rdio drops those Calls without a word. */
   it('passes on how many Calls a slow connection cost', async () => {
-    greeting = [{ t: 'call', call }, { t: 'lagged', skipped: 4 }]
+    greeting = [{ t: 'call', call, seq: 1 }, { t: 'lagged', skipped: 4 }]
 
     renderApp('/')
 
     expect(await screen.findByText(/4 missed/i)).toBeInTheDocument()
+  })
+
+  /** ADR-0004's `gap` notice (#94): the Backfill could not reach back as far as
+   *  we asked, so the listener is told their history has a hole rather than left
+   *  to read a silent truncation as having missed nothing. */
+  it('admits a Backfill that left a hole in the history', async () => {
+    greeting = [{ t: 'call', call, seq: 9 }, { t: 'gap', since: 0 }]
+
+    renderApp('/')
+
+    expect(await screen.findByText(/some missed/i)).toBeInTheDocument()
   })
 
   /** Spec US 14's auto-reactivate used to be a five-second sweep in *this*
@@ -234,7 +245,7 @@ describe('the live-feed link', () => {
       await lastSubscription()
 
       act(() => {
-        store.dispatch(received(call))
+        store.dispatch(received(call, 1))
         store.dispatch(avoid({ until: Date.now() + 30 * 60_000 }))
       })
 
@@ -262,8 +273,11 @@ describe('the live-feed link', () => {
     }
   })
 
-  /** ADR-0004: on reconnect the client hands back the last Call id it saw, and
-   *  the server backfills the gap. rdio just loses those Calls. */
+  /** ADR-0004: on reconnect the client hands back the last **emission** it saw
+   *  and the server backfills the gap. rdio just loses those Calls.
+   *
+   *  Deliberately an emission unequal to the Call's id (#94), so this cannot
+   *  pass on a client that went back to reading `call.id`. */
   it('asks for what it missed when the socket comes back', async () => {
     let sockets = 0
     server.use(
@@ -273,7 +287,7 @@ describe('the live-feed link', () => {
           feed.subscriptions.push(JSON.parse(String(event.data)))
         })
         if (sockets > 1) return
-        client.send(JSON.stringify({ t: 'call', call }))
+        client.send(JSON.stringify({ t: 'call', call, seq: 41 }))
         setTimeout(() => client.close(), 0)
       }),
     )
@@ -281,7 +295,7 @@ describe('the live-feed link', () => {
     renderApp('/')
 
     await waitFor(() => expect(sockets).toBe(2), { timeout: 3_000 })
-    await waitFor(() => expect(feed.subscriptions.at(-1)?.since).toBe(call.id))
+    await waitFor(() => expect(feed.subscriptions.at(-1)?.since).toBe(41))
   })
 
   it('holds one socket open across the whole app', async () => {
@@ -335,7 +349,7 @@ describe('the live-feed link', () => {
      * frame from before the feed went off is still the most recent one.
      */
     it('reconnects and subscribes afresh, never backfilling the silence', async () => {
-      greeting = [{ t: 'call', call }]
+      greeting = [{ t: 'call', call, seq: 1 }]
       const store = makeStore()
       renderApp('/', store)
       // A Call arrives first, so there *is* a cursor to have dropped.

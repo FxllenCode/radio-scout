@@ -10,8 +10,6 @@ mod common;
 use common::logs::LogCapture;
 use common::{CallUpload, TestApp, next_json, next_text, request_id_of};
 
-use std::time::Duration;
-
 use futures_util::SinkExt;
 use radio_scout::IngestConfig;
 use radio_scout::db::entities::call;
@@ -661,11 +659,11 @@ async fn a_read_path_5xx_carries_only_a_ref_as_well() {
 // The live feed
 // ---------------------------------------------------------------------------
 
-/// A reconnecting client's catch-up is one line, not one per Call (rule 8), and
+/// A reconnecting client's **Backfill** is one line, not one per Call (rule 8), and
 /// it carries the size — the number that says whether the client's history has a
 /// gap it must fill from the archive (#13).
 #[tokio::test]
-async fn a_subscription_and_its_catch_up_each_log_once() {
+async fn a_subscription_and_its_backfill_each_log_once() {
     let capture = LogCapture::start();
     let app = recorder_app().await;
     app.upload_ok(form(RECORDER_KEY, 11, 100, 1000)).await;
@@ -689,22 +687,22 @@ async fn a_subscription_and_its_catch_up_each_log_once() {
     );
     assert!(subscribed.contains("systems=1"), "{subscribed}");
 
-    let catch_up = capture.wait_for("live-feed catch-up").await;
-    assert!(catch_up.contains(" DEBUG "), "{catch_up}");
-    assert!(catch_up.contains("sent=2"), "the backfill size: {catch_up}");
-    assert!(catch_up.contains("truncated=false"), "{catch_up}");
+    let backfill = capture.wait_for("live-feed Backfill").await;
+    assert!(backfill.contains(" DEBUG "), "{backfill}");
+    assert!(backfill.contains("sent=2"), "the Backfill size: {backfill}");
+    assert!(backfill.contains("truncated=false"), "{backfill}");
     assert_eq!(
-        capture.lines_containing("live-feed catch-up").len(),
+        capture.lines_containing("live-feed Backfill").len(),
         1,
         "one line per reconnect, never one per Call"
     );
 }
 
-/// Catch-up is best-effort for the *connection's* sake — a transient DB failure
+/// A **Backfill** is best-effort for the *connection's* sake — a transient DB failure
 /// must not kill a live socket — but never for the operator's: a backfill that
 /// quietly returns nothing looks exactly like a client that missed nothing.
 #[tokio::test]
-async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() {
+async fn a_backfill_that_cannot_read_the_archive_says_so_and_keeps_the_socket() {
     let capture = LogCapture::start();
     let app = TestApp::spawn().await;
     app.refuse_statements_on("calls");
@@ -719,7 +717,7 @@ async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() 
     // failed, which is the whole point of swallowing it.
     assert_eq!(next_json(&mut ws).await["t"], "subscribed");
 
-    let line = capture.wait_for("live-feed catch-up query failed").await;
+    let line = capture.wait_for("live-feed Backfill query failed").await;
     assert!(line.contains(" WARN "), "{line}");
     assert!(line.contains("since=0"), "{line}");
     assert!(line.contains(common::REFUSED), "why it failed: {line}");
@@ -731,7 +729,7 @@ async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() 
 /// whose view failed to build and carried on, which is the shape of bug an
 /// operator can only ever report as "some calls go missing sometimes".
 #[tokio::test]
-async fn a_catch_up_that_cannot_build_its_view_says_so_and_keeps_the_socket() {
+async fn a_backfill_that_cannot_build_its_view_says_so_and_keeps_the_socket() {
     let capture = LogCapture::start();
     let app = recorder_app().await;
     // Arranged through the front door first, then refused: the denormalizer
@@ -749,28 +747,18 @@ async fn a_catch_up_that_cannot_build_its_view_says_so_and_keeps_the_socket() {
     .expect("send sub");
     assert_eq!(next_json(&mut ws).await["t"], "subscribed");
 
-    let line = capture.wait_for("live-feed catch-up view failed").await;
+    let line = capture.wait_for("live-feed Backfill view failed").await;
     assert!(line.contains(" WARN "), "{line}");
     assert!(line.contains("since=0"), "{line}");
     assert!(line.contains(common::REFUSED), "why it failed: {line}");
 }
 
-/// A half-open connection being reaped is a listener that silently stopped
-/// hearing anything — WARN, not silence (rdio leaves such connections lingering
-/// and says nothing at all).
-#[tokio::test]
-async fn a_reaped_connection_says_so() {
-    let capture = LogCapture::start();
-    let heartbeat = Duration::from_millis(100);
-    let app = TestApp::builder().heartbeat(heartbeat).spawn().await;
-    let (_ws, _hello) = app.connect_ws_with_hello().await;
-
-    // Go silent: never read, so no auto-pong is ever sent.
-    tokio::time::sleep(heartbeat * 4).await;
-
-    let line = capture.wait_for("live-feed listener reaped").await;
-    assert!(line.contains(" WARN "), "{line}");
-}
+// A half-open connection being reaped is a listener that silently stopped
+// hearing anything, and it says so at WARN — rdio leaves such connections
+// lingering and says nothing at all. That line is asserted in `src/live.rs`'s
+// own table since #94 (`an_unanswered_ping_reaps_on_the_next_tick`), because
+// reaching it here meant shortening the shipped heartbeat from outside and then
+// sleeping through it.
 
 /// Rule 5 on the Web Push path (#16). A push endpoint is a stable per-device
 /// identifier — worse than an IP address, because it survives a lease — so it
