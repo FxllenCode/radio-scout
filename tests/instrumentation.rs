@@ -483,7 +483,7 @@ async fn a_5xx_gives_the_client_a_ref_and_the_operator_the_cause() {
     app.seed_talkgroup(11, 54241).await;
 
     // Break the schema under the handler's feet, the way a missing column did.
-    app.break_table("calls").await;
+    app.refuse_statements_on("calls");
 
     let resp = app
         .upload_response(form(RECORDER_KEY, 11, 54241, 1000))
@@ -493,10 +493,10 @@ async fn a_5xx_gives_the_client_a_ref_and_the_operator_the_cause() {
     let body = resp.text().await.expect("body");
 
     // The client gets the ref and nothing else.
-    let missing_table = app.missing_table_cause("calls");
+    let refusal = common::REFUSED;
     assert_eq!(body, format!("internal error (ref: {request_id})\n"));
     assert!(
-        !body.contains(&missing_table),
+        !body.contains(refusal),
         "the cause must not travel: {body:?}"
     );
 
@@ -505,7 +505,7 @@ async fn a_5xx_gives_the_client_a_ref_and_the_operator_the_cause() {
     assert!(line.contains(" ERROR "), "{line}");
     assert!(line.contains(&format!("request_id={request_id}")), "{line}");
     assert!(line.contains("stage=dedup"), "what it was doing: {line}");
-    assert!(line.contains(&missing_table), "why it failed: {line}");
+    assert!(line.contains(refusal), "why it failed: {line}");
     assert!(line.contains("system_ref=11"), "what it was about: {line}");
     assert!(line.contains("talkgroup_ref=54241"), "{line}");
 }
@@ -534,7 +534,7 @@ async fn a_failure_names_the_stage_of_the_pipeline_it_happened_in(
 ) {
     let capture = LogCapture::start();
     let app = recorder_app().await;
-    app.break_table(drop_table).await;
+    app.refuse_statements_on(drop_table);
 
     let mut upload = upload_parts(RECORDER_KEY, 1000)
         .talkgroup(54241)
@@ -559,7 +559,7 @@ async fn a_failure_names_the_stage_of_the_pipeline_it_happened_in(
 async fn the_trunk_recorder_dialect_names_its_own_failing_stage() {
     let capture = LogCapture::start();
     let app = TestApp::spawn().await;
-    app.break_table("systems").await;
+    app.refuse_statements_on("systems");
 
     let (status, _) = app
         .upload_tr(tr_form(
@@ -707,7 +707,7 @@ async fn a_subscription_and_its_catch_up_each_log_once() {
 async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() {
     let capture = LogCapture::start();
     let app = TestApp::spawn().await;
-    app.break_table("calls").await;
+    app.refuse_statements_on("calls");
 
     let mut ws = app.connect_ws().await;
     ws.send(WsMessage::Text(
@@ -722,10 +722,7 @@ async fn a_catch_up_that_cannot_read_the_archive_says_so_and_keeps_the_socket() 
     let line = capture.wait_for("live-feed catch-up query failed").await;
     assert!(line.contains(" WARN "), "{line}");
     assert!(line.contains("since=0"), "{line}");
-    assert!(
-        line.contains(&app.missing_table_cause("calls")),
-        "why it failed: {line}"
-    );
+    assert!(line.contains(common::REFUSED), "why it failed: {line}");
 }
 
 /// A half-open connection being reaped is a listener that silently stopped

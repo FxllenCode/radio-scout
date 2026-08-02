@@ -427,9 +427,9 @@ fn is_assignment(line: &str, var: &str) -> bool {
 mod tests {
     use super::*;
     use crate::db;
+    use crate::db::Db;
     use crate::testing::LogCapture;
     use rstest::rstest;
-    use sea_orm::DatabaseConnection;
 
     /// A key an assertion can hunt for in log output.
     const SECRET: &str = "s3cr3t-ingest-key-do-not-log";
@@ -438,7 +438,7 @@ mod tests {
 
     /// A fresh database with no keys, plus the temp dir holding it (and standing
     /// in for the directory an env file is written to).
-    async fn empty_db() -> (DatabaseConnection, tempfile::TempDir) {
+    async fn empty_db() -> (Db, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = db::connect(&crate::testing::sqlite_url(&tmp))
             .await

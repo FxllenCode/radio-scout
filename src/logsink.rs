@@ -33,7 +33,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sea_orm::DatabaseConnection;
+use crate::db::Db;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender, error::TryRecvError};
 use tracing::field::{Field, Visit};
@@ -322,12 +322,12 @@ impl LogWriter {
     /// carries it across and only a full stop ends it. The loop also ends on
     /// its own when the sink is dropped — which in the binary is never, and in
     /// a test is the deterministic "everything has been written" moment.
-    pub fn start(self, db: DatabaseConnection) -> Worker {
+    pub fn start(self, db: Db) -> Worker {
         let meter = self.meter.clone();
         Worker::start(WORKER, meter, move |stop| self.run(db, stop))
     }
 
-    async fn run(mut self, db: DatabaseConnection, mut stop: Shutdown) {
+    async fn run(mut self, db: Db, mut stop: Shutdown) {
         // Whether the last write failed, so a database that is down says so
         // once rather than once per batch — and says so again when it comes
         // back, which is the line an operator actually waits for.
@@ -365,7 +365,7 @@ impl LogWriter {
     /// them, and settle them.
     async fn write_batch_from(
         &mut self,
-        db: &DatabaseConnection,
+        db: &Db,
         first: (NewLogEvent, Ticket),
         failing: bool,
     ) -> bool {
@@ -408,7 +408,7 @@ impl LogWriter {
 /// A failure here is never propagated anywhere: the console already has every
 /// one of these events, so the honest response is to say so and carry on. This
 /// is what "a sink failure degrades to console-only" means in code.
-async fn write_batch(db: &DatabaseConnection, batch: &[NewLogEvent], failing: bool) -> bool {
+async fn write_batch(db: &Db, batch: &[NewLogEvent], failing: bool) -> bool {
     match repo::insert_log_events(db, batch).await {
         Ok(()) => {
             if failing {
@@ -545,15 +545,16 @@ impl Visit for EventFields {
 mod tests {
     use super::*;
     use crate::db;
+    use crate::db::Db;
     use crate::db::entities::log_event;
     use crate::testing::{LogCapture, ScopedSubscriber, sqlite_url};
     use rstest::rstest;
-    use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, QueryOrder};
+    use sea_orm::{EntityTrait, QueryOrder};
     use tracing::info;
     use tracing_subscriber::layer::SubscriberExt;
 
     /// A database with the schema on it, and the temp dir holding it.
-    async fn database() -> (DatabaseConnection, tempfile::TempDir) {
+    async fn database() -> (Db, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = db::connect(&sqlite_url(&tmp)).await.expect("db");
         (db, tmp)
@@ -573,7 +574,7 @@ mod tests {
     /// which is also what makes the overflow case deterministic rather than a
     /// race with the drain.
     async fn stored_after(
-        db: &DatabaseConnection,
+        db: &Db,
         level: StoredLevel,
         emit: impl FnOnce(),
     ) -> Vec<log_event::Model> {
@@ -582,7 +583,7 @@ mod tests {
 
     /// [`stored_after`], keeping what the sink logged about itself too.
     async fn drain(
-        db: &DatabaseConnection,
+        db: &Db,
         level: StoredLevel,
         capacity: usize,
         emit: impl FnOnce(),
@@ -607,7 +608,7 @@ mod tests {
     /// Drive the sink and keep only what it said about *itself* — for the case
     /// where the table is gone and there is nothing to read back.
     async fn console_after(
-        db: &DatabaseConnection,
+        db: &Db,
         level: StoredLevel,
         capacity: usize,
         emit: impl FnOnce(),
@@ -830,16 +831,19 @@ mod tests {
         );
     }
 
-    /// A sink whose table is gone degrades to console-only: it says so **once**,
-    /// keeps accepting events, and never propagates the failure to whatever was
-    /// logging. The console already has every one of these lines, which is the
-    /// whole reason a failure here is survivable.
+    /// A sink whose database has gone away degrades to console-only: it says so
+    /// **once**, keeps accepting events, and never propagates the failure to
+    /// whatever was logging. The console already has every one of these lines,
+    /// which is the whole reason a failure here is survivable.
+    ///
+    /// The pool is closed rather than the table dropped (#97): closing is what
+    /// a database going away actually is, it needs no DDL and no dialect, and
+    /// the assertion below is about the cause *travelling* rather than about
+    /// the words a particular driver chose for it.
     #[tokio::test]
     async fn a_sink_that_cannot_store_says_so_once_and_carries_on() {
         let (db, _tmp) = database().await;
-        db.execute_unprepared("DROP TABLE logs")
-            .await
-            .expect("take the table away");
+        db.close().await.expect("close the pool");
 
         let console = console_after(&db, StoredLevel::default(), QUEUE_CAPACITY, || {
             info!("an event");
@@ -849,7 +853,7 @@ mod tests {
 
         assert!(console.contains("WARN"), "{console}");
         assert!(
-            console.contains("no such table: logs"),
+            console.contains("error="),
             "the operator needs the cause, not just the fact:\n{console}"
         );
         assert_eq!(
@@ -887,9 +891,7 @@ mod tests {
     #[tokio::test]
     async fn a_sink_that_is_already_failing_stays_quiet() {
         let (db, _tmp) = database().await;
-        db.execute_unprepared("DROP TABLE logs")
-            .await
-            .expect("take the table away");
+        db.close().await.expect("close the pool");
         let batch = [NewLogEvent {
             message: "an event".into(),
             ..Default::default()

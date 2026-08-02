@@ -14,6 +14,7 @@ mod common;
 
 use clap::Parser;
 use common::CallUpload;
+use radio_scout::blob::AudioStore;
 use radio_scout::config::{self, Cli, Config};
 use radio_scout::db::entities::call;
 use radio_scout::db::repo::{self, NewCall};

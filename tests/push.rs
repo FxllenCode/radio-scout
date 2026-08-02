@@ -443,7 +443,7 @@ async fn a_push_that_cannot_be_delivered_says_which_service_failed() {
 async fn a_broken_database_keeps_its_cause_on_the_server(#[case] path: &str, #[case] stage: &str) {
     let capture = common::logs::LogCapture::start();
     let app = TestApp::spawn().await;
-    app.break_table("push_subscriptions").await;
+    app.refuse_statements_on("push_subscriptions");
 
     let body = match path.ends_with("unsubscribe") {
         true => json!({ "token": "a-token-nobody-can-look-up" }),
@@ -457,10 +457,7 @@ async fn a_broken_database_keeps_its_cause_on_the_server(#[case] path: &str, #[c
     assert_eq!(body, format!("internal error (ref: {reference})\n"));
     let line = capture.wait_for(stage).await;
     assert!(line.contains(" ERROR "), "{line}");
-    assert!(
-        line.contains(&app.missing_table_cause("push_subscriptions")),
-        "why it failed: {line}"
-    );
+    assert!(line.contains(common::REFUSED), "why it failed: {line}");
 }
 
 /// A database that goes out from under the *sender* costs notifications, not
@@ -472,16 +469,13 @@ async fn a_sender_that_cannot_read_its_subscriptions_says_so_and_keeps_running()
     let service = PushService::start().await;
     let app = TestApp::with_key("k").await;
     subscribe_to(&app, &service.endpoint()).await;
-    app.break_table("push_subscriptions").await;
+    app.refuse_statements_on("push_subscriptions");
 
     app.upload_ok(CallUpload::new()).await;
 
     let line = capture.wait_for("web push skipped").await;
     assert!(line.contains(" WARN "), "{line}");
-    assert!(
-        line.contains(&app.missing_table_cause("push_subscriptions")),
-        "{line}"
-    );
+    assert!(line.contains(common::REFUSED), "{line}");
     service.expect_nothing(&app).await;
 }
 

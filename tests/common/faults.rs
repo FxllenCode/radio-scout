@@ -1,311 +1,379 @@
-//! Fault injection for the blob store (ticket #37).
+//! Making one I/O call fail, by naming it (#37, reshaped by #97).
 //!
-//! Radio-Scout's workers are written to survive I/O that fails: the enhancement
-//! worker settles a Call as `skipped` and takes the next one, serving tells
-//! "gone" from "broken". Those arms shipped **untested**, because the only store
-//! the suite had was a temp filesystem that works, and the only way to break one
-//! — pointing at an S3 endpoint nothing listens on — fails the *first* operation
-//! and so can never reach the second.
+//! Radio-Scout's workers and handlers are written to survive I/O that fails:
+//! the enhancement worker settles a Call as `skipped` and takes the next one,
+//! serving tells "gone" from "broken", a 5xx keeps its cause on the server. None
+//! of those arms is reachable while the only store is a filesystem that works
+//! and the only database is one that answers.
 //!
-//! [`Faults`] is a handle onto a store that does what it is told:
+//! Both seams here are **substitutes at an interface Radio-Scout owns**, put in
+//! place through `instance::Wiring` exactly as an S3 store or a frozen clock is:
 //!
-//! ```ignore
-//! let (store, faults) = common::faulty_store(tmp.path());
-//! let app = TestApp::builder().store(store).enhancement(config).spawn().await;
+//! - [`Refusing`] answers statements for a [`Db`], refusing any that names a
+//!   table it has been told to refuse. It is what replaced `DROP TABLE` plus a
+//!   trigger written twice in two dialects' procedural SQL — which could only
+//!   fail the *first* statement touching a table, and could only be recognised
+//!   by matching each driver's own wording.
+//! - [`FaultyStore`] answers for an [`AudioStore`], delegating to a real one
+//!   until told to fail. It replaced a decorator over `object_store`'s own
+//!   trait, which had to know that `serve_audio` stats an object before it
+//!   reads it — the audio path's internal call order, written into the fault
+//!   machinery, where a rewrite of the handler would have silently stopped
+//!   reaching the arm.
 //!
-//! faults.fail_puts();          // the worker's `store-audio` arm
-//! ```
-//!
-//! ## Stalling is the other half, and the more important one
-//!
-//! Several arms worth reaching are not "an operation failed" but "a failure
-//! landed *between* two statements" — a table dropped after the Call behind it
-//! was queued, an object pruned after the stat that sized it. Provoking those by
-//! racing a sleep against a background worker trades uncovered lines for flaky
-//! ones, which is a worse deal and is why [#20] left them alone.
-//!
-//! So a fault can also **park** an operation: [`Faults::stall_reads`] holds the
-//! caller inside its `get`, [`Faults::stalled`] resolves once it is provably
-//! parked there, and [`Faults::release`] lets it go. Between the second and the
-//! third the test owns the world, and can drop a table or prune an object
-//! knowing exactly which statement has run and which has not. Nothing sleeps and
-//! nothing races.
-//!
-//! Its companion for failures the *database* has to stage is
-//! [`crate::common::TestApp::fail_writes_to`].
-//!
-//! [#20]: https://github.com/FxllenCode/radio-scout/issues/20
+//! Nothing here parks a call to stage "a failure between two statements". It
+//! does not need to: an interface can simply *say* that the stat found an object
+//! and the read did not ([`Faults::hide_reads`]), where a decorator under the
+//! store could only race one real answer against another.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use futures_util::stream::BoxStream;
-use object_store::path::Path as ObjectPath;
-use object_store::{
-    CopyOptions, Error as ObjectError, GetOptions, GetResult, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult, Result,
-};
-use radio_scout::BlobStore;
-use tokio::sync::watch;
+use bytes::Bytes;
+use object_store::Error as ObjectError;
+use radio_scout::blob::{AudioStore, PresignedUrl, StoredObject};
+use radio_scout::db::{Connection, Db, Transaction, Txn};
+use radio_scout::instance::Decorate;
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, ExecResult, QueryResult, Statement};
 
-/// The `store` field of every error this raises, so a log line or an assertion
-/// can tell an injected store failure from a real one.
+/// What a refused statement says, on either dialect.
 ///
-/// Its opposite number for the database seam is
-/// [`crate::common::INJECTED_WRITE`], which is a whole message rather than a
-/// tag because a trigger has nowhere else to put one.
+/// Ours rather than a driver's, which is the point: a test asserting that the
+/// cause reached the operator's log used to have to know two phrasings for
+/// "no such table" and got no warning when it was asserting on the one this run
+/// was not using.
+pub const REFUSED: &str = "statement refused by the test harness";
+
+/// The `store` field of every error [`FaultyStore`] raises, so a log line or an
+/// assertion can tell an injected store failure from a real one.
 pub const INJECTED_IO: &str = "injected";
 
-/// What the store has been told to do to each kind of operation.
+// ---------------------------------------------------------------------------
+// The statement seam
+// ---------------------------------------------------------------------------
+
+/// Which statements are being refused. Shared by a [`Db`] and every transaction
+/// begun on it, so a rule armed after the app started reaches both.
+#[derive(Default)]
+struct Refusals(std::sync::Mutex<Vec<Rule>>);
+
+/// One table, and how much of what touches it is refused.
+struct Rule {
+    /// As it appears in the SQL: quoted, which sea-orm writes identically on
+    /// both dialects — so a rule is written once and matches on either. The
+    /// rest of a statement is *not* identical (Postgres binds `$1` where SQLite
+    /// binds `?`), which is why what a rule matches is an identifier and never
+    /// a whole statement.
+    table: String,
+    updates_only: bool,
+}
+
+impl Refusals {
+    /// The refusal `sql` earns, or `Ok(())` to let it through.
+    fn judge(&self, sql: &str) -> Result<(), DbErr> {
+        let refused = self
+            .0
+            .lock()
+            .expect("the refusal list")
+            .iter()
+            .any(|rule| sql.contains(&rule.table) && (!rule.updates_only || is_an_update(sql)));
+        match refused {
+            true => Err(DbErr::Custom(REFUSED.to_string())),
+            false => Ok(()),
+        }
+    }
+}
+
+/// Whether this statement changes rows that are already there.
 ///
-/// The two `watch` channels rather than a `Notify` apiece are deliberate: a
-/// `Notify` registers interest when its future is first *polled*, not when it is
-/// created, so a wake-up that lands in the window between deciding to park and
-/// being polled is lost and the parked read never returns. A test harness that
-/// hangs one run in fifty is worse than the uncovered lines it was built to
-/// reach. `watch::Sender::subscribe` takes effect immediately, and
-/// `borrow_and_update` marks the point the waiter is asking *from*, so both
-/// handshakes below are settled before either side can miss the other.
-struct Script {
-    fail_puts: AtomicBool,
-    fail_reads: AtomicBool,
-    stall_reads: AtomicBool,
-    /// How many reads have parked since stalling was last armed — what
-    /// [`Faults::stalled`] waits on. Only ever counts up within a round, so a
-    /// test that asks after the fact still gets a straight answer;
-    /// [`Faults::stall_reads`] is what starts a new round.
-    parked: watch::Sender<usize>,
-    /// Bumped by [`Faults::release`]; every parked read is waiting on a change.
-    released: watch::Sender<u64>,
-    /// The [`PutOptions`] of every write that reached the decorator, newest last
-    /// — recorded *before* any injected failure, so what a caller asked for is
-    /// observable even when the write is made to fail.
-    ///
-    /// This is the only way to see what `BlobStore::put` asks a store to record
-    /// against an object without a store that answers (#31): the `Cache-Control`
-    /// an S3-backed store stamps is invisible to a filesystem round trip, and
-    /// `tests/s3.rs` — which reads it back off a real store — skips wherever one
-    /// is not running, which is the everyday loop.
-    puts: std::sync::Mutex<Vec<PutOptions>>,
+/// **Updates and not inserts**, deliberately: the arms worth reaching on the
+/// write side all sit *after* both a read and an insert of the same table have
+/// succeeded — the enhancement worker updates a Call row it has just read,
+/// ingest marks a Call pending after inserting it — so a test has to be able to
+/// arrange rows through the app's own front door and only then take the update
+/// away. It is the one thing a dropped table could never stage, and it is why
+/// #20 shipped those arms uncovered.
+fn is_an_update(sql: &str) -> bool {
+    sql.trim_start().starts_with("UPDATE")
 }
 
-impl Default for Script {
-    fn default() -> Self {
-        Self {
-            fail_puts: AtomicBool::new(false),
-            fail_reads: AtomicBool::new(false),
-            stall_reads: AtomicBool::new(false),
-            parked: watch::Sender::new(0),
-            released: watch::Sender::new(0),
-            puts: std::sync::Mutex::new(Vec::new()),
-        }
+/// A handle onto the statements an app issues. Cheap to clone; every clone
+/// governs the same handle.
+#[derive(Clone, Default)]
+pub struct Statements(Arc<Refusals>);
+
+impl Statements {
+    /// Refuse every statement naming `table`, from now on.
+    pub fn refuse(&self, table: &str) {
+        self.add(table, false);
+    }
+
+    /// Refuse every statement naming `table` that updates a row, leaving reads
+    /// and inserts — the arrangement an update arm needs — alone.
+    pub fn refuse_updates(&self, table: &str) {
+        self.add(table, true);
+    }
+
+    fn add(&self, table: &str, updates_only: bool) {
+        self.0.0.lock().expect("the refusal list").push(Rule {
+            // Quoted the way sea-orm writes an identifier, so `calls` cannot
+            // match a column called `calls_id` or a table called `call_patches`.
+            table: format!("\"{table}\""),
+            updates_only,
+        });
     }
 }
 
-impl Script {
-    /// Fail here if `switch` is thrown, naming `operation` so the test failure
-    /// (or the operator-facing log line under test) says which one it was.
-    fn check(&self, switch: &AtomicBool, operation: &'static str) -> Result<()> {
-        if switch.load(Ordering::SeqCst) {
-            return Err(ObjectError::Generic {
-                store: INJECTED_IO,
-                source: format!("injected {operation} failure").into(),
-            });
-        }
-        Ok(())
-    }
-
-    /// Park until released, if reads are being stalled.
-    async fn maybe_stall(&self) {
-        if !self.stall_reads.load(Ordering::SeqCst) {
-            return;
-        }
-        let mut released = self.released.subscribe();
-        released.mark_unchanged();
-        // Re-read *after* subscribing. `release` lowers this flag before it
-        // bumps the channel, so seeing it still raised here proves the bump has
-        // not happened yet — and the subscription above is already in place to
-        // catch it when it does. Without this the read could park immediately
-        // after a release it was too late to see, and stay parked.
-        if !self.stall_reads.load(Ordering::SeqCst) {
-            return;
-        }
-        self.parked.send_modify(|parked| *parked += 1);
-        let _ = released.changed().await;
-    }
+/// A database handle that answers through `inner` unless [`Statements`] says
+/// otherwise.
+struct Refusing<C> {
+    inner: C,
+    refusals: Arc<Refusals>,
 }
 
-/// A handle onto a store that can be made to fail, or to hold still. Cheap to
-/// clone; every clone drives the same store.
-#[derive(Clone)]
-pub struct Faults(Arc<Script>);
-
-impl Faults {
-    /// Wrap `store` so this handle governs it. Until told otherwise it behaves
-    /// exactly like the store it wraps. Reached through [`faulty_store`].
-    fn wrap(store: BlobStore) -> (BlobStore, Faults) {
-        let script = Arc::new(Script::default());
-        let faults = Faults(script.clone());
-        (
-            store.decorated(|inner| Arc::new(FaultyStore { inner, script })),
-            faults,
-        )
-    }
-
-    /// Refuse every write from now on.
-    pub fn fail_puts(&self) {
-        self.0.fail_puts.store(true, Ordering::SeqCst);
-    }
-
-    /// Wrap an arbitrary store, for the case where what is under test is not a
-    /// filesystem one — an **S3-backed** store, whose `put` stamps attributes a
-    /// filesystem store never would (#31).
-    pub fn wrapping(store: BlobStore) -> (BlobStore, Faults) {
-        Self::wrap(store)
-    }
-
-    /// The [`PutOptions`] every write has carried, newest last.
-    pub fn puts(&self) -> Vec<PutOptions> {
-        self.0.puts.lock().expect("recorded puts").clone()
-    }
-
-    /// Refuse every read of an object's *bytes* from now on.
-    pub fn fail_reads(&self) {
-        self.0.fail_reads.store(true, Ordering::SeqCst);
-    }
-
-    /// Park every read of an object's bytes until [`Faults::release`]. The
-    /// caller that issued it stays inside its `get`, which is what makes
-    /// "between two statements" a place a test can stand.
-    ///
-    /// Arming resets the parked count, so a test that stalls, releases and
-    /// stalls again is asking about *this* round. Without that,
-    /// [`Faults::stalled`] would be satisfied by the previous round's reads and
-    /// return with nothing actually parked — a silent race rather than a hang,
-    /// which is the worse of the two.
-    pub fn stall_reads(&self) {
-        self.0.parked.send_modify(|parked| *parked = 0);
-        self.0.stall_reads.store(true, Ordering::SeqCst);
-    }
-
-    /// Resolve once at least `count` reads have parked. Returns immediately if
-    /// that many already have, so a test cannot lose the race by arriving late.
-    pub async fn stalled(&self, count: usize) {
-        let mut parked = self.0.parked.subscribe();
-        while *parked.borrow_and_update() < count {
-            parked
-                .changed()
-                .await
-                .expect("the store outlives every test that stalls it");
-        }
-    }
-
-    /// Let every parked read through, and stop parking new ones.
-    ///
-    /// The flag comes down *before* the channel goes up, which is the half of
-    /// the handshake [`Script::maybe_stall`] leans on.
-    pub fn release(&self) {
-        self.0.stall_reads.store(false, Ordering::SeqCst);
-        self.0.released.send_modify(|released| *released += 1);
-    }
+/// Something to compose around an Instance's database handle, and the handle
+/// onto what it will refuse — the one line a test that fails a statement needs.
+///
+/// A decorator rather than a finished `Db`, so the Instance still opens and
+/// migrates its own database exactly as a boot does; this only wraps the
+/// result, and wraps it again after a restart.
+pub fn refusals() -> (Decorate, Statements) {
+    let refusals = Arc::new(Refusals::default());
+    let composed = refusals.clone();
+    (
+        Arc::new(move |db| {
+            Db::new(Refusing {
+                inner: db,
+                refusals: composed.clone(),
+            })
+        }),
+        Statements(refusals),
+    )
 }
 
-/// The decorator itself: delegates to `inner` unless [`Script`] says otherwise.
-#[derive(Debug)]
-struct FaultyStore {
-    inner: Arc<dyn ObjectStore>,
-    script: Arc<Script>,
-}
-
-impl std::fmt::Display for FaultyStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Faulty({})", self.inner)
+#[async_trait::async_trait]
+impl<C: ConnectionTrait + Send + Sync> ConnectionTrait for Refusing<C> {
+    fn get_database_backend(&self) -> DbBackend {
+        self.inner.get_database_backend()
     }
-}
 
-impl std::fmt::Debug for Script {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Script")
+    async fn execute(&self, statement: Statement) -> Result<ExecResult, DbErr> {
+        self.refusals.judge(&statement.sql)?;
+        self.inner.execute(statement).await
+    }
+
+    async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        self.refusals.judge(sql)?;
+        self.inner.execute_unprepared(sql).await
+    }
+
+    async fn query_one(&self, statement: Statement) -> Result<Option<QueryResult>, DbErr> {
+        self.refusals.judge(&statement.sql)?;
+        self.inner.query_one(statement).await
+    }
+
+    async fn query_all(&self, statement: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        self.refusals.judge(&statement.sql)?;
+        self.inner.query_all(statement).await
+    }
+
+    fn support_returning(&self) -> bool {
+        self.inner.support_returning()
     }
 }
 
 #[async_trait::async_trait]
-impl ObjectStore for FaultyStore {
-    async fn put_opts(
-        &self,
-        location: &ObjectPath,
-        payload: PutPayload,
-        opts: PutOptions,
-    ) -> Result<PutResult> {
-        // Recorded before the failure check, so a test can arm `fail_puts` to
-        // stop the write reaching a backend it cannot talk to and still assert
-        // on what the write asked for.
-        self.script
-            .puts
-            .lock()
-            .expect("recorded puts")
-            .push(opts.clone());
-        self.script.check(&self.script.fail_puts, "put")?;
-        self.inner.put_opts(location, payload, opts).await
+impl Connection for Refusing<Db> {
+    /// A transaction begun here is composed too, sharing the same rules — so a
+    /// statement inside ingest's insert transaction is as refusable as one
+    /// outside it.
+    async fn begin(&self) -> Result<Txn, DbErr> {
+        Ok(Txn::new(Refusing {
+            inner: self.inner.begin().await?,
+            refusals: self.refusals.clone(),
+        }))
     }
 
-    async fn put_multipart_opts(
-        &self,
-        location: &ObjectPath,
-        opts: PutMultipartOptions,
-    ) -> Result<Box<dyn MultipartUpload>> {
-        self.script.check(&self.script.fail_puts, "put")?;
-        self.inner.put_multipart_opts(location, opts).await
+    async fn close(&self) -> Result<(), DbErr> {
+        self.inner.close().await
+    }
+}
+
+#[async_trait::async_trait]
+impl Transaction for Refusing<Txn> {
+    async fn commit(self: Box<Self>) -> Result<(), DbErr> {
+        self.inner.commit().await
     }
 
-    /// **A `head` is never failed or parked, only a read of the bytes.**
+    async fn rollback(self: Box<Self>) -> Result<(), DbErr> {
+        self.inner.rollback().await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The store seam
+// ---------------------------------------------------------------------------
+
+/// What the store has been told to do.
+#[derive(Default)]
+struct Script {
+    fail_puts: AtomicBool,
+    /// What a read of an object's bytes does. One value rather than a flag
+    /// each, because "broken" and "gone" are alternatives: a store cannot both
+    /// refuse a read and answer it with nothing, and two flags would make the
+    /// answer depend on which was armed first.
+    reads: std::sync::Mutex<Reads>,
+}
+
+/// How a read of an object's bytes answers.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Reads {
+    /// The store hands over what it has.
+    #[default]
+    Working,
+    /// The store refuses — a node shedding load, a disk throwing errors. A 500.
+    Failing,
+    /// The store says there is no such object — pruned since it was stat'd. A
+    /// 404.
+    Hidden,
+}
+
+/// A handle onto a store that can be made to fail. Cheap to clone; every clone
+/// drives the same store.
+#[derive(Clone, Default)]
+pub struct Faults(Arc<Script>);
+
+impl Faults {
+    /// Refuse every write from now on — a disk that filled up, a Garage node
+    /// refusing writes.
+    pub fn fail_puts(&self) {
+        self.0.fail_puts.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuse every read of an object's bytes from now on, while still
+    /// answering for its size — a store that says it has the object and then
+    /// will not hand it over.
+    pub fn fail_reads(&self) {
+        self.set_reads(Reads::Failing);
+    }
+
+    /// Answer every read with "no such object", while still answering for its
+    /// size.
     ///
-    /// Not fussiness: `serve_audio` stats an object before it reads it, so a
-    /// store that refuses everything fails at the stat and the read arms behind
-    /// it stay exactly as unreachable as they were — which is the same "the
-    /// first operation is the one that fails" problem an unreachable endpoint
-    /// has, and the reason this type exists. `head` and `get` share one backend
-    /// call, so the split has to be made here.
-    async fn get_opts(&self, location: &ObjectPath, options: GetOptions) -> Result<GetResult> {
-        if !options.head {
-            self.script.maybe_stall().await;
-            self.script.check(&self.script.fail_reads, "read")?;
+    /// The object pruned between the stat that sized it and the read that would
+    /// have served it. Retention and orphan-GC both run while listeners are
+    /// listening, so the window is ordinary — and stating it at the interface
+    /// is the whole gain: under the store it could only be staged by parking a
+    /// real read and pruning a real object while it was held.
+    pub fn hide_reads(&self) {
+        self.set_reads(Reads::Hidden);
+    }
+
+    fn set_reads(&self, reads: Reads) {
+        *self.0.reads.lock().expect("the read mode") = reads;
+    }
+
+    fn reads(&self) -> Reads {
+        *self.0.reads.lock().expect("the read mode")
+    }
+
+    fn check_puts(&self) -> Result<(), ObjectError> {
+        match self.0.fail_puts.load(Ordering::SeqCst) {
+            true => Err(refused("put")),
+            false => Ok(()),
         }
-        self.inner.get_opts(location, options).await
+    }
+}
+
+/// The error an injected store failure raises, tagged so a log line or an
+/// assertion can tell it from a real one.
+fn refused(operation: &'static str) -> ObjectError {
+    ObjectError::Generic {
+        store: INJECTED_IO,
+        source: format!("injected {operation} failure").into(),
+    }
+}
+
+/// A real store, answering as it is told to.
+///
+/// Delegation rather than reimplementation: what a test wants is a store that
+/// behaves exactly like the real one except in the one respect under test, and
+/// a hand-written fake would be a second implementation of object storage to
+/// keep true.
+pub struct FaultyStore {
+    inner: Box<dyn AudioStore>,
+    faults: Faults,
+}
+
+#[async_trait::async_trait]
+impl AudioStore for FaultyStore {
+    async fn put(&self, key: &str, bytes: Bytes) -> Result<(), ObjectError> {
+        self.faults.check_puts()?;
+        self.inner.put(key, bytes).await
     }
 
-    // Below here: plain passthroughs. Deliberately not switchable *yet* — no
-    // test needs a delete or a listing to fail (orphan-GC's delete arm is
-    // already covered by a read-only directory in `src/retention.rs`), and a
-    // fault nothing arms is a fault nothing proves. Adding one is the four
-    // lines `put_opts` spends.
-    fn delete_stream(
-        &self,
-        locations: BoxStream<'static, Result<ObjectPath>>,
-    ) -> BoxStream<'static, Result<ObjectPath>> {
-        self.inner.delete_stream(locations)
+    /// **Not switchable, and for a different reason than it used to be.** The
+    /// decorator this replaced could not fail a stat because `head` and `get`
+    /// were one backend call and failing both would have made the read arms
+    /// unreachable — the handler's call order, encoded here. Nothing forces
+    /// that now: `size` is simply an operation no test has needed to fail,
+    /// because `serve_audio`'s `stat-audio` arm is reached by a store that is
+    /// genuinely broken (`tests/instrumentation.rs` puts a file where the audio
+    /// directory should be). Adding a switch is the four lines `put` spends.
+    async fn size(&self, key: &str) -> Result<Option<u64>, ObjectError> {
+        self.inner.size(key).await
     }
 
-    fn list(&self, prefix: Option<&ObjectPath>) -> BoxStream<'static, Result<ObjectMeta>> {
-        self.inner.list(prefix)
+    async fn get(&self, key: &str) -> Result<Option<Bytes>, ObjectError> {
+        match self.faults.reads() {
+            Reads::Working => self.inner.get(key).await,
+            Reads::Failing => Err(refused("read")),
+            Reads::Hidden => Ok(None),
+        }
     }
 
-    async fn list_with_delimiter(&self, prefix: Option<&ObjectPath>) -> Result<ListResult> {
-        self.inner.list_with_delimiter(prefix).await
+    /// A ranged read has no "gone" to report — there is no `Option` in its
+    /// answer, because it is only ever issued for an object something has
+    /// already sized. A hidden object therefore reads as a refusal here, which
+    /// is what the store itself would say.
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Bytes, ObjectError> {
+        match self.faults.reads() {
+            Reads::Working => self.inner.get_range(key, start, end).await,
+            _ => Err(refused("read")),
+        }
     }
 
-    async fn copy_opts(
-        &self,
-        from: &ObjectPath,
-        to: &ObjectPath,
-        options: CopyOptions,
-    ) -> Result<()> {
-        self.inner.copy_opts(from, to, options).await
+    async fn delete(&self, key: &str) -> Result<(), ObjectError> {
+        self.inner.delete(key).await
     }
+
+    async fn list_objects(&self) -> Result<Vec<StoredObject>, ObjectError> {
+        self.inner.list_objects().await
+    }
+
+    fn is_presigning(&self) -> bool {
+        self.inner.is_presigning()
+    }
+
+    async fn presigned_get_url(&self, key: &str) -> Option<Result<PresignedUrl, ObjectError>> {
+        self.inner.presigned_get_url(key).await
+    }
+}
+
+/// Any store, with a [`Faults`] handle onto it.
+fn faults_over(store: impl AudioStore + 'static) -> (FaultyStore, Faults) {
+    let faults = Faults::default();
+    (
+        FaultyStore {
+            inner: Box::new(store),
+            faults: faults.clone(),
+        },
+        faults,
+    )
 }
 
 /// A real filesystem store under `dir`, with a [`Faults`] handle onto it — the
 /// one line most fault-injecting tests need.
-pub fn faulty_store(dir: &std::path::Path) -> (BlobStore, Faults) {
-    Faults::wrap(BlobStore::filesystem(dir.join("audio")).expect("a filesystem store"))
+pub fn faulty_store(dir: &std::path::Path) -> (FaultyStore, Faults) {
+    faults_over(radio_scout::BlobStore::filesystem(dir.join("audio")).expect("a filesystem store"))
 }

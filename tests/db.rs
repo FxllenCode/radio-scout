@@ -12,17 +12,14 @@ use radio_scout::db::entities::{
     api_key, call_frequency, call_patch, call_unit, group, system, tag, talkgroup, unit,
 };
 use radio_scout::db::repo::{Disposition, DropReason};
-use radio_scout::db::{self, repo};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    Set,
-};
+use radio_scout::db::{self, Db, repo};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
 
 const NOW: i64 = 1_700_000_000_000;
 
 /// A fresh SQLite database (temp file so a connection pool shares one DB) with
 /// migrations applied. The TempDir must outlive the connection.
-async fn sqlite() -> (DatabaseConnection, tempfile::TempDir) {
+async fn sqlite() -> (Db, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
     let db = db::connect(&url).await.expect("connect + migrate sqlite");
@@ -366,7 +363,7 @@ async fn dialect_sensitive_queries_on_postgres_when_available() {
 /// Postgres.
 ///
 /// Reads the dataset [`run_search_suite`] seeded, before retention adds its own.
-async fn run_catalog_suite(db: &DatabaseConnection) {
+async fn run_catalog_suite(db: &Db) {
     let catalog = repo::catalog(db).await.unwrap();
 
     let systems: Vec<_> = catalog
@@ -414,7 +411,7 @@ async fn run_catalog_suite(db: &DatabaseConnection) {
 ///
 /// Runs *after* [`run_search_suite`] and builds on the calls it seeded — those
 /// have no recorded `audio_size`, which is exactly the NULL-tolerance case.
-async fn run_retention_suite(db: &DatabaseConnection) {
+async fn run_retention_suite(db: &Db) {
     let seeded_without_sizes = repo::referenced_object_keys(db).await.unwrap().len();
     assert_eq!(
         repo::total_audio_bytes(db).await.unwrap(),
@@ -454,7 +451,7 @@ async fn run_retention_suite(db: &DatabaseConnection) {
 
 /// A call with a recorded audio size, for the retention suite.
 async fn seed_sized_call(
-    db: &DatabaseConnection,
+    db: &Db,
     system_ref: i64,
     talkgroup_ref: i64,
     audio_size: i64,
@@ -483,7 +480,7 @@ async fn seed_sized_call(
 /// cascading filters, DISTINCT, ordering, paging, the total count, the batched
 /// Call view, and the cascading filter options. Run identically on both
 /// dialects: every query here is one ADR-0003 flags as divergence-prone.
-async fn run_search_suite(db: &DatabaseConnection) {
+async fn run_search_suite(db: &Db) {
     let (a, b, c, d) = seed_search_dataset(db).await;
     assert_search_filters(db, a, b, c, d).await;
     assert_sort_and_count(db, a, b, c, d).await;
@@ -494,7 +491,7 @@ async fn run_search_suite(db: &DatabaseConnection) {
 /// The dataset every search assertion below reads:
 /// - system 100 "Alpha": tg1 tag Fire {Emergency}, tg2 tag Law {Emergency,Public}
 /// - system 200 "Beta":  tg1 tag Fire {Public}
-async fn seed_search_dataset(db: &DatabaseConnection) -> (i64, i64, i64, i64) {
+async fn seed_search_dataset(db: &Db) -> (i64, i64, i64, i64) {
     let a = seed_call(db, 100, "Alpha", 1, "Fire", &["Emergency"], 1000, "a").await;
     let b = seed_call(
         db,
@@ -512,7 +509,7 @@ async fn seed_search_dataset(db: &DatabaseConnection) -> (i64, i64, i64, i64) {
     (a, b, c, d)
 }
 
-async fn assert_search_filters(db: &DatabaseConnection, a: i64, b: i64, c: i64, d: i64) {
+async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     // No filter -> all, newest first.
     assert_eq!(ids(db, search_base()).await, vec![d, c, b, a]);
 
@@ -642,7 +639,7 @@ fn search_base() -> repo::CallSearch {
     repo::CallSearch::default()
 }
 
-async fn ids(db: &DatabaseConnection, s: repo::CallSearch) -> Vec<i64> {
+async fn ids(db: &Db, s: repo::CallSearch) -> Vec<i64> {
     repo::search_calls(db, &s)
         .await
         .unwrap()
@@ -653,7 +650,7 @@ async fn ids(db: &DatabaseConnection, s: repo::CallSearch) -> Vec<i64> {
 
 #[allow(clippy::too_many_arguments)]
 async fn seed_call(
-    db: &DatabaseConnection,
+    db: &Db,
     system_ref: i64,
     system_label: &str,
     talkgroup_ref: i64,
@@ -682,7 +679,7 @@ async fn seed_call(
 /// Insert a System row directly with an explicit per-system auto-populate flag
 /// and blacklist (per-System policy has no surface that sets it yet — #19).
 async fn seed_system(
-    db: &DatabaseConnection,
+    db: &Db,
     ext_ref: i64,
     label: &str,
     auto_populate: bool,
@@ -702,7 +699,7 @@ async fn seed_system(
 }
 
 /// Insert a bare Talkgroup row (no labels) under `system_id`.
-async fn seed_talkgroup(db: &DatabaseConnection, system_id: i64, ext_ref: i64) -> talkgroup::Model {
+async fn seed_talkgroup(db: &Db, system_id: i64, ext_ref: i64) -> talkgroup::Model {
     talkgroup::ActiveModel {
         system_id: Set(system_id),
         r#ref: Set(ext_ref),
@@ -1235,7 +1232,7 @@ async fn auto_populate_migration_converges_on_databases_that_predate_the_columns
 /// Playback mode walks a filtered result set forwards in time, so oldest-first
 /// is a first-class sort — not just a reversed page. Alongside it, the result
 /// count a paginator needs: how many Calls match, independent of the page.
-async fn assert_sort_and_count(db: &DatabaseConnection, a: i64, b: i64, c: i64, d: i64) {
+async fn assert_sort_and_count(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
@@ -1314,7 +1311,7 @@ async fn assert_sort_and_count(db: &DatabaseConnection, a: i64, b: i64, c: i64, 
 /// A search page is denormalized in one batch rather than per Call. rdio-scanner
 /// returns bare ids and makes the client fetch each Call separately (N+1 over
 /// its WebSocket); a page here arrives ready to render and play.
-async fn assert_batched_call_view(db: &DatabaseConnection) {
+async fn assert_batched_call_view(db: &Db) {
     let page = repo::search_calls(db, &repo::CallSearch::default())
         .await
         .unwrap();
@@ -1392,7 +1389,7 @@ async fn stored_calls_attaches_patches_to_the_right_call() {
 /// System list stays switchable. Only values that actually have Calls are
 /// offered — rdio-scanner builds these lists from its whole config, so it
 /// happily offers Talkgroups with nothing to show.
-async fn assert_cascading_filter_options(db: &DatabaseConnection) {
+async fn assert_cascading_filter_options(db: &Db) {
     // Unfiltered: everything with at least one Call.
     let all = repo::filter_options(db, &repo::CallSearch::default())
         .await
@@ -1491,7 +1488,7 @@ async fn assert_cascading_filter_options(db: &DatabaseConnection) {
     assert_eq!(by_system_bounds(db, 200).await, (Some(3000), Some(3000)));
 }
 
-async fn by_system_bounds(db: &DatabaseConnection, system_ref: i64) -> (Option<i64>, Option<i64>) {
+async fn by_system_bounds(db: &Db, system_ref: i64) -> (Option<i64>, Option<i64>) {
     let options = repo::filter_options(
         db,
         &repo::CallSearch {

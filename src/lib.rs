@@ -39,14 +39,15 @@ mod testing;
 
 use std::sync::Arc;
 
+use crate::db::Db;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
-use sea_orm::DatabaseConnection;
 
 use crate::admin::AdminAuth;
+use crate::blob::AudioStore;
 use crate::call::CallId;
 use crate::config::TrustedProxies;
 use crate::db::repo;
@@ -64,8 +65,8 @@ pub use crate::ingest::IngestConfig;
 /// clone (Arc / channel / DB pool handle).
 #[derive(Clone)]
 pub struct AppState {
-    pub audio: Arc<BlobStore>,
-    pub db: DatabaseConnection,
+    pub audio: Arc<dyn AudioStore>,
+    pub db: Db,
     pub live: LiveFeed,
     pub ingest: IngestConfig,
     /// Whose `X-Forwarded-For` the request log may believe (#17). Empty — the
@@ -91,7 +92,7 @@ impl AppState {
     /// Assemble state from a blob store, a database connection, and ingest
     /// config, with a fresh live-feed hub, no trusted proxies, and an admin
     /// surface nothing can authenticate to until a password is provisioned.
-    pub fn new(audio: Arc<BlobStore>, db: DatabaseConnection, ingest: IngestConfig) -> Self {
+    pub fn new(audio: Arc<dyn AudioStore>, db: Db, ingest: IngestConfig) -> Self {
         AppState {
             audio,
             db,

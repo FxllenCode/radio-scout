@@ -22,6 +22,7 @@ use bytes::Bytes;
 use rstest::rstest;
 
 use radio_scout::IngestConfig;
+use radio_scout::blob::AudioStore;
 use radio_scout::db::DbBackend;
 use radio_scout::db::entities::{call, call_patch, system};
 use sea_orm::ConnectionTrait;
@@ -469,7 +470,9 @@ async fn the_builder_accepts_a_caller_supplied_store() {
 }
 
 // ---------------------------------------------------------------------------
-// Fault injection (#37): a store, and a table, that can be made to fail.
+// Fault injection (#37, reshaped by #97): a store and a statement that can be
+// made to fail, both by naming what should fail rather than by damaging the
+// thing underneath.
 // ---------------------------------------------------------------------------
 
 /// **The store seam.** Every worker that writes audio has an error arm that is
@@ -496,58 +499,90 @@ async fn a_store_can_be_told_to_fail_its_writes() {
     );
 }
 
-/// **The stall.** Several arms worth reaching are not "an operation failed" but
-/// "a failure landed *between* two statements" — a Call pruned after its row was
-/// read, a table dropped after the queue was filled. Parking the caller inside
-/// its read is what turns provoking those from a race against a sleep into a
-/// place a test can stand: while it is parked, the test owns the world.
+/// **A store that stats an object and then does not hand it over.**
+///
+/// Both halves of that are real — a Garage node shedding load answers the read
+/// with an error, and an object pruned between the stat and the read is simply
+/// gone — and serving has to tell them apart: one is a 500 an operator must act
+/// on, the other a 404 the client should stop asking about.
+///
+/// Neither is reachable through a store that works, and **no real store can be
+/// made to fail one and not the other**: a filesystem object made unreadable
+/// fails its stat too, because `LocalFileSystem` opens the file to size it.
+/// Under the store, the previous answer had to encode `serve_audio`'s own call
+/// order ("a `head` is never failed, only a `get`") and park a real read while a
+/// real object was pruned. Named at the interface, it is two lines and no
+/// timing.
 #[tokio::test]
-async fn a_store_can_hold_a_read_still_until_it_is_released() {
+async fn a_store_can_stat_an_object_it_will_not_hand_over() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (store, faults) = common::faulty_store(tmp.path());
     store
         .put("aa/1.wav", Bytes::from_static(b"bytes"))
         .await
         .expect("write");
-    let store = std::sync::Arc::new(store);
 
-    faults.stall_reads();
-    let reader = tokio::spawn({
-        let store = store.clone();
-        async move { store.get("aa/1.wav").await }
-    });
-    faults.stalled(1).await;
-
-    assert!(
-        !reader.is_finished(),
-        "a stalled read is parked, not merely slow"
-    );
-
-    faults.release();
-    let bytes = reader
-        .await
-        .expect("join")
-        .expect("read")
-        .expect("the object");
+    faults.fail_reads();
     assert_eq!(
-        &bytes[..],
-        b"bytes",
-        "and a released read returns the real bytes, not an error"
+        store.size("aa/1.wav").await.expect("stat"),
+        Some(5),
+        "the stat still answers, which is what makes the read the failing step"
+    );
+    assert!(store.get("aa/1.wav").await.is_err(), "broken");
+
+    faults.hide_reads();
+    assert_eq!(
+        store
+            .get("aa/1.wav")
+            .await
+            .expect("a hidden read is not an error"),
+        None,
+        "gone, which is a different answer from broken"
     );
 }
 
-/// **The table seam**, and why `break_table` was not enough. Taking a table away
-/// breaks the *first* statement that touches it — but every failure worth
-/// reaching on the write side happens after a read of the same table has already
-/// succeeded, so a dropped table always fails the wrong one. Refusing writes
-/// while reads and inserts still work is what puts the failure where it belongs.
+/// **The statement seam** (#97): a failing statement is chosen by *naming* it.
+///
+/// What it replaces is `DROP TABLE` — dialect-specific DDL that took every
+/// statement touching the table with it, so a read that had to succeed first
+/// could not, and whose failure could only be recognised by matching a driver's
+/// own wording, one phrasing per dialect. The refusal here is Radio-Scout's own
+/// string on both, and the table is named in the SQL the same way on both, so
+/// nothing about this test knows which dialect it is running on.
+#[tokio::test]
+async fn a_statement_naming_a_refused_table_is_refused() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(CallUpload::new()).await;
+    let stored = app.the_call().await;
+
+    app.refuse_statements_on("calls");
+
+    let refused = radio_scout::db::repo::find_call(&app.db, stored.id)
+        .await
+        .expect_err("a statement naming a refused table must fail");
+    assert!(
+        refused.to_string().contains(common::REFUSED),
+        "the refusal says it was injected, whatever the dialect: {refused}"
+    );
+    assert!(
+        radio_scout::db::repo::count_api_keys(&app.db).await.is_ok(),
+        "a table nobody named still answers"
+    );
+}
+
+/// **Refusing one kind of statement**, and why taking the table away was not
+/// enough. A dropped table breaks the *first* statement that touches it — but
+/// every failure worth reaching on the write side happens after a read *and* an
+/// insert of the same table have already succeeded, so it always failed the
+/// wrong one. Refusing updates while reads and inserts still work is what puts
+/// the failure where it belongs.
 #[tokio::test]
 async fn a_table_can_be_told_to_refuse_its_updates() {
     let app = TestApp::with_key("k").await;
     app.upload_ok(CallUpload::new()).await;
     let stored = app.the_call().await;
 
-    app.fail_writes_to("calls").await;
+    app.refuse_updates_to("calls");
 
     // Reads are untouched...
     assert_eq!(app.the_call().await.id, stored.id, "reads still work");
@@ -564,7 +599,7 @@ async fn a_table_can_be_told_to_refuse_its_updates() {
 
     let error = refused.expect_err("an update must be refused").to_string();
     assert!(
-        error.contains(common::INJECTED_WRITE),
+        error.contains(common::REFUSED),
         "the refusal must say it was injected, on either dialect: {error}"
     );
     assert_eq!(

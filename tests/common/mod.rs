@@ -42,6 +42,15 @@
 //! caller-supplied blob store (the S3 serving mode), or a caller-supplied
 //! database URL.
 //!
+//! **Failure is wired in by default** (#97). Every spawned app issues its
+//! statements through a handle this one can refuse — [`TestApp::refuse_statements_on`]
+//! and [`TestApp::refuse_updates_to`], which is how a 5xx path or a worker's
+//! error arm is reached without damaging a schema — and
+//! [`faulty_store`] hands over an audio store that can be told to fail a write,
+//! refuse a read, or answer one with "no such object". Both substitute at an
+//! interface Radio-Scout owns; see `faults.rs` for why that is not the same as
+//! decorating what is underneath.
+//!
 //! Included via `mod common;` from each `tests/*.rs` binary. Every binary is its
 //! own crate and recompiles this module whole while using a subset of it, so an
 //! unused helper is the normal state here — hence the blanket `dead_code` allow
@@ -64,7 +73,7 @@ mod ws;
 #[allow(unused_imports)]
 pub use audio::{silence_ms, wav};
 #[allow(unused_imports)]
-pub use faults::{Faults, INJECTED_IO, faulty_store};
+pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faulty_store};
 #[allow(unused_imports)]
 pub use push::{PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRIBER_PUBLIC};
 #[allow(unused_imports)]
@@ -82,17 +91,18 @@ use std::time::Duration;
 
 use clap::Parser;
 use radio_scout::admin::CSRF_HEADER;
+use radio_scout::blob::AudioStore;
 use radio_scout::config::{Cli, Config};
+use radio_scout::db::Db;
 use radio_scout::db::entities::{call, call_patch, system, tag, talkgroup, talkgroup_ref, unit};
 use radio_scout::db::repo::{self, NewCall, NewLogEvent};
-use radio_scout::db::{self};
 use radio_scout::enhance::EnhancementConfig;
 use radio_scout::instance::{self, Credentials, Instance, Wiring};
 use radio_scout::merge;
-use radio_scout::{BlobStore, Clock, IngestConfig};
+use radio_scout::{Clock, IngestConfig};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set,
 };
 
 /// A running Radio-Scout, and everything needed to observe it.
@@ -102,11 +112,13 @@ use sea_orm::{
 pub struct TestApp {
     /// `host:port` the app is listening on.
     pub addr: String,
-    /// The same connection the handlers use — for seeding rows and asserting on
-    /// them.
-    pub db: DatabaseConnection,
-    /// The same blob store the app writes audio to.
-    pub store: Arc<BlobStore>,
+    /// The same handle the handlers use — for seeding rows and asserting on
+    /// them, and for refusing a statement they are about to issue.
+    pub db: Db,
+    /// The same audio store the app writes to.
+    pub store: Arc<dyn AudioStore>,
+    /// Which statements this Instance's database is refusing (#97).
+    statements: Statements,
     /// The running Instance itself (#90) — the same assembly the binary boots,
     /// and what [`TestApp::restart`] stops and starts.
     instance: Instance,
@@ -196,11 +208,15 @@ impl TestApp {
     /// [`TestApp::restart_with`], and onto a different store — an operator
     /// whose `[storage]` now points somewhere else, or whose disk filled up
     /// while the process was down.
-    pub async fn restart_onto(&mut self, store: Option<BlobStore>, edit: impl FnOnce(&mut Config)) {
+    pub async fn restart_onto(
+        &mut self,
+        store: Option<Arc<dyn AudioStore>>,
+        edit: impl FnOnce(&mut Config),
+    ) {
         let mut config = self.instance.config().clone();
         edit(&mut config);
         self.instance
-            .restart_with(config, store.map(Arc::new))
+            .restart_with(config, store)
             .await
             .expect("restart");
         self.addr = loopback(&self.instance);
@@ -837,80 +853,35 @@ impl TestApp {
         refs
     }
 
-    /// Take a table out from under the running app, the way a half-applied
-    /// migration or a hand-edited database does.
+    /// Refuse every statement this app issues that names `table` (#97).
     ///
-    /// This is the only way to reach the 5xx paths (#29) from outside a handler:
-    /// every other failure mode is a 4xx by design. The DDL is **dialect-
-    /// specific**, which is why it lives here rather than in five test files —
-    /// Postgres refuses to drop a table that constraints still depend on, and
-    /// SQLite has no `CASCADE` to offer it.
-    pub async fn break_table(&self, table: &str) {
-        let cascade = match self.db.get_database_backend() {
-            db::DbBackend::Postgres => " CASCADE",
-            _ => "",
-        };
-        self.db
-            .execute_unprepared(&format!("DROP TABLE {table}{cascade}"))
-            .await
-            .unwrap_or_else(|err| panic!("break table {table}: {err}"));
+    /// How the 5xx paths (#29) are reached from outside a handler: every other
+    /// failure mode is a 4xx by design. What it replaced was `DROP TABLE`, and
+    /// the two differ in three ways that matter — the DDL was dialect-specific,
+    /// it took the whole table away rather than one statement, and its failure
+    /// could only be recognised by matching the driver's own wording for "no
+    /// such table", one phrasing per dialect. A refusal here is
+    /// [`REFUSED`] on both, and the rule is armed rather than executed, so the
+    /// schema underneath is untouched and nothing has to be dropped in
+    /// dependency order.
+    ///
+    /// It applies to this test's own queries too, because they go through the
+    /// same handle — arrange first, then refuse.
+    pub fn refuse_statements_on(&self, table: &str) {
+        self.statements.refuse(table);
     }
 
-    /// Make every **update** to `table` fail, while reads and inserts go on
-    /// working (#37).
+    /// Refuse every statement naming `table` that **updates a row**, leaving
+    /// reads and inserts working (#37).
     ///
-    /// [`TestApp::break_table`]'s companion, and the thing it cannot do. A
-    /// dropped table fails the *first* statement that touches it, but the
-    /// failures worth reaching on the write side all happen after a read of the
-    /// same table has already succeeded — the enhancement worker updates a Call
-    /// row it has just read, ingest marks a Call pending after inserting it. So
-    /// a dropped table always breaks the wrong statement, which is exactly why
-    /// #20 shipped those arms uncovered.
-    ///
-    /// A trigger is how the failure is aimed at one statement kind. The DDL is
-    /// **dialect-specific** — Postgres has no trigger body without a function to
-    /// call, SQLite has no function to call — so it lives here beside
-    /// `break_table` rather than in five test files. Both raise
-    /// [`INJECTED_WRITE`], so an assertion about the cause reads the same on
-    /// either dialect.
-    pub async fn fail_writes_to(&self, table: &str) {
-        let statements = match self.db.get_database_backend() {
-            db::DbBackend::Postgres => vec![
-                format!(
-                    "CREATE OR REPLACE FUNCTION rs_fail_write() RETURNS trigger \
-                     LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION '{INJECTED_WRITE}'; END $$"
-                ),
-                format!(
-                    "CREATE TRIGGER rs_fail_write_{table} BEFORE UPDATE ON {table} \
-                     FOR EACH ROW EXECUTE FUNCTION rs_fail_write()"
-                ),
-            ],
-            _ => vec![format!(
-                "CREATE TRIGGER rs_fail_write_{table} BEFORE UPDATE ON {table} \
-                 BEGIN SELECT RAISE(ABORT, '{INJECTED_WRITE}'); END"
-            )],
-        };
-        for statement in statements {
-            self.db
-                .execute_unprepared(&statement)
-                .await
-                .unwrap_or_else(|err| panic!("fail writes to {table}: {err}"));
-        }
-    }
-
-    /// How **this** dialect words "that table isn't there" — SQLite says
-    /// `no such table: calls`, Postgres says `relation "calls" does not exist`.
-    ///
-    /// The 5xx tests assert that the driver's own explanation reaches the
-    /// operator's log and never the client's body ([`TestApp::break_table`] is
-    /// how they get one). A test that pins a single wording keeps asserting that
-    /// on one dialect and quietly asserts nothing on the other — precisely the
-    /// half-blind green a dual-dialect run exists to catch.
-    pub fn missing_table_cause(&self, table: &str) -> String {
-        match self.db.get_database_backend() {
-            db::DbBackend::Postgres => format!(r#"relation "{table}" does not exist"#),
-            _ => format!("no such table: {table}"),
-        }
+    /// [`TestApp::refuse_statements_on`]'s companion, and the thing a dropped
+    /// table could never do: every update arm worth reaching happens after a
+    /// read *and* an insert of the same table have already succeeded — the
+    /// enhancement worker updates a Call row it has just read, ingest marks a
+    /// Call pending after inserting it — so taking the table away always broke
+    /// the wrong statement, which is why #20 shipped those arms uncovered.
+    pub fn refuse_updates_to(&self, table: &str) {
+        self.statements.refuse_updates(table);
     }
 
     // -- Stored objects -----------------------------------------------------
@@ -994,19 +965,12 @@ impl TestApp {
 pub struct TestAppBuilder {
     toml: Option<String>,
     edits: Vec<ConfigEdit>,
-    store: Option<BlobStore>,
+    store: Option<Arc<dyn AudioStore>>,
     heartbeat: Option<Duration>,
     clock: Option<Clock>,
     vapid: Option<String>,
     unwritable_env: bool,
 }
-
-/// What [`TestApp::fail_writes_to`] raises, on either dialect — so a test can
-/// assert that the driver's own explanation of an injected failure reached the
-/// operator's log, the way [`TestApp::missing_table_cause`] does for a table
-/// that isn't there. Its opposite number for the store seam is
-/// [`faults::INJECTED_IO`].
-pub const INJECTED_WRITE: &str = "injected write failure";
 
 /// The header a reverse proxy names the original client in — what
 /// `[server] trusted_proxies` decides whether to believe (#17, #28).
@@ -1069,8 +1033,8 @@ impl TestAppBuilder {
     /// Use this blob store instead of the one `[storage]` describes — an
     /// S3-backed store exercises the presigned-redirect serving path offline
     /// (SigV4 is computed locally), and [`faulty_store`] makes I/O fail.
-    pub fn store(mut self, store: BlobStore) -> Self {
-        self.store = Some(store);
+    pub fn store(mut self, store: impl AudioStore + 'static) -> Self {
+        self.store = Some(Arc::new(store));
         self
     }
 
@@ -1169,7 +1133,13 @@ impl TestAppBuilder {
         if self.unwritable_env {
             std::fs::create_dir(&env_file).expect("an unwritable env path");
         }
+        // Every spawned app can be told to refuse a statement (#97), whether or
+        // not it ever is: the Instance still opens and migrates its own
+        // database exactly as a boot does, and this only composes a decorator
+        // around the handle it opened.
+        let (decorate, statements) = faults::refusals();
         let mut wiring = Wiring::default()
+            .decorate_db(decorate)
             .credentials(Credentials {
                 env_file: Some(env_file),
                 // Configured, so `login()` knows it; the other two are
@@ -1200,6 +1170,7 @@ impl TestAppBuilder {
             addr: loopback(&instance),
             db: instance.db.clone(),
             store: instance.store.clone(),
+            statements,
             instance,
             log_sink: std::sync::Mutex::new(sink),
             // With a cookie jar, so the client behaves like the browser the

@@ -119,10 +119,7 @@ pub async fn search(
 
 /// The three queries behind a result page: the page itself, its denormalized
 /// view, and the total behind it.
-async fn load_page(
-    db: &sea_orm::DatabaseConnection,
-    search: &CallSearch,
-) -> Result<SearchPage, sea_orm::DbErr> {
+async fn load_page(db: &crate::db::Db, search: &CallSearch) -> Result<SearchPage, sea_orm::DbErr> {
     let rows = repo::search_calls(db, search).await?;
     let results = repo::stored_calls(db, &rows).await?;
     let count = repo::count_calls(db, search).await?;
@@ -217,7 +214,7 @@ pub async fn download(State(state): State<AppState>, Path(id): Path<CallId>) -> 
 /// A Call's denormalized view plus the recorder's own filename (the one column
 /// the view doesn't carry, used to pick the download's extension).
 async fn load_call(
-    db: &sea_orm::DatabaseConnection,
+    db: &crate::db::Db,
     id: CallId,
 ) -> Result<Option<(StoredCall, Option<String>)>, sea_orm::DbErr> {
     let Some(call) = repo::find_call(db, id).await? else {

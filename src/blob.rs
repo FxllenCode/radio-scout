@@ -292,6 +292,65 @@ fn redact_query(url: &str) -> String {
     }
 }
 
+/// What Radio-Scout does with stored audio (#97).
+///
+/// The **port** an `AppState`, an `Instance` and every worker holds, and the
+/// one [`BlobStore`] implements. It is deliberately Radio-Scout's own
+/// vocabulary rather than `object_store`'s: bytes and keys, `None` for an
+/// object that is not there, and no notion of a multipart upload, a listing
+/// stream or a `GetOptions`.
+///
+/// **Why it exists.** Every arm that handles a store refusing something — the
+/// enhancement worker settling a Call as `skipped`, serving telling "gone" from
+/// "broken" — is unreachable while the only store is a filesystem that works.
+/// Before this the seam was *under* the store: a decorator implementing seven
+/// methods of `object_store`'s trait, which had to know that `serve_audio` stats
+/// an object before it reads it (a `head` was never failed, only a `get`) — the
+/// audio path's internal call order, written into the fault machinery, where a
+/// rewrite of the handler would have silently stopped reaching the arm. Naming
+/// the dependency here instead means a substitute answers *these* questions and
+/// knows nothing about how they are asked.
+#[async_trait::async_trait]
+pub trait AudioStore: Send + Sync {
+    /// Store `bytes` under `key`.
+    async fn put(&self, key: &str, bytes: Bytes) -> Result<(), ObjectError>;
+
+    /// The size in bytes of the object at `key`, or `None` if it's absent.
+    async fn size(&self, key: &str) -> Result<Option<u64>, ObjectError>;
+
+    /// Fetch the whole object, or `None` if absent.
+    async fn get(&self, key: &str) -> Result<Option<Bytes>, ObjectError>;
+
+    /// Fetch a byte range `[start, end)` of the object.
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Bytes, ObjectError>;
+
+    /// Delete the object at `key` (idempotent-ish; missing is not an error).
+    async fn delete(&self, key: &str) -> Result<(), ObjectError>;
+
+    /// List every object with the metadata orphan-GC judges it by (#10).
+    async fn list_objects(&self) -> Result<Vec<StoredObject>, ObjectError>;
+
+    /// List every object key in the store.
+    ///
+    /// Provided, not required: it is [`AudioStore::list_objects`] with the
+    /// metadata dropped, so an implementer that had to write it out could only
+    /// get it wrong.
+    async fn list_keys(&self) -> Result<Vec<String>, ObjectError> {
+        Ok(self
+            .list_objects()
+            .await?
+            .into_iter()
+            .map(|object| object.key)
+            .collect())
+    }
+
+    /// Whether this backend serves via presigned URLs (S3) rather than proxying.
+    fn is_presigning(&self) -> bool;
+
+    /// A short-lived presigned GET URL for `key` — `None` on non-S3 backends.
+    async fn presigned_get_url(&self, key: &str) -> Option<Result<PresignedUrl, ObjectError>>;
+}
+
 /// A backend-agnostic blob store. Cheap to clone (shared handles).
 #[derive(Clone)]
 pub struct BlobStore {
@@ -366,69 +425,6 @@ impl BlobStore {
         })
     }
 
-    /// Whether this backend serves via presigned URLs (S3) rather than proxying.
-    pub fn is_presigning(&self) -> bool {
-        self.signer.is_some()
-    }
-
-    /// This store with its backend wrapped by `decorate`, which is handed the
-    /// current backend and returns the one to use in its place.
-    ///
-    /// **The seam a test harness makes I/O fail through (#37).** Every worker
-    /// that reads or writes audio has an error arm — the enhancement worker
-    /// settling a Call as `skipped`, ingest answering a recorder 500 — and while
-    /// the only store in the suite is a filesystem that works, not one of them
-    /// is reachable. They shipped untested until a store could be *told* to
-    /// fail. Composing rather than constructing is what lets that decoration sit
-    /// over a real filesystem store, or a real S3 one, without the harness
-    /// reimplementing either.
-    ///
-    /// The presigning half is deliberately left pointing at the undecorated S3
-    /// client: a decorator has no credentials and cannot sign, and silently
-    /// dropping the signer would turn an S3-backed store into a proxying one
-    /// halfway through a test.
-    pub fn decorated(
-        self,
-        decorate: impl FnOnce(Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore>,
-    ) -> Self {
-        Self {
-            store: decorate(self.store),
-            signer: self.signer,
-            // The decorated store shares the undecorated one's signature cache,
-            // for the same reason it shares its signer: decoration changes how
-            // bytes are read, not who the object is.
-            signed: self.signed,
-        }
-    }
-
-    /// Store `bytes` under `key`.
-    ///
-    /// On an S3 backend the object is written carrying the same `Cache-Control`
-    /// the proxying path puts on its own responses (#31). It has to: with a
-    /// presigned redirect the store answers the client directly, so a header
-    /// Radio-Scout sets on *its* response is never seen. Without one the browser
-    /// falls back to heuristic freshness, which for an object written moments
-    /// ago is nothing — so the element would revalidate every prefetched Call
-    /// instead of playing it from cache, and a stable signed URL would have
-    /// bought a 304 rather than the silence it is supposed to buy.
-    ///
-    /// An object key is minted fresh per object and never rewritten (enhancement
-    /// writes a *new* key), so `immutable` is exactly true of the bytes at it.
-    pub async fn put(&self, key: &str, bytes: Bytes) -> Result<(), ObjectError> {
-        let options = object_store::PutOptions {
-            attributes: self.object_attributes(),
-            ..Default::default()
-        };
-        self.store
-            .put_opts(
-                &ObjectPath::from(key),
-                PutPayload::from_bytes(bytes),
-                options,
-            )
-            .await?;
-        Ok(())
-    }
-
     /// The attributes a stored object carries.
     ///
     /// Empty on the filesystem backend, and not merely as an optimisation:
@@ -446,85 +442,12 @@ impl BlobStore {
         }
     }
 
-    /// The size in bytes of the object at `key`, or `None` if it's absent.
-    pub async fn size(&self, key: &str) -> Result<Option<u64>, ObjectError> {
-        match self.store.head(&ObjectPath::from(key)).await {
-            Ok(meta) => Ok(Some(meta.size)),
-            Err(ObjectError::NotFound { .. }) => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-
-    /// Fetch the whole object, or `None` if absent.
-    pub async fn get(&self, key: &str) -> Result<Option<Bytes>, ObjectError> {
-        match self.store.get(&ObjectPath::from(key)).await {
-            Ok(result) => Ok(Some(result.bytes().await?)),
-            Err(ObjectError::NotFound { .. }) => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-
-    /// Fetch a byte range `[start, end)` of the object.
-    pub async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Bytes, ObjectError> {
-        self.store
-            .get_range(&ObjectPath::from(key), start..end)
-            .await
-    }
-
-    /// Delete the object at `key` (idempotent-ish; missing is not an error).
-    pub async fn delete(&self, key: &str) -> Result<(), ObjectError> {
-        match self.store.delete(&ObjectPath::from(key)).await {
-            Ok(()) | Err(ObjectError::NotFound { .. }) => Ok(()),
-            Err(err) => Err(err),
-        }
-    }
-
-    /// List every object key in the store.
-    pub async fn list_keys(&self) -> Result<Vec<String>, ObjectError> {
-        Ok(self
-            .list_objects()
-            .await?
-            .into_iter()
-            .map(|object| object.key)
-            .collect())
-    }
-
-    /// List every object with the metadata orphan-GC judges it by (#10).
-    pub async fn list_objects(&self) -> Result<Vec<StoredObject>, ObjectError> {
-        let metas = self.store.list(None).try_collect::<Vec<_>>().await?;
-        Ok(metas
-            .into_iter()
-            .map(|meta| StoredObject {
-                key: meta.location.to_string(),
-                size: meta.size,
-                last_modified_ms: meta.last_modified.timestamp_millis(),
-            })
-            .collect())
-    }
-
-    /// A short-lived presigned GET URL for `key` — `None` on non-S3 backends.
-    /// The caller performs the access-scope check *before* calling this
-    /// (listening is open in v1, so the check is a no-op).
-    ///
-    /// **The same URL for the same object, for a slice of its lifetime (#31).**
-    /// The client prefetches the next Call's audio and the `<audio>` element
-    /// then asks for it again; signing afresh each time meant the element was
-    /// sent somewhere the prefetch had not warmed, so every prefetched Call was
-    /// downloaded twice. A signature is reused while more than [`PRESIGN_MARGIN`]
-    /// of it remains, and the caller is told how long the redirect may be cached
-    /// — always less than what is left, so a cached redirect cannot outlive the
-    /// signature it points at.
-    pub async fn presigned_get_url(&self, key: &str) -> Option<Result<PresignedUrl, ObjectError>> {
-        self.presigned_get_url_at(key, std::time::SystemTime::now())
-            .await
-    }
-
-    /// [`BlobStore::presigned_get_url`] against an explicit clock.
+    /// [`AudioStore::presigned_get_url`] against an explicit clock.
     ///
     /// The clock is a parameter because every decision here is about elapsed
     /// time — reuse, re-mint, prune — and the window is five minutes wide. Given
     /// `now`, this is the whole of that logic and a test can walk it to the
-    /// boundary and past it; the public method above supplies the real clock and
+    /// boundary and past it; the trait method supplies the real clock and
     /// nothing else.
     async fn presigned_get_url_at(
         &self,
@@ -551,7 +474,107 @@ impl BlobStore {
             max_age_secs: max_age_of(expires_at, now),
         }))
     }
+}
 
+#[async_trait::async_trait]
+impl AudioStore for BlobStore {
+    /// Store `bytes` under `key`.
+    ///
+    /// On an S3 backend the object is written carrying the same `Cache-Control`
+    /// the proxying path puts on its own responses (#31). It has to: with a
+    /// presigned redirect the store answers the client directly, so a header
+    /// Radio-Scout sets on *its* response is never seen. Without one the browser
+    /// falls back to heuristic freshness, which for an object written moments
+    /// ago is nothing — so the element would revalidate every prefetched Call
+    /// instead of playing it from cache, and a stable signed URL would have
+    /// bought a 304 rather than the silence it is supposed to buy.
+    ///
+    /// An object key is minted fresh per object and never rewritten (enhancement
+    /// writes a *new* key), so `immutable` is exactly true of the bytes at it.
+    async fn put(&self, key: &str, bytes: Bytes) -> Result<(), ObjectError> {
+        let options = object_store::PutOptions {
+            attributes: self.object_attributes(),
+            ..Default::default()
+        };
+        self.store
+            .put_opts(
+                &ObjectPath::from(key),
+                PutPayload::from_bytes(bytes),
+                options,
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn is_presigning(&self) -> bool {
+        self.signer.is_some()
+    }
+
+    /// The size in bytes of the object at `key`, or `None` if it's absent.
+    async fn size(&self, key: &str) -> Result<Option<u64>, ObjectError> {
+        match self.store.head(&ObjectPath::from(key)).await {
+            Ok(meta) => Ok(Some(meta.size)),
+            Err(ObjectError::NotFound { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Fetch the whole object, or `None` if absent.
+    async fn get(&self, key: &str) -> Result<Option<Bytes>, ObjectError> {
+        match self.store.get(&ObjectPath::from(key)).await {
+            Ok(result) => Ok(Some(result.bytes().await?)),
+            Err(ObjectError::NotFound { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Fetch a byte range `[start, end)` of the object.
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Bytes, ObjectError> {
+        self.store
+            .get_range(&ObjectPath::from(key), start..end)
+            .await
+    }
+
+    /// Delete the object at `key` (idempotent-ish; missing is not an error).
+    async fn delete(&self, key: &str) -> Result<(), ObjectError> {
+        match self.store.delete(&ObjectPath::from(key)).await {
+            Ok(()) | Err(ObjectError::NotFound { .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// List every object with the metadata orphan-GC judges it by (#10).
+    async fn list_objects(&self) -> Result<Vec<StoredObject>, ObjectError> {
+        let metas = self.store.list(None).try_collect::<Vec<_>>().await?;
+        Ok(metas
+            .into_iter()
+            .map(|meta| StoredObject {
+                key: meta.location.to_string(),
+                size: meta.size,
+                last_modified_ms: meta.last_modified.timestamp_millis(),
+            })
+            .collect())
+    }
+
+    /// A short-lived presigned GET URL for `key` — `None` on non-S3 backends.
+    /// The caller performs the access-scope check *before* calling this
+    /// (listening is open in v1, so the check is a no-op).
+    ///
+    /// **The same URL for the same object, for a slice of its lifetime (#31).**
+    /// The client prefetches the next Call's audio and the `<audio>` element
+    /// then asks for it again; signing afresh each time meant the element was
+    /// sent somewhere the prefetch had not warmed, so every prefetched Call was
+    /// downloaded twice. A signature is reused while more than [`PRESIGN_MARGIN`]
+    /// of it remains, and the caller is told how long the redirect may be cached
+    /// — always less than what is left, so a cached redirect cannot outlive the
+    /// signature it points at.
+    async fn presigned_get_url(&self, key: &str) -> Option<Result<PresignedUrl, ObjectError>> {
+        self.presigned_get_url_at(key, std::time::SystemTime::now())
+            .await
+    }
+}
+
+impl BlobStore {
     /// The signature cache.
     ///
     /// A poisoned lock is taken anyway: the map holds no invariant a panic
@@ -655,7 +678,7 @@ impl GcOutcome {
 /// under it. The caller derives the cutoff from
 /// [`RetentionConfig::orphan_grace`](crate::retention::RetentionConfig::orphan_grace).
 pub async fn orphan_gc(
-    store: &BlobStore,
+    store: &dyn AudioStore,
     referenced_keys: &HashSet<String>,
     written_before_ms: i64,
 ) -> Result<GcOutcome, ObjectError> {
@@ -691,6 +714,22 @@ fn is_reclaimable(
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    /// **A filesystem write must ask for nothing**, and that is not an
+    /// optimisation: `object_store` specifies that a backend which cannot
+    /// honour an attribute returns an error, and `LocalFileSystem` cannot store
+    /// one — so a store that asked would fail every write on a Pi.
+    ///
+    /// The S3 half of this decision is asserted where it can be seen for real:
+    /// `tests/blob.rs` writes through the S3 backend to a stub that records the
+    /// headers, and `tests/s3.rs` reads it back off a store that answers.
+    #[test]
+    fn a_filesystem_write_asks_for_nothing_a_filesystem_would_refuse() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let filesystem = BlobStore::filesystem(tmp.path()).expect("fs store");
+
+        assert!(filesystem.object_attributes().is_empty());
+    }
 
     fn object(key: &str, last_modified_ms: i64) -> StoredObject {
         StoredObject {

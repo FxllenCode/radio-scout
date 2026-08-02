@@ -46,7 +46,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, Set,
-    TransactionTrait,
 };
 use serde::Serialize;
 
@@ -592,7 +591,7 @@ impl From<DbErr> for ImportError {
 /// applied. A dry run walks the identical path and rolls back, so its report is
 /// a promise about the real run rather than a separate estimate of it.
 pub async fn import(
-    db: &sea_orm::DatabaseConnection,
+    db: &crate::db::Db,
     bytes: &[u8],
     options: &ImportOptions,
     now_ms: i64,

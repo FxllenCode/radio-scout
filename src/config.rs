@@ -1634,7 +1634,7 @@ fn set_env(env: &impl Fn(&str) -> Option<String>, var: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::S3Config;
+    use crate::blob::{AudioStore, S3Config};
     use crate::enhance::Mode;
     use crate::testing::LogCapture;
     use rstest::rstest;

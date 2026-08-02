@@ -21,10 +21,12 @@
 //! own startup. `main.rs` is bootstrap glue that is excluded from coverage; a
 //! subsystem wired there is a subsystem no test can reach.
 //!
-//! [`Wiring`] is deliberately small, and four of its six entries earn their
+//! [`Wiring`] is deliberately small, and five of its seven entries earn their
 //! place by varying between two *real* runs: the object store (a filesystem
-//! directory, an S3 bucket, a fault decorator), the clock, the credential
-//! **sources**, and the draining half of the log sink — which is there because
+//! directory, an S3 bucket, a substitute that can be made to fail), what is
+//! composed around the database handle (the same move, one level up — #97),
+//! the clock, the credential
+//! **sources**, and the draining half of the log sink, which is there because
 //! of an ordering rather than a value. The other two are on borrowed time and
 //! say so where they are declared: `bind`, because the suite listens on
 //! loopback where a scanner listens on every interface, and `heartbeat`, which
@@ -35,11 +37,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sea_orm::DatabaseConnection;
+use crate::db::Db;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::admin::AdminAuth;
+use crate::blob::AudioStore;
 use crate::config::Config;
 use crate::enhance::Enhancer;
 use crate::logsink;
@@ -48,6 +51,13 @@ use crate::retention;
 use crate::startup;
 use crate::worker::{Worker, Workers};
 use crate::{AppState, BlobStore, Clock, build_app};
+
+/// Something composed around the database handle before anything is given it —
+/// see [`Wiring::decorate_db`].
+///
+/// `Arc` rather than `Box` because [`Parts`] is cloned on every restart, and
+/// `Send + Sync` because an Instance is assembled inside a spawned task.
+pub type Decorate = Arc<dyn Fn(Db) -> Db + Send + Sync>;
 
 /// The env file a generated credential is written to when the boot had none to
 /// have read one from — beside the database rather than in the working
@@ -65,7 +75,19 @@ const ENV_FILE_NAME: &str = ".env";
 pub struct Wiring {
     /// The object store to use, when it is not the one `[storage]` describes —
     /// an S3 store built elsewhere, or a decorator that can be made to fail.
-    store: Option<BlobStore>,
+    store: Option<Arc<dyn AudioStore>>,
+    /// Something to compose around the database handle before the application
+    /// is given it.
+    ///
+    /// A **decorator, not a handle** (#97): opening the database stays where a
+    /// boot does it — `db::connect`, migrations and all, inside [`assemble`] —
+    /// and this only wraps the result. Handing in a finished handle instead
+    /// would let every spawned Instance skip the one step a boot cannot skip,
+    /// which is the shape #90 removed from the harness in the first place.
+    /// Kept across a restart, because a restart reconnects and the composition
+    /// has to survive it. Nothing an operator can write in `radio-scout.toml`
+    /// produces one, which is what this list is for.
+    db: Option<Decorate>,
     /// Where the three credentials are read from and written to.
     credentials: Credentials,
     /// What time it is (#90). The wall clock unless a caller says otherwise.
@@ -103,8 +125,14 @@ pub struct Wiring {
 
 impl Wiring {
     /// Use this store rather than opening the one `[storage]` names.
-    pub fn store(mut self, store: BlobStore) -> Self {
+    pub fn store(mut self, store: Arc<dyn AudioStore>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Compose `decorate` around the database handle this Instance opens.
+    pub fn decorate_db(mut self, decorate: Decorate) -> Self {
+        self.db = Some(decorate);
         self
     }
 
@@ -270,9 +298,9 @@ pub struct Instance {
     /// OS to choose, and the number it chose is the only one a client can use.
     pub addr: SocketAddr,
     /// The database every handler and worker shares.
-    pub db: DatabaseConnection,
+    pub db: Db,
     /// The audio store every handler and worker shares.
-    pub store: Arc<BlobStore>,
+    pub store: Arc<dyn AudioStore>,
     running: Running,
     /// Every Worker's reading, shared with the `AppState` handlers are given
     /// (#93) — the half of a Worker that has to reach a status surface.
@@ -296,13 +324,17 @@ pub struct Instance {
 /// These travel together everywhere — into [`assemble`], back out on the
 /// handle, and into the next `assemble` — so they are one type rather than four
 /// parameters that could be passed in the wrong order.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 struct Parts {
     credentials: Credentials,
     clock: Clock,
     /// Where to listen and how often to ping, neither of which is a setting.
     bind: Option<SocketAddr>,
     heartbeat: Option<Duration>,
+    /// What to compose around the database handle, if a caller asked for
+    /// anything — kept because a restart re-opens the database and whatever was
+    /// composed around it has to survive that.
+    db: Option<Decorate>,
 }
 
 /// The tasks one run of an Instance owns.
@@ -401,7 +433,7 @@ impl Instance {
     pub async fn restart_with(
         &mut self,
         config: Config,
-        store: Option<Arc<BlobStore>>,
+        store: Option<Arc<dyn AudioStore>>,
     ) -> Result<(), StartError> {
         self.stop_run().await;
         let store = store.unwrap_or_else(|| self.store.clone());
@@ -454,12 +486,13 @@ pub async fn start(config: Config, wiring: Wiring) -> Result<Instance, StartErro
         clock: wiring.clock,
         bind: wiring.bind,
         heartbeat: wiring.heartbeat,
+        db: wiring.db,
     };
     assemble(
         config,
         parts,
         wiring.log_writer,
-        wiring.store.map(Arc::new),
+        wiring.store,
         Workers::default(),
     )
     .await
@@ -475,7 +508,7 @@ async fn assemble(
     config: Config,
     parts: Parts,
     log_writer: Option<logsink::LogWriter>,
-    store: Option<Arc<BlobStore>>,
+    store: Option<Arc<dyn AudioStore>>,
     workers: Workers,
 ) -> Result<Instance, StartError> {
     let base_dir = config.server.base_dir.clone();
@@ -487,6 +520,10 @@ async fn assemble(
     let db = crate::db::connect(&config.database_url())
         .await
         .map_err(StartError::Database)?;
+    let db = match &parts.db {
+        Some(decorate) => decorate(db),
+        None => db,
+    };
 
     // Now there is somewhere to put them, everything logged since boot — the
     // migrations included — is written out, and the sink keeps up from here.

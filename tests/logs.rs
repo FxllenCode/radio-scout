@@ -365,7 +365,7 @@ async fn the_addresses_rule_5_permits_are_the_ones_stored(
 async fn a_broken_log_table_never_reaches_the_request() {
     let app = TestApp::with_key("k").await;
     let _sink = app.store_logs();
-    app.break_table("logs").await;
+    app.refuse_statements_on("logs");
 
     app.upload_ok(CallUpload::new().key("k")).await;
 
@@ -384,7 +384,7 @@ async fn a_log_that_cannot_be_read_keeps_its_cause_on_the_server() {
     let app = TestApp::spawn().await;
     app.login().await;
     let capture = LogCapture::start();
-    app.break_table("logs").await;
+    app.refuse_statements_on("logs");
 
     let response = app.get("/api/admin/logs").await;
 
@@ -398,10 +398,7 @@ async fn a_log_that_cannot_be_read_keeps_its_cause_on_the_server() {
     );
 
     let logged = capture.wait_for("stage=search-logs").await;
-    assert!(
-        logged.contains(&app.missing_table_cause("logs")),
-        "{logged}"
-    );
+    assert!(logged.contains(common::REFUSED), "{logged}");
     assert!(logged.contains(&request_id), "{logged}");
 }
 

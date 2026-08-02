@@ -3,6 +3,7 @@
 //! storage (ADR-0002); this layer holds only small metadata.
 
 pub mod entities;
+mod handle;
 pub mod migration;
 pub mod repo;
 
@@ -10,13 +11,19 @@ use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
 use sea_orm_migration::MigratorTrait;
 use tracing::{debug, info};
 
+pub use handle::{Connection, Db, Transaction, Txn};
 pub use sea_orm::DbBackend;
 
 /// Connect to the database at `url` and bring the schema up to date.
 ///
 /// SQLite URLs get `foreign_keys = ON` (off by default in SQLite). Postgres
 /// enforces foreign keys unconditionally.
-pub async fn connect(url: &str) -> Result<DatabaseConnection, DbErr> {
+///
+/// Migration runs against the connection itself rather than the [`Db`] it is
+/// wrapped in: sea-orm's migrator takes its own kind of handle, and a schema is
+/// brought up to date once at boot rather than being part of what the
+/// application does with a database afterwards.
+pub async fn connect(url: &str) -> Result<Db, DbErr> {
     let db = Database::connect(url).await?;
     if db.get_database_backend() == DbBackend::Sqlite {
         // WAL persists in the file header (set once); foreign_keys is
@@ -27,7 +34,7 @@ pub async fn connect(url: &str) -> Result<DatabaseConnection, DbErr> {
         }
     }
     migrate(&db).await?;
-    Ok(db)
+    Ok(Db::new(db))
 }
 
 /// Bring the schema up to date, **saying what it did** (ADR-0011).

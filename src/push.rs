@@ -616,7 +616,7 @@ fn topic_for(system_ref: i64, talkgroup_ref: i64) -> Option<String> {
 }
 
 /// Deliver one notification and act on what the push service says.
-async fn send(db: sea_orm::DatabaseConnection, client: reqwest::Client, delivery: Delivery) {
+async fn send(db: crate::db::Db, client: reqwest::Client, delivery: Delivery) {
     let subscription = delivery.subscription_id;
     let mut request = client.post(&delivery.request.url);
     for (name, value) in &delivery.request.headers {

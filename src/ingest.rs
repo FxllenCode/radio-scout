@@ -27,7 +27,6 @@ use std::sync::Arc;
 use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use sea_orm::TransactionTrait;
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Level, Span, field, info, span, warn};
 
@@ -442,11 +441,11 @@ async fn queue_for_enhancement(state: &AppState, call_id: crate::call::CallId) {
             "could not mark a Call for enhancement"
         );
     }
-    crate::enhance::offer(state, call_id).await;
+    state.enhancer.offer(state, call_id).await;
 }
 
 async fn insert_in_txn(
-    db: &sea_orm::DatabaseConnection,
+    db: &crate::db::Db,
     new_call: &NewCall,
     auto_populate: bool,
     now_ms: i64,

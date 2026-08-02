@@ -39,26 +39,33 @@ suite against a server with a much lower limit, that is what "too many clients a
 
 Everything found so far, so a new failure can be recognised as a new class rather than re-derived:
 
-- **`DROP TABLE`** — Postgres refuses while foreign keys still reference the table; SQLite has no
-  `CASCADE` to offer it. The 5xx tests break a table on purpose to reach the error paths, so this is
-  `TestApp::break_table`, which speaks the dialect it is on.
-- **Missing-table wording** — SQLite says `no such table: calls`, Postgres says
-  `relation "calls" does not exist`. The instrumentation tests assert the driver's own explanation
-  reaches the operator's log and never the client's body, so they ask
-  `TestApp::missing_table_cause("calls")` rather than pinning one dialect's phrasing — a pinned
-  phrase keeps asserting on one dialect and quietly asserts nothing on the other.
-- **Trigger bodies** — Postgres has no trigger body without a function to call
-  (`CREATE FUNCTION … LANGUAGE plpgsql` + `EXECUTE FUNCTION`); SQLite has no function to call and
-  raises inline (`SELECT RAISE(ABORT, …)`). `TestApp::fail_writes_to` ([#37](https://github.com/FxllenCode/radio-scout/issues/37))
-  needs one, because a *dropped* table fails the first statement that touches it and the write arms
-  worth reaching all happen after a read of the same table has already succeeded. Both dialects raise
-  the one string `common::INJECTED_WRITE`, so the assertion about the cause is dialect-blind the way
-  `missing_table_cause` makes the one above it.
 - **`SUM(bigint)`** — Postgres widens it to `numeric`, SQLite keeps it an integer, so
   `repo::total_audio_bytes` casts. Guarded by `tests/db.rs`.
 - **Text collation** — the two order text differently, which is why the selection catalog sorts in
   Rust rather than in the database ([#12](https://github.com/FxllenCode/radio-scout/issues/12)): a
   panel must read the same on a Pi's SQLite as on a hosted Postgres.
+
+## What used to differ, and deliberately no longer does
+
+Three entries lived here until [#97](https://github.com/FxllenCode/radio-scout/issues/97), and all
+three were the same mistake: reaching an error arm by *damaging the database*, which can only be done
+in each dialect's own words.
+
+`DROP TABLE` needed a `CASCADE` on Postgres and could not have one on SQLite. Recognising the
+failure meant knowing two phrasings for "no such table" — a driver's words, pinned as if they were
+our contract. Failing a write while reads still worked needed a trigger, which on Postgres has no
+body without a `plpgsql` function to call and on SQLite has no function to call.
+
+None of it is needed now. A failing statement is chosen by **naming the table** through
+`TestApp::refuse_statements_on` / `refuse_updates_to`, and the refusal is Radio-Scout's own
+`common::REFUSED` on both dialects.
+
+That works because sea-orm **quotes an identifier the same way on both** — `FROM "calls"` on
+SQLite and on Postgres — so the one thing a rule matches on does not vary. The statements around it
+are not byte-identical (a prepared Postgres statement binds `$1` where SQLite binds `?`), which is
+exactly why the rule matches a quoted table name rather than a whole statement. The upshot is the
+same: a test writes one rule and never learns which dialect it is on. See ADR-0009's #97 amendment
+for why the seam moved.
 
 ## In CI
 

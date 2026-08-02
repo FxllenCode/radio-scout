@@ -142,6 +142,90 @@ async fn flaky_get(State(state): State<FlakyState>) -> (StatusCode, Bytes) {
     (StatusCode::OK, state.body.clone())
 }
 
+/// A stub S3 that accepts a write and **remembers the headers it arrived
+/// with** (#31, #97).
+///
+/// What a write asks a store to record about an object is invisible from a
+/// filesystem round trip and invisible from the caller's side, so it used to be
+/// asserted by intercepting `PutOptions` inside a decorator under the store.
+/// That proved what Radio-Scout *asked for* and stopped one step short of what
+/// `object_store` then *sent* — and it needed a production decoration seam to
+/// exist at all.
+///
+/// Over a socket there is no gap left: this is the real S3 backend, real SigV4,
+/// and the header a browser would eventually be served by. `tests/s3.rs` proves
+/// the same thing against a store that answers for real, and skips wherever one
+/// is not running; this half runs everywhere.
+#[derive(Clone)]
+pub struct RecordingStore {
+    addr: SocketAddr,
+    headers: Recorded,
+}
+
+/// The headers every write has arrived with, newest last.
+type Recorded = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+impl RecordingStore {
+    /// Start one on an ephemeral port.
+    pub async fn start() -> Self {
+        let headers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/{*key}", axum::routing::put(record_put))
+            .with_state(headers.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        RecordingStore { addr, headers }
+    }
+
+    /// A [`BlobStore`] pointed at it.
+    pub fn store(&self) -> BlobStore {
+        BlobStore::s3(&S3Config {
+            bucket: OFFLINE_BUCKET.into(),
+            region: DEFAULT_REGION.into(),
+            endpoint: Some(format!("http://{}", self.addr)),
+            access_key_id: OFFLINE_KEY_ID.into(),
+            secret_access_key: OFFLINE_SECRET.into(),
+            allow_http: true,
+        })
+        .expect("build a recording s3 store")
+    }
+
+    /// What `name` arrived as on the last write, if it arrived at all.
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .lock()
+            .expect("recorded headers")
+            .iter()
+            .rev()
+            .find(|(header, _)| header == name)
+            .map(|(_, value)| value.clone())
+    }
+}
+
+/// Record what arrived, and answer the way S3 does.
+///
+/// The `ETag` is not decoration: `object_store` reads one off every successful
+/// write and treats its absence as a failed put, so a stub that answers a bare
+/// `200` is not answering like an object store.
+async fn record_put(
+    State(headers): State<Recorded>,
+    request: axum::extract::Request,
+) -> ([(axum::http::HeaderName, &'static str); 1], StatusCode) {
+    let mut recorded = headers.lock().expect("recorded headers");
+    for (name, value) in request.headers() {
+        if let Ok(value) = value.to_str() {
+            recorded.push((name.as_str().to_string(), value.to_string()));
+        }
+    }
+    ([(axum::http::header::ETAG, "\"an-etag\"")], StatusCode::OK)
+}
+
 /// How long the `CreateBucket` signature is valid. It is signed and sent in the
 /// same breath, so this is a timeout, not a lifetime anyone holds.
 const CREATE_BUCKET_TTL: Duration = Duration::from_secs(60);

@@ -109,10 +109,7 @@ pub async fn search(
 }
 
 /// The page and the total behind it.
-async fn load_page(
-    db: &sea_orm::DatabaseConnection,
-    search: &LogSearch,
-) -> Result<LogPage, sea_orm::DbErr> {
+async fn load_page(db: &crate::db::Db, search: &LogSearch) -> Result<LogPage, sea_orm::DbErr> {
     let results: Vec<LogView> = repo::search_log_events(db, search)
         .await?
         .into_iter()

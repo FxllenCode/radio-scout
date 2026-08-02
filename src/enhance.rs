@@ -691,6 +691,213 @@ impl Enhancer {
     }
 }
 
+// -- What enhancement needs of the world -------------------------------------
+
+/// What enhancing a Call needs of the **Archive** (CONTEXT.md) — a Call's row
+/// and the audio object behind it, which is exactly what "the Archive" means.
+///
+/// Six questions, and they are the whole of enhancement's dependency on the
+/// world. Before this the worker took the entire `AppState`: a concrete database
+/// handle and a concrete store, so its interface named nothing substitutable and
+/// its error arms could only be reached by damaging the things underneath —
+/// dropping a table, or parking a real read inside a real store while a real
+/// object was pruned. That machinery had to know the order [`step`] asks its
+/// questions in, which is a fact about the worker written down somewhere the
+/// worker cannot see.
+#[async_trait::async_trait]
+pub trait Archive: Send + Sync {
+    /// Calls a previous process left mid-enhancement.
+    async fn pending(&self) -> Result<Vec<CallId>, Failure>;
+
+    /// Where a Call's audio is, or `None` if the Call is no longer there.
+    async fn audio_of(&self, call_id: CallId) -> Result<Option<CallAudio>, Failure>;
+
+    /// The bytes behind an object key, or `None` if the object is gone.
+    async fn read(&self, key: &str) -> Result<Option<bytes::Bytes>, Failure>;
+
+    /// Write an object.
+    async fn write(&self, key: &str, bytes: bytes::Bytes) -> Result<(), Failure>;
+
+    /// Point a Call at its enhanced audio, settling it `done`.
+    async fn store_enhanced(&self, call_id: CallId, audio: EnhancedAudio) -> Result<(), Failure>;
+
+    /// Settle a Call `skipped`, leaving the audio it arrived with.
+    async fn mark_skipped(&self, call_id: CallId) -> Result<(), Failure>;
+}
+
+/// Where a Call's audio is — all of a Call's row that enhancement reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallAudio {
+    pub object_key: String,
+}
+
+/// The enhanced audio a Call is to be pointed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnhancedAudio {
+    pub object_key: String,
+    pub mime: &'static str,
+    pub name: String,
+    pub bytes: i64,
+    pub duration_ms: i64,
+}
+
+/// Why one of the Archive's answers could not be given.
+///
+/// The cause as text, because that is all anything here does with it: it
+/// becomes `cause=` on a WARN line an operator reads (ADR-0011 rule 4). Keeping
+/// a driver's error type in the port's signature would put sea-orm and
+/// `object_store` in the interface of something whose subject is audio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure(String);
+
+impl Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<E: std::error::Error> From<E> for Failure {
+    fn from(error: E) -> Self {
+        Failure(error.to_string())
+    }
+}
+
+/// How one Call's enhancement ended.
+///
+/// A **value**, not a log line (#97). Every arm below used to be reachable only
+/// by grepping a WARN out of a running Instance's output, which meant a test
+/// about "the Call was skipped because the store refused" was really a test
+/// about a string, and the arms that matter most — the ones an Operator's disk
+/// filling up produces — were the hardest to reach at all.
+///
+/// **Settled**, not "outcome": CONTEXT.md reserves that word (with *result*,
+/// *verdict* and *disposition*) for what **Ingest** decided about a Call, and
+/// two closed vocabularies sharing a name is exactly what the glossary's avoid
+/// lists exist to prevent. It is also the Worker entry's own word for work that
+/// a Worker no longer owes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settled {
+    /// The Call now points at levelled audio.
+    Enhanced { bytes: i64, duration_ms: i64 },
+    /// The Call was pruned between being queued and being reached, which
+    /// retention is entitled to do. **Not a failure**: there is nothing to say
+    /// and nothing to settle, because the row saying `pending` is itself gone.
+    Vanished,
+    /// Enhancement gave up, and the Call keeps the audio it arrived with.
+    /// `reason` is the slug an operator greps (ADR-0011 rule 3).
+    Skipped { reason: &'static str, cause: String },
+}
+
+impl Settled {
+    /// Give up on this Call, under `reason`, because of `cause`.
+    fn skipped(reason: &'static str, cause: impl Display) -> Self {
+        Settled::Skipped {
+            reason,
+            cause: cause.to_string(),
+        }
+    }
+}
+
+/// Enhance one Call: read its audio, run the chain, and point the row at the
+/// result.
+///
+/// Everything it needs is [`Archive`], and everything it did is the [`Settled`]
+/// — so the caller decides what to log and what to settle, and a test can ask
+/// for any of them without a running Instance. It does **not** settle the Call
+/// itself; [`settle`] does, because "record that this failed" is one more thing
+/// that can fail and is worth saying separately.
+pub async fn step(archive: &dyn Archive, config: &EnhancementConfig, call_id: CallId) -> Settled {
+    let audio = match archive.audio_of(call_id).await {
+        Ok(Some(audio)) => audio,
+        Ok(None) => return Settled::Vanished,
+        Err(error) => return Settled::skipped("look-up-call", error),
+    };
+    let original = match archive.read(&audio.object_key).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Settled::skipped("audio-missing", "no object"),
+        Err(error) => return Settled::skipped("read-audio", error),
+    };
+
+    // The one blocking stage. On `spawn_blocking` because it is hundreds of
+    // milliseconds of solid arithmetic, and holding a Tokio worker thread for
+    // that long stalls every request scheduled behind it.
+    let config = config.clone();
+    let enhanced = match enhanced_or_reason(
+        tokio::task::spawn_blocking(move || enhance(&original, &config)).await,
+    ) {
+        Ok(enhanced) => enhanced,
+        Err((reason, cause)) => return Settled::skipped(reason, cause),
+    };
+
+    // A new key, never the old one: ADR-0002's ordering rests on objects being
+    // immutable once written, and a listener mid-download of the original keeps
+    // reading a file that still exists until orphan-GC reclaims it.
+    let object_key = crate::blob::new_object_key(enhanced.extension);
+    let bytes = enhanced.bytes.len() as i64;
+    if let Err(error) = archive
+        .write(&object_key, bytes::Bytes::from(enhanced.bytes))
+        .await
+    {
+        return Settled::skipped("store-audio", error);
+    }
+
+    match archive
+        .store_enhanced(
+            call_id,
+            EnhancedAudio {
+                name: format!("{call_id}.{}", enhanced.extension),
+                object_key,
+                mime: enhanced.mime,
+                bytes,
+                duration_ms: enhanced.duration_ms,
+            },
+        )
+        .await
+    {
+        Ok(()) => Settled::Enhanced {
+            bytes,
+            duration_ms: enhanced.duration_ms,
+        },
+        // The object is written but unreferenced — an orphan, which #10's sweep
+        // reclaims. The Call keeps working on its original audio.
+        Err(error) => Settled::skipped("store-call", error),
+    }
+}
+
+/// Act on how a Call's enhancement ended: say it, and settle the row.
+///
+/// One funnel, the shape [`crate::ingest::rejected`] uses and for the same
+/// reason: a Call that quietly stopped being enhanced with nothing in the log is
+/// indistinguishable from one that was never queued. The Call keeps the audio it
+/// arrived with, so nothing a listener can reach is broken by a skip.
+async fn record(archive: &dyn Archive, call_id: CallId, settled: Settled) {
+    match settled {
+        Settled::Enhanced { bytes, duration_ms } => debug!(bytes, duration_ms, "call enhanced"),
+        // Ordinary, not exotic: the archive is bounded and the queue is deep.
+        Settled::Vanished => {}
+        Settled::Skipped { reason, cause } => {
+            warn!(reason = %reason, cause = %cause, "enhancement skipped");
+            mark_skipped(archive, call_id).await;
+        }
+    }
+}
+
+/// Record that a Call will not be enhanced, saying so if even that fails.
+///
+/// A Call left `pending` is re-queued by every subsequent boot and — because a
+/// pending Call is deliberately served without `immutable`
+/// ([`crate::audio_cache_control`]) — stays permanently uncacheable, so a
+/// failure here is worth its own line.
+async fn mark_skipped(archive: &dyn Archive, call_id: CallId) {
+    if let Err(error) = archive.mark_skipped(call_id).await {
+        warn!(
+            reason = %"mark-skipped-failed",
+            %error,
+            "could not record that enhancement was skipped"
+        );
+    }
+}
+
 /// Start the enhancement worker: re-queue what a restart interrupted, then work
 /// the queue until the process ends.
 ///
@@ -702,7 +909,7 @@ pub fn spawn(state: AppState) -> Option<Worker> {
     let inner = state.enhancer.0.clone()?;
     let mut inbox = inner.inbox.take()?;
     let meter = inner.meter.clone();
-    // The catch-up sweep is owed before this returns, so an Instance can never
+    // The resume sweep is owed before this returns, so an Instance can never
     // be observed idle in the window before it has run. That window is exactly
     // what `a_restart_leaves_the_existing_archive_alone` used to sleep 300ms
     // through.
@@ -714,7 +921,7 @@ pub fn spawn(state: AppState) -> Option<Worker> {
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => return,
-                _ = catch_up(&state) => {}
+                _ = resume(&state) => {}
             }
         }
         loop {
@@ -735,139 +942,167 @@ pub fn spawn(state: AppState) -> Option<Worker> {
             // of CPU on a Pi — and a stop that had to wait it out would be a
             // restart that appears to hang. Cutting it short is what `abort()`
             // did before this and is safe for the same reason: the row is still
-            // `pending`, and the next boot's catch-up sweep picks it up.
+            // `pending`, and the next boot's resume sweep picks it up.
             //
             // The Ticket is dropped either way, so a Call cut short leaves no
             // depth behind claiming it is still being worked on.
+            // Both halves inside the span, not just the second: everything
+            // `step` issues on the way — every statement, and the `sqlx::query`
+            // line each one leaves at DEBUG — is about *this* Call, and a
+            // diagnostic that names the Call only once it has already failed is
+            // the wrong half of the story.
+            let work = async {
+                let settled = step(&state, &inner.config, call_id).await;
+                record(&state, call_id, settled).await;
+            }
+            .instrument(span!(Level::ERROR, "enhance", call_id));
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
-                _ = run(&state, &inner.config, call_id) => {}
+                () = work => {}
             }
         }
     }))
 }
 
-/// Re-queue Calls that were pending when the process last stopped.
+/// Pick up what the last process left, saying what was found.
 ///
-/// Only `pending` — never `none`. A Call marked `none` was ingested while
-/// enhancement was off, and sweeping those up would mean that turning
-/// enhancement on silently re-encoded an operator's entire archive the next
-/// time they restarted. Converting an existing archive is a deliberate act, and
-/// it is not this.
-async fn catch_up(state: &AppState) {
-    let pending = match repo::calls_pending_enhancement(&state.db).await {
-        Ok(pending) => pending,
-        Err(error) => {
-            warn!(
-                reason = %"sweep-failed",
-                %error,
-                "could not look for Calls left mid-enhancement"
-            );
-            return;
-        }
-    };
-    if pending.is_empty() {
-        return;
-    }
-    info!(
-        calls = pending.len(),
-        "resuming enhancement after a restart"
-    );
-    for call_id in pending {
-        offer(state, call_id).await;
-    }
-}
-
-/// Offer an already-`pending` Call to the queue, and record it as `skipped` if
-/// the queue would not take it.
-///
-/// Shared by ingest and the boot sweep so the two cannot drift: a refusal that
-/// left the row `pending` would be re-queued by every subsequent boot, and —
-/// because a `pending` Call is deliberately served without `immutable`
-/// ([`crate::audio_cache_control`]) — would stay permanently uncacheable. That
-/// is exactly what happens when a restart interrupts more Calls than the queue
-/// is deep.
-pub(crate) async fn offer(state: &AppState, call_id: CallId) {
-    if state.enhancer.submit(call_id) {
-        return;
-    }
-    // `submit` has already said why it refused.
-    if let Err(error) =
-        repo::mark_enhancement(&state.db, call_id, call::EnhancementState::SKIPPED).await
-    {
-        warn!(
-            reason = %"mark-skipped-failed",
+/// The worker's own wrapper around [`Enhancer::resume`]: the method decides,
+/// this says so. Enhancement is a background convenience and must never be the
+/// reason a scanner refuses to come up, so an Archive that cannot be asked
+/// leaves a WARN and nothing else.
+async fn resume(state: &AppState) {
+    match state.enhancer.resume(state).await {
+        Ok(resumed) if resumed.is_empty() => {}
+        // `queued` and `shed` separately, because they are different news: the
+        // first is work about to happen, the second is Calls that will keep the
+        // audio they arrived with because this queue could not hold them all.
+        Ok(resumed) => info!(
+            queued = resumed.queued,
+            shed = resumed.shed,
+            "resuming enhancement after a restart"
+        ),
+        Err(error) => warn!(
+            reason = %"sweep-failed",
             %error,
-            "a refused Call is still marked pending and will be re-queued every boot"
-        );
+            "could not look for Calls left mid-enhancement"
+        ),
     }
 }
 
-/// Enhance one Call: read its audio, run the chain, and point the row at the
-/// result.
-async fn run(state: &AppState, config: &EnhancementConfig, call_id: CallId) {
-    let span = span!(Level::ERROR, "enhance", call_id);
-    async {
-        let audio = match repo::get_call_audio(&state.db, call_id).await {
-            Ok(Some(audio)) => audio,
-            // The Call was pruned between being queued and being reached, which
-            // retention is entitled to do. Nothing to say.
-            Ok(None) => return,
-            Err(error) => return skipped(state, call_id, "look-up-call", &error).await,
-        };
-        let original = match state.audio.get(&audio.object_key).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return skipped(state, call_id, "audio-missing", &"no object").await,
-            Err(error) => return skipped(state, call_id, "read-audio", &error).await,
-        };
+/// What a resume found, and what it did with it.
+///
+/// A value rather than a log line, so "the previous process left eight Calls and
+/// the queue could only take one" is something a test can state — and something
+/// a caller could one day show an Operator. Reaching it before #97 meant
+/// standing two applications up on one database and one directory and inferring
+/// it from what the second one printed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Resumed {
+    /// Calls put back on the enhancement queue.
+    pub queued: usize,
+    /// Calls the queue would not take, settled `skipped` instead.
+    pub shed: usize,
+}
 
-        // The one blocking stage. On `spawn_blocking` because it is hundreds of
-        // milliseconds of solid arithmetic, and holding a Tokio worker thread
-        // for that long stalls every request scheduled behind it.
-        let config = config.clone();
-        let enhanced = match enhanced_or_reason(
-            tokio::task::spawn_blocking(move || enhance(&original, &config)).await,
-        ) {
-            Ok(enhanced) => enhanced,
-            Err((reason, cause)) => return skipped(state, call_id, reason, &cause).await,
-        };
+impl Resumed {
+    /// Whether the previous process left anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.queued + self.shed == 0
+    }
+}
 
-        // A new key, never the old one: ADR-0002's ordering rests on objects
-        // being immutable once written, and a listener mid-download of the
-        // original keeps reading a file that still exists until orphan-GC
-        // reclaims it.
-        let object_key = crate::blob::new_object_key(enhanced.extension);
-        let bytes = enhanced.bytes.len() as i64;
-        if let Err(error) = state
-            .audio
-            .put(&object_key, bytes::Bytes::from(enhanced.bytes))
-            .await
-        {
-            return skipped(state, call_id, "store-audio", &error).await;
+impl Enhancer {
+    /// Re-queue Calls that were pending when the process last stopped.
+    ///
+    /// Only `pending` — never `none`. A Call marked `none` was ingested while
+    /// enhancement was off, and sweeping those up would mean that turning
+    /// enhancement on silently re-encoded an operator's entire archive the next
+    /// time they restarted. Converting an existing archive is a deliberate act,
+    /// and it is not this.
+    pub async fn resume(&self, archive: &dyn Archive) -> Result<Resumed, Failure> {
+        let mut resumed = Resumed::default();
+        for call_id in archive.pending().await? {
+            match self.offer(archive, call_id).await {
+                true => resumed.queued += 1,
+                false => resumed.shed += 1,
+            }
         }
+        Ok(resumed)
+    }
 
-        if let Err(error) = repo::store_enhanced_audio(
-            &state.db,
+    /// Offer an already-`pending` Call to the queue, recording it as `skipped`
+    /// if the queue would not take it. `true` means it was queued.
+    ///
+    /// Shared by ingest and the resume sweep so the two cannot drift: a refusal
+    /// that left the row `pending` would be re-queued by every subsequent boot,
+    /// and — because a `pending` Call is deliberately served without
+    /// `immutable` ([`crate::audio_cache_control`]) — would stay permanently
+    /// uncacheable. That is exactly what happens when a restart interrupts more
+    /// Calls than the queue is deep.
+    pub(crate) async fn offer(&self, archive: &dyn Archive, call_id: CallId) -> bool {
+        if self.submit(call_id) {
+            return true;
+        }
+        // `submit` has already said why it refused.
+        if let Err(error) = archive.mark_skipped(call_id).await {
+            warn!(
+                reason = %"mark-skipped-failed",
+                %error,
+                "a refused Call is still marked pending and will be re-queued every boot"
+            );
+        }
+        false
+    }
+}
+
+/// The Archive an `AppState` is: its database for the rows, its store for the
+/// objects.
+///
+/// The only implementation that ships, and deliberately thin — every decision
+/// is in [`step`], and each of these is one call. This is the half a test
+/// cannot substitute, so it is the half that must have nothing in it worth
+/// testing.
+#[async_trait::async_trait]
+impl Archive for AppState {
+    async fn pending(&self) -> Result<Vec<CallId>, Failure> {
+        Ok(repo::calls_pending_enhancement(&self.db).await?)
+    }
+
+    async fn audio_of(&self, call_id: CallId) -> Result<Option<CallAudio>, Failure> {
+        Ok(repo::get_call_audio(&self.db, call_id)
+            .await?
+            .map(|audio| CallAudio {
+                object_key: audio.object_key,
+            }))
+    }
+
+    async fn read(&self, key: &str) -> Result<Option<bytes::Bytes>, Failure> {
+        Ok(self.audio.get(key).await?)
+    }
+
+    async fn write(&self, key: &str, bytes: bytes::Bytes) -> Result<(), Failure> {
+        Ok(self.audio.put(key, bytes).await?)
+    }
+
+    async fn store_enhanced(&self, call_id: CallId, audio: EnhancedAudio) -> Result<(), Failure> {
+        Ok(repo::store_enhanced_audio(
+            &self.db,
             call_id,
             repo::EnhancedAudio {
-                object_key: &object_key,
-                mime: enhanced.mime,
-                name: format!("{call_id}.{}", enhanced.extension),
-                bytes,
-                duration_ms: enhanced.duration_ms,
+                object_key: &audio.object_key,
+                mime: audio.mime,
+                name: audio.name,
+                bytes: audio.bytes,
+                duration_ms: audio.duration_ms,
             },
         )
-        .await
-        {
-            // The object is written but unreferenced — an orphan, which #10's
-            // sweep reclaims. The Call keeps working on its original audio.
-            return skipped(state, call_id, "store-call", &error).await;
-        }
-        debug!(bytes, duration_ms = enhanced.duration_ms, "call enhanced");
+        .await?)
     }
-    .instrument(span)
-    .await
+
+    async fn mark_skipped(&self, call_id: CallId) -> Result<(), Failure> {
+        Ok(repo::mark_enhancement(&self.db, call_id, call::EnhancementState::SKIPPED).await?)
+    }
 }
 
 /// What a finished blocking stage produced, or the `(reason, cause)` to give up
@@ -889,33 +1124,6 @@ fn enhanced_or_reason(
         Ok(Ok(enhanced)) => Ok(enhanced),
         Ok(Err(error)) => Err((error.reason(), error.to_string())),
         Err(error) => Err(("enhance-panicked", error.to_string())),
-    }
-}
-
-/// Give up on enhancing a Call, saying why, and leave it playable.
-///
-/// One funnel, the shape [`crate::ingest::rejected`] uses and for the same
-/// reason: a Call that quietly stopped being enhanced with nothing in the log
-/// is indistinguishable from one that was never queued. The Call keeps the
-/// audio it arrived with, so nothing a listener can reach is broken by this.
-async fn skipped(
-    state: &AppState,
-    call_id: CallId,
-    reason: &'static str,
-    // `+ Send + Sync`, because this is a parameter of a future the worker holds
-    // across an await, and a bare `dyn Display` would make that future — and so
-    // the whole worker task — un-spawnable.
-    cause: &(dyn Display + Send + Sync),
-) {
-    warn!(reason = %reason, cause = %cause, "enhancement skipped");
-    if let Err(error) =
-        repo::mark_enhancement(&state.db, call_id, call::EnhancementState::SKIPPED).await
-    {
-        warn!(
-            reason = %"mark-skipped-failed",
-            %error,
-            "could not record that enhancement was skipped"
-        );
     }
 }
 
@@ -1239,6 +1447,322 @@ mod tests {
         assert!(enhancer.submit(1));
     }
 
+    // -- One Call, as an outcome ---------------------------------------------
+
+    /// **An Archive that answers however a test needs it to** (#97).
+    ///
+    /// The port is six questions, so a substitute is six answers — no store
+    /// internals, no schema, and no knowledge of the order [`step`] asks them
+    /// in. That last part is the point: the arms below used to be reachable
+    /// only by parking a real read inside a real store while a real table was
+    /// taken away, which meant the fault machinery encoded the worker's own
+    /// call order and would have gone quietly unreachable if the worker were
+    /// rewritten.
+    #[derive(Default)]
+    struct FakeArchive {
+        audio: std::sync::Mutex<std::collections::HashMap<CallId, (String, Vec<u8>)>>,
+        pending: Vec<CallId>,
+        /// Which question answers with a failure, if any.
+        fails: Option<&'static str>,
+        /// What the Archive was told, in order — so "it settled the Call" is an
+        /// assertion rather than a log line to grep.
+        settled: std::sync::Mutex<Vec<(CallId, String)>>,
+    }
+
+    impl FakeArchive {
+        /// An Archive holding one Call, with real enhanceable audio behind it.
+        fn holding(call_id: CallId) -> Self {
+            let archive = FakeArchive::default();
+            archive.audio.lock().expect("audio").insert(
+                call_id,
+                (
+                    "aa/original.wav".to_string(),
+                    wav(&tone(1000.0, 16_000, 0.1), 16_000),
+                ),
+            );
+            archive
+        }
+
+        fn failing(mut self, question: &'static str) -> Self {
+            self.fails = Some(question);
+            self
+        }
+
+        fn refuse(&self, question: &'static str) -> Result<(), FakeFailure> {
+            match self.fails == Some(question) {
+                true => Err(FakeFailure(question)),
+                false => Ok(()),
+            }
+        }
+
+        fn settled(&self) -> Vec<(CallId, String)> {
+            self.settled.lock().expect("settled").clone()
+        }
+    }
+
+    /// What a refused question says. One string, so an assertion about the
+    /// cause reaching a log line is about *this* test's failure and not a
+    /// driver's phrasing.
+    #[derive(Debug)]
+    struct FakeFailure(&'static str);
+
+    impl Display for FakeFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "the fake archive refused to {}", self.0)
+        }
+    }
+
+    impl std::error::Error for FakeFailure {}
+
+    #[async_trait::async_trait]
+    impl Archive for FakeArchive {
+        async fn pending(&self) -> Result<Vec<CallId>, Failure> {
+            self.refuse("list pending")?;
+            Ok(self.pending.clone())
+        }
+
+        async fn audio_of(&self, call_id: CallId) -> Result<Option<CallAudio>, Failure> {
+            self.refuse("look up the Call")?;
+            Ok(self
+                .audio
+                .lock()
+                .expect("audio")
+                .get(&call_id)
+                .map(|(key, _)| CallAudio {
+                    object_key: key.clone(),
+                }))
+        }
+
+        async fn read(&self, key: &str) -> Result<Option<bytes::Bytes>, Failure> {
+            self.refuse("read the audio")?;
+            Ok(self
+                .audio
+                .lock()
+                .expect("audio")
+                .values()
+                .find(|(stored, _)| stored == key)
+                .map(|(_, bytes)| bytes::Bytes::from(bytes.clone())))
+        }
+
+        async fn write(&self, key: &str, bytes: bytes::Bytes) -> Result<(), Failure> {
+            self.refuse("write the audio")?;
+            self.audio
+                .lock()
+                .expect("audio")
+                .insert(-1, (key.to_string(), bytes.to_vec()));
+            Ok(())
+        }
+
+        async fn store_enhanced(
+            &self,
+            call_id: CallId,
+            audio: EnhancedAudio,
+        ) -> Result<(), Failure> {
+            self.refuse("store the Call")?;
+            self.settled
+                .lock()
+                .expect("settled")
+                .push((call_id, audio.object_key));
+            Ok(())
+        }
+
+        async fn mark_skipped(&self, call_id: CallId) -> Result<(), Failure> {
+            self.refuse("mark the Call skipped")?;
+            self.settled
+                .lock()
+                .expect("settled")
+                .push((call_id, call::EnhancementState::SKIPPED.to_string()));
+            Ok(())
+        }
+    }
+
+    /// **Every way enhancing one Call can go, as a value** (#97).
+    ///
+    /// Each of these is a real thing an operator's instance does — a Garage node
+    /// shedding load, a disk that filled up, a database that stops taking
+    /// writes, retention pruning a Call out from under the queue — and each was
+    /// previously reachable only by running the whole application against a
+    /// damaged store or a dropped table, then grepping a WARN out of its output.
+    /// Two of them needed a real read *parked* inside the store while a real
+    /// table was taken away, which is the machinery this replaced.
+    ///
+    /// The promise they share: **enhancement is a convenience, and nothing about
+    /// it failing costs a listener the Call.** The audio the recorder uploaded
+    /// stays where it is, and the reason is a slug an operator can grep.
+    #[rstest]
+    // The row is gone — retention pruned it between queue and reach. Not a
+    // failure: there is nothing left to settle.
+    #[case::pruned(None, Settled::Vanished)]
+    #[case::row_unreadable(Some("look up the Call"), skipped_with("look-up-call"))]
+    #[case::store_refuses_the_read(Some("read the audio"), skipped_with("read-audio"))]
+    #[case::disk_full(Some("write the audio"), skipped_with("store-audio"))]
+    #[case::database_read_only(Some("store the Call"), skipped_with("store-call"))]
+    #[tokio::test]
+    async fn every_way_one_call_can_go_is_an_outcome(
+        #[case] failing: Option<&'static str>,
+        #[case] expected: Settled,
+    ) {
+        let archive = match failing {
+            Some(question) => FakeArchive::holding(7).failing(question),
+            // Nothing failing and no Call to find: the pruned case.
+            None => FakeArchive::default(),
+        };
+
+        let outcome = step(&archive, &normalizing(), 7).await;
+
+        assert_eq!(reason_of(&outcome), reason_of(&expected), "{outcome:?}");
+        assert!(
+            archive.settled().is_empty(),
+            "step decides; settling is the caller's, so that recording a failure \
+             can itself fail and be said out loud"
+        );
+    }
+
+    /// An [`Settled::Skipped`] under `reason`, whatever its cause — the cause is
+    /// the fake's own wording and is not what these cases are about.
+    fn skipped_with(reason: &'static str) -> Settled {
+        Settled::Skipped {
+            reason,
+            cause: String::new(),
+        }
+    }
+
+    fn reason_of(settled: &Settled) -> &str {
+        match settled {
+            Settled::Enhanced { .. } => "enhanced",
+            Settled::Vanished => "vanished",
+            Settled::Skipped { reason, .. } => reason,
+        }
+    }
+
+    /// ...and the happy path: the Call is pointed at new audio, at the storage
+    /// rate, with a duration ingest could never have known.
+    #[tokio::test]
+    async fn an_enhanced_call_is_pointed_at_its_new_audio() {
+        let archive = FakeArchive::holding(7);
+
+        let outcome = step(&archive, &normalizing(), 7).await;
+
+        assert!(
+            matches!(outcome, Settled::Enhanced { duration_ms, .. } if duration_ms > 1_500),
+            "{outcome:?}"
+        );
+        let settled = archive.settled();
+        assert_eq!(settled.len(), 1);
+        assert_ne!(
+            settled[0].1, "aa/original.wav",
+            "a new object key, never the old one: a listener mid-download of the \
+             original keeps reading a file that still exists (ADR-0002)"
+        );
+    }
+
+    /// **A Call the queue could not take is settled, not left pending.**
+    ///
+    /// A restart that interrupted more Calls than the queue is deep is the
+    /// ordinary way this happens. A Call left `pending` is re-queued by every
+    /// subsequent boot and — because a pending Call is deliberately served
+    /// without `immutable` — stays permanently uncacheable, so shedding has to
+    /// be recorded rather than merely counted.
+    #[tokio::test]
+    async fn a_resume_that_overflows_the_queue_settles_what_it_could_not_take() {
+        let archive = FakeArchive {
+            pending: vec![1, 2, 3, 4],
+            ..FakeArchive::default()
+        };
+        let enhancer = queue_of_depth(1);
+
+        let resumed = enhancer.resume(&archive).await.expect("resume");
+
+        assert_eq!(resumed, Resumed { queued: 1, shed: 3 });
+        assert_eq!(
+            archive.settled().len(),
+            3,
+            "every shed Call is recorded skipped: {:?}",
+            archive.settled()
+        );
+    }
+
+    /// **What is done about each outcome**, which is the other half of the
+    /// decision and is deliberately not [`step`]'s.
+    ///
+    /// A skip has to be *recorded*, or the Call stays `pending` — re-queued by
+    /// every subsequent boot, and permanently uncacheable, because a pending
+    /// Call is served without `immutable`. A Call that **vanished** must not be:
+    /// retention pruned it, the row saying `pending` is gone with it, and there
+    /// is nothing to say and nothing to settle. Marking one would be an update
+    /// against a row that no longer exists, and warning about it would fill an
+    /// operator's log with a failure that is not one.
+    #[tokio::test]
+    async fn a_pruned_call_is_passed_over_in_silence_and_a_skipped_one_is_recorded() {
+        let capture = LogCapture::start();
+        let archive = FakeArchive::holding(7);
+
+        record(&archive, 7, Settled::Vanished).await;
+
+        assert!(archive.settled().is_empty(), "nothing to settle");
+        assert_eq!(capture.text(), "", "and nothing to say");
+
+        record(
+            &archive,
+            7,
+            Settled::skipped("store-audio", "the disk is full"),
+        )
+        .await;
+
+        assert_eq!(archive.settled(), [(7, "skipped".to_string())]);
+        let logged = capture.text();
+        assert!(logged.contains("reason=store-audio"), "{logged}");
+        assert!(logged.contains(" WARN "), "{logged}");
+    }
+
+    /// ...and when even *recording* the skip fails — a database that has gone
+    /// read-only under a worker holding a Call — the operator is told, because
+    /// what is left behind is a Call every later boot will pick up again.
+    #[tokio::test]
+    async fn a_skip_that_cannot_be_recorded_says_so() {
+        let capture = LogCapture::start();
+        let archive = FakeArchive::holding(7).failing("mark the Call skipped");
+
+        record(&archive, 7, Settled::skipped("read-audio", "nope")).await;
+
+        let logged = capture.text();
+        assert!(logged.contains("reason=mark-skipped-failed"), "{logged}");
+        assert!(
+            logged.contains("mark the Call skipped"),
+            "the cause: {logged}"
+        );
+    }
+
+    /// A resume finding nothing is the normal case — an Instance that stopped
+    /// cleanly — and has nothing to say about it.
+    #[tokio::test]
+    async fn a_resume_with_nothing_to_pick_up_says_so() {
+        let resumed = queue_of_depth(4)
+            .resume(&FakeArchive::default())
+            .await
+            .expect("resume");
+
+        assert!(resumed.is_empty());
+        assert_eq!(resumed, Resumed::default());
+    }
+
+    /// An Archive that cannot even be asked is the boot case: a half-applied
+    /// migration, a hand-edited database. Enhancement is a background
+    /// convenience and must never be the reason a scanner refuses to come up,
+    /// so this is a value the caller decides what to do about — and what it does
+    /// is log and carry on serving.
+    #[tokio::test]
+    async fn a_resume_that_cannot_read_the_archive_is_an_error_not_a_panic() {
+        let archive = FakeArchive::default().failing("list pending");
+
+        let refused = queue_of_depth(4)
+            .resume(&archive)
+            .await
+            .expect_err("an Archive that cannot be asked");
+
+        assert!(refused.to_string().contains("list pending"), "{refused}");
+    }
+
     /// An `AppState` with enhancement on and nothing else configured.
     async fn enhancing_state() -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1249,6 +1773,71 @@ mod tests {
         let mut state = AppState::new(store, db, crate::IngestConfig::default());
         state.enhancer = Enhancer::from_config(normalizing());
         (state, tmp)
+    }
+
+    /// **The Call queued behind a pruned one is still enhanced.**
+    ///
+    /// Retention is entitled to prune a Call between it being queued and the
+    /// worker reaching it — the archive is bounded and the queue is deep, so on
+    /// a busy instance this is ordinary. What must survive is the *worker*: if a
+    /// Call that vanished ended the loop, or unwound it, a single prune would
+    /// cost an operator every enhancement after it.
+    ///
+    /// The queue takes any id, so "a Call that is not there" needs no prune and
+    /// no timing — it is an id nothing was ever stored under, put in front of a
+    /// real one. Reaching this used to mean parking a real read inside the store
+    /// while a real row was deleted.
+    #[tokio::test]
+    async fn a_call_that_vanished_does_not_take_the_queue_behind_it_with_it() {
+        let capture = LogCapture::start();
+        let (state, _tmp) = enhancing_state().await;
+        let call_id = stored_call(&state).await;
+
+        assert!(state.enhancer.submit(999_999), "a Call that is not there");
+        assert!(state.enhancer.submit(call_id), "and a real one behind it");
+        let worker = spawn(state.clone()).expect("the worker starts");
+        worker.idle().await;
+        worker.stop().await;
+
+        let enhanced = state
+            .audio_of(call_id)
+            .await
+            .expect("look up the Call")
+            .expect("the Call is still there");
+        assert!(
+            enhanced.object_key.ends_with(".wav"),
+            "the Call behind the one that vanished was enhanced: {}",
+            enhanced.object_key
+        );
+        capture.assert_never_logged("enhancement skipped");
+    }
+
+    /// A Call with real enhanceable audio, stored the way ingest stores one.
+    async fn stored_call(state: &AppState) -> CallId {
+        let object_key = crate::blob::new_object_key("wav");
+        state
+            .audio
+            .put(
+                &object_key,
+                bytes::Bytes::from(wav(&tone(1000.0, 16_000, 0.1), 16_000)),
+            )
+            .await
+            .expect("store the audio");
+        crate::db::repo::insert_call(
+            &state.db,
+            &crate::db::repo::NewCall {
+                system_ref: 11,
+                talkgroup_ref: 54241,
+                call_at_ms: 1_000,
+                object_key,
+                ..Default::default()
+            },
+            true,
+            1_000,
+        )
+        .await
+        .expect("insert the Call")
+        .id
     }
 
     /// **One worker, and only ever one** (#93). Enhancement is deliberately

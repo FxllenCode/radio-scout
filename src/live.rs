@@ -494,7 +494,7 @@ async fn handle_text(
 /// order).
 async fn send_catchup(
     socket: &mut WebSocket,
-    db: &sea_orm::DatabaseConnection,
+    db: &crate::db::Db,
     conn: &ConnState,
     since: CallId,
 ) -> Result<(), Disconnected> {

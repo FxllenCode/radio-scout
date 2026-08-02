@@ -49,7 +49,7 @@ async fn sweep_prunes_calls_older_than_the_retention_window() {
         max_size_bytes: None,
         ..Default::default()
     };
-    let report = retention::sweep(&app.db, &app.store, &config, NOW)
+    let report = retention::sweep(&app.db, app.store.as_ref(), &config, NOW)
         .await
         .unwrap();
 
@@ -78,9 +78,14 @@ async fn pruned_calls_stop_serving_audio() {
         "audio serves before the sweep"
     );
 
-    retention::sweep(&app.db, &app.store, &RetentionConfig::default(), NOW)
-        .await
-        .unwrap();
+    retention::sweep(
+        &app.db,
+        app.store.as_ref(),
+        &RetentionConfig::default(),
+        NOW,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(app.get(&audio).await.status(), 404);
 }
@@ -105,7 +110,7 @@ async fn size_cap_drops_the_oldest_until_the_archive_fits() {
         max_size_bytes: Some(2500),
         ..Default::default()
     };
-    let report = retention::sweep(&app.db, &app.store, &config, NOW)
+    let report = retention::sweep(&app.db, app.store.as_ref(), &config, NOW)
         .await
         .unwrap();
 
@@ -152,7 +157,7 @@ async fn size_cap_leaves_an_archive_that_already_fits(
         max_size_bytes: Some(cap),
         ..Default::default()
     };
-    let report = retention::sweep(&app.db, &app.store, &config, NOW)
+    let report = retention::sweep(&app.db, app.store.as_ref(), &config, NOW)
         .await
         .unwrap();
 
@@ -176,7 +181,7 @@ async fn pruning_pages_through_batches_until_the_archive_is_within_policy() {
         batch_size: 2, // three passes for five calls
         ..Default::default()
     };
-    let report = retention::sweep(&app.db, &app.store, &config, NOW)
+    let report = retention::sweep(&app.db, app.store.as_ref(), &config, NOW)
         .await
         .unwrap();
 
@@ -205,9 +210,14 @@ async fn pruning_takes_a_calls_child_rows_with_it() {
     .await;
     assert_eq!(app.count::<call_frequency::Entity>().await, 1);
 
-    let report = retention::sweep(&app.db, &app.store, &RetentionConfig::default(), NOW)
-        .await
-        .unwrap();
+    let report = retention::sweep(
+        &app.db,
+        app.store.as_ref(),
+        &RetentionConfig::default(),
+        NOW,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(report.aged_out, 1);
     assert_eq!(app.count::<call::Entity>().await, 0);
@@ -234,7 +244,7 @@ async fn orphan_gc_reclaims_audio_no_call_row_points_at() {
         orphan_grace: std::time::Duration::ZERO,
         ..Default::default()
     };
-    let report = retention::sweep(&app.db, &app.store, &config, now_ms() + 60_000)
+    let report = retention::sweep(&app.db, app.store.as_ref(), &config, now_ms() + 60_000)
         .await
         .unwrap();
 
@@ -286,7 +296,7 @@ async fn an_undeletable_object_is_counted_and_the_sweep_carries_on() {
         orphan_grace: std::time::Duration::ZERO,
         ..Default::default()
     };
-    let report = retention::sweep(&app.db, &app.store, &config, now_ms() + 60_000).await;
+    let report = retention::sweep(&app.db, app.store.as_ref(), &config, now_ms() + 60_000).await;
     std::fs::set_permissions(&shard_dir, restore).unwrap();
     let report = report.expect("an undeletable object must not fail the sweep");
 
@@ -315,7 +325,7 @@ async fn orphan_gc_spares_audio_written_within_the_grace_period() {
         orphan_grace: std::time::Duration::from_secs(3600),
         ..Default::default()
     };
-    let report = retention::sweep(&app.db, &app.store, &config, now_ms())
+    let report = retention::sweep(&app.db, app.store.as_ref(), &config, now_ms())
         .await
         .unwrap();
 
@@ -333,7 +343,7 @@ async fn retention_days_zero_keeps_everything() {
         max_size_bytes: None,
         ..Default::default()
     };
-    let report = retention::sweep(&app.db, &app.store, &config, NOW)
+    let report = retention::sweep(&app.db, app.store.as_ref(), &config, NOW)
         .await
         .unwrap();
 
@@ -363,7 +373,7 @@ async fn pruning_an_encrypted_call_deletes_a_row_and_complains_about_nothing() {
 
     let report = retention::sweep(
         &app.db,
-        &app.store,
+        app.store.as_ref(),
         &RetentionConfig {
             days: 7,
             max_size_bytes: None,

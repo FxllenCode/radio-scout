@@ -9,6 +9,7 @@ use common::{TestApp, header_of};
 
 use rstest::rstest;
 
+use radio_scout::blob::AudioStore;
 use radio_scout::db::entities::call::EnhancementState;
 use radio_scout::db::repo::NewCall;
 use radio_scout::{BlobStore, S3Config};
@@ -284,27 +285,23 @@ async fn a_store_that_refuses_to_read_is_a_server_error_not_a_missing_call(
 /// listening, so this window is ordinary rather than exotic.
 ///
 /// It is a **404**, not a 500: the object really is gone, the client should stop
-/// asking, and nothing needs an operator's attention. Reaching it at all needs
-/// the read held still while the prune happens — the two are one `await` apart.
+/// asking, and nothing needs an operator's attention. What separates it from the
+/// test above is only what the store *said* — an error there, nothing here — so
+/// the store is told to say it (#97). Before that seam existed the same window
+/// had to be staged by parking a real read inside the store and pruning a real
+/// object while it was held, which meant the fault machinery had to know that
+/// serving stats before it reads.
 #[tokio::test]
 async fn audio_pruned_between_the_stat_and_the_read_is_a_404() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (store, faults) = common::faulty_store(tmp.path());
-    let app = std::sync::Arc::new(TestApp::builder().store(store).spawn().await);
+    let app = TestApp::builder().store(store).spawn().await;
     let id = insert_call(&app, "aa/1.wav", Some("audio/wav")).await;
     app.put_object("aa/1.wav", b"audio-bytes").await;
 
-    faults.stall_reads();
-    let listener = tokio::spawn({
-        let app = app.clone();
-        async move { app.get(&audio(id)).await }
-    });
-    // Parked *after* the stat, which is what makes this the window it claims.
-    faults.stalled(1).await;
-    app.store.delete("aa/1.wav").await.expect("prune");
-    faults.release();
+    faults.hide_reads();
+    let resp = app.get(&audio(id)).await;
 
-    let resp = listener.await.expect("join");
     assert_eq!(resp.status(), 404);
     assert_eq!(resp.text().await.expect("body"), "audio not found\n");
 }

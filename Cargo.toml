@@ -22,6 +22,14 @@ object_store = { version = "0.14", features = ["aws"] }
 bytes = "1"
 futures-util = "0.3"
 http = "1"
+# `db::Db` and `blob::AudioStore` are held as trait objects and have async
+# methods (#97), so their futures have to be boxed. The cost is one allocation
+# per database statement and per object read — real, and deliberately accepted:
+# it is nanoseconds against a query or a disk read even on a Pi, and sea-orm's
+# own `ConnectionTrait` is already shaped this way, so a statement was paying it
+# before this. Pinned to the major sea-orm and object_store already declare
+# their traits with, so cargo unifies rather than linking two copies.
+async-trait = "0.1"
 sha2 = "0.10"
 time = { version = "0.3", features = ["parsing"] }
 sea-orm = { version = "1", features = [
@@ -109,10 +117,11 @@ reqwest = { version = "0.13", default-features = false, features = ["multipart",
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tempfile = "3"
-# The fault-injecting blob store (#37) implements `ObjectStore` itself, so the
-# test crates name the trait and its (`async_trait`-shaped) signatures directly.
-# Both are already in the dependency graph via the library — pinned to the same
-# majors so cargo unifies rather than linking two copies of the trait.
+# The substitutes the harness composes (#97) implement `blob::AudioStore` and
+# `db::Connection`, so the test crates name those traits' (`async_trait`-shaped)
+# signatures directly — and `tests/blob.rs` and `tests/s3.rs` still drive the
+# real `object_store` types. Both are already in the dependency graph via the
+# library, pinned to the same majors so cargo unifies rather than linking two.
 object_store = { version = "0.14", features = ["aws"] }
 async-trait = "0.1"
 # Test-hardening tooling (ADR-0010): property-based edge-case generation,

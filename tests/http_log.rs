@@ -145,7 +145,7 @@ async fn a_5xx_logs_at_error_without_a_listener_address() {
     let id = seed_playable_call(&app).await;
 
     // Break the lookup under the handler's feet, the way a missing column did.
-    app.break_table("calls").await;
+    app.refuse_statements_on("calls");
 
     let audio = format!("/api/call/{id}/audio");
     assert_eq!(app.get(&audio).await.status(), 500);

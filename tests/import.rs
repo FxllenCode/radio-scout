@@ -8,9 +8,10 @@
 mod common;
 use common::TestApp;
 
+use radio_scout::db::Db;
 use radio_scout::db::entities::{group, talkgroup, talkgroup_group};
 use radio_scout::db::repo::{self, NewCall};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -56,7 +57,7 @@ async fn import_ok(app: &TestApp, query: &str, csv: &str) -> Value {
 
 /// The stored Talkgroup for (system ref, talkgroup ref).
 async fn stored_talkgroup(
-    db: &DatabaseConnection,
+    db: &Db,
     system_ref: i64,
     talkgroup_ref: i64,
 ) -> Option<talkgroup::Model> {
@@ -74,18 +75,14 @@ async fn stored_talkgroup(
 }
 
 /// The Talkgroup for (system, ref), panicking if the import didn't make one.
-async fn must_store(
-    db: &DatabaseConnection,
-    system_ref: i64,
-    talkgroup_ref: i64,
-) -> talkgroup::Model {
+async fn must_store(db: &Db, system_ref: i64, talkgroup_ref: i64) -> talkgroup::Model {
     stored_talkgroup(db, system_ref, talkgroup_ref)
         .await
         .unwrap_or_else(|| panic!("no talkgroup {system_ref}/{talkgroup_ref}"))
 }
 
 /// The Tag name on a stored Talkgroup.
-async fn tag_of(db: &DatabaseConnection, tg: &talkgroup::Model) -> Option<String> {
+async fn tag_of(db: &Db, tg: &talkgroup::Model) -> Option<String> {
     let tag_id = tg.tag_id?;
     radio_scout::db::entities::tag::Entity::find_by_id(tag_id)
         .one(db)
@@ -95,7 +92,7 @@ async fn tag_of(db: &DatabaseConnection, tg: &talkgroup::Model) -> Option<String
 }
 
 /// The Group names linked to a stored Talkgroup, sorted.
-async fn groups_of(db: &DatabaseConnection, talkgroup_id: i64) -> Vec<String> {
+async fn groups_of(db: &Db, talkgroup_id: i64) -> Vec<String> {
     let mut names = Vec::new();
     for link in talkgroup_group::Entity::find()
         .filter(talkgroup_group::Column::TalkgroupId.eq(talkgroup_id))
@@ -115,7 +112,7 @@ async fn groups_of(db: &DatabaseConnection, talkgroup_id: i64) -> Vec<String> {
 }
 
 /// How many Talkgroups exist in total — the count that catches duplication.
-async fn talkgroup_count(db: &DatabaseConnection) -> usize {
+async fn talkgroup_count(db: &Db) -> usize {
     talkgroup::Entity::find()
         .all(db)
         .await
@@ -124,7 +121,7 @@ async fn talkgroup_count(db: &DatabaseConnection) -> usize {
 }
 
 /// Ingest one Call, so a System and an auto-populated Talkgroup exist to curate.
-async fn seed_call(db: &DatabaseConnection, system_ref: i64, label: &str, talkgroup_ref: i64) {
+async fn seed_call(db: &Db, system_ref: i64, label: &str, talkgroup_ref: i64) {
     repo::insert_call(
         db,
         &NewCall {

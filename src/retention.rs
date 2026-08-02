@@ -29,14 +29,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::db::Db;
 use object_store::Error as ObjectError;
-use sea_orm::{DatabaseConnection, DbErr, TransactionTrait};
+use sea_orm::DbErr;
 use serde::{Deserialize, Serialize};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 
 use crate::Clock;
-use crate::blob::{self, BlobStore};
+use crate::blob;
+use crate::blob::AudioStore;
 use crate::call::CallId;
 use crate::db::repo::{self, PrunableCall};
 use crate::worker::{Meter, Worker};
@@ -296,8 +298,8 @@ impl From<ObjectError> for SweepError {
 /// reclaim orphans. Age first so the cap only has to deal with what a legitimate
 /// retention window left behind.
 pub async fn sweep(
-    db: &DatabaseConnection,
-    store: &BlobStore,
+    db: &Db,
+    store: &dyn AudioStore,
     config: &RetentionConfig,
     now_ms: i64,
 ) -> Result<SweepReport, SweepError> {
@@ -378,8 +380,8 @@ pub const WORKER: &str = "retention";
 /// [`crate::push`] and [`crate::enhance`] live behind a `Clone` surface and buy
 /// the same guarantee at runtime instead.
 pub struct Sweeper {
-    db: DatabaseConnection,
-    store: Arc<BlobStore>,
+    db: Db,
+    store: Arc<dyn AudioStore>,
     config: RetentionConfig,
     clock: Clock,
     meter: Arc<Meter>,
@@ -387,12 +389,7 @@ pub struct Sweeper {
 
 impl Sweeper {
     /// A sweeper for this archive under this policy.
-    pub fn new(
-        db: DatabaseConnection,
-        store: Arc<BlobStore>,
-        config: RetentionConfig,
-        clock: Clock,
-    ) -> Self {
+    pub fn new(db: Db, store: Arc<dyn AudioStore>, config: RetentionConfig, clock: Clock) -> Self {
         Sweeper {
             db,
             store,
@@ -450,7 +447,7 @@ impl Sweeper {
                     // is safe for the same reason: the deletes are transactional
                     // per batch, so the archive is consistent wherever it stops.
                     _ = stop.cancelled() => break,
-                    outcome = sweep(&db, &store, &config, clock.now_ms()) => log_sweep(&outcome),
+                    outcome = sweep(&db, store.as_ref(), &config, clock.now_ms()) => log_sweep(&outcome),
                 }
             }
         })
@@ -493,8 +490,8 @@ fn log_sweep(outcome: &Result<SweepReport, SweepError>) {
 /// (ADR-0002). That ordering means a crash mid-batch leaves orphaned audio —
 /// harmless, and reclaimed by the GC pass — rather than rows whose audio 404s.
 async fn prune_batch(
-    db: &DatabaseConnection,
-    store: &BlobStore,
+    db: &Db,
+    store: &dyn AudioStore,
     batch: &[PrunableCall],
     report: &mut SweepReport,
 ) -> Result<(), SweepError> {
@@ -531,6 +528,7 @@ async fn prune_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlobStore;
     use crate::db;
     use crate::db::entities::call;
     use crate::now_ms;
@@ -543,7 +541,7 @@ mod tests {
     const NOW: i64 = 1_000_000_000_000;
 
     /// A DB + blob store in a temp dir, with nothing stored yet.
-    async fn empty_archive() -> (DatabaseConnection, Arc<BlobStore>, tempfile::TempDir) {
+    async fn empty_archive() -> (Db, Arc<BlobStore>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = db::connect(&crate::testing::sqlite_url(&tmp))
             .await
@@ -554,8 +552,7 @@ mod tests {
 
     /// An archive holding one Call old enough that any sweep with a non-zero
     /// retention window prunes it.
-    async fn archive_with_one_stale_call() -> (DatabaseConnection, Arc<BlobStore>, tempfile::TempDir)
-    {
+    async fn archive_with_one_stale_call() -> (Db, Arc<BlobStore>, tempfile::TempDir) {
         let (db, store, tmp) = empty_archive().await;
         add_stale_call(&db, &store, 1).await;
         (db, store, tmp)
@@ -563,7 +560,7 @@ mod tests {
 
     /// Store one Call dated the epoch (so it is always past any retention
     /// window), with its audio object, exactly as ingest would.
-    async fn add_stale_call(db: &DatabaseConnection, store: &BlobStore, talkgroup_ref: i64) {
+    async fn add_stale_call(db: &Db, store: &BlobStore, talkgroup_ref: i64) {
         let object_key = format!("aa/{talkgroup_ref}.wav");
         store
             .put(&object_key, bytes::Bytes::from_static(b"xxxxxxxx"))
@@ -711,7 +708,7 @@ mod tests {
         // do fail now — otherwise the rest of this proves nothing.
         db.close().await.expect("close");
         assert!(
-            sweep(&probe_db, &probe_store, &probe_config, now_ms())
+            sweep(&probe_db, probe_store.as_ref(), &probe_config, now_ms())
                 .await
                 .is_err(),
             "a closed pool should make sweeps fail"
@@ -739,7 +736,7 @@ mod tests {
             ..Default::default()
         };
 
-        let report = tokio::time::timeout(WAIT, sweep(&db, &store, &config, now_ms()))
+        let report = tokio::time::timeout(WAIT, sweep(&db, store.as_ref(), &config, now_ms()))
             .await
             .expect("sweep should terminate")
             .unwrap();
@@ -765,7 +762,7 @@ mod tests {
     }
 
     /// Store `count` log events dated `at_ms`, as the sink would have.
-    async fn add_log_events(db: &DatabaseConnection, at_ms: i64, count: usize) {
+    async fn add_log_events(db: &Db, at_ms: i64, count: usize) {
         let events: Vec<repo::NewLogEvent> = (0..count)
             .map(|n| repo::NewLogEvent {
                 at_ms,
@@ -781,7 +778,7 @@ mod tests {
     }
 
     /// How many log events are stored.
-    async fn stored_log_count(db: &DatabaseConnection) -> u64 {
+    async fn stored_log_count(db: &Db) -> u64 {
         crate::db::entities::log_event::Entity::find()
             .count(db)
             .await
@@ -804,7 +801,9 @@ mod tests {
             ..Default::default()
         };
 
-        let report = sweep(&db, &store, &config, now).await.expect("sweep");
+        let report = sweep(&db, store.as_ref(), &config, now)
+            .await
+            .expect("sweep");
 
         assert_eq!(report.logs_pruned, 1);
         assert_eq!(stored_log_count(&db).await, 1, "the recent event survives");
@@ -822,7 +821,9 @@ mod tests {
             ..Default::default()
         };
 
-        let report = sweep(&db, &store, &config, NOW).await.expect("sweep");
+        let report = sweep(&db, store.as_ref(), &config, NOW)
+            .await
+            .expect("sweep");
 
         assert_eq!(report.logs_pruned, 0);
         assert_eq!(stored_log_count(&db).await, 3);
@@ -841,7 +842,7 @@ mod tests {
             ..Default::default()
         };
 
-        let report = tokio::time::timeout(WAIT, sweep(&db, &store, &config, NOW))
+        let report = tokio::time::timeout(WAIT, sweep(&db, store.as_ref(), &config, NOW))
             .await
             .expect("the sweep terminates")
             .expect("sweep");
@@ -930,7 +931,7 @@ mod tests {
             ..Default::default()
         };
         let capture = LogCapture::start();
-        let report = sweep(&db, &store, &config, now_ms() + 60_000).await;
+        let report = sweep(&db, store.as_ref(), &config, now_ms() + 60_000).await;
         std::fs::set_permissions(&shard, restore).expect("restore");
 
         assert!(

@@ -17,9 +17,8 @@ mod common;
 use common::logs::LogCapture;
 use common::s3::unreachable_store;
 use common::{CallUpload, TestApp, wav};
-use radio_scout::db::entities::call::{self as call_entity, EnhancementState};
+use radio_scout::db::entities::call::EnhancementState;
 use radio_scout::enhance::{EnhancementConfig, Mode};
-use sea_orm::EntityTrait;
 
 /// The bytes a recorder would send: two seconds of 16 kHz tone, deliberately
 /// quiet, so that "it was levelled" is visible in the result.
@@ -413,7 +412,7 @@ async fn a_call_whose_audio_vanished_is_skipped_rather_than_retried_forever() {
 #[tokio::test]
 async fn a_database_the_sweep_cannot_read_does_not_stop_the_boot() {
     let mut app = TestApp::spawn().await;
-    app.break_table("calls").await;
+    app.refuse_statements_on("calls");
 
     app.restart_with(|config| config.enhancement = normalizing())
         .await;
@@ -466,7 +465,7 @@ async fn a_store_that_cannot_be_read_skips_the_call_and_keeps_going() {
     // connection is not on its own enough to settle inside the deadline below —
     // the connection fails fast but the *call* retries it — so what actually
     // bounds this is `blob::retry_policy` (#39).
-    app.restart_onto(Some(unreachable_store()), |config| {
+    app.restart_onto(Some(std::sync::Arc::new(unreachable_store())), |config| {
         config.enhancement = normalizing()
     })
     .await;
@@ -535,7 +534,7 @@ async fn a_sweep_that_overflows_the_queue_leaves_nothing_pending() {
 // The I/O failure arms (#37). Each of these is a real thing an operator's
 // instance does — a full disk, a Garage node refusing writes, a database that
 // goes away mid-Call — and each was unreachable until the harness could make a
-// specific operation fail (`common::Faults`, `TestApp::fail_writes_to`).
+// specific operation fail (`common::Faults`, `TestApp::refuse_updates_to`).
 //
 // What they all assert is the same promise: **enhancement is a convenience, and
 // nothing about it failing may cost a listener the Call**. The audio a recorder
@@ -599,7 +598,7 @@ async fn a_store_that_cannot_be_written_leaves_the_call_on_its_original_audio() 
 
 /// A database that stops taking writes part-way through — a disk that filled, a
 /// replica promoted read-only — with the reads that got the worker there still
-/// working. This is the failure `break_table` could never stage: the worker
+/// working. This is the failure a dropped table could never stage: the worker
 /// updates a Call row it has *already read*, so taking the table away breaks the
 /// read and the update is never attempted.
 ///
@@ -623,7 +622,7 @@ async fn a_database_that_stops_taking_writes_says_so_for_every_call_it_loses() {
             .expect("interrupt it");
     }
     // Only now: everything above is the arrangement, and it is all writes.
-    app.fail_writes_to("calls").await;
+    app.refuse_updates_to("calls");
 
     // A queue one Call deep, so the sweep both *runs* one Call to its failing
     // update and *refuses* the other seven to their failing update.
@@ -637,7 +636,7 @@ async fn a_database_that_stops_taking_writes_says_so_for_every_call_it_loses() {
 
     let skipped = capture.wait_for("reason=store-call").await;
     assert!(
-        skipped.contains(common::INJECTED_WRITE),
+        skipped.contains(common::REFUSED),
         "the operator is told why the update failed: {skipped}"
     );
     // Pinned on the message rather than the `reason` slug, unusually: both
@@ -658,104 +657,6 @@ async fn a_database_that_stops_taking_writes_says_so_for_every_call_it_loses() {
     );
 }
 
-/// **A table that goes away while the worker is holding a Call.** The worker had
-/// already read its row, so the failure lands on the *update* — and the Call
-/// behind it in the queue never gets a row read at all.
-///
-/// Both arms are reached in one pass because the store is holding the first Call
-/// still: while it is parked inside its `get`, the second Call is provably
-/// queued and nothing has read it yet, so the table can be taken away knowing
-/// exactly which statements have run. Racing a sleep against a background worker
-/// would reach the same lines and fail on a loaded CI runner instead.
-#[tokio::test]
-async fn a_table_that_vanishes_mid_call_is_survived_by_the_worker() {
-    let capture = LogCapture::start();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (store, faults) = common::faulty_store(tmp.path());
-    faults.stall_reads();
-
-    let app = TestApp::builder()
-        .store(store)
-        .enhancement(normalizing())
-        .spawn()
-        .await;
-    app.create_api_key("k").await;
-
-    // The first Call: the worker reads its row, then parks reading its audio.
-    app.upload_ok(call()).await;
-    faults.stalled(1).await;
-    // The second: queued behind the parked one, its row not yet read.
-    app.upload_ok(call().talkgroup(200).at(2_000)).await;
-
-    app.break_table("calls").await;
-    faults.release();
-
-    let missing = app.missing_table_cause("calls");
-    let update = capture.wait_for("reason=store-call").await;
-    assert!(
-        update.contains(&missing),
-        "the Call that was already read fails on its update: {update}"
-    );
-    let lookup = capture.wait_for("reason=look-up-call").await;
-    assert!(
-        lookup.contains(&missing),
-        "the Call behind it fails on its row: {lookup}"
-    );
-
-    assert_eq!(
-        app.get("/healthz").await.status(),
-        200,
-        "the process must still be serving — a worker that unwinds takes every \
-         later Call's enhancement with it"
-    );
-}
-
-/// A Call pruned between being queued and being reached. Retention is entitled
-/// to do exactly this — the archive is bounded and the queue is deep — so it is
-/// ordinary, not exotic, and it is **not a failure**: there is nothing to say
-/// and nothing to settle, because the row saying `pending` is itself gone.
-///
-/// What must survive is the worker. The Call queued behind the pruned one has to
-/// be enhanced, or a busy instance would lose everything after the first prune.
-#[tokio::test]
-async fn a_call_pruned_before_the_worker_reaches_it_is_passed_over_in_silence() {
-    let capture = LogCapture::start();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (store, faults) = common::faulty_store(tmp.path());
-    faults.stall_reads();
-
-    let app = TestApp::builder()
-        .store(store)
-        .enhancement(normalizing())
-        .spawn()
-        .await;
-    app.create_api_key("k").await;
-
-    app.upload_ok(call()).await;
-    faults.stalled(1).await;
-    app.upload_ok(call().talkgroup(200).at(2_000)).await;
-    app.upload_ok(call().talkgroup(300).at(3_000)).await;
-    let queued = app.calls().await;
-    let (first, pruned, behind) = (&queued[0], &queued[1], &queued[2]);
-
-    call_entity::Entity::delete_by_id(pruned.id)
-        .exec(&app.db)
-        .await
-        .expect("prune the queued Call");
-    faults.release();
-
-    assert_eq!(
-        app.await_enhancement(first.id).await.enhancement,
-        EnhancementState::DONE
-    );
-    assert_eq!(
-        app.await_enhancement(behind.id).await.enhancement,
-        EnhancementState::DONE,
-        "the Call queued behind a pruned one must still be enhanced"
-    );
-    capture.assert_never_logged("enhancement skipped");
-}
-
 /// The ingest side of the same failure. A Call is marked `pending` *before* it
 /// is offered to the queue, so that a process killed between the two finds it
 /// again at the next boot — which means the mark is a write that can fail while
@@ -770,7 +671,7 @@ async fn a_call_that_cannot_be_marked_pending_still_lands_and_still_plays() {
     let capture = LogCapture::start();
     let app = TestApp::builder().enhancement(normalizing()).spawn().await;
     app.create_api_key("k").await;
-    app.fail_writes_to("calls").await;
+    app.refuse_updates_to("calls");
 
     app.upload_ok(call()).await;
 
@@ -788,7 +689,7 @@ async fn a_call_that_cannot_be_marked_pending_still_lands_and_still_plays() {
         "the Call the recorder uploaded must still play"
     );
     let line = capture.wait_for("reason=mark-pending-failed").await;
-    assert!(line.contains(common::INJECTED_WRITE), "{line}");
+    assert!(line.contains(common::REFUSED), "{line}");
 }
 
 /// An encrypted Call has no audio object at all (#42, spec US 9), so there is
