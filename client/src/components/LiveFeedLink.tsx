@@ -4,7 +4,6 @@ import {
   connectLiveFeed,
   type LiveFeedHandle,
   type LiveStatus,
-  type Subscription,
 } from '@/lib/liveFeed'
 import { usePush } from '@/hooks/usePush'
 import { useAppDispatch, useAppSelector, useAppStore } from '@/store/hooks'
@@ -12,17 +11,12 @@ import {
   connected,
   connecting,
   disconnected,
-  expireAvoids,
   lagged,
   received,
   selectFeedStatus,
   selectSince,
 } from '@/store/live'
 import { selectSubscription } from '@/store/transport'
-
-/** How often lapsed avoids are swept up. Avoids are timed in tens of minutes
- *  (spec US 14), so this only has to be finer than a listener would notice. */
-const AVOID_SWEEP_MS = 5_000
 
 const STATUS_ACTION: Record<LiveStatus, () => { type: string }> = {
   connecting,
@@ -47,11 +41,10 @@ export function LiveFeedLink() {
   // their phone is what they actually hear.
   const { push, token: pushToken } = usePush()
 
-  // Serialized, so this re-runs when the *matrix* changes rather than on every
-  // render that rebuilds an equal one.
-  const matrix = useAppSelector((state) =>
-    JSON.stringify(selectSubscription(state)),
-  )
+  // Compared by reference: the selector holds its identity while nothing it
+  // reads has changed (#91), so this re-runs when the *matrix* changes and not
+  // on every dispatch that would have rebuilt an equal one.
+  const matrix = useAppSelector(selectSubscription)
   const feedOff = useAppSelector(selectFeedStatus) === 'off'
 
   useEffect(() => {
@@ -109,23 +102,12 @@ export function LiveFeedLink() {
   // otherwise someone who just switched notifications on would keep being
   // notified about their own listening until the next reconnect.
   useEffect(() => {
-    const selection = JSON.parse(matrix) as Subscription
-    feed.current?.subscribe(selection)
+    feed.current?.subscribe(matrix)
     // The server's copy of the Selection decides which Calls are worth waking a
     // phone for, so it moves with the listener's. A no-op while notifications
     // are off, and a no-op when the server already has this one.
-    void push?.sync(selection)
+    void push?.sync(matrix)
   }, [matrix, push, pushToken])
-
-  // A timed avoid has to reactivate on its own (spec US 14), and nothing else
-  // is guaranteed to wake the store when its moment comes.
-  useEffect(() => {
-    const sweep = setInterval(
-      () => dispatch(expireAvoids(Date.now())),
-      AVOID_SWEEP_MS,
-    )
-    return () => clearInterval(sweep)
-  }, [dispatch])
 
   return null
 }

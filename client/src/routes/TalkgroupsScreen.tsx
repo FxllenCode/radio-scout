@@ -1,23 +1,18 @@
 import { Search } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
 import { ledForCall } from '@/lib/led'
 import {
-  categoryViews,
-  countOn,
-  isSelected,
-  stateOf,
-  summarize,
-  talkgroupsOf,
-  type CatalogEntry,
-  type CategoryView,
-  type Selection,
-  type TalkgroupKey,
-  type TriState,
-} from '@/lib/selection'
+  panelOf,
+  type Choice,
+  type PanelCategory,
+  type PanelRow,
+  type PanelSystem,
+} from '@/lib/panel'
+import type { TriState } from '@/lib/selection'
 import { cn } from '@/lib/utils'
 import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -26,7 +21,7 @@ import {
   chooseSystem,
   chooseTalkgroups,
   selectAudibleSelection,
-  selectAvoidUntil,
+  selectAvoids,
 } from '@/store/live'
 import type { Catalog } from '@/types'
 
@@ -52,6 +47,12 @@ const COUNTDOWN_TICK_MS = 30_000
  * constructed), a **filter** so a Talkgroup can be found without scrolling a
  * wall of buttons, and **counts** so a category says how much of it is on
  * before you tap it.
+ *
+ * The panel is derived once, by [`panelOf`], and this file renders it (#91).
+ * Nothing below decides what a tap means, what a row is called, or how much of
+ * a System is on — it is handed all of that. Every input to that memo holds its
+ * identity between dispatches, which is what lets 400+ rows scroll while audio
+ * plays (#57): playback progress redraws nothing here.
  */
 export function TalkgroupsScreen() {
   const dispatch = useAppDispatch()
@@ -59,13 +60,21 @@ export function TalkgroupsScreen() {
   // (spec US 14) laid over it, so a muted Talkgroup reads off in the rows, the
   // category chips and the summary alike.
   const selection = useAppSelector(selectAudibleSelection)
+  const avoided = useAppSelector(selectAvoids)
   const { data, isLoading, isError } = useGetCatalogQuery()
   const [filter, setFilter] = useState('')
 
   const catalog = data ?? EMPTY_CATALOG
-  const { on, total } = summarize(catalog, selection)
-  const matches = matching(talkgroupsOf(catalog), filter)
-  const filtered = filter.trim().length > 0
+  const panel = useMemo(
+    () => panelOf({ catalog, selection, avoided, filter }),
+    [catalog, selection, avoided, filter],
+  )
+  const { on, total } = panel
+
+  /** Do what this control is for. Two action creators, chosen by the shape the
+   *  panel handed us — never by this file working out which one applies. */
+  const choose = (choice: Choice) =>
+    dispatch('systemRef' in choice ? chooseSystem(choice) : chooseTalkgroups(choice))
 
   return (
     <Screen
@@ -93,47 +102,30 @@ export function TalkgroupsScreen() {
         <>
           <Filter value={filter} onChange={setFilter} />
 
-          <Categories
-            catalog={catalog}
-            selection={selection}
-            onToggle={(category) =>
-              dispatch(
-                chooseTalkgroups({
-                  keys: category.keys,
-                  on: category.state !== 'all',
-                }),
-              )
-            }
-          />
+          <div className="mb-5 flex flex-col gap-3">
+            {panel.categories.map(({ heading, categories }) => (
+              <section key={heading} aria-label={heading}>
+                <h2 className="mb-1.5 font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/70">
+                  {heading}
+                </h2>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {categories.map((category) => (
+                    <CategoryChip
+                      key={category.label}
+                      category={category}
+                      onClick={() => choose(category.choice)}
+                    />
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
 
-          {catalog.systems.map((system) => {
-            const talkgroups = matches.filter((tg) => tg.systemRef === system.ref)
-            if (talkgroups.length === 0) return null
-            return (
-              <SystemSection
-                key={system.ref}
-                label={system.label ?? `System ${system.ref}`}
-                talkgroups={talkgroups}
-                selection={selection}
-                // The button acts on what it is next to. Unfiltered, that is
-                // the System itself — one wildcard, which also covers the
-                // Talkgroups this browser has never heard of (spec US 21).
-                // Filtered, it is the rows on screen and nothing else.
-                onAll={(next) =>
-                  dispatch(
-                    filtered
-                      ? chooseTalkgroups({ keys: talkgroups, on: next })
-                      : chooseSystem({ systemRef: system.ref, on: next }),
-                  )
-                }
-                onToggle={(key, next) =>
-                  dispatch(chooseTalkgroups({ keys: [key], on: next }))
-                }
-              />
-            )
-          })}
+          {panel.systems.map((system) => (
+            <SystemSection key={system.key} system={system} onChoose={choose} />
+          ))}
 
-          {matches.length === 0 && <Notice>No talkgroups match “{filter}”.</Notice>}
+          {panel.empty && <Notice>No talkgroups match “{filter}”.</Notice>}
 
           <div className="mt-6 flex items-center gap-2 border-t border-border pt-4">
             <span className="flex-1 font-mono text-[11px] tabular-nums text-muted-foreground">
@@ -164,21 +156,6 @@ export function TalkgroupsScreen() {
   )
 }
 
-/** Talkgroups whose label, name, tag, group or TGID contains `filter`. */
-function matching(talkgroups: CatalogEntry[], filter: string): CatalogEntry[] {
-  const needle = filter.trim().toLowerCase()
-  if (!needle) return talkgroups
-  return talkgroups.filter((talkgroup) =>
-    [
-      talkgroup.label,
-      talkgroup.name,
-      talkgroup.tag,
-      ...talkgroup.groups,
-      String(talkgroup.ref),
-    ].some((field) => field?.toLowerCase().includes(needle)),
-  )
-}
-
 function Filter({
   value,
   onChange,
@@ -204,45 +181,6 @@ function Filter({
   )
 }
 
-/** The Group and Tag category rows (spec US 20). */
-function Categories({
-  catalog,
-  selection,
-  onToggle,
-}: {
-  catalog: Catalog
-  selection: Selection
-  onToggle: (category: CategoryView) => void
-}) {
-  const rows = [
-    { heading: 'Groups', categories: categoryViews(catalog, selection, 'group') },
-    { heading: 'Tags', categories: categoryViews(catalog, selection, 'tag') },
-  ]
-
-  return (
-    <div className="mb-5 flex flex-col gap-3">
-      {rows.map(({ heading, categories }) =>
-        categories.length === 0 ? null : (
-          <section key={heading} aria-label={heading}>
-            <h2 className="mb-1.5 font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/70">
-              {heading}
-            </h2>
-            <div className="grid grid-cols-2 gap-1.5">
-              {categories.map((category) => (
-                <CategoryChip
-                  key={category.label}
-                  category={category}
-                  onClick={() => onToggle(category)}
-                />
-              ))}
-            </div>
-          </section>
-        ),
-      )}
-    </div>
-  )
-}
-
 /** The glyph the mockup gives each of the three states. */
 const STATE_GLYPH: Record<TriState, string> = { all: '●', some: '◐', none: '○' }
 
@@ -258,7 +196,7 @@ function CategoryChip({
   category,
   onClick,
 }: {
-  category: CategoryView
+  category: PanelCategory
   onClick: () => void
 }) {
   const { state } = category
@@ -286,20 +224,13 @@ function CategoryChip({
 }
 
 function SystemSection({
-  label,
-  talkgroups,
-  selection,
-  onAll,
-  onToggle,
+  system,
+  onChoose,
 }: {
-  label: string
-  talkgroups: CatalogEntry[]
-  selection: Selection
-  onAll: (on: boolean) => void
-  onToggle: (key: TalkgroupKey, on: boolean) => void
+  system: PanelSystem
+  onChoose: (choice: Choice) => void
 }) {
-  const on = countOn(selection, talkgroups)
-  const allOn = stateOf(selection, talkgroups) === 'all'
+  const { label, on, total, allOn, rows } = system
 
   return (
     <fieldset className="mb-5">
@@ -308,25 +239,20 @@ function SystemSection({
           {label}
         </span>
         <span className="flex-1 font-mono text-[9px] tabular-nums text-muted-foreground/50">
-          {on}/{talkgroups.length}
+          {on}/{total}
         </span>
         <button
           type="button"
           aria-label={`Turn ${label} all ${allOn ? 'off' : 'on'}`}
-          onClick={() => onAll(!allOn)}
+          onClick={() => onChoose(system.all)}
           className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
         >
           {allOn ? 'All off' : 'All on'}
         </button>
       </legend>
       <ul className="divide-y divide-border rounded-xl border border-border bg-card">
-        {talkgroups.map((talkgroup) => (
-          <TalkgroupRow
-            key={talkgroup.ref}
-            talkgroup={talkgroup}
-            selection={selection}
-            onToggle={onToggle}
-          />
+        {rows.map((row) => (
+          <TalkgroupRow key={row.key} row={row} onChoose={onChoose} />
         ))}
       </ul>
     </fieldset>
@@ -334,24 +260,13 @@ function SystemSection({
 }
 
 function TalkgroupRow({
-  talkgroup,
-  selection,
-  onToggle,
+  row,
+  onChoose,
 }: {
-  talkgroup: CatalogEntry
-  selection: Selection
-  onToggle: (key: TalkgroupKey, on: boolean) => void
+  row: PanelRow
+  onChoose: (choice: Choice) => void
 }) {
-  const key: TalkgroupKey = {
-    systemRef: talkgroup.systemRef,
-    talkgroupRef: talkgroup.ref,
-  }
-  const avoidedUntil = useAppSelector((state) =>
-    selectAvoidUntil(state, key.systemRef, key.talkgroupRef),
-  )
-  // `selection` already has the avoids laid over it, so a muted Talkgroup reads
-  // off here exactly as it does in the counts above.
-  const selected = isSelected(selection, key.systemRef, key.talkgroupRef)
+  const { talkgroup, selected, avoidedUntil } = row
 
   return (
     <li>
@@ -359,7 +274,7 @@ function TalkgroupRow({
         type="button"
         role="switch"
         aria-checked={selected}
-        onClick={() => onToggle(key, !selected)}
+        onClick={() => onChoose(row.choice)}
         className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/40"
       >
         <span
@@ -377,7 +292,7 @@ function TalkgroupRow({
           <StatusLed
             color={ledForCall({
               systemRef: talkgroup.systemRef,
-              talkgroupRef: talkgroup.ref,
+              talkgroupRef: talkgroup.talkgroupRef,
               led: talkgroup.led,
             })}
             size={8}
@@ -395,14 +310,14 @@ function TalkgroupRow({
             !selected && 'text-muted-foreground',
           )}
         >
-          {talkgroup.label ?? talkgroup.name ?? `Talkgroup ${talkgroup.ref}`}
+          {row.label}
         </span>
         {avoidedUntil !== undefined && <AvoidBadge until={avoidedUntil} />}
         <span
           aria-hidden
           className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/60"
         >
-          {talkgroup.ref}
+          {talkgroup.talkgroupRef}
         </span>
       </button>
     </li>
@@ -434,9 +349,16 @@ function AvoidBadge({ until }: { until: number }) {
   )
 }
 
-/** The clock, as far as a countdown needs it. Only ticks while something is
- *  counting down — the store changes when an avoid *lapses*, never while one is
- *  merely running, so nothing else would redraw the number. */
+/**
+ * The clock, as far as a countdown needs it.
+ *
+ * The one thing on this screen that ticks (#91), and it ticks for the *display*
+ * alone: whether an **Avoid** is still in force is decided from its deadline,
+ * by the store's own clock (`store/avoids`) and by every Call that arrives.
+ * Only runs while something is counting down — the store changes when an Avoid
+ * *lapses*, never while one is merely running, so nothing else would redraw the
+ * number.
+ */
 function useNow(ticking: boolean): number {
   const [now, setNow] = useState(() => Date.now())
 

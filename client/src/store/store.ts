@@ -2,15 +2,20 @@ import { configureStore } from '@reduxjs/toolkit'
 import { setupListeners } from '@reduxjs/toolkit/query'
 
 import {
+  loadAvoids,
   loadFeedOff,
+  loadHold,
   loadSelection,
   namespaceOf,
+  saveAvoids,
   saveFeedOff,
+  saveHold,
   saveSelection,
 } from '@/lib/persist'
 
 import { api } from './api'
-import { initialLiveState, liveReducer } from './live'
+import { createAvoidClock } from './avoids'
+import { expireAvoids, initialLiveState, liveReducer, type LiveState } from './live'
 import { playbackReducer } from './playback'
 import { transportReducer } from './transport'
 
@@ -42,9 +47,15 @@ export function makeStore(options: StoreOptions = {}) {
   const namespace = options.namespace ?? namespaceOf()
   const remembered = storage && loadSelection(storage, namespace)
   const rememberedFeedOff = storage && loadFeedOff(storage, namespace)
+  // Read against the clock, so an **Avoid** whose hour ran out while the tab
+  // was closed is simply not in force on the way back in (#91).
+  const rememberedAvoids = storage && loadAvoids(storage, namespace, Date.now())
+  const rememberedHold = storage && loadHold(storage, namespace)
   const hydrated = {
     ...(remembered ? { selection: remembered } : {}),
     ...(rememberedFeedOff === undefined ? {} : { feedOff: rememberedFeedOff }),
+    ...(rememberedAvoids ? { avoided: rememberedAvoids } : {}),
+    ...(rememberedHold === undefined ? {} : { hold: rememberedHold }),
   }
   const store = configureStore({
     reducer: {
@@ -54,7 +65,11 @@ export function makeStore(options: StoreOptions = {}) {
       transport: transportReducer,
     },
     middleware: (getDefaultMiddleware) =>
-      getDefaultMiddleware().concat(api.middleware),
+      // Prepended, as RTK requires of a listener middleware, so an effect sees
+      // the action before anything downstream can stop it.
+      getDefaultMiddleware()
+        .prepend(createAvoidClock().middleware)
+        .concat(api.middleware),
     // Spread unconditionally: with nothing remembered `hydrated` is empty and
     // this is `initialLiveState`, which is what no preloaded state would have
     // given anyway.
@@ -64,22 +79,35 @@ export function makeStore(options: StoreOptions = {}) {
   setupListeners(store.dispatch)
 
   if (storage) {
-    let last = store.getState().live.selection
-    let lastFeedOff = store.getState().live.feedOff
-    store.subscribe(() => {
-      const { selection, feedOff } = store.getState().live
-      if (selection !== last) {
-        last = selection
-        saveSelection(storage, namespace, selection)
-      }
-      // Written on the switch, not on every Call — same reason as above, and a
-      // listener flips this once in a session at most.
-      if (feedOff !== lastFeedOff) {
-        lastFeedOff = feedOff
-        saveFeedOff(storage, namespace, feedOff)
-      }
-    })
+    /** Write `read`'s value out whenever it changes, and never otherwise — a
+     *  Call arrives every few seconds, and persisting on each one would cost a
+     *  phone its battery for nothing. */
+    const remember = <T,>(read: (live: LiveState) => T, save: (value: T) => void) => {
+      let last = read(store.getState().live)
+      store.subscribe(() => {
+        const next = read(store.getState().live)
+        if (next === last) return
+        last = next
+        save(next)
+      })
+    }
+
+    // What a **Profile** is, per CONTEXT.md: its Selection, its Avoid list and
+    // its Hold state — plus the feed-off switch #80 added.
+    remember((live) => live.selection, (it) => saveSelection(storage, namespace, it))
+    remember((live) => live.avoided, (it) => saveAvoids(storage, namespace, it))
+    remember((live) => live.hold, (it) => saveHold(storage, namespace, it))
+    remember((live) => live.feedOff, (it) => saveFeedOff(storage, namespace, it))
   }
+
+  // A store hydrated holding an Avoid has had no action to wake its clock with
+  // (`./avoids`) — preloaded state arrives without one. This is that action:
+  // what had already lapsed was dropped on the way in, so it changes nothing,
+  // and its only job is to get the next deadline scheduled. Dispatched
+  // unconditionally rather than behind "is there a deadline to schedule", which
+  // is the clock's own rule and belongs to the clock.
+  store.dispatch(expireAvoids(Date.now()))
+
   return store
 }
 

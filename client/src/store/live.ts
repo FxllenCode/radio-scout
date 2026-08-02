@@ -10,35 +10,25 @@ import {
 import type { LiveStatus, Subscription } from '@/lib/liveFeed'
 import {
   EVERYTHING,
+  avoidKey,
   isSelected,
+  isSystemHold,
+  isTalkgroupHold,
+  parseAvoidKey,
+  silenced,
   restrictToSystem,
   restrictToTalkgroup,
   setEverything,
   setSystem,
   setTalkgroups,
+  type Avoids,
+  type Hold,
   type Selection,
   type TalkgroupKey,
 } from '@/lib/selection'
 import type { Call } from '@/types'
 
 import { enterLiveFeed, enterPlaybackMode } from './playback'
-
-/** What the listener has narrowed the feed to: a whole System, or one
- *  Talkgroup within it (CONTEXT.md **Hold**). */
-export interface Hold {
-  systemRef: number
-  /** `null` holds the whole System. */
-  talkgroupRef: number | null
-}
-
-/** A hold on a whole System, versus one on a single Talkgroup. Named once so
- *  the reducers and the display can't drift apart on what `talkgroupRef: null`
- *  means. */
-export const isSystemHold = (hold: Hold | null): boolean =>
-  hold?.talkgroupRef === null
-
-export const isTalkgroupHold = (hold: Hold | null): boolean =>
-  hold?.talkgroupRef != null
 
 /** How many played Calls stay replayable (spec US 13: "back through the last
  *  five"). */
@@ -76,9 +66,9 @@ export interface LiveState {
    *  arriving Call is judged against, alongside the hold and the avoids. */
   selection: Selection
   hold: Hold | null
-  /** `systemRef:talkgroupRef` → the moment the avoid lapses, `0` for never
-   *  (spec US 14's timed 30/60/120 min cycle). */
-  avoided: Record<string, number>
+  /** Every **Avoid** in force, by [`avoidKey`] (spec US 14's timed
+   *  30/60/120 min cycle). */
+  avoided: Avoids
   /** Calls the listener will not hear: dropped by the server's `lagged` notice
    *  or by the queue cap. The display admits them rather than hiding them. */
   missed: number
@@ -133,15 +123,6 @@ export const initialLiveState: LiveState = {
  */
 const statusOf = (state: LiveState): FeedStatus =>
   feedStatus({ off: state.feedOff, playback: state.inPlayback, link: state.status })
-
-const avoidKey = (systemRef: number, talkgroupRef: number) =>
-  `${systemRef}:${talkgroupRef}`
-
-/** The `systemRef:talkgroupRef` key read back as the pair it encodes. */
-function parseAvoidKey(key: string): TalkgroupKey {
-  const [systemRef, talkgroupRef] = key.split(':')
-  return { systemRef: Number(systemRef), talkgroupRef: Number(talkgroupRef) }
-}
 
 /**
  * Does the listener still want this Call?
@@ -198,6 +179,24 @@ function next(state: LiveState) {
   play(state, state.queue.shift() ?? null)
 }
 
+/**
+ * Let every **Avoid** whose deadline has passed lapse (spec US 14's
+ * auto-reactivate).
+ *
+ * The one place a deadline is compared to a clock, and the clock is always
+ * handed in: a reducer that read `Date.now()` would decide differently on every
+ * replay of the same actions. `0` is "until the listener says otherwise" and is
+ * never a deadline.
+ *
+ * Immer only marks the map changed if something is actually deleted, which is
+ * what keeps [`selectLiveMatrix`] memoized across the Calls that ask.
+ */
+function expire(state: LiveState, now: number) {
+  for (const [key, until] of Object.entries(state.avoided)) {
+    if (until !== 0 && until <= now) delete state.avoided[key]
+  }
+}
+
 /** Drop whatever the listener no longer wants — after a selection change, a
  *  hold, or an avoid. */
 function purge(state: LiveState) {
@@ -213,9 +212,17 @@ function purge(state: LiveState) {
  * base (#12); a **Hold** narrows it to one System or Talkgroup (spec US 11);
  * and each **Avoid** is a Talkgroup silenced on top (US 14). The server resolves
  * the most specific entry first, so the layers survive as a single flat matrix.
+ *
+ * Written over the three fields rather than over the state so the selector
+ * below can memoize on them (#91). A reducer still has [`matrixOf`], because a
+ * memoized selector over an Immer draft would be cached against a proxy that
+ * stops being valid the moment the reducer returns.
  */
-function matrixOf(state: LiveState): Subscription {
-  const { hold, selection } = state
+function matrixFrom(
+  selection: Selection,
+  hold: Hold | null,
+  avoided: Avoids,
+): Subscription {
   const held =
     hold === null
       ? selection
@@ -223,12 +230,12 @@ function matrixOf(state: LiveState): Subscription {
         ? restrictToSystem(selection, hold.systemRef)
         : restrictToTalkgroup(hold.systemRef, hold.talkgroupRef)
 
-  return silenced(held, state)
+  return silenced(held, avoided)
 }
 
-/** `base` with every avoided Talkgroup turned off on top of it. */
-function silenced(base: Selection, state: LiveState): Selection {
-  return setTalkgroups(base, Object.keys(state.avoided).map(parseAvoidKey), false)
+/** [`matrixFrom`] over a whole slice — what the reducers judge a Call against. */
+function matrixOf(state: LiveState): Subscription {
+  return matrixFrom(state.selection, state.hold, state.avoided)
 }
 
 /**
@@ -326,54 +333,73 @@ const liveSlice = createSlice({
       state.feedOff = false
     },
 
-    /** A Call arrived over the feed: play it if the feed is quiet, else queue
-     *  it. A **Backfill** Call (ADR-0004) arrives the same way — a listener
-     *  coming back wants to hear what they missed. */
-    received(state, action: PayloadAction<Call>) {
-      const call = action.payload
-      // A silence the listener asked for is not interrupted (#88). A Call still
-      // in flight when the socket closed, or one the server sent before it saw
-      // the new matrix, is not played and not counted: they asked for silence,
-      // and this is what that costs.
-      if (!feedPlays(statusOf(state))) return
-      // Catch-up is at-least-once (ADR-0004): a Call ingested in the window
-      // between connect and the backfill query arrives twice, and hearing it
-      // twice is the listener's problem to be spared.
-      if (state.seen.includes(call.id)) return
-      state.seen.push(call.id)
-      if (state.seen.length > SEEN_LIMIT) state.seen.shift()
+    /**
+     * A Call arrived over the feed: play it if the feed is quiet, else queue
+     * it. A **Backfill** Call (ADR-0004) arrives the same way — a listener
+     * coming back wants to hear what they missed.
+     *
+     * `at` is the moment it arrived, supplied by the action creator so the
+     * reducer stays pure, and it is what the Avoids in force are judged
+     * against (#91). The store keeps its own clock for lapsing them
+     * (`./avoids`), but a browser throttles a backgrounded tab's timers — so a
+     * Call that arrives after an Avoid's deadline must be heard on the
+     * strength of the deadline itself, not on the clock having woken to notice
+     * it.
+     */
+    received: {
+      prepare: (call: Call, at: number = Date.now()) => ({ payload: { call, at } }),
 
-      // The cursor counts every Call the server sent, even one filtered out
-      // here, or a reconnect would ask for it again.
-      state.since = Math.max(state.since ?? 0, call.id)
+      reducer(state, action: PayloadAction<{ call: Call; at: number }>) {
+        const { call, at } = action.payload
+        // Asked before the Call is judged, so it is judged against the Avoids
+        // that are actually in force — and so the matrix the socket re-sends
+        // is the one that lets the Talkgroup through again.
+        expire(state, at)
 
-      if (!wanted(state, call)) return
+        // A silence the listener asked for is not interrupted (#88). A Call
+        // still in flight when the socket closed, or one the server sent before
+        // it saw the new matrix, is not played and not counted: they asked for
+        // silence, and this is what that costs.
+        if (!feedPlays(statusOf(state))) return
+        // Catch-up is at-least-once (ADR-0004): a Call ingested in the window
+        // between connect and the backfill query arrives twice, and hearing it
+        // twice is the listener's problem to be spared.
+        if (state.seen.includes(call.id)) return
+        state.seen.push(call.id)
+        if (state.seen.length > SEEN_LIMIT) state.seen.shift()
 
-      // An encrypted Call is activity, not audio (#42, spec US 9): it goes
-      // straight into RECENT so the listener sees the channel is busy, and it
-      // never becomes `current` and never joins the queue.
-      //
-      // This is not tidiness. There is nothing to play — the server sends no
-      // `audioUrl` for one — so making it `current` would leave the audio
-      // element with no source, and an element with no source never fires
-      // `ended`. The feed would stop on it silently and forever, with
-      // everything queued behind it frozen.
-      if (call.encrypted) {
-        state.history.unshift(call)
-        state.history = state.history.slice(0, HISTORY_DEPTH)
-        return
-      }
+        // The cursor counts every Call the server sent, even one filtered out
+        // here, or a reconnect would ask for it again.
+        state.since = Math.max(state.since ?? 0, call.id)
 
-      if (!state.current) {
-        play(state, call)
-        return
-      }
-      state.queue.push(call)
-      if (state.queue.length > QUEUE_LIMIT) {
-        // The stalest go first, and are admitted rather than vanishing.
-        state.missed += state.queue.length - QUEUE_LIMIT
-        state.queue = state.queue.slice(-QUEUE_LIMIT)
-      }
+        if (!wanted(state, call)) return
+
+        // An encrypted Call is activity, not audio (#42, spec US 9): it goes
+        // straight into RECENT so the listener sees the channel is busy, and it
+        // never becomes `current` and never joins the queue.
+        //
+        // This is not tidiness. There is nothing to play — the server sends no
+        // `audioUrl` for one — so making it `current` would leave the audio
+        // element with no source, and an element with no source never fires
+        // `ended`. The feed would stop on it silently and forever, with
+        // everything queued behind it frozen.
+        if (call.encrypted) {
+          state.history.unshift(call)
+          state.history = state.history.slice(0, HISTORY_DEPTH)
+          return
+        }
+
+        if (!state.current) {
+          play(state, call)
+          return
+        }
+        state.queue.push(call)
+        if (state.queue.length > QUEUE_LIMIT) {
+          // The stalest go first, and are admitted rather than vanishing.
+          state.missed += state.queue.length - QUEUE_LIMIT
+          state.queue = state.queue.slice(-QUEUE_LIMIT)
+        }
+      },
     },
 
     /** The current Call finished, or the listener skipped it (spec US 12). */
@@ -456,11 +482,10 @@ const liveSlice = createSlice({
     },
 
     /** Let every avoid whose time has come lapse (spec US 14's auto-reactivate).
-     *  `now` is passed in rather than read, so the reducer stays pure. */
+     *  `now` is passed in rather than read, so the reducer stays pure. Dispatched
+     *  by the store's own clock (`./avoids`) at each deadline. */
     expireAvoids(state, action: PayloadAction<number>) {
-      for (const [key, until] of Object.entries(state.avoided)) {
-        if (until !== 0 && until <= action.payload) delete state.avoided[key]
-      }
+      expire(state, action.payload)
     },
 
     /** The server told us a slow connection cost us Calls (ADR-0004 `lagged`). */
@@ -541,6 +566,10 @@ export const selectPlayId = (state: WithLive): number => state.live.playId
 
 export const selectHold = (state: WithLive): Hold | null => state.live.hold
 
+/** Every **Avoid** in force and when each lapses — what the Talkgroups panel
+ *  badges a row with, and the input both matrices below are silenced by. */
+export const selectAvoids = (state: WithLive): Avoids => state.live.avoided
+
 /** How many Talkgroups are muted right now (spec US 14). */
 export const selectAvoidedCount = (state: WithLive): number =>
   Object.keys(state.live.avoided).length
@@ -584,20 +613,14 @@ export const selectLiveControls: (state: WithLive) => Controls = createSelector(
     }),
 )
 
+/** Is this Talkgroup silenced right now? *When* it lapses is on the deadline
+ *  itself, which the Talkgroups panel reads off [`selectAvoids`] — a timed
+ *  Avoid is coming back on its own, and the panel shows the difference. */
 export const selectIsAvoided = (
   state: WithLive,
   systemRef: number,
   talkgroupRef: number,
-): boolean => selectAvoidUntil(state, systemRef, talkgroupRef) !== undefined
-
-/** When a Talkgroup's avoid lapses — `0` for "until the listener says
- *  otherwise", `undefined` for one that isn't avoided. The Talkgroups panel
- *  shows the difference: a timed avoid is coming back on its own (#12). */
-export const selectAvoidUntil = (
-  state: WithLive,
-  systemRef: number,
-  talkgroupRef: number,
-): number | undefined => state.live.avoided[avoidKey(systemRef, talkgroupRef)]
+): boolean => avoidKey(systemRef, talkgroupRef) in state.live.avoided
 
 /** What the listener has chosen to hear, before a hold or an avoid narrows it
  *  (#12) — what the Talkgroups panel draws and what is persisted. */
@@ -611,11 +634,25 @@ export const selectSelection = (state: WithLive): Selection => state.live.select
  * A **hold** is deliberately not folded in. It is a temporary narrowing the
  * Live screen owns (spec US 11) — showing it here would make the panel claim
  * the listener had deselected every other System.
+ *
+ * Memoized, and that is the point rather than a nicety (#91). It allocates a
+ * fresh matrix on every call, so an unmemoized version missed every reference
+ * comparison downstream — and the Live screen dispatches playback progress
+ * several times a second, which is how 400 panel rows came to redraw several
+ * times a second *because* audio was playing.
  */
-export const selectAudibleSelection = (state: WithLive): Selection =>
-  silenced(state.live.selection, state.live)
+export const selectAudibleSelection: (state: WithLive) => Selection =
+  createSelector([selectSelection, selectAvoids], silenced)
 
-/** The subscription matrix this state asks the server for (ADR-0004) —
- *  selection, hold and avoids flattened into one, per [`matrixOf`]. */
-export const selectLiveMatrix = (state: WithLive): Subscription =>
-  matrixOf(state.live)
+/**
+ * The subscription matrix this state asks the server for (ADR-0004) —
+ * selection, hold and avoids flattened into one, per [`matrixFrom`].
+ *
+ * Memoized for the same reason, and with a caller who had already discovered
+ * it: `LiveFeedLink` compared this by serializing it to a string, because
+ * comparing it by reference could only ever say "changed".
+ */
+export const selectLiveMatrix: (state: WithLive) => Subscription = createSelector(
+  [selectSelection, selectHold, selectAvoids],
+  matrixFrom,
+)

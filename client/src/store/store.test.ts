@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { feedOffKey, selectionKey } from '@/lib/persist'
+import { avoidsKey, feedOffKey, holdKey, selectionKey } from '@/lib/persist'
 import { EVERYTHING, setTalkgroups } from '@/lib/selection'
 
 import {
+  avoid,
   chooseTalkgroups,
   received,
   selectFeedStatus,
+  selectHold,
   selectSelection,
+  toggleHoldSystem,
   turnFeedOff,
   turnFeedOn,
 } from './live'
@@ -41,6 +44,17 @@ function fakeStorage(seed: Record<string, string> = {}) {
 }
 
 const NARROWED = setTalkgroups(EVERYTHING, [{ systemRef: 11, talkgroupRef: 100 }], false)
+
+/** A fixed moment every deadline below is written relative to, so nothing here
+ *  depends on when it ran. */
+const NOW = 1_700_000_000_000
+
+const CALL = {
+  id: 1,
+  systemRef: 11,
+  talkgroupRef: 100,
+  audioUrl: '/api/call/1/audio',
+}
 
 describe('makeStore', () => {
   /** Whether `globalThis.localStorage` exists at all differs by Node version —
@@ -206,6 +220,134 @@ describe('makeStore', () => {
 
       expect(writes).toEqual([])
       expect(isOff(makeStore({ storage, namespace: 'default' }))).toBe(false)
+    })
+  })
+
+  /**
+   * A **Profile** is its own Selection, Avoid list and Hold state (CONTEXT.md),
+   * and all three now outlive the tab (#91).
+   *
+   * An Avoid persists as the *deadline* it already is, which is why it can:
+   * "twenty minutes left" is a subtraction on the way back, where a running
+   * timer would simply have gone with the page. A Listener who avoided a
+   * Talkgroup for an hour and reloaded used to hear it again immediately.
+   */
+  describe('the Avoids and the Hold (#91, spec US 14)', () => {
+    // Pinned, so a deadline written relative to [`NOW`] means the same thing
+    // however long ago this file was written — and *scoped*, because
+    // `setSystemTime` on its own leaves the clock stopped for every later test
+    // in the file. It also disposes the timer a hydrated Avoid schedules: a
+    // store built here has no other way to be shut down.
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(NOW)
+    })
+    afterEach(() => vi.useRealTimers())
+
+    const avoided = (store: AppStore) => store.getState().live.avoided
+
+    it('starts a Listener who has never avoided anything on nothing', () => {
+      const { storage } = fakeStorage()
+
+      const store = makeStore({ storage, namespace: 'default' })
+
+      expect(avoided(store)).toEqual({})
+      expect(selectHold(store.getState())).toBeNull()
+    })
+
+    it('remembers an Avoid and a Hold as they are placed', () => {
+      const { storage } = fakeStorage()
+      const store = makeStore({ storage, namespace: 'truck' })
+
+      store.dispatch(received(CALL, NOW))
+      store.dispatch(toggleHoldSystem())
+      store.dispatch(avoid({ until: NOW + 30 * 60_000 }))
+
+      expect(storage.getItem(avoidsKey('truck'))).toBe(
+        JSON.stringify({ '11:100': NOW + 30 * 60_000 }),
+      )
+      expect(storage.getItem(holdKey('truck'))).toBe(
+        JSON.stringify({ systemRef: 11, talkgroupRef: null }),
+      )
+    })
+
+    it('comes back holding what this browser last held', () => {
+      const { storage } = fakeStorage({
+        [avoidsKey('default')]: JSON.stringify({ '11:100': NOW + 20 * 60_000 }),
+        [holdKey('default')]: JSON.stringify({ systemRef: 11, talkgroupRef: 100 }),
+      })
+
+      const store = makeStore({ storage, namespace: 'default' })
+
+      expect(avoided(store)).toEqual({ '11:100': NOW + 20 * 60_000 })
+      expect(selectHold(store.getState())).toEqual({ systemRef: 11, talkgroupRef: 100 })
+    })
+
+    /** A Hold the Listener *released* is remembered as released. Treating that
+     *  as "never said" would hand them back a narrowing they had just let go
+     *  of, which is the one thing a persisted Hold must not do. */
+    it('comes back holding nothing once the Listener lets go', () => {
+      const { storage } = fakeStorage()
+      const store = makeStore({ storage, namespace: 'default' })
+      store.dispatch(received(CALL, NOW))
+      store.dispatch(toggleHoldSystem())
+      store.dispatch(toggleHoldSystem())
+
+      expect(selectHold(makeStore({ storage, namespace: 'default' }).getState()))
+        .toBeNull()
+    })
+
+    /** The half a deadline buys over a countdown: what lapsed while the tab was
+     *  closed is simply not in force on the way back in, without anything
+     *  having had to be running to notice. */
+    it('drops an Avoid whose time was up while the tab was closed', () => {
+      const { storage } = fakeStorage({
+        [avoidsKey('default')]: JSON.stringify({ '11:100': NOW - 1, '11:200': 0 }),
+      })
+
+      const store = makeStore({ storage, namespace: 'default' })
+
+      expect(avoided(store)).toEqual({ '11:200': 0 })
+    })
+
+    /** A hand-edited or half-written value costs the Listener their Avoids and
+     *  nothing else — the same promise `loadSelection` keeps. */
+    it.each([
+      ['not an object', '"nope"'],
+      ['a deadline that is not a number', '{"11:100":"soon"}'],
+      ['not JSON at all', '{oh no'],
+      // A key that is not a `systemRef:talkgroupRef` pair is the one that
+      // *escapes*: it parses, it is a number, and it survives into the
+      // subscription matrix as `sel: { NaN: { NaN: false } }` — junk on every
+      // `sub` frame the socket sends, permanent if its deadline is `0`, and
+      // invisible in the panel because no row can be keyed by it.
+      ['keyed by something that is not a Talkgroup', '{"oops":0}'],
+      ['keyed by a half pair', '{"11:":0}'],
+      ['keyed by nothing at all', '{"":0}'],
+    ])('ignores stored Avoids that are %s', (_what, stored) => {
+      const { storage } = fakeStorage({ [avoidsKey('default')]: stored })
+
+      expect(avoided(makeStore({ storage, namespace: 'default' }))).toEqual({})
+    })
+
+    it.each([
+      ['not an object', '7'],
+      ['missing its System', '{"talkgroupRef":100}'],
+      ['not JSON at all', '{oh no'],
+    ])('ignores a stored Hold that is %s', (_what, stored) => {
+      const { storage } = fakeStorage({ [holdKey('default')]: stored })
+
+      expect(selectHold(makeStore({ storage, namespace: 'default' }).getState())).toBeNull()
+    })
+
+    it('runs unremembered when the browser has no storage', () => {
+      const store = makeStore({ storage: undefined, namespace: 'default' })
+
+      store.dispatch(received(CALL, NOW))
+      store.dispatch(avoid({ until: 0 }))
+
+      expect(avoided(store)).toEqual({ '11:100': 0 })
+      expect(ambient.writes).toEqual([])
     })
   })
 

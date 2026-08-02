@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { feedOffKey } from '@/lib/persist'
 import {
   avoid,
+  chooseEverything,
   chooseTalkgroups,
   received,
   selectLiveMatrix,
@@ -12,7 +13,8 @@ import {
   turnFeedOn,
 } from '@/store/live'
 import { makeStore } from '@/store/store'
-import { enterPlaybackMode } from '@/store/playback'
+import { enterLiveFeed, enterPlaybackMode } from '@/store/playback'
+import { progressed } from '@/store/transport'
 import { liveFeed } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { fakePush } from '@/test/push'
@@ -142,6 +144,43 @@ describe('the live-feed link', () => {
     expect(await lastSubscription()).toEqual({ t: 'sub', all: true, sel: {} })
   })
 
+  /** #91: the matrix is re-sent when the *listener* changes it, never because
+   *  a Call is playing. Playback progress lands several times a second, and a
+   *  matrix rebuilt per dispatch would put a `sub` frame on the wire behind
+   *  every one of them — the bandwidth server-side filtering exists to save,
+   *  spent on saying nothing changed. */
+  it.each([
+    ['the live feed', received(call), chooseEverything(false)],
+    ['the archive', enterPlaybackMode(), enterLiveFeed()],
+  ])(
+    'does not re-subscribe while %s is playing',
+    async (_source, start, changeTheMatrix) => {
+      const store = makeStore()
+      // Started before the socket exists, so the frame under test is the only
+      // one this test can be counting.
+      store.dispatch(start)
+      renderApp('/', store)
+      await lastSubscription()
+      const sent = feed.subscriptions.length
+
+      act(() => {
+        for (const position of [0.5, 1, 1.5, 2]) {
+          store.dispatch(progressed({ position, duration: 9 }))
+        }
+      })
+      // A frame we *do* expect, so anything the progress put on the wire ahead
+      // of it has landed by the time this one has: frames reach the recorder
+      // asynchronously, and counting them without a marker to wait for would
+      // pass by arriving early rather than by never arriving.
+      act(() => void store.dispatch(changeTheMatrix))
+      await waitFor(() =>
+        expect(feed.subscriptions.length).toBeGreaterThan(sent),
+      )
+
+      expect(feed.subscriptions).toHaveLength(sent + 1)
+    },
+  )
+
   /** The whole point of the feed: a Call pushed by the server plays, with no
    *  request from the client (spec US 9). */
   it('plays a Call the server pushes', async () => {
@@ -181,23 +220,42 @@ describe('the live-feed link', () => {
     expect(await screen.findByText(/4 missed/i)).toBeInTheDocument()
   })
 
-  /** Spec US 14: a timed avoid has to come back on its own, so something has to
-   *  notice its moment passed. */
-  it('lets a timed avoid lapse without the listener touching anything', async () => {
-    vi.useFakeTimers()
+  /** Spec US 14's auto-reactivate used to be a five-second sweep in *this*
+   *  component. It belongs to the store now (#91) — a single timer at the
+   *  deadline, provable without rendering anything — so what is left to check
+   *  here is that the matrix it changes still reaches the server. */
+  it('re-subscribes when an avoid lapses under it', async () => {
+    // Real time still advances the fake clock, so `waitFor` below can wait on
+    // a frame while `advanceTimersByTime` skips the half hour.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const store = makeStore()
       renderApp('/', store)
-      store.dispatch(received(call))
-      store.dispatch(avoid({ until: Date.now() + 30 * 60_000 }))
-      expect(selectLiveMatrix(store.getState()).sel).toEqual({
-        '11': { '54241': false },
+      await lastSubscription()
+
+      act(() => {
+        store.dispatch(received(call))
+        store.dispatch(avoid({ until: Date.now() + 30 * 60_000 }))
       })
 
+      // The Talkgroup comes off the matrix…
+      await waitFor(() =>
+        expect(feed.subscriptions.at(-1)).toMatchObject({
+          sel: { '11': { '54241': false } },
+        }),
+      )
+      const silenced = feed.subscriptions.length
+
+      // …and goes back on it when its deadline passes, with the listener
+      // touching nothing. Only the store's own clock ran.
       await act(async () => {
         vi.advanceTimersByTime(31 * 60_000)
       })
 
+      await waitFor(() =>
+        expect(feed.subscriptions.length).toBeGreaterThan(silenced),
+      )
+      expect(feed.subscriptions.at(-1)).toMatchObject({ all: true, sel: {} })
       expect(selectLiveMatrix(store.getState())).toEqual({ all: true, sel: {} })
     } finally {
       vi.useRealTimers()

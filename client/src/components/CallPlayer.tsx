@@ -10,6 +10,7 @@ import {
 import { prefetchAudio } from '@/lib/prefetch'
 import { keepAliveLoopUrl } from '@/lib/silence'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
+import { selectPlayId } from '@/store/live'
 import {
   KEEP_ALIVE_LIMIT_MS,
   keepAliveExpired,
@@ -22,7 +23,6 @@ import {
   selectIsBridging,
   selectIsPaused,
   selectNowPlaying,
-  selectSourceId,
   selectUpcomingCall,
   sourceChanged,
 } from '@/store/transport'
@@ -55,7 +55,7 @@ export function CallPlayer() {
   const hasKeepAlive = useAppSelector(selectHasKeepAlive)
   // Replaying the Call already loaded leaves `src` untouched, so the element
   // needs a separate nudge to start it over (spec US 13).
-  const playId = useAppSelector(selectSourceId)
+  const playId = useAppSelector(selectPlayId)
   const element = useRef<HTMLAudioElement>(null)
   /** Bumped on every return to the foreground — what re-binds the lock screen. */
   const [foregrounded, setForegrounded] = useState(0)

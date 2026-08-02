@@ -134,6 +134,52 @@ export function restrictToTalkgroup(
   return { all: false, sel: { [systemRef]: { [talkgroupRef]: true } } }
 }
 
+/** What the listener has narrowed the feed to: a whole System, or one
+ *  Talkgroup within it (CONTEXT.md **Hold**). */
+export interface Hold {
+  systemRef: number
+  /** `null` holds the whole System. */
+  talkgroupRef: number | null
+}
+
+/** A hold on a whole System, versus one on a single Talkgroup. Named once so
+ *  the reducers and the display can't drift apart on what `talkgroupRef: null`
+ *  means. */
+export const isSystemHold = (hold: Hold | null): boolean =>
+  hold?.talkgroupRef === null
+
+export const isTalkgroupHold = (hold: Hold | null): boolean =>
+  hold?.talkgroupRef != null
+
+/**
+ * Every **Avoid** in force: [`avoidKey`] → the moment it lapses, `0` for
+ * "until the listener says otherwise".
+ *
+ * A **deadline**, not a countdown (#91). Storing the moment rather than running
+ * a timer against it is what makes an Avoid survive a reload — a timestamp
+ * persists where an interval cannot — and what lets any reader decide for
+ * itself whether one is still in force by comparing it to the clock.
+ */
+export type Avoids = Record<string, number>
+
+/** How an Avoid names the Talkgroup it silences. A string, because that is what
+ *  an object key is, and the map has to be JSON to be remembered. */
+export const avoidKey = (systemRef: number, talkgroupRef: number) =>
+  `${systemRef}:${talkgroupRef}`
+
+/** An [`avoidKey`] read back as the pair it encodes. */
+export function parseAvoidKey(key: string): TalkgroupKey {
+  const [systemRef, talkgroupRef] = key.split(':')
+  return { systemRef: Number(systemRef), talkgroupRef: Number(talkgroupRef) }
+}
+
+/** `base` with every avoided Talkgroup turned off on top of it — the third and
+ *  outermost of the layers a **Selection** is narrowed by, after the Selection
+ *  itself and a **Hold**. */
+export function silenced(base: Selection, avoided: Avoids): Selection {
+  return setTalkgroups(base, Object.keys(avoided).map(parseAvoidKey), false)
+}
+
 function clone(sel: Selection['sel']): Selection['sel'] {
   return Object.fromEntries(
     Object.entries(sel).map(([system, talkgroups]) => [system, { ...talkgroups }]),
@@ -151,8 +197,16 @@ function prune(sel: Selection['sel']): Selection['sel'] {
 // Reading the catalog against a selection — what the Talkgroups panel draws.
 // ---------------------------------------------------------------------------
 
-/** A catalog Talkgroup with the System Ref that completes its key. */
-export interface CatalogEntry extends TalkgroupKey, CatalogTalkgroup {
+/**
+ * A catalog Talkgroup with the System Ref that completes its key.
+ *
+ * The catalog's own `ref` is *replaced* by the key's `talkgroupRef` rather than
+ * joined by it (#91): they were two spellings of one number, so every reader
+ * had to know which one this call site had settled on, and two of them could be
+ * compared and always agree. One field, and the key a row is addressed by is
+ * the one it carries.
+ */
+export interface CatalogEntry extends TalkgroupKey, Omit<CatalogTalkgroup, 'ref'> {
   systemLabel?: string
 }
 
@@ -160,11 +214,11 @@ export interface CatalogEntry extends TalkgroupKey, CatalogTalkgroup {
  *  server has already sorted for reading). */
 export function talkgroupsOf(catalog: Catalog): CatalogEntry[] {
   return catalog.systems.flatMap((system) =>
-    system.talkgroups.map((talkgroup) => ({
+    system.talkgroups.map(({ ref, ...talkgroup }) => ({
       ...talkgroup,
       systemRef: system.ref,
       systemLabel: system.label,
-      talkgroupRef: talkgroup.ref,
+      talkgroupRef: ref,
     })),
   )
 }

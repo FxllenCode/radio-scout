@@ -1,4 +1,5 @@
 import { act, screen, within } from '@testing-library/react'
+import { Profiler } from 'react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
@@ -7,9 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EVERYTHING } from '@/lib/selection'
 import { avoid, received, selectSelection } from '@/store/live'
 import { makeStore, type AppStore } from '@/store/store'
+import { progressed } from '@/store/transport'
+
+import { TalkgroupsScreen } from './TalkgroupsScreen'
 import { ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
-import { renderApp } from '@/test/utils'
+import { renderApp, renderWithProviders } from '@/test/utils'
 
 /** A store with storage of its own, so no test can inherit another's
  *  selection (and none depends on jsdom having local storage at all). */
@@ -333,6 +337,41 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
     showPanel()
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not load/i)
+  })
+
+  /**
+   * #57 asks that 400+ rows scroll smoothly *while audio plays*, and #91 is
+   * what makes that reachable. Playback progress lands several times a second,
+   * so anything the panel reads that is rebuilt per dispatch — an unmemoized
+   * matrix, a per-row store subscription, a fresh derivation — redraws every
+   * row several times a second precisely *because* a Call is playing.
+   *
+   * Counted as commits rather than asserted about the selectors, so it stays
+   * true of whatever the panel is made of later: a future inline object
+   * anywhere in this subtree fails here.
+   */
+  it('does not redraw because audio is playing', async () => {
+    let commits = 0
+    const store = scannerStore()
+    renderWithProviders(
+      <Profiler id="talkgroups" onRender={() => void (commits += 1)}>
+        <TalkgroupsScreen />
+      </Profiler>,
+      { store },
+    )
+    await talkgroupRow('Alpha Fire')
+    const drawn = commits
+
+    act(() => {
+      store.dispatch(
+        received({ id: 7, systemRef: 100, talkgroupRef: 2, audioUrl: '/api/call/7/audio' }),
+      )
+      for (const position of [0.5, 1, 1.5, 2]) {
+        store.dispatch(progressed({ position, duration: 9 }))
+      }
+    })
+
+    expect(commits).toBe(drawn)
   })
 
   it('has no accessibility violations', async () => {

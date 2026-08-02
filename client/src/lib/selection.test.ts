@@ -166,6 +166,21 @@ describe('reading the catalog against a selection', () => {
     ])
   })
 
+  /** One Ref field, not two spellings of it (#91). A flattened entry used to
+   *  carry the catalog's `ref` *and* the key's `talkgroupRef` holding the same
+   *  number, so a reader had to know which one this particular call site had
+   *  settled on — and two of them could be compared and always agree. */
+  it('spells a Talkgroup Ref exactly once', () => {
+    expect(talkgroupsOf(CATALOG)[0]).toEqual({
+      systemRef: 100,
+      systemLabel: 'Alpha',
+      talkgroupRef: 1,
+      label: 'Alpha Fire',
+      tag: 'Fire',
+      groups: ['Emergency'],
+    })
+  })
+
   it('counts how much of the catalog is selected', () => {
     const off = setTalkgroups(EVERYTHING, [{ systemRef: 100, talkgroupRef: 2 }], false)
 

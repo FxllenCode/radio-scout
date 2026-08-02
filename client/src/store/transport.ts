@@ -14,7 +14,6 @@ import {
   selectHistory,
   selectLiveCall,
   selectLiveMatrix,
-  selectPlayId,
   selectQueue,
   type LiveState,
 } from './live'
@@ -146,11 +145,6 @@ export const selectIsLiveSource = (state: TransportRoot): boolean =>
 export const selectUpcomingCall = (state: TransportRoot): Call | null =>
   selectIsLiveSource(state) ? (selectQueue(state)[0] ?? null) : selectNextCall(state)
 
-/** Bumped whenever playback (re)starts — including a replay of the Call already
- *  loaded, which the element would otherwise ignore. */
-export const selectSourceId = (state: TransportRoot): number =>
-  selectPlayId(state)
-
 export const selectIsPaused = (state: TransportRoot): boolean =>
   state.transport.paused
 
@@ -221,6 +215,11 @@ export const selectProgress = (state: TransportRoot): number => {
   return Math.min(1, position / duration)
 }
 
+/** What a Listener in playback mode asks the server for: nothing at all. A
+ *  constant rather than a literal, so this answer keeps its identity too — see
+ *  [`selectSubscription`]. */
+const NOTHING: Subscription = { all: false, sel: {} }
+
 /**
  * What the client asks the server to send it (ADR-0004).
  *
@@ -228,11 +227,15 @@ export const selectProgress = (state: TransportRoot): number => {
  * exclusive), and "off" should mean the server stops sending — not merely that
  * the client stops playing. Otherwise a listener browsing the archive keeps
  * paying for a feed they can't hear.
+ *
+ * Referentially stable in both arms (#91), because `LiveFeedLink` compares it
+ * to decide whether to put a `sub` frame on the wire. The archive arm is the
+ * one that caught this out: it was written as a literal, so every dispatch —
+ * and playback progress is several a second — produced a new "nothing" that
+ * compared unequal to the last one and re-subscribed to say so.
  */
 export const selectSubscription = (state: TransportRoot): Subscription =>
-  selectPlaybackMode(state) === 'playback'
-    ? { all: false, sel: {} }
-    : selectLiveMatrix(state)
+  selectPlaybackMode(state) === 'playback' ? NOTHING : selectLiveMatrix(state)
 
 /** Skip forward: the next archive result, or the next Call in the queue. */
 export const nextCall =

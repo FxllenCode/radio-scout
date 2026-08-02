@@ -18,14 +18,13 @@ import { callCategory, formatFrequency, systemName, talkgroupName } from '@/lib/
 import { formatCallTime } from '@/lib/archive'
 import { feedReadout, type FeedBadge, type FeedEmpty } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
+import { isSystemHold, isTalkgroupHold } from '@/lib/selection'
 import { cn } from '@/lib/utils'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   advance,
   avoid,
   clearAvoids,
-  isSystemHold,
-  isTalkgroupHold,
   replay,
   selectAvoidedCount,
   selectFeedStatus,

@@ -63,8 +63,15 @@ function rootState(live: LiveState) {
   return { live }
 }
 
+/** The moment every Call in this file arrives. Handed in rather than left to
+ *  `Date.now()`, because an arriving Call judges itself against the **Avoid**
+ *  deadlines in force (#91) — so a file that let the wall clock in would decide
+ *  differently depending on when it ran. Every `until:` below is relative to
+ *  this. */
+const NOW = 1_000
+
 /** Play `call` and let it arrive as the live feed would. */
-const arrive = (...calls: Call[]) => calls.map((one) => received(one))
+const arrive = (...calls: Call[]) => calls.map((one) => received(one, NOW))
 
 /** A Call on an encrypted talkgroup: flagged, and with no audio to fetch — the
  *  shape `GET /api/calls` and the live feed both deliver for one (#42). */
@@ -842,6 +849,17 @@ describe('selection (spec US 19–22)', () => {
 })
 
 describe('the selection as the panel draws it', () => {
+  /** #91: the panel is drawn from this, and the Live screen dispatches several
+   *  times a second while a Call plays. A selector that allocates a fresh
+   *  matrix each call misses every reference comparison downstream, so the
+   *  whole panel redraws precisely *because* audio is playing. */
+  it('keeps its identity while nothing it reads has changed', () => {
+    const state = rootState(reduce(...arrive(call(1, 11, 100)), avoid({ until: 0 })))
+
+    expect(selectAudibleSelection(state)).toBe(selectAudibleSelection(state))
+    expect(selectLiveMatrix(state)).toBe(selectLiveMatrix(state))
+  })
+
   /** The Talkgroups panel shows what the listener will actually hear, so an
    *  avoided Talkgroup reads off there — but a **hold** is a temporary
    *  narrowing shown on the Live screen, and must not make the panel claim the
