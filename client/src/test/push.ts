@@ -24,8 +24,13 @@ export const FAKE_KEYS = {
 }
 
 export interface FakePush extends PushEnvironment {
-  /** The `applicationServerKey` the app subscribed with, if it did. */
-  applicationServerKey?: BufferSource | string | null
+  /** The `applicationServerKey` the app subscribed with, if it did.
+   *
+   *  `Uint8Array`, which is what `PushManagerLike.subscribe` takes and what
+   *  every reader here was casting it back to. The wider `BufferSource` it used
+   *  to claim is not even a supertype under TypeScript's typed-array generics —
+   *  a `Uint8Array<ArrayBufferLike>` may be backed by a `SharedArrayBuffer`. */
+  applicationServerKey?: Uint8Array
   /** Whether the live subscription has been unsubscribed. */
   unsubscribed: boolean
   /** How many times permission was asked for — the "one gesture" rule. */

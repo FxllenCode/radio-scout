@@ -57,7 +57,9 @@ export function beIosSafari({ installed = false } = {}): void {
     configurable: true,
     writable: true,
   })
-  onTestFinished(() => Reflect.deleteProperty(navigator, 'standalone'))
+  onTestFinished(() => {
+    Reflect.deleteProperty(navigator, 'standalone')
+  })
 }
 
 /** Make `matchMedia` answer as a browser running us installed (or not). jsdom
@@ -74,5 +76,7 @@ export function beStandalone(standalone = true): void {
         removeEventListener() {},
       }) as unknown as MediaQueryList,
   )
-  onTestFinished(() => vi.unstubAllGlobals())
+  onTestFinished(() => {
+    vi.unstubAllGlobals()
+  })
 }

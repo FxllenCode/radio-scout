@@ -101,7 +101,9 @@ export function installServiceWorker({
     configurable: true,
     writable: true,
   })
-  onTestFinished(() => Reflect.deleteProperty(navigator, 'serviceWorker'))
+  onTestFinished(() => {
+    Reflect.deleteProperty(navigator, 'serviceWorker')
+  })
   return container
 }
 

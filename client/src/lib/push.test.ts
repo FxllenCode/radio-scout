@@ -76,7 +76,7 @@ describe('turning notifications on', () => {
     // The raw key bytes, not the base64url text — `subscribe` rejects a string
     // on some browsers and mis-reads it on others.
     expect(env.applicationServerKey).toBeInstanceOf(Uint8Array)
-    expect((env.applicationServerKey as Uint8Array).length).toBe(65)
+    expect(env.applicationServerKey?.length).toBe(65)
   })
 
   it('reports a refused permission as blocked, and registers nothing', async () => {
@@ -217,9 +217,9 @@ describe('the application server key', () => {
     // The uncompressed-point marker, and the last byte — the two that would
     // survive a base64url/base64 mix-up unnoticed if only the length were
     // checked.
-    const bytes = env.applicationServerKey as Uint8Array
-    expect(bytes[0]).toBe(0x04)
-    expect(bytes[64]).toBe(0x0f)
+    const bytes = env.applicationServerKey
+    expect(bytes?.[0]).toBe(0x04)
+    expect(bytes?.[64]).toBe(0x0f)
     expect(VAPID_PUBLIC_KEY.endsWith('7A8')).toBe(true)
   })
 })

@@ -1,17 +1,24 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { onPushOpen, PUSH_OPEN } from './pushOpen'
+import { type MessageSource, onPushOpen, PUSH_OPEN } from './pushOpen'
 
-/** A stand-in for `navigator.serviceWorker`, which jsdom does not have. */
-function source() {
+/**
+ * A stand-in for `navigator.serviceWorker`, which jsdom does not have.
+ *
+ * Typed as the [`MessageSource`] the module actually asks for rather than as a
+ * bare `EventTarget`, because the two differ exactly where it matters: a
+ * `MessageSource` promises its listener a `MessageEvent`, and an `EventTarget`
+ * promises only an `Event` — which has no `data` for the production listener to
+ * read. The cast is the narrowing, and it belongs here, in the thing standing in
+ * for the browser, rather than at the call site.
+ */
+function source(): MessageSource & { post: (data: unknown) => boolean } {
   const target = new EventTarget()
   return {
-    ...(target as unknown as {
-      addEventListener: EventTarget['addEventListener']
-      removeEventListener: EventTarget['removeEventListener']
-    }),
-    addEventListener: target.addEventListener.bind(target),
-    removeEventListener: target.removeEventListener.bind(target),
+    addEventListener: (type, listener) =>
+      target.addEventListener(type, listener as EventListener),
+    removeEventListener: (type, listener) =>
+      target.removeEventListener(type, listener as EventListener),
     post: (data: unknown) =>
       target.dispatchEvent(Object.assign(new Event('message'), { data })),
   }

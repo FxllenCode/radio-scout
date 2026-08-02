@@ -9,5 +9,13 @@
     "lib": ["ES2023", "WebWorker"],
     "types": ["vite/client"]
   },
+  /* **Overridden, not inherited**, for the reason `tsconfig.test.json` says at
+     more length: `extends` merges `exclude`, and the app's names `src/sw.ts` —
+     the very file this project exists for. Without this the worker resolves to
+     everything *except* the worker, so the one file already outside the coverage
+     profile (jsdom cannot enter a WebWorker scope) had no typechecker either.
+     Empty for the reason `tsconfig.test.json` gives: the defaults this also
+     discards cannot match an `src/`-rooted include. */
+  "exclude": [],
   "include": ["src/sw.ts", "src/lib/pushMessage.ts", "src/lib/pushOpen.ts"]
 }

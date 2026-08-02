@@ -139,7 +139,9 @@ describe('service worker', () => {
   it('reloads the page itself when the caller offers no other way', async () => {
     const reload = vi.fn()
     vi.stubGlobal('location', { reload })
-    onTestFinished(() => vi.unstubAllGlobals())
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+    })
     const container = installServiceWorker()
     const handle = registerServiceWorker()
     await registered(container)

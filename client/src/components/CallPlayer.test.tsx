@@ -434,7 +434,9 @@ describe('CallPlayer', () => {
     // over the job of saying something happened.
     it('gives up the session after a long enough lull', () => {
       vi.useFakeTimers()
-      onTestFinished(() => vi.useRealTimers())
+      onTestFinished(() => {
+        vi.useRealTimers()
+      })
       const store = afterTheLastCall()
       expect(player().src).toBe(keepAliveLoopUrl())
 
@@ -493,9 +495,9 @@ describe('CallPlayer', () => {
         value: 'hidden',
         configurable: true,
       })
-      onTestFinished(() =>
-        Reflect.deleteProperty(Document.prototype, 'visibilityState'),
-      )
+      onTestFinished(() => {
+        Reflect.deleteProperty(Document.prototype, 'visibilityState')
+      })
 
       act(() => document.dispatchEvent(new Event('visibilitychange')))
 

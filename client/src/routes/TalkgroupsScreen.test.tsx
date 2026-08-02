@@ -34,9 +34,10 @@ function scannerStore(): AppStore {
   })
 }
 
-/** The panel, and a store to inspect afterwards. */
+/** The panel, and a store to inspect afterwards — which `renderApp` already
+ *  hands back, so naming it again only shadowed it with itself. */
 function showPanel(store: AppStore = scannerStore()) {
-  return { store, ...renderApp('/talkgroups', store) }
+  return renderApp('/talkgroups', store)
 }
 
 /** Wait for the catalog to arrive — every assertion below is downstream of it.

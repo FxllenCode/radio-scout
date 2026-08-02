@@ -13,5 +13,16 @@
       "node"
     ]
   },
+  /* **Overridden, not inherited.** `extends` merges `exclude` too, and
+     `tsconfig.app.json` excludes precisely the patterns this project includes —
+     `exclude` filters what `include` found, so without this the project resolves
+     to one file (`src/fonts.d.ts`) and reports success on an empty set, at
+     speed, forever. `src/typecheck.test.ts` asserts what this actually loads.
+
+     Empty rather than a narrowed list: an `exclude` here would replace
+     TypeScript's defaults (`node_modules`, `outDir`, …) as well as the app's,
+     and none of those can match anyway — every pattern below is rooted at
+     `src/`. */
+  "exclude": [],
   "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test", "src/**/*.d.ts"]
 }
