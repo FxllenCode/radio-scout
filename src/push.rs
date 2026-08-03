@@ -855,7 +855,6 @@ mod tests {
             patches: vec![],
             frequency: None,
             source: None,
-            date_time: None,
             timestamp: None,
             audio_mime: None,
             duration_ms: None,

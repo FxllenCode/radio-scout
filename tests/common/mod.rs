@@ -644,7 +644,7 @@ impl TestApp {
             .await
             .expect("read the Call")
             .expect("a Call to emit");
-        let view = repo::stored_calls(&self.db, std::slice::from_ref(&row))
+        let view = radio_scout::archive::stored_calls(&self.db, std::slice::from_ref(&row))
             .await
             .expect("denormalize the Call")
             .pop()

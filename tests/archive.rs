@@ -61,6 +61,111 @@ async fn search_ids(app: &TestApp, query: &str) -> Vec<i64> {
 }
 
 // ---------------------------------------------------------------------------
+// What a read costs (#98)
+// ---------------------------------------------------------------------------
+
+/// **A search page costs a fixed handful of database round-trips however many
+/// Calls it carries** — the property an N+1 hides, because the page it returns
+/// is correct either way and only the cost behind it is wrong (#86, #98).
+///
+/// This is the whole of rdio-scanner's worst archive behaviour: it answers a
+/// search with bare ids and has the client fetch every row it wants to show,
+/// one request at a time, over its own WebSocket. A page of fifty Calls is
+/// fifty-one round trips there and a constant here — which on a Pi is the
+/// difference between a Search screen and a stalled one.
+///
+/// Two sizes and not a pinned number, deliberately: what must hold is that the
+/// cost does not grow per Call, and a pinned constant would make a legitimately
+/// added query look like this regression. The Backfill's own version of this
+/// lives in `tests/live.rs`; since #98 both read the same module.
+#[tokio::test]
+async fn a_search_page_costs_the_same_queries_however_many_calls_it_carries() {
+    let few = search_statements(2).await;
+    let many = search_statements(20).await;
+
+    // A search costs *something*, or the two below are equal because nothing is
+    // being counted rather than because nothing grows.
+    assert!(few > 0, "a search reads the archive");
+    assert_eq!(
+        few, many,
+        "a page of 20 Calls must cost what a page of 2 does"
+    );
+}
+
+/// Serve one search page over `calls` stored Calls, and answer with the number
+/// of statements the Instance issued doing it.
+async fn search_statements(calls: i64) -> u64 {
+    let app = TestApp::spawn().await;
+    // Distinct Systems, Talkgroups, Tags and Groups, so every batched lookup in
+    // the denormalizer has more than one row to resolve — a per-Call query would
+    // otherwise be hidden behind a page that all resolves to one of everything.
+    for n in 0..calls {
+        seed_searchable_call(&app, 100 + n, "Alpha", n, "Fire", &["Emergency"], 1000 + n).await;
+    }
+    // Every Worker owes nothing (#93), so what is counted below is the read's
+    // own and not a seed still being finished behind it.
+    app.settle().await;
+
+    let before = app.statements_issued();
+    let page = app.get_json("/api/calls").await;
+    assert_eq!(
+        ids_of(&page).len() as i64,
+        calls,
+        "the whole page came back"
+    );
+    app.statements_issued() - before
+}
+
+/// One Call read whole is the same shape of promise: opening a Call with a long
+/// signal history must not cost a query per frequency or per unit heard.
+#[tokio::test]
+async fn one_call_costs_the_same_queries_however_much_detail_it_carries() {
+    let brief = detail_statements(1).await;
+    let long = detail_statements(12).await;
+
+    assert!(brief > 0, "reading one Call reads the archive");
+    assert_eq!(
+        brief, long,
+        "a Call's detail must not cost a query per frequency or per unit heard"
+    );
+}
+
+/// Read one Call's detail over an upload carrying `entries` frequencies and
+/// `entries` units, and answer with the number of statements it took.
+async fn detail_statements(entries: usize) -> u64 {
+    let app = TestApp::with_key("k").await;
+    let listed =
+        |body: &dyn Fn(usize) -> String| (0..entries).map(body).collect::<Vec<_>>().join(",");
+    let meta = format!(
+        r#"{{"short_name":"butco","talkgroup":54241,"start_time":1669740338,
+            "freqList":[{}],"srcList":[{}]}}"#,
+        listed(&|n| format!(
+            r#"{{"freq":{},"time":1669740338,"pos":{n},"len":1}}"#,
+            774_031_250 + n
+        )),
+        listed(&|n| format!(
+            r#"{{"src":{},"time":1669740339,"pos":{n},"tag":"Engine {n}"}}"#,
+            4_424_000 + n
+        )),
+    );
+    app.upload_tr(common::CallUpload::tr(&meta)).await;
+    let id = app.the_call().await.id;
+    // Every Worker owes nothing (#93), so what is counted below is the read's
+    // own and not an ingest still being finished behind it.
+    app.settle().await;
+
+    let before = app.statements_issued();
+    let call = app.get_json(&format!("/api/call/{id}")).await;
+    assert_eq!(
+        call["frequencies"].as_array().expect("frequencies").len(),
+        entries,
+        "the whole signal history came back"
+    );
+    assert_eq!(call["units"].as_array().expect("units").len(), entries);
+    app.statements_issued() - before
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/calls — search
 // ---------------------------------------------------------------------------
 

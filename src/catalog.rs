@@ -16,14 +16,18 @@
 //! (#10) is still something a listener wants selected, because the selection is
 //! about what *will* arrive.
 //!
-//! The wire contract is [`Catalog`]; the query behind it is
-//! [`crate::db::repo::catalog`].
+//! The wire contract is [`Catalog`], and [`read`] is the query behind it. The
+//! read lives here rather than in [`crate::db::repo`] because these types do
+//! (#98): a data-layer module that has to import a handler module's view types
+//! in order to build them has the dependency backwards, and this was the last
+//! place it did.
 
 use axum::extract::State;
+use sea_orm::{ConnectionTrait, DbErr, EntityTrait};
 use serde::Serialize;
 
 use crate::AppState;
-use crate::db::repo;
+use crate::db::entities::{group, system, tag, talkgroup, talkgroup_group};
 use crate::failure::{Failure, Stage};
 
 /// One Talkgroup a listener can select. Nested under its System, so the Ref
@@ -74,9 +78,74 @@ crate::answers_json!(Catalog);
 
 /// `GET /api/catalog` — the Systems and Talkgroups a listener can select.
 pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> {
-    repo::catalog(&state.db)
-        .await
-        .map_err(Stage::LoadCatalog.failed())
+    read(&state.db).await.map_err(Stage::LoadCatalog.failed())
+}
+
+/// Every System and Talkgroup a listener can select (#12, spec US 19–21).
+///
+/// Three flat queries — systems, talkgroups (with their Tag), and the
+/// Talkgroup→Group links — assembled in Rust. Constant in the number of
+/// round trips rather than one per Talkgroup, which is what makes this
+/// affordable on a Pi with a few hundred Talkgroups, and it keeps the
+/// dialect-divergent list aggregation out of SQL (ADR-0003), like the archive
+/// search.
+pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Catalog, DbErr> {
+    let mut groups_by_talkgroup: std::collections::HashMap<i64, Vec<String>> =
+        std::collections::HashMap::new();
+    for (link, group) in talkgroup_group::Entity::find()
+        .find_also_related(group::Entity)
+        .all(db)
+        .await?
+    {
+        if let Some(group) = group {
+            groups_by_talkgroup
+                .entry(link.talkgroup_id)
+                .or_default()
+                .push(group.name);
+        }
+    }
+
+    let mut talkgroups_by_system: std::collections::HashMap<i64, Vec<CatalogTalkgroup>> =
+        std::collections::HashMap::new();
+    for (talkgroup, tag) in talkgroup::Entity::find()
+        .find_also_related(tag::Entity)
+        .all(db)
+        .await?
+    {
+        let mut groups = groups_by_talkgroup
+            .remove(&talkgroup.id)
+            .unwrap_or_default();
+        groups.sort();
+        talkgroups_by_system
+            .entry(talkgroup.system_id)
+            .or_default()
+            .push(CatalogTalkgroup {
+                r#ref: talkgroup.r#ref,
+                label: talkgroup.label,
+                name: talkgroup.name,
+                tag: tag.map(|tag| tag.name),
+                groups,
+                led: talkgroup.led,
+            });
+    }
+
+    let mut systems: Vec<CatalogSystem> = system::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|system| {
+            let mut talkgroups = talkgroups_by_system.remove(&system.id).unwrap_or_default();
+            talkgroups.sort_by_key(|tg| display_order(tg.label.as_deref(), tg.r#ref));
+            CatalogSystem {
+                r#ref: system.r#ref,
+                label: system.label,
+                talkgroups,
+            }
+        })
+        .collect();
+    systems.sort_by_key(|system| display_order(system.label.as_deref(), system.r#ref));
+
+    Ok(Catalog { systems })
 }
 
 /// How the panel is ordered: by what the listener reads, then by Ref.

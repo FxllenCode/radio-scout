@@ -788,12 +788,17 @@ async fn perform(
 /// Read the Calls a reconnecting Listener missed: everything emitted after
 /// `since`, bounded by [`BACKFILL_MAX_CALLS`], oldest emission first.
 ///
-/// **A fixed handful of queries for the whole page, not a handful per Call**
-/// (#86). The page is denormalized in one batch by [`repo::stored_calls`], which
-/// costs the same six lookups whether it is handed one Call or the whole bound;
-/// asking per Call instead cost a Pi seven round-trips for every Call on every
-/// network blip and every phone unlock, which is exactly rdio-scanner's archive
-/// N+1 moved onto the live socket.
+/// **The reading is [`crate::archive::emitted_since`]**, which is the one module
+/// that answers for a window of the Archive (#98) — so ordering, the pairing of
+/// each Call with the emission it went out as, and the fact that denormalizing a
+/// whole page costs the same handful of queries as denormalizing one (#86) are
+/// not things this path has to know a second time. Asking per Call instead cost
+/// a Pi seven round-trips for every Call on every network blip and every phone
+/// unlock, which is exactly rdio-scanner's archive N+1 moved onto the live
+/// socket.
+///
+/// What stays here is the *protocol*: turning that window into frames, and what
+/// to do when it cannot be read.
 ///
 /// **Best-effort, and never silently so**: a database error gives back an empty
 /// page rather than ending the connection, and says why. A Backfill that quietly
@@ -801,53 +806,39 @@ async fn perform(
 /// (#29) — the shape of bug an operator can only report as "some calls go
 /// missing sometimes".
 ///
-/// The page is a **snapshot**: a Call pruned between the two queries is still
-/// sent, where a re-fetch would have skipped it. That race was never closed,
-/// only narrowed — retention can prune a Call a microsecond after the frame goes
-/// out either way — and ADR-0004 already makes this delivery best-effort.
+/// The page is a **snapshot**: a Call pruned between the read and the send is
+/// still sent, where a re-fetch would have skipped it. That race was never
+/// closed, only narrowed — retention can prune a Call a microsecond after the
+/// frame goes out either way — and ADR-0004 already makes this delivery
+/// best-effort.
 ///
 /// Delivery is **at-least-once**: a Call emitted in the window between the
 /// client's connect and this query arrives both here and live. Call ids are
 /// unique, so the client dedups by id — which it does anyway to drive
 /// replay/history — rather than the server tracking a high-water mark.
 async fn read_backfill(db: &crate::db::Db, since: Emission) -> Backfill {
-    let models = match repo::calls_emitted_since(db, since, BACKFILL_MAX_CALLS).await {
-        Ok(models) => models,
+    let window = match crate::archive::emitted_since(db, since, BACKFILL_MAX_CALLS).await {
+        Ok(window) => window,
         Err(error) => {
-            warn!(%error, since, "live-feed Backfill query failed");
-            return Backfill::unreadable(since);
-        }
-    };
-    // Hitting the bound means the Listener's history has a gap only archive
-    // search (#13) can fill. Read off the page rather than off what is sent,
-    // because the Selection filters below it.
-    let truncated = models.len() as u64 == BACKFILL_MAX_CALLS;
-    let views = match repo::stored_calls(db, &models).await {
-        Ok(views) => views,
-        Err(error) => {
-            warn!(%error, since, "live-feed Backfill view failed");
+            // One message, because there is now one read (#98): the page and the
+            // views behind it fail together, and `error` says which statement
+            // did. Two messages for one event is the drift ADR-0011 rule 6 is
+            // about — a Listener's history is gone either way.
+            warn!(%error, since, "live-feed Backfill failed");
             return Backfill::unreadable(since);
         }
     };
     Backfill {
         since,
-        // The page and its views are in the same order, so each Call is paired
-        // back with the emission it went out as — which is the cursor the
-        // Listener hands back next time, and it has to be the *emission* or a
-        // Backfill carrying a Delayed Call would move that cursor backwards.
-        calls: models
-            .iter()
-            // Every row here matched `emitted_seq > since`, so none of them can
-            // be missing one; the fallback is what a `NULL` would have to mean
-            // and not a case the query can produce.
-            .map(|model| model.emitted_seq.unwrap_or_default())
-            .zip(views)
+        calls: window
+            .calls
+            .into_iter()
             .map(|(seq, call)| Emitted {
                 seq,
                 call: Arc::new(call),
             })
             .collect(),
-        truncated,
+        truncated: window.truncated,
     }
 }
 
@@ -874,7 +865,6 @@ mod tests {
             patches,
             frequency: None,
             source: None,
-            date_time: None,
             timestamp: None,
             audio_mime: None,
             duration_ms: None,

@@ -508,8 +508,12 @@ async fn an_emission_that_cannot_be_recorded_still_reaches_the_feed() {
     );
 }
 
-/// A Backfill whose query fails costs the Listener their history, never their
+/// A Backfill whose read fails costs the Listener their history, never their
 /// connection — and never silently.
+///
+/// Two failure points, one promise, and since #98 one message: the page and the
+/// views behind it are read by one module, so `error=` is what says which
+/// statement went down. This case is the page itself.
 #[tokio::test]
 async fn a_backfill_that_cannot_be_read_leaves_the_connection_serving() {
     let app = feed_app().await;
@@ -527,14 +531,15 @@ async fn a_backfill_that_cannot_be_read_leaves_the_connection_serving() {
     subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
     assert!(
         logged
-            .wait_for("live-feed Backfill query failed")
+            .wait_for("live-feed Backfill failed")
             .await
             .contains("WARN")
     );
 }
 
-/// The same, one query later: the page was read but could not be denormalized —
-/// the Systems and Talkgroups a Call's view is built from are gone.
+/// ...and this one is the denormalizing behind it: the page was read, but the
+/// Systems and Talkgroups a Call's view is built from are not answering. A
+/// half-built page must never reach a Listener either way.
 #[tokio::test]
 async fn a_backfill_whose_view_cannot_be_built_leaves_the_connection_serving() {
     let app = feed_app().await;
@@ -550,7 +555,7 @@ async fn a_backfill_whose_view_cannot_be_built_leaves_the_connection_serving() {
     assert!(received(&mut ws).await.is_none(), "no half-built page");
     assert!(
         logged
-            .wait_for("live-feed Backfill view failed")
+            .wait_for("live-feed Backfill failed")
             .await
             .contains("WARN")
     );

@@ -8,9 +8,11 @@
 
 mod common;
 
+use radio_scout::archive;
 use radio_scout::blob::StoredAudio;
 use radio_scout::db::entities::{
-    api_key, call_frequency, call_patch, call_unit, group, system, tag, talkgroup, unit,
+    api_key, call_frequency, call_patch, call_unit, group, system, tag, talkgroup, talkgroup_group,
+    unit,
 };
 use radio_scout::db::repo::{Disposition, DropReason, NewCall, Resolved};
 use radio_scout::db::{self, Db, repo};
@@ -370,7 +372,7 @@ async fn dialect_sensitive_queries_on_postgres_when_available() {
 ///
 /// Reads the dataset [`run_search_suite`] seeded, before retention adds its own.
 async fn run_catalog_suite(db: &Db) {
-    let catalog = repo::catalog(db).await.unwrap();
+    let catalog = radio_scout::catalog::read(db).await.unwrap();
 
     let systems: Vec<_> = catalog
         .systems
@@ -481,7 +483,7 @@ async fn seed_sized_call(
 }
 
 /// Seed a self-contained dataset and assert the whole archive-search surface —
-/// cascading filters, DISTINCT, ordering, paging, the total count, the batched
+/// cascading filters, ordering, paging, the total count, the batched
 /// Call view, and the cascading filter options. Run identically on both
 /// dialects: every query here is one ADR-0003 flags as divergence-prone.
 async fn run_search_suite(db: &Db) {
@@ -521,7 +523,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 system_ref: Some(100),
                 ..search_base()
             }
@@ -533,7 +535,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 system_ref: Some(100),
                 talkgroup_ref: Some(1),
                 ..search_base()
@@ -546,7 +548,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 talkgroup_ref: Some(2),
                 ..search_base()
             }
@@ -554,11 +556,12 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
         .await,
         vec![b]
     );
-    // By group — tg2 is in two groups but DISTINCT keeps each call once.
+    // By group — tg2 is in two groups, and each Call still arrives once
+    // (`a_group_filter_cannot_multiply_a_call` says why that needs no DISTINCT).
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 group_name: Some("Emergency".into()),
                 ..search_base()
             }
@@ -569,7 +572,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 group_name: Some("Public".into()),
                 ..search_base()
             }
@@ -581,7 +584,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 tag_name: Some("Fire".into()),
                 ..search_base()
             }
@@ -592,7 +595,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 tag_name: Some("Law".into()),
                 ..search_base()
             }
@@ -604,7 +607,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 after_ms: Some(2000),
                 before_ms: Some(3000),
                 ..search_base()
@@ -617,7 +620,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 limit: 2,
                 ..search_base()
             }
@@ -628,7 +631,7 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 limit: 2,
                 offset: 1,
                 ..search_base()
@@ -639,17 +642,22 @@ async fn assert_search_filters(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     );
 }
 
-fn search_base() -> repo::CallSearch {
-    repo::CallSearch::default()
+fn search_base() -> archive::CallSearch {
+    archive::CallSearch::default()
 }
 
-async fn ids(db: &Db, s: repo::CallSearch) -> Vec<i64> {
-    repo::search_calls(db, &s)
+async fn ids(db: &Db, s: archive::CallSearch) -> Vec<i64> {
+    page(db, &s)
         .await
-        .unwrap()
+        .results
         .into_iter()
         .map(|c| c.id)
         .collect()
+}
+
+/// One filtered window of the Archive, read the way every caller reads one.
+async fn page(db: &Db, search: &archive::CallSearch) -> archive::SearchPage {
+    archive::page(db, search).await.unwrap()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1139,27 +1147,28 @@ async fn calls_emitted_since_is_bounded_newest_and_ascending() {
     }
 
     // `emitted_seq > since`, ascending.
-    let after = repo::calls_emitted_since(&db, 2, 10).await.unwrap();
-    assert_eq!(
-        after.iter().map(|c| c.id).collect::<Vec<_>>(),
-        vec![3, 4, 5]
-    );
+    assert_eq!(emitted(&db, 2, 10).await, vec![3, 4, 5]);
 
     // The limit keeps the NEWEST `limit` (not the oldest), still ascending.
-    let capped = repo::calls_emitted_since(&db, 0, 2).await.unwrap();
     assert_eq!(
-        capped.iter().map(|c| c.id).collect::<Vec<_>>(),
+        emitted(&db, 0, 2).await,
         vec![4, 5],
         "newest-2, delivered oldest-first"
     );
 
     // Nothing newer than the last emission.
-    assert!(
-        repo::calls_emitted_since(&db, 5, 10)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(emitted(&db, 5, 10).await.is_empty());
+}
+
+/// The Call ids in one emission window, oldest emission first.
+async fn emitted(db: &Db, since: i64, limit: u64) -> Vec<i64> {
+    archive::emitted_since(db, since, limit)
+        .await
+        .unwrap()
+        .calls
+        .into_iter()
+        .map(|(_seq, call)| call.id)
+        .collect()
 }
 
 /// A Call that is stored but has not gone out yet is **not** backfilled — a
@@ -1171,22 +1180,14 @@ async fn a_stored_but_unemitted_call_is_not_backfilled() {
     let held = seed_call(&db, 11, "sys", 100, "Tag", &["Grp"], NOW, "k1").await;
 
     assert!(
-        repo::calls_emitted_since(&db, 0, 10)
-            .await
-            .unwrap()
-            .is_empty(),
+        emitted(&db, 0, 10).await.is_empty(),
         "a stored Call with no emission has not gone out"
     );
 
     repo::emit_call(&db, held, 1).await.unwrap();
 
     assert_eq!(
-        repo::calls_emitted_since(&db, 0, 10)
-            .await
-            .unwrap()
-            .iter()
-            .map(|c| c.id)
-            .collect::<Vec<_>>(),
+        emitted(&db, 0, 10).await,
         vec![held],
         "and once it has, it backfills like any other"
     );
@@ -1388,9 +1389,9 @@ async fn assert_sort_and_count(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
-                sort: repo::CallSort::Oldest,
-                ..repo::CallSearch::default()
+            archive::CallSearch {
+                sort: archive::CallSort::Oldest,
+                ..archive::CallSearch::default()
             }
         )
         .await,
@@ -1400,64 +1401,170 @@ async fn assert_sort_and_count(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
-                sort: repo::CallSort::Oldest,
+            archive::CallSearch {
+                sort: archive::CallSort::Oldest,
                 limit: 2,
                 offset: 1,
-                ..repo::CallSearch::default()
+                ..archive::CallSearch::default()
             }
         )
         .await,
         vec![b, c]
     );
     // Newest-first stays the default.
-    assert_eq!(repo::CallSearch::default().sort, repo::CallSort::Newest);
+    assert_eq!(
+        archive::CallSearch::default().sort,
+        archive::CallSort::Newest
+    );
 
-    let all = repo::CallSearch::default();
-    assert_eq!(repo::count_calls(db, &all).await.unwrap(), 4);
+    let all = archive::CallSearch::default();
+    assert_eq!(page(db, &all).await.count, 4);
 
     // A page window never changes the total.
-    let paged = repo::CallSearch {
+    let paged = archive::CallSearch {
         limit: 2,
         offset: 2,
-        ..repo::CallSearch::default()
+        ..archive::CallSearch::default()
     };
-    assert_eq!(repo::count_calls(db, &paged).await.unwrap(), 4);
+    assert_eq!(page(db, &paged).await.count, 4);
 
     // Filters do.
-    let tagged = repo::CallSearch {
+    let tagged = archive::CallSearch {
         tag_name: Some("Fire".into()),
-        ..repo::CallSearch::default()
+        ..archive::CallSearch::default()
     };
-    assert_eq!(repo::count_calls(db, &tagged).await.unwrap(), 3);
+    assert_eq!(page(db, &tagged).await.count, 3);
 
-    // A talkgroup in two groups is still counted once (DISTINCT).
-    let grouped = repo::CallSearch {
+    // A talkgroup in two groups is still counted once.
+    let grouped = archive::CallSearch {
         group_name: Some("Emergency".into()),
-        ..repo::CallSearch::default()
+        ..archive::CallSearch::default()
     };
-    assert_eq!(repo::count_calls(db, &grouped).await.unwrap(), 3);
+    assert_eq!(page(db, &grouped).await.count, 3);
 
     // No matches -> zero, not an error.
-    let none = repo::CallSearch {
+    let none = archive::CallSearch {
         system_ref: Some(999),
-        ..repo::CallSearch::default()
+        ..archive::CallSearch::default()
     };
-    assert_eq!(repo::count_calls(db, &none).await.unwrap(), 0);
+    assert_eq!(page(db, &none).await.count, 0);
 
     // An offset with no limit skips ahead and returns the rest — SQLite rejects
     // OFFSET without LIMIT, so the query supplies an unbounded one.
     assert_eq!(
         ids(
             db,
-            repo::CallSearch {
+            archive::CallSearch {
                 offset: 1,
-                ..repo::CallSearch::default()
+                ..archive::CallSearch::default()
             }
         )
         .await,
         vec![c, b, a]
     );
+
+    assert_the_total_describes_the_rows_above_it(db).await;
+}
+
+/// **A page and its total come from the same filter** — the property one module
+/// now owns rather than three read paths each composing it (#98).
+///
+/// Walked over every window of every filter this dataset can express, because
+/// the failure it guards against is not a wrong number in one place: it is a
+/// total computed from a *different* search than the rows above it, which reads
+/// as a paginator that is subtly off and nothing else. Three facts have to hold
+/// together at every step, and only the last one is about arithmetic:
+/// the window never moves the total, the rows never exceed the window, and
+/// `hasMore` says whether walking on would find anything.
+async fn assert_the_total_describes_the_rows_above_it(db: &Db) {
+    for filter in [
+        archive::CallSearch::default(),
+        archive::CallSearch {
+            tag_name: Some("Fire".into()),
+            ..archive::CallSearch::default()
+        },
+        // The Group filter is the one that joins a many-to-many relation, so it
+        // is where a total could count a join's extra rows and the page not.
+        archive::CallSearch {
+            group_name: Some("Emergency".into()),
+            ..archive::CallSearch::default()
+        },
+        archive::CallSearch {
+            system_ref: Some(999),
+            ..archive::CallSearch::default()
+        },
+    ] {
+        let total = page(db, &filter).await.count;
+
+        for offset in 0..=total + 1 {
+            for limit in 1..=3 {
+                let window = page(
+                    db,
+                    &archive::CallSearch {
+                        limit,
+                        offset,
+                        ..filter.clone()
+                    },
+                )
+                .await;
+                let shown = window.results.len() as u64;
+
+                assert_eq!(
+                    window.count, total,
+                    "the window {offset}+{limit} moved the total of {filter:?}"
+                );
+                assert!(shown <= limit, "a page of {shown} exceeded its limit");
+
+                // `hasMore` against the only independent oracle there is:
+                // whether walking on actually finds anything. Re-deriving it
+                // from `count` here would be the same arithmetic `Page` does,
+                // and an assertion that recomputes its subject can never
+                // disagree with it.
+                let next = page(
+                    db,
+                    &archive::CallSearch {
+                        limit,
+                        offset: offset + shown,
+                        ..filter.clone()
+                    },
+                )
+                .await;
+                assert_eq!(
+                    window.has_more,
+                    !next.results.is_empty(),
+                    "hasMore is wrong about what follows \
+                     ({filter:?}, offset {offset}, limit {limit})"
+                );
+            }
+        }
+
+        // Walking a page at a time reaches every row and stops exactly at the
+        // total — the client's own loop, run against the module.
+        let (mut walked, mut seen) = (0, Vec::new());
+        loop {
+            let step = page(
+                db,
+                &archive::CallSearch {
+                    limit: 2,
+                    offset: walked,
+                    ..filter.clone()
+                },
+            )
+            .await;
+            walked += step.results.len() as u64;
+            seen.extend(step.results.iter().map(|call| call.id));
+            if !step.has_more {
+                break;
+            }
+        }
+        assert_eq!(walked, total, "walking {filter:?} did not reach its total");
+        seen.dedup();
+        assert_eq!(
+            seen.len() as u64,
+            total,
+            "walking {filter:?} saw a Call twice"
+        );
+    }
 }
 
 /// A search page is denormalized in one batch rather than per Call. rdio-scanner
@@ -1471,10 +1578,7 @@ async fn assert_sort_and_count(db: &Db, a: i64, b: i64, c: i64, d: i64) {
 /// anyway: an oracle that resolves the same joins the same way can only ever
 /// agree, including about a join both get wrong.
 async fn assert_batched_call_view(db: &Db, a: i64, b: i64, c: i64, d: i64) {
-    let page = repo::search_calls(db, &repo::CallSearch::default())
-        .await
-        .unwrap();
-    let batched = repo::stored_calls(db, &page).await.unwrap();
+    let batched = page(db, &archive::CallSearch::default()).await.results;
 
     // In the order they were given, which here is the page's own newest-first.
     assert_eq!(
@@ -1508,7 +1612,7 @@ async fn assert_batched_call_view(db: &Db, a: i64, b: i64, c: i64, d: i64) {
     assert_eq!(batched[2].talkgroup_group.as_deref(), Some("Emergency"));
 
     // An empty page needs no queries and yields nothing.
-    assert!(repo::stored_calls(db, &[]).await.unwrap().is_empty());
+    assert!(archive::stored_calls(db, &[]).await.unwrap().is_empty());
 }
 
 /// Patches ride along on a batched page, keyed to the right Call.
@@ -1537,10 +1641,7 @@ async fn stored_calls_attaches_patches_to_the_right_call() {
     .unwrap()
     .id;
 
-    let page = repo::search_calls(&db, &repo::CallSearch::default())
-        .await
-        .unwrap();
-    let views = repo::stored_calls(&db, &page).await.unwrap();
+    let views = page(&db, &archive::CallSearch::default()).await.results;
 
     let by_id = |id: i64| views.iter().find(|v| v.id == id).unwrap();
     assert_eq!(by_id(patched).patches, vec![9001, 9002]); // ordered
@@ -1554,7 +1655,7 @@ async fn stored_calls_attaches_patches_to_the_right_call() {
 /// happily offers Talkgroups with nothing to show.
 async fn assert_cascading_filter_options(db: &Db) {
     // Unfiltered: everything with at least one Call.
-    let all = repo::filter_options(db, &repo::CallSearch::default())
+    let all = archive::options(db, &archive::CallSearch::default())
         .await
         .unwrap();
     assert_eq!(
@@ -1574,11 +1675,11 @@ async fn assert_cascading_filter_options(db: &Db) {
     assert_eq!(all.date_stop_ms, Some(4000));
 
     // Pick System 100: its Talkgroups only...
-    let by_system = repo::filter_options(
+    let by_system = archive::options(
         db,
-        &repo::CallSearch {
+        &archive::CallSearch {
             system_ref: Some(100),
-            ..repo::CallSearch::default()
+            ..archive::CallSearch::default()
         },
     )
     .await
@@ -1603,11 +1704,11 @@ async fn assert_cascading_filter_options(db: &Db) {
 
     // Pick Tag "Law": only the Talkgroup/Group that carry it, and the Tag list
     // stays complete.
-    let by_tag = repo::filter_options(
+    let by_tag = archive::options(
         db,
-        &repo::CallSearch {
+        &archive::CallSearch {
             tag_name: Some("Law".into()),
-            ..repo::CallSearch::default()
+            ..archive::CallSearch::default()
         },
     )
     .await
@@ -1634,12 +1735,12 @@ async fn assert_cascading_filter_options(db: &Db) {
 
     // The offered date range describes what the *other* filters can reach, so
     // narrowing the range never collapses the picker's own bounds.
-    let narrowed = repo::filter_options(
+    let narrowed = archive::options(
         db,
-        &repo::CallSearch {
+        &archive::CallSearch {
             after_ms: Some(2500),
             before_ms: Some(3500),
-            ..repo::CallSearch::default()
+            ..archive::CallSearch::default()
         },
     )
     .await
@@ -1649,14 +1750,323 @@ async fn assert_cascading_filter_options(db: &Db) {
 
     // A System filter *does* move the bounds (System 200 has one Call at 3000).
     assert_eq!(by_system_bounds(db, 200).await, (Some(3000), Some(3000)));
+
+    assert_every_dimension_cascades(db).await;
+    assert_a_group_filter_cannot_multiply_a_call(db).await;
+}
+
+/// **Why the archive search does not deduplicate** (#98).
+///
+/// Talkgroup↔Group is many-to-many, and the search query carried a `DISTINCT`
+/// under the Group filter on the strength of that: a Talkgroup in several Groups
+/// would come back once per Group. True of the relation, false of the query —
+/// two schema constraints make a Call unmultipliable, and this is where they are
+/// written down:
+///
+/// 1. **`groups.name` is `UNIQUE`**, so a filter on a group *name* matches at
+///    most one Group row.
+/// 2. **`talkgroup_groups` is keyed `(talkgroup_id, group_id)`**, so at most one
+///    link joins that Group to that Talkgroup.
+///
+/// Removing the `DISTINCT` failed no test, which is exactly the problem: it was
+/// an unkillable mutation on the search path buying a sort buffer per group
+/// filter for a case SQL cannot produce. Asserting the constraints rather than
+/// the absent duplicate is deliberate — the duplicate is what *cannot* be
+/// constructed, so the only honest test is of the reason it cannot. Relax either
+/// constraint and this fails, which is the moment `CallQuery::rows` owes a
+/// `DISTINCT` again.
+///
+/// The dataset already has the shape that would break: talkgroup 2 is in both
+/// **Emergency** and **Public**, and Call `b` is on it.
+///
+/// Every probe runs in a **transaction that is rolled back**, for two reasons:
+/// the rows it offers would otherwise be seen by the suites that share this
+/// database, and a refused statement aborts the transaction it is in — so each
+/// gets its own. Both dialects run it, because the constraints are the schema's
+/// and either could be the one that stops enforcing them.
+async fn assert_a_group_filter_cannot_multiply_a_call(db: &Db) {
+    let a_group = |name: &str| group::ActiveModel {
+        name: Set(name.to_string()),
+        created_at_ms: Set(NOW),
+        ..Default::default()
+    };
+    let (talkgroup_id, emergency) = emergency_membership(db).await;
+    let a_link = |group_id| talkgroup_group::ActiveModel {
+        talkgroup_id: Set(talkgroup_id),
+        group_id: Set(group_id),
+    };
+
+    // The **control**, so neither refusal below can pass for the wrong reason:
+    // both rows insert fine when they are not the duplicate.
+    let txn = db.begin().await.unwrap();
+    let fresh = a_group("Marine").insert(&txn).await.expect("a new Group");
+    a_link(fresh.id)
+        .insert(&txn)
+        .await
+        .expect("a new membership");
+    txn.rollback().await.unwrap();
+
+    // 1. A second Group by a name already taken is refused.
+    let txn = db.begin().await.unwrap();
+    assert!(
+        a_group("Emergency").insert(&txn).await.is_err(),
+        "two Groups may not share a name, or a name filter could match both"
+    );
+    txn.rollback().await.unwrap();
+
+    // 2. ...and a Talkgroup may not join one Group twice, so its Calls cannot
+    //    come back once per link.
+    let txn = db.begin().await.unwrap();
+    assert!(
+        a_link(emergency).insert(&txn).await.is_err(),
+        "a Talkgroup may not join one Group twice, or its Calls would double"
+    );
+    txn.rollback().await.unwrap();
+
+    // ...and so the Call on a Talkgroup that *is* in two Groups still arrives
+    // once under either of them.
+    for name in ["Emergency", "Public"] {
+        let matched = ids(
+            db,
+            archive::CallSearch {
+                group_name: Some(name.into()),
+                talkgroup_ref: Some(2),
+                ..archive::CallSearch::default()
+            },
+        )
+        .await;
+        assert_eq!(matched.len(), 1, "{name} carried the Call more than once");
+    }
+}
+
+/// The (talkgroup, group) ids of talkgroup 2's Emergency membership.
+async fn emergency_membership(db: &Db) -> (i64, i64) {
+    let group = group::Entity::find()
+        .filter(group::Column::Name.eq("Emergency"))
+        .one(db)
+        .await
+        .unwrap()
+        .expect("the Emergency group");
+    let talkgroup = talkgroup::Entity::find()
+        .filter(talkgroup::Column::Ref.eq(2))
+        .one(db)
+        .await
+        .unwrap()
+        .expect("talkgroup 2");
+    (talkgroup.id, group.id)
+}
+
+/// Every filter, against every dimension it narrows — the whole table, not the
+/// three combinations somebody happened to write down (#98).
+///
+/// **The Group dimension is why this exists.** It was the one filter no test set,
+/// and it is also the one the two facet queries are most entangled over: the
+/// Group options are read through a query that joins Talkgroup→Group *itself*,
+/// so a Group filter arriving on the same query would have joined them a second
+/// time and SQL would have refused the duplicate alias. That never happened only
+/// because the caller clears the filter first — an invariant held by a comment,
+/// on a path nothing exercised.
+///
+/// Read as a table: rows are the filter applied, columns are what each dimension
+/// then offers. **Every filter `CallSearch` carries appears as a row** — System,
+/// Talkgroup, Group, Tag, both date bounds and the duration floor — because
+/// "every dimension" spread across two functions is a claim nobody can check by
+/// reading one of them. Every row asserts its **own** dimension is unnarrowed,
+/// which is the cascade's whole promise: a choice stays reversible in one click.
+async fn assert_every_dimension_cascades(db: &Db) {
+    // The dataset: 100 "Alpha" {tg1 Fire [Emergency], tg2 Law [Emergency,Public]}
+    //              200 "Beta"  {tg1 Fire [Public]}
+    // Calls a(100,1,@1000) b(100,2,@2000) c(200,1,@3000) d(100,1,@4000).
+    for (filter, expected) in [
+        (
+            archive::CallSearch {
+                group_name: Some("Public".into()),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                // b (tg2 is in Public) and c (tg1@200 is in Public).
+                systems: vec![100, 200],
+                talkgroups: vec![(100, 2), (200, 1)],
+                tags: vec!["Fire", "Law"],
+                // Its own dimension stays whole, so Public is switchable.
+                groups: vec!["Emergency", "Public"],
+                dates: (Some(2000), Some(3000)),
+            },
+        ),
+        (
+            archive::CallSearch {
+                group_name: Some("Emergency".into()),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                // a, b and d — all on System 100.
+                systems: vec![100],
+                talkgroups: vec![(100, 1), (100, 2)],
+                tags: vec!["Fire", "Law"],
+                groups: vec!["Emergency", "Public"],
+                dates: (Some(1000), Some(4000)),
+            },
+        ),
+        (
+            archive::CallSearch {
+                talkgroup_ref: Some(2),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                // Only b. A Talkgroup Ref is not scoped to a System here, but
+                // only System 100 has a Talkgroup 2.
+                systems: vec![100],
+                talkgroups: vec![(100, 1), (100, 2), (200, 1)],
+                tags: vec!["Law"],
+                groups: vec!["Emergency", "Public"],
+                dates: (Some(2000), Some(2000)),
+            },
+        ),
+        (
+            archive::CallSearch {
+                system_ref: Some(100),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                // a, b and d.
+                systems: vec![100, 200],
+                talkgroups: vec![(100, 1), (100, 2)],
+                tags: vec!["Fire", "Law"],
+                groups: vec!["Emergency", "Public"],
+                dates: (Some(1000), Some(4000)),
+            },
+        ),
+        (
+            archive::CallSearch {
+                tag_name: Some("Fire".into()),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                // a, c and d — the Fire Talkgroup on each System.
+                systems: vec![100, 200],
+                talkgroups: vec![(100, 1), (200, 1)],
+                tags: vec!["Fire", "Law"],
+                // tg1@100 is in Emergency, tg1@200 in Public.
+                groups: vec!["Emergency", "Public"],
+                dates: (Some(1000), Some(4000)),
+            },
+        ),
+        (
+            archive::CallSearch {
+                after_ms: Some(3000),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                // c and d.
+                systems: vec![100, 200],
+                talkgroups: vec![(100, 1), (200, 1)],
+                tags: vec!["Fire"],
+                groups: vec!["Emergency", "Public"],
+                // Its own dimension stays whole, so the picker never collapses.
+                dates: (Some(1000), Some(4000)),
+            },
+        ),
+        (
+            // The other date bound, which is a separate field and so a separate
+            // chance to be dropped on the way to a facet query.
+            archive::CallSearch {
+                before_ms: Some(2000),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                // a and b, both on System 100.
+                systems: vec![100],
+                talkgroups: vec![(100, 1), (100, 2)],
+                tags: vec!["Fire", "Law"],
+                groups: vec!["Emergency", "Public"],
+                dates: (Some(1000), Some(4000)),
+            },
+        ),
+        (
+            // The duration floor (#42) has no dimension of its own to offer, so
+            // the only way to see whether it reaches the facet queries at all is
+            // a value nothing matches: none of these Calls has a measured
+            // duration, so every dimension must empty — including the date
+            // bounds, which clear only the date filters.
+            archive::CallSearch {
+                min_duration_ms: Some(1),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                systems: vec![],
+                talkgroups: vec![],
+                tags: vec![],
+                groups: vec![],
+                dates: (None, None),
+            },
+        ),
+        (
+            // Two filters at once: the Group and the System narrow together, and
+            // each still offers its own dimension whole.
+            archive::CallSearch {
+                group_name: Some("Public".into()),
+                system_ref: Some(200),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                systems: vec![100, 200],
+                talkgroups: vec![(200, 1)],
+                tags: vec!["Fire"],
+                groups: vec!["Public"],
+                dates: (Some(3000), Some(3000)),
+            },
+        ),
+        (
+            // A Group nothing is in: every dimension empties, and nothing errors.
+            archive::CallSearch {
+                group_name: Some("Marine".into()),
+                ..archive::CallSearch::default()
+            },
+            Offered {
+                systems: vec![],
+                talkgroups: vec![],
+                tags: vec![],
+                groups: vec!["Emergency", "Public"],
+                dates: (None, None),
+            },
+        ),
+    ] {
+        let options = archive::options(db, &filter).await.unwrap();
+        assert_eq!(offered(&options), expected, "cascading from {filter:?}");
+    }
+}
+
+/// What each dimension offered, in one comparable value — so a case reads as a
+/// row of a table rather than six assertions.
+#[derive(Debug, PartialEq, Eq)]
+struct Offered<'a> {
+    systems: Vec<i64>,
+    talkgroups: Vec<(i64, i64)>,
+    tags: Vec<&'a str>,
+    groups: Vec<&'a str>,
+    dates: (Option<i64>, Option<i64>),
+}
+
+fn offered(options: &radio_scout::call::FilterOptions) -> Offered<'_> {
+    Offered {
+        systems: options.systems.iter().map(|s| s.r#ref).collect(),
+        talkgroups: options
+            .talkgroups
+            .iter()
+            .map(|t| (t.system_ref, t.r#ref))
+            .collect(),
+        tags: options.tags.iter().map(String::as_str).collect(),
+        groups: options.groups.iter().map(String::as_str).collect(),
+        dates: (options.date_start_ms, options.date_stop_ms),
+    }
 }
 
 async fn by_system_bounds(db: &Db, system_ref: i64) -> (Option<i64>, Option<i64>) {
-    let options = repo::filter_options(
+    let options = archive::options(
         db,
-        &repo::CallSearch {
+        &archive::CallSearch {
             system_ref: Some(system_ref),
-            ..repo::CallSearch::default()
+            ..archive::CallSearch::default()
         },
     )
     .await
@@ -1669,7 +2079,7 @@ async fn by_system_bounds(db: &Db, system_ref: i64) -> (Option<i64>, Option<i64>
 #[tokio::test]
 async fn filter_options_on_an_empty_archive_are_empty() {
     let (db, _dir) = sqlite().await;
-    let options = repo::filter_options(&db, &repo::CallSearch::default())
+    let options = archive::options(&db, &archive::CallSearch::default())
         .await
         .unwrap();
 
@@ -1754,7 +2164,7 @@ async fn recorder_truth_migration_converges_on_databases_that_predate_the_column
     assert_eq!(existing.duration_ms, None, "nobody ever measured it");
     assert_eq!(existing.site_id, None);
 
-    let views = repo::stored_calls(&db, std::slice::from_ref(&existing))
+    let views = archive::stored_calls(&db, std::slice::from_ref(&existing))
         .await
         .expect("denormalize the pre-upgrade archive");
     assert_eq!(views.len(), 1);

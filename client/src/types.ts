@@ -3,11 +3,14 @@
  *  recorder-supplied external id and **id** is Radio-Scout's internal key.
  *
  *  **What the client reads, not everything the wire carries** (#89). The server
- *  also sends `dateTime` (`timestamp` in ISO-8601, which nothing here renders —
- *  `formatCallTime` works from the millisecond value) and `audioMime` (the
- *  `<audio>` element sniffs the response's own Content-Type). Declaring a field
- *  nobody reads invites code to be written against it, and both of those have a
- *  better source already in use. */
+ *  also sends `audioMime`, which nothing here needs — the `<audio>` element
+ *  sniffs the response's own Content-Type. Declaring a field nobody reads
+ *  invites code to be written against it when a better source is already in use.
+ *
+ *  A `dateTime` was declared here too, and removed for that reason. #98 then
+ *  removed it from the *server*, where it turned out never to have been sent at
+ *  all: the field was on both sides of the protocol and hardcoded absent on the
+ *  sending one. `timestamp` is the only call time there is. */
 export interface Call {
   id: number
   systemRef: number

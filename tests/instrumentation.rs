@@ -716,17 +716,22 @@ async fn a_backfill_that_cannot_read_the_archive_says_so_and_keeps_the_socket() 
     // failed, which is the whole point of swallowing it.
     assert_eq!(next_json(&mut ws).await["t"], "subscribed");
 
-    let line = capture.wait_for("live-feed Backfill query failed").await;
+    let line = capture.wait_for("live-feed Backfill failed").await;
     assert!(line.contains(" WARN "), "{line}");
     assert!(line.contains("since=0"), "{line}");
     assert!(line.contains(common::REFUSED), "why it failed: {line}");
 }
 
-/// The other half of the same swallow (#86). A Backfill is two queries now — the
-/// page, then the batch that denormalizes it — so the second needs the line the
+/// The other half of the same swallow (#86). A Backfill reads a page and then
+/// the batch that denormalizes it, so the second failure needs the line the
 /// first has. What it replaced said nothing at all: the loop dropped any Call
 /// whose view failed to build and carried on, which is the shape of bug an
 /// operator can only ever report as "some calls go missing sometimes".
+///
+/// **Since #98 both arms write the same message**, because both are one read of
+/// the Archive and the operator's question is the same either way — what is
+/// gone, and why. `error=` names the statement that went down; a second
+/// *message* for it would be the per-callsite drift ADR-0011 rule 6 forbids.
 #[tokio::test]
 async fn a_backfill_that_cannot_build_its_view_says_so_and_keeps_the_socket() {
     let capture = LogCapture::start();
@@ -746,7 +751,7 @@ async fn a_backfill_that_cannot_build_its_view_says_so_and_keeps_the_socket() {
     .expect("send sub");
     assert_eq!(next_json(&mut ws).await["t"], "subscribed");
 
-    let line = capture.wait_for("live-feed Backfill view failed").await;
+    let line = capture.wait_for("live-feed Backfill failed").await;
     assert!(line.contains(" WARN "), "{line}");
     assert!(line.contains("since=0"), "{line}");
     assert!(line.contains(common::REFUSED), "why it failed: {line}");

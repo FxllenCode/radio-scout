@@ -5,11 +5,11 @@
 //! transmission (audio + metadata). **Ref** is the external, recorder-supplied
 //! numeric id (`systemRef`, `talkgroupRef`, …); **Id** is Radio-Scout's internal
 //! primary key, never sent by recorders. `StoredCall` is the denormalized view
-//! built from the SeaORM rows (`crate::db::repo::stored_calls`, which builds a
-//! whole page of them in a fixed number of queries — there is no per-Call form).
+//! built from the SeaORM rows by `crate::archive::stored_calls`, which builds a
+//! whole page of them in a fixed number of queries — there is no per-Call form.
 //!
-//! These live here rather than beside their handlers so the data layer can build
-//! them without depending on the HTTP layer.
+//! These live here rather than beside their handlers so anything may build them
+//! without depending on the HTTP layer.
 
 use serde::Serialize;
 
@@ -74,8 +74,20 @@ pub struct StoredCall {
     pub frequency: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub date_time: Option<String>,
+    /// When the transmission started, unix milliseconds.
+    ///
+    /// **The only time field on the wire** (#98). There used to be a `dateTime`
+    /// beside it — rdio-scanner's ISO-8601 spelling of this same instant, kept
+    /// for symmetry with the ingest form field of that name. Nothing ever set
+    /// it: it was declared on both sides of the protocol and hardcoded `None`
+    /// on this one, so no client has received it and none can start to. A field
+    /// that is always absent is not a field, it is an invitation to write code
+    /// against something that will never arrive — and the client did declare
+    /// it, until #89 removed it for exactly that reason.
+    ///
+    /// The recorder-facing `dateTime` is untouched: [`crate::ingest`] still
+    /// accepts it on an upload, because that is a wire contract with rdio's
+    /// recorders and is a different direction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,7 +293,6 @@ mod tests {
             patches: vec![54001, 54002],
             frequency: Some(774_031_250),
             source: Some(1_610_092),
-            date_time: Some("2022-11-29T18:05:38Z".into()),
             timestamp: Some(1_669_740_338_000),
             audio_mime: Some("audio/mp4".into()),
             duration_ms: Some(8250),
@@ -337,7 +348,6 @@ mod tests {
             patches: vec![],
             frequency: None,
             source: None,
-            date_time: None,
             timestamp: None,
             audio_mime: None,
             duration_ms: None,
