@@ -272,13 +272,7 @@ async fn a_listener_leaves_no_address_in_the_stored_log() {
     // *successful* chatty one — which is the only shape that logs a listener's
     // address at all (a 404 escalates to WARN, where rule 5 already drops it).
     let id = app
-        .seed_call(NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: 1000,
-            object_key: "aa/1.wav".into(),
-            ..Default::default()
-        })
+        .seed_call(NewCall::new(11, 54241, 1000), common::audio_at("aa/1.wav"))
         .await;
     app.put_object("aa/1.wav", b"audio-bytes").await;
 

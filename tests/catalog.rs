@@ -31,16 +31,16 @@ async fn seed_talkgroup(
     tag: &str,
     groups: &[&str],
 ) {
-    app.seed_call(NewCall {
-        system_ref,
-        system_label: Some(system_label.into()),
-        talkgroup_ref,
-        talkgroup_label: Some(label.into()),
-        talkgroup_tag: Some(tag.into()),
-        talkgroup_groups: groups.iter().map(|g| (*g).to_string()).collect(),
-        object_key: format!("k/{system_ref}-{talkgroup_ref}.wav"),
-        ..Default::default()
-    })
+    app.seed_call(
+        NewCall {
+            system_label: Some(system_label.into()),
+            talkgroup_label: Some(label.into()),
+            talkgroup_tag: Some(tag.into()),
+            talkgroup_groups: groups.iter().map(|g| (*g).to_string()).collect(),
+            ..NewCall::new(system_ref, talkgroup_ref, 0)
+        },
+        common::audio_at(format!("k/{system_ref}-{talkgroup_ref}.wav")),
+    )
     .await;
 }
 

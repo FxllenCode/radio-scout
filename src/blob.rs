@@ -100,6 +100,49 @@ pub fn new_object_key(extension: &str) -> String {
     format!("{}/{}.{}", &uuid[0..2], uuid, extension)
 }
 
+/// An audio object that **exists in the store**: where it is, and how big it is.
+///
+/// The other half of #96's split. A recorder's facts are what it said
+/// ([`crate::db::repo::NewCall`]); these two are facts about *our* store, and
+/// they cannot be known until the write has happened. Keeping them on the
+/// recorder's type is what made ADR-0001's "write the audio object before the
+/// row" a comment: a `NewCall` could be built naming an object nobody had
+/// written, and only a comment said not to.
+///
+/// What the split buys, exactly: an insert cannot happen without the caller
+/// having *decided* what audio exists, and the recorder's own type can no
+/// longer express an answer. [`StoredAudio::written`] is still a public
+/// constructor over two values — a test seeding rows says so deliberately —
+/// so this is a much narrower door, not a sealed one.
+///
+/// The byte length rides along so retention's size cap is a `SUM()` over rows
+/// rather than a stat per object (#10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAudio {
+    key: String,
+    bytes: i64,
+}
+
+impl StoredAudio {
+    /// Describe an object that has just been written — the only way to make one.
+    pub fn written(key: String, bytes: usize) -> Self {
+        StoredAudio {
+            key,
+            bytes: bytes as i64,
+        }
+    }
+
+    /// The object key the Call's row points at.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// How many bytes were written.
+    pub fn bytes(&self) -> i64 {
+        self.bytes
+    }
+}
+
 /// `[storage]` — where Call audio lives (US 39, ADR-0002), as an operator
 /// writes it.
 ///

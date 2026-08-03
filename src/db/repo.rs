@@ -7,8 +7,9 @@
 //! label, `Talkgroup <ref>` name, lowest-free Ref for new Systems). Two toggles
 //! gate it — a global one ([`IngestConfig`](crate::ingest::IngestConfig)) and a
 //! per-system one ([`system::Model::auto_populate`]) — and a per-system blacklist
-//! drops chosen Talkgroups outright. [`ingest_disposition`] is the single place
-//! that decision is made; [`insert_call`] applies the defaults on create.
+//! drops chosen Talkgroups outright. [`disposition`] is the single place that
+//! decision is made — purely, over the [`Channel`] [`resolve_channel`] read for
+//! the Call (#96) — and [`insert_call`] applies the defaults on create.
 //!
 //! The archive-search query filters via joins + `DISTINCT` (portable across
 //! SQLite/Postgres). It deliberately does **no** DB-side list aggregation
@@ -21,7 +22,10 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
 };
 
-use crate::call::{CallId, Emission, FilterOptions, StoredCall, SystemOption, TalkgroupOption};
+use crate::blob::StoredAudio;
+use crate::call::{
+    CallId, Candidate, Emission, FilterOptions, StoredCall, SystemOption, TalkgroupOption,
+};
 use crate::catalog::{Catalog, CatalogSystem, CatalogTalkgroup, display_order};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
@@ -247,8 +251,21 @@ pub struct NewCallFrequency {
     pub at_ms: Option<i64>,
 }
 
-/// A Call to persist, described by Refs/labels as a recorder sends it.
-#[derive(Debug, Clone, Default)]
+/// **What a Recorder said** about one Call — Refs and labels, exactly as it
+/// sent them.
+///
+/// Deliberately *only* that (#96). It carried the object key and the byte
+/// length too, which are facts about our own store and are not knowable until
+/// the audio has been written; [`StoredAudio`] carries those, and
+/// [`insert_call`] takes both — so ADR-0001's write-order is a property of the
+/// types rather than a comment somebody has to read.
+///
+/// **No `Default`**, for the same reason: a defaulted `NewCall` is a Call on
+/// Talkgroup 0 of System 0 at the beginning of the epoch, which no Recorder
+/// could send and which several tests were quietly seeding. [`NewCall::new`]
+/// takes the three facts every upload has, and `..NewCall::new(…)` keeps
+/// everything else as short as `..Default::default()` was.
+#[derive(Debug, Clone)]
 pub struct NewCall {
     pub system_ref: i64,
     pub system_label: Option<String>,
@@ -260,12 +277,8 @@ pub struct NewCall {
     pub call_at_ms: i64,
     pub frequency: Option<i64>,
     pub source_ref: Option<i64>,
-    pub object_key: String,
     pub audio_mime: Option<String>,
     pub audio_name: Option<String>,
-    /// Byte length of the audio object, filled in by ingest when it writes the
-    /// object (#10 — retention's size cap sums it).
-    pub audio_size: Option<i64>,
     /// The recorder's own figure when it sent one; otherwise filled in by
     /// ingest from the audio's container header (#42).
     pub duration_ms: Option<i64>,
@@ -286,36 +299,116 @@ pub struct NewCall {
     pub frequencies: Vec<NewCallFrequency>,
 }
 
-/// Resolve the Call's System/Talkgroup/Tag/Groups by Ref (creating as needed with
-/// auto-populate defaults), then insert the Call and its child rows. Returns the
-/// stored Call.
+/// What a Recorder said about the **channel** a Call was on — the labels an
+/// unknown Talkgroup is auto-populated with (#8), and nothing else.
+///
+/// Its own type because a Talkgroup is also created where there is no Call at
+/// all: unmerging one (#45) restores it from a member Ref and a label. That
+/// path used to build a whole `NewCall` to carry four strings, which meant
+/// inventing a Call on System 0 at the beginning of the epoch — exactly the
+/// value #96 stopped `NewCall` from being able to express.
+pub struct NewTalkgroup<'a> {
+    pub talkgroup_ref: i64,
+    pub label: Option<&'a str>,
+    pub name: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub groups: &'a [String],
+}
+
+impl NewCall {
+    /// What this Call says about its own channel.
+    pub fn talkgroup(&self) -> NewTalkgroup<'_> {
+        NewTalkgroup {
+            talkgroup_ref: self.talkgroup_ref,
+            label: self.talkgroup_label.as_deref(),
+            name: self.talkgroup_name.as_deref(),
+            tag: self.talkgroup_tag.as_deref(),
+            groups: &self.talkgroup_groups,
+        }
+    }
+
+    /// The three facts every upload carries — which System, which Talkgroup,
+    /// and when — with everything a Recorder may or may not have said left
+    /// empty. Fill the rest in with `..NewCall::new(system, talkgroup, at_ms)`.
+    pub fn new(system_ref: i64, talkgroup_ref: i64, call_at_ms: i64) -> Self {
+        NewCall {
+            system_ref,
+            system_label: None,
+            talkgroup_ref,
+            talkgroup_label: None,
+            talkgroup_name: None,
+            talkgroup_tag: None,
+            talkgroup_groups: Vec::new(),
+            call_at_ms,
+            frequency: None,
+            source_ref: None,
+            audio_mime: None,
+            audio_name: None,
+            duration_ms: None,
+            stop_at_ms: None,
+            emergency: false,
+            encrypted: false,
+            priority: None,
+            audio_type: None,
+            site_ref: None,
+            patches: Vec::new(),
+            units: Vec::new(),
+            frequencies: Vec::new(),
+        }
+    }
+}
+
+/// Insert a Call and its child rows, into the `channel` already resolved for it
+/// — creating the System or the Talkgroup where `resolved` says there is none.
+/// Returns the stored Call.
+///
+/// `audio` is the object ingest wrote a moment ago, or `None` for an **encrypted
+/// Call**, which is a row and nothing else (#42, spec US 9). It is an argument
+/// rather than a field of `new` because only a completed write produces one,
+/// which is how ADR-0001's ordering is expressed: the row cannot be inserted
+/// until the object exists.
 ///
 /// A brand-new Talkgroup is auto-populated (#8) with the recorder's labels,
 /// falling back to rdio-scanner's defaults (numeric label, `Talkgroup <ref>`
 /// name, `Untagged` Tag, `Unknown` Group). An **existing** Talkgroup is left
 /// untouched — auto-populate fills unknowns, it never rewrites curated rows. The
 /// `auto_populate` flag (the effective global-or-per-system value from
-/// [`ingest_disposition`]) gates only the Unit roster, matching rdio.
+/// [`disposition`]) gates only the Unit roster, matching rdio.
+///
+/// Passing `&Resolved::unresolved()` asks for both to be resolved here, which is
+/// what a caller seeding rows directly wants; ingest passes what it already
+/// read, so the pair is resolved once per Call rather than twice (#96).
 ///
 /// Not internally transactional — the caller (ingest) wraps this in one so the
 /// resolve → insert sequence is atomic with the audio write (ADR-0001).
 pub async fn insert_call<C: ConnectionTrait>(
     db: &C,
     new: &NewCall,
+    audio: Option<StoredAudio>,
+    resolved: &Resolved,
     auto_populate: bool,
     now_ms: i64,
 ) -> Result<call::Model, DbErr> {
-    // System gets a `System <ref>` default label when the recorder sent none.
-    // The label is only applied on create; an existing System keeps its own.
-    let system_label = new
-        .system_label
-        .clone()
-        .or_else(|| Some(format!("System {}", new.system_ref)));
-    let sys = resolve_or_create_system(db, new.system_ref, system_label, now_ms).await?;
+    let sys = match resolved.system.clone() {
+        Some(known) => known,
+        // System gets a `System <ref>` default label when the recorder sent
+        // none. The label is only applied on create; an existing System keeps
+        // its own.
+        None => {
+            let label = new
+                .system_label
+                .clone()
+                .or_else(|| Some(format!("System {}", new.system_ref)));
+            resolve_or_create_system(db, new.system_ref, label, now_ms).await?
+        }
+    };
 
-    let tg = match resolve_talkgroup(db, sys.id, new.talkgroup_ref).await? {
-        Some(existing) => existing,
-        None => create_populated_talkgroup(db, sys.id, new, now_ms).await?,
+    let tg = match resolved.talkgroup.clone() {
+        Some(known) => known,
+        None => match resolve_talkgroup(db, sys.id, new.talkgroup_ref).await? {
+            Some(existing) => existing,
+            None => create_populated_talkgroup(db, sys.id, &new.talkgroup(), now_ms).await?,
+        },
     };
 
     // A Site is discovered the way a Talkgroup is (#8): a multi-site System
@@ -341,10 +434,16 @@ pub async fn insert_call<C: ConnectionTrait>(
         call_at_ms: Set(new.call_at_ms),
         frequency: Set(new.frequency),
         source_ref: Set(new.source_ref),
-        object_key: Set(new.object_key.clone()),
+        // An **Encrypted Call** has no object: the empty key is what the serve
+        // path and the wire both read as "there is nothing here", and a `NULL`
+        // size is what keeps retention's cap counting only what exists.
+        object_key: Set(audio
+            .as_ref()
+            .map(|a| a.key().to_owned())
+            .unwrap_or_default()),
         audio_mime: Set(new.audio_mime.clone()),
         audio_name: Set(new.audio_name.clone()),
-        audio_size: Set(new.audio_size),
+        audio_size: Set(audio.as_ref().map(StoredAudio::bytes)),
         duration_ms: Set(new.duration_ms),
         stop_at_ms: Set(new.stop_at_ms),
         emergency: Set(new.emergency),
@@ -541,6 +640,16 @@ async fn patch_members<C: ConnectionTrait>(
         }
     }
 
+    Ok(patch_members_of(refs, &canonical))
+}
+
+/// Which of `refs` this System claims, given the arriving-Ref → owning-Ref map
+/// the queries above produced — the decision half of [`patch_members`] (#96).
+///
+/// Pure, so every shape a recorder can send is a value a table names: the radio
+/// tail SDRTrunk appends, a member Ref resolving to its owner, and two Refs that
+/// turn out to be one channel.
+fn patch_members_of(refs: &[i64], canonical: &std::collections::HashMap<i64, i64>) -> PatchMembers {
     let mut found = PatchMembers::default();
     for arrived_as in refs {
         let Some(&owner) = canonical.get(arrived_as) else {
@@ -553,7 +662,7 @@ async fn patch_members<C: ConnectionTrait>(
             found.members.push(owner);
         }
     }
-    Ok(found)
+    found
 }
 
 /// What [`patch_members`] made of a recorder's `patches` array.
@@ -621,18 +730,18 @@ pub async fn resolve_talkgroup<C: ConnectionTrait>(
 async fn create_populated_talkgroup<C: ConnectionTrait>(
     db: &C,
     system_id: i64,
-    new: &NewCall,
+    new: &NewTalkgroup<'_>,
     now_ms: i64,
 ) -> Result<talkgroup::Model, DbErr> {
-    let tag_name = new.talkgroup_tag.as_deref().unwrap_or(DEFAULT_TAG);
+    let tag_name = new.tag.unwrap_or(DEFAULT_TAG);
     let tag_id = resolve_or_create_tag(db, tag_name, now_ms).await?.id;
     let label = new
-        .talkgroup_label
-        .clone()
+        .label
+        .map(str::to_string)
         .unwrap_or_else(|| new.talkgroup_ref.to_string());
     let name = new
-        .talkgroup_name
-        .clone()
+        .name
+        .map(str::to_string)
         .unwrap_or_else(|| format!("Talkgroup {}", new.talkgroup_ref));
 
     let tg = talkgroup::ActiveModel {
@@ -648,10 +757,10 @@ async fn create_populated_talkgroup<C: ConnectionTrait>(
     .insert(db)
     .await?;
 
-    let group_labels: Vec<&str> = if new.talkgroup_groups.is_empty() {
+    let group_labels: Vec<&str> = if new.groups.is_empty() {
         vec![DEFAULT_GROUP]
     } else {
-        new.talkgroup_groups.iter().map(String::as_str).collect()
+        new.groups.iter().map(String::as_str).collect()
     };
     for group_name in group_labels {
         let grp = resolve_or_create_group(db, group_name, now_ms).await?;
@@ -963,10 +1072,14 @@ async fn unfold_ref<C: ConnectionTrait>(
     let restored = create_populated_talkgroup(
         db,
         owner.system_id,
-        &NewCall {
+        &NewTalkgroup {
             talkgroup_ref: member.r#ref,
-            talkgroup_label: member.label.clone(),
-            ..Default::default()
+            label: member.label.as_deref(),
+            // Everything else falls back to rdio-scanner's defaults, as it did
+            // when this Ref was first heard.
+            name: None,
+            tag: None,
+            groups: &[],
         },
         now_ms,
     )
@@ -1642,32 +1755,49 @@ pub async fn ensure_api_key<C: ConnectionTrait>(
     Ok(true)
 }
 
-/// Whether `raw_key` is a valid, enabled key scoped to `system_ref`. Denied when
-/// the key is missing, disabled, or scoped to a different System (ADR-0008:
-/// recorders always require a valid per-system key).
+/// The API key row `raw_key` names, if there is one. The rule about it is
+/// [`authorizes`] — a read here, a decision there (#96).
+async fn find_api_key<C: ConnectionTrait>(
+    db: &C,
+    raw_key: &str,
+) -> Result<Option<api_key::Model>, DbErr> {
+    api_key::Entity::find()
+        .filter(api_key::Column::KeyHash.eq(hash_key(raw_key)))
+        .one(db)
+        .await
+}
+
+/// Whether `raw_key` authorizes ingesting into `system_ref` — the read and the
+/// rule, composed.
 pub async fn authorize_ingest<C: ConnectionTrait>(
     db: &C,
     raw_key: &str,
     system_ref: i64,
 ) -> Result<bool, DbErr> {
-    let Some(key) = api_key::Entity::find()
-        .filter(api_key::Column::KeyHash.eq(hash_key(raw_key)))
-        .one(db)
-        .await?
-    else {
-        return Ok(false);
-    };
-    if key.disabled {
-        return Ok(false);
-    }
-    Ok(match key.system_ref {
-        None => true,
-        Some(scoped) => scoped == system_ref,
-    })
+    Ok(authorizes(
+        find_api_key(db, raw_key).await?.as_ref(),
+        system_ref,
+    ))
 }
 
-/// Is there already a Call on this Talkgroup within `±window_ms` of
-/// `call_at_ms`? (ADR-0001 duplicate detection.)
+/// Whether a key row authorizes ingesting into `system_ref` (ADR-0008:
+/// recorders always require a valid per-system key). Denied when the key is
+/// missing, disabled, or scoped to a different System.
+pub fn authorizes(key: Option<&api_key::Model>, system_ref: i64) -> bool {
+    let Some(key) = key else {
+        return false;
+    };
+    if key.disabled {
+        return false;
+    }
+    match key.system_ref {
+        None => true,
+        Some(scoped) => scoped == system_ref,
+    }
+}
+
+/// The Calls already stored on this Talkgroup inside `window`, as the rows a
+/// duplicate decision is made over (ADR-0001, reshaped by #96).
 ///
 /// Keyed on the **canonical** Talkgroup's Id rather than the Ref a recorder
 /// sent (#45), which is what makes a merge collapse the traffic and not merely
@@ -1675,37 +1805,40 @@ pub async fn authorize_ingest<C: ConnectionTrait>(
 /// each of its Refs, is the plainest reason to merge two channels, and a merge
 /// that left the Call playing twice would have fixed nothing a listener hears.
 /// Recognising the same transmission across *different* channels, and keeping
-/// the better copy of it, is #46's widening of this predicate.
+/// the better copy of it, is #46's widening of this predicate — which is why
+/// this hands back rows rather than the `COUNT` it used to.
 ///
 /// `None` means no Talkgroup owns that Ref yet, which is not a state a duplicate
 /// can exist in: a Call is a row referencing a Talkgroup row, so no Talkgroup
-/// means no Calls to be a duplicate of. It also costs no query, where the
-/// previous shape spent one joining through two tables to reach the same
-/// certainty — and both Systems and Talkgroups have now been resolved by
-/// [`ingest_disposition`] a moment earlier anyway.
-pub async fn is_duplicate_call<C: ConnectionTrait>(
+/// means no Calls to be a duplicate of. It also costs no query.
+pub async fn calls_within<C: ConnectionTrait>(
     db: &C,
     talkgroup_id: Option<i64>,
-    call_at_ms: i64,
-    window_ms: i64,
-) -> Result<bool, DbErr> {
+    window: std::ops::RangeInclusive<i64>,
+) -> Result<Vec<Candidate>, DbErr> {
     let Some(talkgroup_id) = talkgroup_id else {
-        return Ok(false);
+        return Ok(Vec::new());
     };
-    let count = call::Entity::find()
+    Ok(call::Entity::find()
         .filter(call::Column::TalkgroupId.eq(talkgroup_id))
-        .filter(call::Column::CallAtMs.gte(call_at_ms - window_ms))
-        .filter(call::Column::CallAtMs.lte(call_at_ms + window_ms))
-        .count(db)
-        .await?;
-    Ok(count > 0)
+        .filter(call::Column::CallAtMs.gte(*window.start()))
+        .filter(call::Column::CallAtMs.lte(*window.end()))
+        .select_only()
+        .column(call::Column::Id)
+        .column(call::Column::CallAtMs)
+        .into_tuple::<(CallId, i64)>()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|(id, call_at_ms)| Candidate { id, call_at_ms })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
 // Auto-populate + blacklist policy (#8, ADR-0001).
 // ---------------------------------------------------------------------------
 
-/// Why an incoming Call was dropped by [`ingest_disposition`]. The two paths are
+/// Why an incoming Call was dropped by [`disposition`]. The two paths are
 /// distinct behaviours worth telling apart — each is logged with its own
 /// `reason` (ADR-0011 rule 3) — though the recorder gets the same HTTP 200
 /// either way so it never retries.
@@ -1724,18 +1857,42 @@ pub enum DropReason {
 pub enum Disposition {
     /// Persist the Call. `auto_populate` is the **effective** flag (global OR the
     /// System's per-system flag) that [`insert_call`] uses to gate the Unit roster.
-    ///
-    /// `talkgroup_id` is the **canonical** channel the Ref resolved to (#45) —
-    /// `None` when nothing owns it yet and auto-populate is about to create it.
-    /// Carried rather than rediscovered because deciding the disposition already
-    /// required resolving it, and dedup needs the same answer two statements
-    /// later: on a Pi taking a Call a second, a query saved is a query saved.
-    Store {
-        auto_populate: bool,
-        talkgroup_id: Option<i64>,
-    },
+    Store { auto_populate: bool },
     /// Drop it silently.
     Drop(DropReason),
+}
+
+/// **What an arriving Call's Refs resolve to** — the System, and the Talkgroup
+/// that owns the Ref it named (#45).
+///
+/// Both are `Option` because either may not exist yet: an unknown System is
+/// about to be created by auto-populate, or dropped by the policy. **Resolved
+/// once per Call** (#96) and then carried — the disposition, the dedup window
+/// and the insert all need the same two rows, and before this each looked them
+/// up again.
+///
+/// Deliberately not called a *channel*: CONTEXT.md spends that word on
+/// **Talkgroup** and puts it on its Avoid list, and this is a pair.
+#[derive(Debug, Clone, Default)]
+pub struct Resolved {
+    pub system: Option<system::Model>,
+    pub talkgroup: Option<talkgroup::Model>,
+}
+
+impl Resolved {
+    /// Nothing looked up yet — what a caller seeding rows directly passes, and
+    /// what makes [`insert_call`] resolve both for itself. Named rather than
+    /// `default()`, because "no System" and "I did not ask" are different
+    /// things and only one of them is this.
+    pub fn unresolved() -> Self {
+        Resolved::default()
+    }
+
+    /// The canonical Talkgroup's Id, which is what a Call is stored against and
+    /// what its duplicates are looked for on.
+    pub fn talkgroup_id(&self) -> Option<i64> {
+        self.talkgroup.as_ref().map(|tg| tg.id)
+    }
 }
 
 /// Is `talkgroup_ref` on a System's comma-separated `blacklist`? Empty entries
@@ -1749,7 +1906,35 @@ pub fn is_blacklisted(blacklist: Option<&str>, talkgroup_ref: i64) -> bool {
         .any(|ref_| ref_ == talkgroup_ref)
 }
 
-/// Decide what to do with an incoming Call before any audio is written (#8).
+/// The System an arriving Call names, and the Talkgroup its Ref resolves to —
+/// **the one read** either is looked up in (#96).
+///
+/// Two statements at worst and one at best, where ingest previously spent them
+/// twice over: once to decide the disposition and again inside [`insert_call`],
+/// which resolved both rows a second time from scratch.
+pub async fn resolve_refs<C: ConnectionTrait>(
+    db: &C,
+    system_ref: i64,
+    talkgroup_ref: i64,
+) -> Result<Resolved, DbErr> {
+    let Some(system) = system::Entity::find()
+        .filter(system::Column::Ref.eq(system_ref))
+        .one(db)
+        .await?
+    else {
+        // No System means no Talkgroup: a Ref is unique only within its System,
+        // so there is nothing to look one up in and no query to spend.
+        return Ok(Resolved::unresolved());
+    };
+    let talkgroup = resolve_talkgroup(db, system.id, talkgroup_ref).await?;
+    Ok(Resolved {
+        system: Some(system),
+        talkgroup,
+    })
+}
+
+/// Decide what to do with an incoming Call before any audio is written (#8) —
+/// **purely**, over the channel [`resolve_channel`] read.
 ///
 /// Mirrors rdio-scanner's `controller.go`: a brand-new System is auto-created
 /// only when the **global** toggle is on; an unknown Talkgroup under a known
@@ -1758,31 +1943,20 @@ pub fn is_blacklisted(blacklist: Option<&str>, talkgroup_ref: i64) -> bool {
 /// (which only blacklist-checks already-known Talkgroups), the blacklist here
 /// applies to a Talkgroup Ref even on its first sighting — "never ingest this"
 /// should hold from the first call.
-pub async fn ingest_disposition<C: ConnectionTrait>(
-    db: &C,
-    system_ref: i64,
+pub fn disposition(
+    resolved: &Resolved,
     talkgroup_ref: i64,
     global_auto_populate: bool,
-) -> Result<Disposition, DbErr> {
-    let Some(sys) = system::Entity::find()
-        .filter(system::Column::Ref.eq(system_ref))
-        .one(db)
-        .await?
-    else {
-        // Unknown System: only auto-created when the global toggle is on. No
-        // System means no Talkgroup, so there is nothing to have resolved.
-        return Ok(if global_auto_populate {
-            Disposition::Store {
+) -> Disposition {
+    let Some(sys) = resolved.system.as_ref() else {
+        // Unknown System: only auto-created when the global toggle is on.
+        return match global_auto_populate {
+            true => Disposition::Store {
                 auto_populate: true,
-                talkgroup_id: None,
-            }
-        } else {
-            Disposition::Drop(DropReason::NotPopulated)
-        });
+            },
+            false => Disposition::Drop(DropReason::NotPopulated),
+        };
     };
-
-    // Resolved once, and used for both of the decisions below (#45).
-    let owner = resolve_talkgroup(db, sys.id, talkgroup_ref).await?;
 
     // **Both Refs are judged**: the one the recorder sent, and the primary Ref of
     // the channel it resolves to (#45). Blacklisting a channel has to reach every
@@ -1792,26 +1966,25 @@ pub async fn ingest_disposition<C: ConnectionTrait>(
     // be the mirror-image bug: a Ref an operator refused yesterday would start
     // storing the day somebody merged it, with nothing said about the change.
     let arrived_as_blacklisted = is_blacklisted(sys.blacklist.as_deref(), talkgroup_ref);
-    let owner_blacklisted = owner
+    let owner_blacklisted = resolved
+        .talkgroup
         .as_ref()
         .is_some_and(|tg| is_blacklisted(sys.blacklist.as_deref(), tg.r#ref));
     if arrived_as_blacklisted || owner_blacklisted {
-        return Ok(Disposition::Drop(DropReason::Blacklisted));
+        return Disposition::Drop(DropReason::Blacklisted);
     }
 
     let effective = global_auto_populate || sys.auto_populate;
     // A Call for an already-known Talkgroup is always stored; an unknown one needs
     // auto-populate to bring it into being. A member Ref counts as known — its
     // channel exists, and nothing is about to be created.
-    let known_talkgroup = owner.is_some();
-    Ok(if known_talkgroup || effective {
-        Disposition::Store {
+    let known_talkgroup = resolved.talkgroup.is_some();
+    match known_talkgroup || effective {
+        true => Disposition::Store {
             auto_populate: effective,
-            talkgroup_id: owner.map(|tg| tg.id),
-        }
-    } else {
-        Disposition::Drop(DropReason::NotPopulated)
-    })
+        },
+        false => Disposition::Drop(DropReason::NotPopulated),
+    }
 }
 
 /// The lowest positive Ref not yet used by any System (rdio-scanner's
@@ -2561,15 +2734,12 @@ mod tests {
             .expect("db")
     }
 
-    /// The least a Call needs to be storable.
-    fn a_call(talkgroup_ref: i64) -> NewCall {
-        NewCall {
-            system_ref: 11,
-            talkgroup_ref,
-            call_at_ms: 1_000 + talkgroup_ref,
-            object_key: format!("k{talkgroup_ref}"),
-            ..Default::default()
-        }
+    /// The least a Call needs to be storable, and the object it points at.
+    fn a_call(talkgroup_ref: i64) -> (NewCall, Option<StoredAudio>) {
+        (
+            NewCall::new(11, talkgroup_ref, 1_000 + talkgroup_ref),
+            Some(StoredAudio::written(format!("k{talkgroup_ref}"), 0)),
+        )
     }
 
     /// A **Backfill** is ordered by *emission*, never by storage (CONTEXT.md's
@@ -2581,10 +2751,14 @@ mod tests {
     async fn a_backfill_reads_emission_order_not_storage_order() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = db(&tmp).await;
-        let early = insert_call(&db, &a_call(100), true, 0)
+        let (call, audio) = a_call(100);
+        let early = insert_call(&db, &call, audio, &Resolved::unresolved(), true, 0)
             .await
             .expect("early");
-        let late = insert_call(&db, &a_call(200), true, 0).await.expect("late");
+        let (call, audio) = a_call(200);
+        let late = insert_call(&db, &call, audio, &Resolved::unresolved(), true, 0)
+            .await
+            .expect("late");
 
         // Emitted in the other order: the Call stored second goes out first, and
         // the one stored first is held back the way a Delay holds one.
@@ -2622,6 +2796,148 @@ mod tests {
                 .expect("count log events"),
             0
         );
+    }
+
+    // -- The decisions ingest makes, as values (#96) -------------------------
+    //
+    // Each of these used to be reachable only through a socket and a multipart
+    // body, because the read and the rule were one function. Resolve reads;
+    // these decide; a table names every arm.
+
+    /// An API key row as the database holds one.
+    fn a_key(disabled: bool, system_ref: Option<i64>) -> api_key::Model {
+        api_key::Model {
+            id: 1,
+            key_hash: "unused — the row was found by its hash".into(),
+            label: None,
+            system_ref,
+            disabled,
+            created_at_ms: 0,
+        }
+    }
+
+    /// **Authorization is a rule about a row, not a query** (ADR-0008). Every
+    /// arm is a recorder that would otherwise be silently refused, or silently
+    /// let into a System it was never scoped to.
+    #[rstest]
+    #[case::no_such_key(None, false)]
+    #[case::a_key_for_every_system(Some(a_key(false, None)), true)]
+    #[case::a_key_for_this_system(Some(a_key(false, Some(11))), true)]
+    #[case::a_key_for_another_system(Some(a_key(false, Some(22))), false)]
+    #[case::a_disabled_key_for_every_system(Some(a_key(true, None)), false)]
+    #[case::a_disabled_key_for_this_system(Some(a_key(true, Some(11))), false)]
+    fn a_key_authorizes_only_the_system_it_is_scoped_to(
+        #[case] key: Option<api_key::Model>,
+        #[case] authorized: bool,
+    ) {
+        assert_eq!(authorizes(key.as_ref(), 11), authorized);
+    }
+
+    fn a_system(auto_populate: bool, blacklist: Option<&str>) -> system::Model {
+        system::Model {
+            id: 1,
+            r#ref: 11,
+            label: None,
+            auto_populate,
+            blacklist: blacklist.map(str::to_string),
+            enhancement: None,
+            created_at_ms: 0,
+        }
+    }
+
+    fn a_talkgroup(primary_ref: i64) -> talkgroup::Model {
+        talkgroup::Model {
+            id: 7,
+            system_id: 1,
+            r#ref: primary_ref,
+            label: None,
+            name: None,
+            tag_id: None,
+            led: None,
+            enhancement: None,
+            created_at_ms: 0,
+        }
+    }
+
+    /// The auto-populate + blacklist policy (#8), over what was resolved.
+    ///
+    /// The last two cases are #45's rule and its mirror image: blacklisting a
+    /// channel reaches every Ref it answers to, or merging a Ref into a
+    /// blacklisted channel would be a way around the operator's own policy —
+    /// and a Ref they refused yesterday must not start storing the day somebody
+    /// merged it.
+    #[rstest]
+    #[case::an_unknown_system_with_auto_populate_on(None, None, true, Disposition::Store { auto_populate: true })]
+    #[case::an_unknown_system_with_auto_populate_off(
+        None,
+        None,
+        false,
+        Disposition::Drop(DropReason::NotPopulated)
+    )]
+    #[case::an_unknown_talkgroup_with_auto_populate_on(Some(a_system(false, None)), None, true, Disposition::Store { auto_populate: true })]
+    #[case::an_unknown_talkgroup_with_auto_populate_off(
+        Some(a_system(false, None)),
+        None,
+        false,
+        Disposition::Drop(DropReason::NotPopulated)
+    )]
+    #[case::a_known_talkgroup_needs_no_auto_populate(Some(a_system(false, None)), Some(a_talkgroup(54241)), false, Disposition::Store { auto_populate: false })]
+    #[case::the_systems_own_flag_overrides_a_global_off(Some(a_system(true, None)), None, false, Disposition::Store { auto_populate: true })]
+    #[case::the_ref_that_arrived_is_blacklisted(
+        Some(a_system(true, Some("54241"))),
+        None,
+        true,
+        Disposition::Drop(DropReason::Blacklisted)
+    )]
+    #[case::the_channel_it_resolves_to_is_blacklisted(
+        Some(a_system(true, Some("100"))),
+        Some(a_talkgroup(100)),
+        true,
+        Disposition::Drop(DropReason::Blacklisted)
+    )]
+    fn the_policy_decides_over_what_was_resolved(
+        #[case] system: Option<system::Model>,
+        #[case] talkgroup: Option<talkgroup::Model>,
+        #[case] global_auto_populate: bool,
+        #[case] expected: Disposition,
+    ) {
+        let resolved = Resolved { system, talkgroup };
+
+        assert_eq!(
+            disposition(&resolved, 54241, global_auto_populate),
+            expected
+        );
+    }
+
+    /// A recorder's `patches` array, resolved against what the System knows
+    /// (#81, #45) — the pure half, over a map the two queries produced.
+    ///
+    /// `dropped` and `collapsed` are separate facts and read as separate
+    /// problems: the first says the System has never heard of a ref (SDRTrunk's
+    /// radio-id tail), the second says two refs named one channel, which is
+    /// channel merge working.
+    #[rstest]
+    #[case::nothing_sent(&[], &[], &[], 0, 0)]
+    #[case::every_ref_is_a_primary(&[100, 200], &[(100, 100), (200, 200)], &[100, 200], 0, 0)]
+    #[case::the_radio_tail_is_dropped(&[100, 4424001], &[(100, 100)], &[100], 1, 0)]
+    #[case::a_member_ref_resolves_to_its_owner(&[555], &[(555, 100)], &[100], 0, 0)]
+    #[case::two_refs_for_one_channel_collapse(&[100, 555], &[(100, 100), (555, 100)], &[100], 0, 1)]
+    #[case::the_same_ref_twice_collapses(&[100, 100], &[(100, 100)], &[100], 0, 1)]
+    #[case::order_is_the_order_the_recorder_sent(&[200, 100], &[(100, 100), (200, 200)], &[200, 100], 0, 0)]
+    fn a_patches_array_resolves_to_this_systems_channels(
+        #[case] refs: &[i64],
+        #[case] canonical: &[(i64, i64)],
+        #[case] members: &[i64],
+        #[case] dropped: usize,
+        #[case] collapsed: usize,
+    ) {
+        let canonical: std::collections::HashMap<i64, i64> = canonical.iter().copied().collect();
+
+        let found = patch_members_of(refs, &canonical);
+
+        assert_eq!(found.members, members);
+        assert_eq!(found.dropped, dropped, "refs no Talkgroup claims");
+        assert_eq!(found.collapsed, collapsed, "refs that named one channel");
     }
 
     #[rstest]

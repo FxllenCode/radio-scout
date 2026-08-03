@@ -1,0 +1,14 @@
+---
+source: src/ingest.rs
+expression: rendered
+---
+Stored { call_id: 1, audio_bytes: 44 }
+  200 "Call imported successfully.\n"
+Duplicate { of: 41 }
+  200 "duplicate call rejected\n"
+Dropped(Blacklisted)
+  200 "Call imported successfully.\n"
+Dropped(NotPopulated)
+  200 "Call imported successfully.\n"
+Unauthorized { system_ref: 11, talkgroup_ref: 54241 }
+  401 "Invalid API key for system 11 talkgroup 54241.\n"

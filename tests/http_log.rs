@@ -19,14 +19,13 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 /// 200 (and 206 for a range) rather than 404.
 async fn seed_playable_call(app: &TestApp) -> i64 {
     app.put_object("ab/clip.wav", b"0123456789").await;
-    app.seed_call(NewCall {
-        system_ref: 11,
-        talkgroup_ref: 54241,
-        call_at_ms: 1000,
-        object_key: "ab/clip.wav".into(),
-        audio_mime: Some("audio/x-wav".into()),
-        ..Default::default()
-    })
+    app.seed_call(
+        NewCall {
+            audio_mime: Some("audio/x-wav".into()),
+            ..NewCall::new(11, 54241, 1000)
+        },
+        common::audio_at("ab/clip.wav"),
+    )
     .await
 }
 

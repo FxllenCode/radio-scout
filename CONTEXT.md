@@ -187,6 +187,10 @@ _Avoid_: upload, import (except in user-facing recorder docs).
 What **Ingest** decided about one **Call** — stored, duplicate, dropped for a named reason, or refused for an unauthorized **API key**. A *value*, not a response: **Ingest** resolves what the database knows, decides purely, then performs. The HTTP endpoints render an Admission into the rdio wire strings; **Dirwatch** logs one with no HTTP in reach. Its reason is a single closed vocabulary — the machine-readable slug and the recorder-facing detail derive from the same value, never two strings that can drift.
 _Avoid_: disposition (the narrower auto-populate/blacklist decision *inside* an Admission), verdict, result, outcome.
 
+**Candidate**:
+A **Call** already stored on a **Talkgroup**, near enough in time that an arriving one has to be compared against it before an **Admission** can be decided. Rows rather than a count, because the decision has to name *which* Call a duplicate was of — and because keeping the better of two copies means comparing them.
+_Avoid_: match, neighbour, dupe.
+
 **Auto-populate**:
 Automatically creating an unknown system/talkgroup/unit the first time a call for it is ingested, so the archive is usable with zero manual configuration.
 _Avoid_: auto-create, discovery.

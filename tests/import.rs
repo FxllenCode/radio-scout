@@ -125,13 +125,11 @@ async fn seed_call(db: &Db, system_ref: i64, label: &str, talkgroup_ref: i64) {
     repo::insert_call(
         db,
         &NewCall {
-            system_ref,
             system_label: Some(label.into()),
-            talkgroup_ref,
-            call_at_ms: 1_000,
-            object_key: format!("k/{system_ref}-{talkgroup_ref}.wav"),
-            ..Default::default()
+            ..NewCall::new(system_ref, talkgroup_ref, 1_000)
         },
+        common::audio_at(format!("k/{system_ref}-{talkgroup_ref}.wav")),
+        &repo::Resolved::default(),
         true,
         0,
     )

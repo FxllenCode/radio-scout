@@ -32,17 +32,16 @@ async fn seed_searchable_call(
     groups: &[&str],
     at_ms: i64,
 ) -> i64 {
-    app.seed_call(NewCall {
-        system_ref,
-        system_label: Some(system_label.into()),
-        talkgroup_ref,
-        talkgroup_tag: Some(tag.into()),
-        talkgroup_groups: groups.iter().map(|g| (*g).to_string()).collect(),
-        call_at_ms: at_ms,
-        object_key: format!("k/{system_ref}-{talkgroup_ref}-{at_ms}.wav"),
-        audio_mime: Some("audio/x-wav".into()),
-        ..Default::default()
-    })
+    app.seed_call(
+        NewCall {
+            system_label: Some(system_label.into()),
+            talkgroup_tag: Some(tag.into()),
+            talkgroup_groups: groups.iter().map(|g| (*g).to_string()).collect(),
+            audio_mime: Some("audio/x-wav".into()),
+            ..NewCall::new(system_ref, talkgroup_ref, at_ms)
+        },
+        common::audio_at(format!("k/{system_ref}-{talkgroup_ref}-{at_ms}.wav")),
+    )
     .await
 }
 
@@ -386,14 +385,13 @@ async fn a_broken_database_is_a_server_error_not_an_empty_archive() {
 async fn download_falls_back_when_the_stored_mime_is_not_header_safe() {
     let app = TestApp::spawn().await;
     let id = app
-        .seed_call(NewCall {
-            system_ref: 100,
-            talkgroup_ref: 1,
-            call_at_ms: 1000,
-            object_key: "k/junk-mime.wav".into(),
-            audio_mime: Some("audio/\u{7f}broken".into()),
-            ..Default::default()
-        })
+        .seed_call(
+            NewCall {
+                audio_mime: Some("audio/\u{7f}broken".into()),
+                ..NewCall::new(100, 1, 1000)
+            },
+            common::audio_at("k/junk-mime.wav"),
+        )
         .await;
     app.put_object("k/junk-mime.wav", b"RIFF").await;
 
@@ -523,14 +521,13 @@ async fn a_call_detail_for_an_unknown_id_is_not_found() {
 /// before durations were recorded at all.
 async fn seed_by_duration(app: &TestApp) {
     for (at_ms, duration_ms) in [(1000, Some(900)), (2000, Some(12_000)), (3000, None)] {
-        app.seed_call(NewCall {
-            system_ref: 100,
-            talkgroup_ref: 1,
-            call_at_ms: at_ms,
-            duration_ms,
-            object_key: format!("k/{at_ms}.wav"),
-            ..Default::default()
-        })
+        app.seed_call(
+            NewCall {
+                duration_ms,
+                ..NewCall::new(100, 1, at_ms)
+            },
+            common::audio_at(format!("k/{at_ms}.wav")),
+        )
         .await;
     }
 }
@@ -577,14 +574,13 @@ async fn a_call_with_no_known_duration_does_not_match_a_duration_filter() {
 async fn min_duration_narrows_the_filter_options() {
     let app = TestApp::spawn().await;
     seed_by_duration(&app).await;
-    app.seed_call(NewCall {
-        system_ref: 200,
-        talkgroup_ref: 9,
-        call_at_ms: 4000,
-        duration_ms: Some(500),
-        object_key: "k/short.wav".into(),
-        ..Default::default()
-    })
+    app.seed_call(
+        NewCall {
+            duration_ms: Some(500),
+            ..NewCall::new(200, 9, 4000)
+        },
+        common::audio_at("k/short.wav"),
+    )
     .await;
 
     let options = app.get_json("/api/calls/filters?minDuration=5").await;

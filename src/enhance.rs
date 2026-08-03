@@ -1828,13 +1828,9 @@ mod tests {
             .expect("store the audio");
         crate::db::repo::insert_call(
             &state.db,
-            &crate::db::repo::NewCall {
-                system_ref: 11,
-                talkgroup_ref: 54241,
-                call_at_ms: 1_000,
-                object_key,
-                ..Default::default()
-            },
+            &crate::db::repo::NewCall::new(11, 54241, 1_000),
+            Some(crate::blob::StoredAudio::written(object_key, 0)),
+            &crate::db::repo::Resolved::default(),
             true,
             1_000,
         )

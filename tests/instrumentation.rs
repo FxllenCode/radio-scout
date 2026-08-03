@@ -514,11 +514,11 @@ async fn a_5xx_gives_the_client_a_ref_and_the_operator_the_cause() {
 /// take out from under a running server.
 #[rstest]
 #[case::auth("api_keys", true, "auth")]
-#[case::policy("systems", true, "auto-populate-policy")]
+#[case::resolve_refs("systems", true, "resolve-refs")]
 // No `system` field, so the Ref is assigned before anything else runs.
 #[case::assign_system_ref("systems", false, "assign-system-ref")]
-// Dedup and the row insert both survive; writing the Call's frequency roster
-// does not.
+// Reading the dedup window and the row insert both survive; writing the Call's
+// frequency roster does not.
 #[case::store_call("call_frequencies", true, "store-call")]
 // The Call is stored; building the view to push to listeners is not. (An upload
 // with no patches never writes this table, so the insert is untroubled by its
@@ -608,14 +608,13 @@ async fn an_unreadable_audio_store_is_a_server_error_not_a_missing_call() {
     let audio_root = app.path().join("audio");
     app.put_object("ab/clip.wav", b"0123456789").await;
     let id = app
-        .seed_call(NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: 1000,
-            object_key: "ab/clip.wav".into(),
-            audio_mime: Some("audio/x-wav".into()),
-            ..Default::default()
-        })
+        .seed_call(
+            NewCall {
+                audio_mime: Some("audio/x-wav".into()),
+                ..NewCall::new(11, 54241, 1000)
+            },
+            common::audio_at("ab/clip.wav"),
+        )
         .await;
 
     std::fs::remove_dir_all(&audio_root).expect("remove audio root");

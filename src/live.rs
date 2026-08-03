@@ -1727,13 +1727,12 @@ mod tests {
     async fn store_and_emit(state: &AppState, talkgroup_ref: i64, seq: Emission) {
         let stored = repo::insert_call(
             &state.db,
-            &repo::NewCall {
-                system_ref: 11,
-                talkgroup_ref,
-                call_at_ms: 1_000 + talkgroup_ref,
-                object_key: format!("k{talkgroup_ref}"),
-                ..Default::default()
-            },
+            &repo::NewCall::new(11, talkgroup_ref, 1_000 + talkgroup_ref),
+            Some(crate::blob::StoredAudio::written(
+                format!("k{talkgroup_ref}"),
+                0,
+            )),
+            &repo::Resolved::default(),
             true,
             0,
         )

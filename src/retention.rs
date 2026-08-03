@@ -568,14 +568,9 @@ mod tests {
             .expect("put");
         repo::insert_call(
             db,
-            &repo::NewCall {
-                system_ref: 11,
-                talkgroup_ref,
-                call_at_ms: 0,
-                object_key,
-                audio_size: Some(8),
-                ..Default::default()
-            },
+            &repo::NewCall::new(11, talkgroup_ref, 0),
+            Some(crate::blob::StoredAudio::written(object_key, 8)),
+            &repo::Resolved::default(),
             true,
             0,
         )

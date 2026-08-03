@@ -350,13 +350,7 @@ async fn a_call_stored_early_and_emitted_late_is_backfilled() {
     let app = feed_app().await;
     // Stored first, held back: no emission yet, and the lowest id in the archive.
     let held = app
-        .seed_call(NewCall {
-            system_ref: 11,
-            talkgroup_ref: 100,
-            call_at_ms: 1_000,
-            object_key: "held.wav".into(),
-            ..Default::default()
-        })
+        .seed_call(NewCall::new(11, 100, 1_000), common::audio_at("held.wav"))
         .await;
     // Stored second and emitted immediately, the ordinary path.
     post_call(&app, 11, 200).await;
@@ -391,13 +385,10 @@ async fn a_truncated_backfill_tells_the_listener_their_history_has_a_gap() {
     // hundred and one multipart posts would say nothing more about it.
     for talkgroup in 0..101 {
         let id = app
-            .seed_call(NewCall {
-                system_ref: 11,
-                talkgroup_ref: 100 + talkgroup,
-                call_at_ms: 1_000 + talkgroup,
-                object_key: format!("k{talkgroup}.wav"),
-                ..Default::default()
-            })
+            .seed_call(
+                NewCall::new(11, 100 + talkgroup, 1_000 + talkgroup),
+                common::audio_at(format!("k{talkgroup}.wav")),
+            )
             .await;
         app.emit(id).await;
     }

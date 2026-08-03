@@ -149,14 +149,13 @@ async fn the_presigned_redirect_is_followable_to_the_real_audio() {
     let app = TestApp::builder().store(store).spawn().await;
     app.put_object("ab/deadbeef.m4a", &audio).await;
     let id = app
-        .seed_call(NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: 1000,
-            object_key: "ab/deadbeef.m4a".to_string(),
-            audio_mime: Some("audio/mp4".to_string()),
-            ..Default::default()
-        })
+        .seed_call(
+            NewCall {
+                audio_mime: Some("audio/mp4".to_string()),
+                ..NewCall::new(11, 54241, 1000)
+            },
+            common::audio_at("ab/deadbeef.m4a"),
+        )
         .await;
 
     let redirect = app

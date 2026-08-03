@@ -263,14 +263,13 @@ async fn a_call_row_can_be_seeded_without_an_upload() {
     let app = TestApp::spawn().await;
 
     let id = app
-        .seed_call(radio_scout::db::repo::NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: 1_000,
-            object_key: "ab/clip.wav".into(),
-            audio_mime: Some("audio/x-wav".into()),
-            ..Default::default()
-        })
+        .seed_call(
+            radio_scout::db::repo::NewCall {
+                audio_mime: Some("audio/x-wav".into()),
+                ..radio_scout::db::repo::NewCall::new(11, 54241, 1_000)
+            },
+            common::audio_at("ab/clip.wav"),
+        )
         .await;
 
     assert_eq!(app.the_call().await.id, id);
@@ -439,14 +438,13 @@ async fn the_builder_accepts_a_caller_supplied_store() {
     .expect("s3 store");
     let app = TestApp::builder().store(s3).spawn().await;
     let id = app
-        .seed_call(radio_scout::db::repo::NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: 1_000,
-            object_key: "ab/clip.m4a".into(),
-            audio_mime: Some("audio/mp4".into()),
-            ..Default::default()
-        })
+        .seed_call(
+            radio_scout::db::repo::NewCall {
+                audio_mime: Some("audio/mp4".into()),
+                ..radio_scout::db::repo::NewCall::new(11, 54241, 1_000)
+            },
+            common::audio_at("ab/clip.m4a"),
+        )
         .await;
 
     let resp = app

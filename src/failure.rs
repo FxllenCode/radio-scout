@@ -91,9 +91,10 @@ stages! {
     Auth => "auth",
     /// Giving a new System the lowest free Ref, for a recorder that sent none.
     AssignSystemRef => "assign-system-ref",
-    /// Deciding whether an unknown System/Talkgroup may be created (#8).
-    AutoPopulatePolicy => "auto-populate-policy",
-    /// Looking for a Call already stored inside the dedup window.
+    /// Reading the System and the Talkgroup an arriving Call's Refs name
+    /// (#96) — the one read the auto-populate/blacklist policy is decided over.
+    ResolveRefs => "resolve-refs",
+    /// Reading the Calls already stored inside the dedup window.
     Dedup => "dedup",
     /// Writing the audio object, before the row (ADR-0001).
     StoreAudio => "store-audio",
@@ -190,8 +191,11 @@ pub enum Reason {
     /// rejection happens in already names them — and neither, ever, is the key
     /// (rule 2): an unknown key has no row to name it by anyway.
     InvalidApiKey { system_ref: i64, talkgroup_ref: i64 },
-    /// The same transmission, already stored inside the dedup window.
-    Duplicate,
+    /// The same transmission, already stored inside the dedup window — and
+    /// which stored Call it duplicates, so an Operator asking "which copy won?"
+    /// has the answer on the line rather than only in the wire body, which
+    /// carries no room for it (ADR-0001 pins those bytes).
+    Duplicate { of: crate::call::CallId },
     /// The Talkgroup is blacklisted (#8). Answered `200` so the recorder never
     /// retries, which makes the WARN line the only record it happened.
     Blacklisted,
@@ -319,6 +323,8 @@ struct Refusal {
     /// How long a locked-out address must wait — the same reading the
     /// `Retry-After` header carries, so the two cannot disagree.
     retry_after_secs: Option<u64>,
+    /// The stored Call a duplicate was of.
+    duplicate_of: Option<crate::call::CallId>,
 }
 
 /// What the caller is handed: text for everything a recorder or a listener
@@ -340,7 +346,14 @@ impl Refusal {
             client_addr: None,
             failures: None,
             retry_after_secs: None,
+            duplicate_of: None,
         }
+    }
+
+    /// The Call this one turned out to be a copy of.
+    fn duplicate_of(mut self, of: crate::call::CallId) -> Self {
+        self.duplicate_of = Some(of);
+        self
     }
 
     /// Rule 5's exemption, taken deliberately by the two arms it covers.
@@ -418,12 +431,13 @@ impl Reason {
                     "Invalid API key for system {system_ref} talkgroup {talkgroup_ref}.\n"
                 )),
             ),
-            Reason::Duplicate => Refusal::new(
+            Reason::Duplicate { of } => Refusal::new(
                 "duplicate",
                 Level::WARN,
                 StatusCode::OK,
                 text("duplicate call rejected\n"),
-            ),
+            )
+            .duplicate_of(*of),
             Reason::Blacklisted => Refusal::new(
                 "blacklisted",
                 Level::WARN,
@@ -555,7 +569,7 @@ impl Reason {
 
 /// The rdio-compatible success string.
 ///
-/// It lives here rather than beside [`crate::ingest::Imported`] because two
+/// It lives here rather than beside [`crate::ingest::Admission`] because two
 /// *rejections* answer with it too — a recorder must never retry a Call we
 /// deliberately dropped — and one string is the only way the success and the
 /// two silences cannot drift apart.
@@ -565,12 +579,14 @@ pub(crate) const CALL_IMPORTED: &str = "Call imported successfully.\n";
 /// whoever is knocking.
 const ADMIN_SESSION_REQUIRED: &str = "admin session required\n";
 
-impl IntoResponse for Reason {
-    /// **The one rendering.** A refusal cannot reach a caller without leaving
-    /// its line, because this is the only way a `Reason` becomes a response —
-    /// which is what makes ADR-0011 rule 3 structural rather than a convention
-    /// a new rejection path has to remember.
-    fn into_response(self) -> Response {
+impl Reason {
+    /// **The one line.** Write this refusal down, without answering anybody.
+    ///
+    /// Called by [`Reason::into_response`] for every surface that answers a
+    /// request, and directly by [`crate::ingest::Admission`], which is written
+    /// down where it is *decided* rather than where it is rendered — because
+    /// Dirwatch (#72) decides one with no request in reach to answer.
+    pub(crate) fn record(&self) {
         let refusal = self.refusal();
         // `tracing` bakes an event's level into a static callsite, so a level
         // chosen at runtime means one callsite per level — the same shape the
@@ -584,6 +600,7 @@ impl IntoResponse for Reason {
                     client_addr = refusal.client_addr.as_ref().map(tracing::field::display),
                     failures = refusal.failures,
                     retry_after_secs = refusal.retry_after_secs,
+                    duplicate_of = refusal.duplicate_of,
                     "request refused"
                 )
             };
@@ -595,7 +612,16 @@ impl IntoResponse for Reason {
             // ERROR — a 5xx is a `Broke`, not a `Reason` — nor TRACE.
             _ => emit!(debug),
         }
+    }
 
+    /// **The one rendering.** What the caller is handed, without the line.
+    ///
+    /// Separate from [`Reason::record`] only so that an [`crate::ingest::Admission`]
+    /// can be recorded once, at the moment it is decided, and rendered later by
+    /// whichever surface asked — never recorded twice. Everything else goes
+    /// through [`Reason::into_response`], which does both.
+    pub(crate) fn respond(&self) -> Response {
+        let refusal = self.refusal();
         let mut response = match refusal.body {
             Told::Text(body) => (refusal.status, body).into_response(),
             Told::Json(body) => (refusal.status, axum::Json(body)).into_response(),
@@ -604,6 +630,20 @@ impl IntoResponse for Reason {
             response.headers_mut().insert(name, value);
         }
         response
+    }
+}
+
+impl IntoResponse for Reason {
+    /// A refusal cannot reach a caller without leaving its line, because this is
+    /// the only way a `Reason` becomes a response — which is what makes
+    /// ADR-0011 rule 3 structural rather than a convention a new rejection path
+    /// has to remember. The one exception is deliberate and is the other half of
+    /// the same rule: an [`crate::ingest::Admission`] was already recorded when
+    /// it was decided, so that a Call ingested with no HTTP request behind it is
+    /// written down too.
+    fn into_response(self) -> Response {
+        self.record();
+        self.respond()
     }
 }
 
@@ -783,7 +823,7 @@ mod tests {
         "invalid-api-key", 401, "Invalid API key for system 11 talkgroup 54241.\n", " WARN "
     )]
     #[case::duplicate(
-        Reason::Duplicate,
+        Reason::Duplicate { of: 41 },
         "duplicate",
         200,
         "duplicate call rejected\n",
@@ -983,7 +1023,7 @@ mod tests {
             retry_after_secs: 900,
         }
         .into_response();
-        let _ = Reason::Duplicate.into_response();
+        let _ = Reason::Duplicate { of: 41 }.into_response();
 
         let logged = capture.text();
         let mut lines = logged.lines();
@@ -1080,7 +1120,7 @@ mod tests {
         // Built inside the upload's span...
         let failure: Failure =
             tracing::error_span!("ingest", system_ref = 11, talkgroup_ref = 54241)
-                .in_scope(|| Reason::Duplicate.into());
+                .in_scope(|| Reason::Duplicate { of: 41 }.into());
         // ...and rendered well outside it, the way axum does.
         let _ = failure.into_response();
 

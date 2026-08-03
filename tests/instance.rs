@@ -277,14 +277,10 @@ async fn the_retention_sweeper_prunes_an_aged_out_call_at_boot() {
         .expect("put");
     repo::insert_call(
         &db,
-        &NewCall {
-            system_ref: 1,
-            talkgroup_ref: 2,
-            // 1970, and `[retention] days` defaults to 7.
-            call_at_ms: 0,
-            object_key: "old/call.wav".into(),
-            ..NewCall::default()
-        },
+        // 1970, and `[retention] days` defaults to 7.
+        &NewCall::new(1, 2, 0),
+        common::audio_at("old/call.wav"),
+        &repo::Resolved::default(),
         true,
         0,
     )
@@ -350,13 +346,10 @@ async fn the_sweeper_goes_on_sweeping_after_the_boot_sweep() {
     // exist yet.
     repo::insert_call(
         &instance.db,
-        &NewCall {
-            system_ref: 1,
-            talkgroup_ref: 2,
-            // 1970, and `[retention] days` defaults to 7.
-            call_at_ms: 0,
-            ..NewCall::default()
-        },
+        // 1970, and `[retention] days` defaults to 7.
+        &NewCall::new(1, 2, 0),
+        None,
+        &repo::Resolved::default(),
         true,
         0,
     )
@@ -665,13 +658,9 @@ async fn the_sweeper_prunes_by_the_clock_the_instance_was_given() {
         .expect("db");
     repo::insert_call(
         &db,
-        &NewCall {
-            system_ref: 1,
-            talkgroup_ref: 2,
-            call_at_ms: 0,
-            object_key: "an-hour-old.wav".into(),
-            ..NewCall::default()
-        },
+        &NewCall::new(1, 2, 0),
+        common::audio_at("an-hour-old.wav"),
+        &repo::Resolved::default(),
         true,
         0,
     )

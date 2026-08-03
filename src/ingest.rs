@@ -8,19 +8,34 @@
 //! - no talkgroup: HTTP 417 `Incomplete call data: no talkgroup\n`
 //! - bad key: HTTP 401 `Invalid API key for system <s> talkgroup <t>.\n`
 //!
-//! The serialized pipeline (ADR-0001): authorize -> auto-populate/blacklist
-//! policy (#8) -> dedup -> write audio object -> insert DB row (in a transaction)
-//! -> emit to the live feed. A Call dropped by the policy (blacklisted, or an
-//! unknown System/Talkgroup with auto-populate off) still returns HTTP 200
-//! `Call imported successfully.` so the recorder never retries — matching rdio,
-//! which likewise 200s and drops the call asynchronously.
+//! **Resolve, then decide purely, then perform** (#96), answering with an
+//! [`Admission`] rather than an HTTP response:
 //!
-//! Which is exactly why every outcome is written down (ADR-0011 rule 3, #29):
-//! two of the five rejections tell the recorder "imported successfully", so the
-//! server's own log is the only place the truth exists. Every path that declines
-//! to store a Call goes through [`rejected`] and leaves a WARN line carrying a
-//! machine-readable `reason`, inside a span naming the System and Talkgroup it
-//! was about — and the Call id too, once there is one.
+//! - [`resolve`] reads what the database knows about this Call, **once**: the
+//!   API key, the System, the Talkgroup its Ref resolves to (#45), and the
+//!   Calls already inside the dedup window. Before this, the System and the
+//!   Talkgroup were each read twice — the policy resolved them, and the insert
+//!   resolved them again from scratch.
+//! - [`admit`] turns those facts and the `[ingest]` configuration into an
+//!   Admission. No database, no store, no clock — so the dedup window's edges
+//!   are property-tested as values, where a `COUNT` over a window could only be
+//!   approached through a socket and two uploads.
+//! - [`perform`] writes the audio object, inserts the row (ADR-0001's order,
+//!   now expressed in the types: the insert takes a [`crate::blob::StoredAudio`]
+//!   that only a completed write produces), publishes to the live feed, and
+//!   offers the Call for enhancement.
+//!
+//! A Call dropped by the auto-populate/blacklist policy (#8) still answers HTTP
+//! 200 `Call imported successfully.` so the recorder never retries — matching
+//! rdio, which likewise 200s and drops the call asynchronously.
+//!
+//! Which is exactly why every Admission is written down (ADR-0011 rule 3, #29):
+//! two of the four tell the recorder "imported successfully", so the server's
+//! own log is the only place the truth exists. [`Admission::record`] leaves that
+//! line **where the Admission is decided** rather than where it is rendered —
+//! inside a span naming the System and Talkgroup it was about, and the Call id
+//! too once there is one — because **Dirwatch** (#72) will decide one with no
+//! request in reach to answer, and rule 3 is about what the server wrote down.
 
 use std::sync::Arc;
 
@@ -30,6 +45,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Level, Span, field, info, span, warn};
 
+use crate::call::{CallId, Candidate};
 use crate::db::entities::call;
 use crate::db::repo::{self, NewCall, NewCallFrequency, NewCallUnit};
 use crate::failure::{Failure, Incomplete, Reason, Stage};
@@ -57,6 +73,41 @@ impl Default for IngestConfig {
             auto_populate: true,
         }
     }
+}
+
+/// The span of time a Call at `call_at_ms` is deduplicated against — inclusive
+/// on both sides, and **the only place that arithmetic is written**.
+///
+/// The candidate query bounds on this range and the decision below re-applies
+/// it, so the two cannot disagree about an edge: a mutation of either bound
+/// moves both, and the property test sees it. Saturating rather than wrapping,
+/// because a recorder that sends `i64::MAX` as its timestamp must be answered,
+/// never panicked at, in the middle of an upload.
+pub(crate) fn dedup_window(call_at_ms: i64, window_ms: i64) -> std::ops::RangeInclusive<i64> {
+    call_at_ms.saturating_sub(window_ms)..=call_at_ms.saturating_add(window_ms)
+}
+
+/// The stored Call this one is a duplicate of, if any — the **nearest** of the
+/// candidates inside the window (ADR-0001's duplicate detection).
+///
+/// Nearest rather than first: a recorder uploading one transmission once per
+/// member Ref can put two candidates in the window, and "duplicate of call 41"
+/// is only useful to an operator if 41 is the Call a listener would call the
+/// same transmission. It is also the copy #46 will compare against.
+///
+/// Pure, which is the point: every near miss is a value a test can construct,
+/// where a `COUNT` over a window could only be approached through a socket, a
+/// multipart body and two uploads.
+fn duplicate_of(candidates: &[Candidate], call_at_ms: i64, window_ms: i64) -> Option<CallId> {
+    let window = dedup_window(call_at_ms, window_ms);
+    candidates
+        .iter()
+        .filter(|candidate| window.contains(&candidate.call_at_ms))
+        // `abs_diff` rather than a subtraction: two Calls at opposite ends of
+        // the epoch are a difference no `i64` holds, and this decision must not
+        // be the place that discovers it.
+        .min_by_key(|candidate| (candidate.call_at_ms.abs_diff(call_at_ms), candidate.id))
+        .map(|candidate| candidate.id)
 }
 
 /// Raw multipart fields, collected before validation. Arrays stay as raw JSON
@@ -97,7 +148,7 @@ struct RawUpload {
 pub async fn call_upload(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Imported, Failure> {
+) -> Result<Recorded, Failure> {
     let mut upload = RawUpload::default();
 
     loop {
@@ -173,25 +224,17 @@ pub async fn call_upload(
         .unwrap_or_else(now_ms);
 
     let new_call = NewCall {
-        system_ref,
         system_label: upload.system_label,
-        talkgroup_ref,
         // rdio drops empty and the "-" placeholder (parsers.go); recorders send
         // these parts even when the talkgroup is unknown, so clean them to NULL.
         talkgroup_label: clean(upload.talkgroup_label),
         talkgroup_name: clean(upload.talkgroup_name),
         talkgroup_tag: clean(upload.talkgroup_tag),
         talkgroup_groups: parse_groups(upload.talkgroup_group, upload.talkgroup_groups),
-        call_at_ms,
         frequency: upload.frequency.as_deref().and_then(parse_i64),
         source_ref: upload.source.as_deref().and_then(parse_i64),
-        object_key: String::new(),
         audio_mime: upload.audio_mime,
         audio_name: upload.audio_name,
-        // Both filled in by `ingest_call` once the object is written.
-        audio_size: None,
-        // Both filled in by `ingest_call` once the audio has been read.
-        duration_ms: None,
         patches: parse_patches(upload.patches.as_deref()),
         // A Site Ref is only ever positive; rdio's own parser takes any
         // unsigned value, and a `0` from a recorder that fills every field
@@ -210,15 +253,18 @@ pub async fn call_upload(
             clean(upload.talker_alias),
         ),
         frequencies: parse_frequencies(upload.frequencies.as_deref()),
-        ..Default::default()
+        // Everything left: `duration_ms`, which the perform phase reads out of
+        // the audio's own header, and the transmission flags the rdio dialect
+        // has no field for at all — only Trunk Recorder's own does
+        // (`build_tr_call`).
+        ..NewCall::new(system_ref, talkgroup_ref, call_at_ms)
     };
 
     ingest_call(&state, &key, new_call, audio).await
 }
 
-/// The shared ingest pipeline used by both upload endpoints (ADR-0001):
-/// authorize -> dedup -> write audio object -> insert row (+children) in a
-/// transaction -> emit to the live feed. `new_call.object_key` is filled here.
+/// The shared ingest pipeline used by both upload endpoints — resolve, decide,
+/// perform (#96), answering with the [`Admission`] it decided.
 ///
 /// Everything one upload says shares a span naming the System and Talkgroup it
 /// was about, so no line has to repeat them and every line can be read together
@@ -231,12 +277,17 @@ pub async fn call_upload(
 /// upload first has an identity: a body too malformed to yield a System and a
 /// Talkgroup is rejected before it, and those lines carry the request id alone —
 /// which is the whole of what is known about them.
-async fn ingest_call(
+///
+/// **This is the entry point a non-HTTP caller uses** (#96): it takes a Call as
+/// a Recorder described it plus its audio, and answers with the [`Admission`] it
+/// decided — already written down. #72's Dirwatch has a `.wav` and a filename
+/// and no request to answer, and needs exactly this and nothing above it.
+pub async fn ingest_call(
     state: &AppState,
     key: &str,
     new_call: NewCall,
     audio: Vec<u8>,
-) -> Result<Imported, Failure> {
+) -> Result<Recorded, Failure> {
     let span = span!(
         Level::ERROR,
         "ingest",
@@ -253,58 +304,139 @@ async fn ingest_call(
 async fn run_pipeline(
     state: &AppState,
     key: &str,
-    mut new_call: NewCall,
+    new_call: NewCall,
     audio: Vec<u8>,
-) -> Result<Imported, Failure> {
-    // Auth (ADR-0008): recorders always require a valid, in-scope API key.
-    //
-    // The key itself is never logged, at any level, in any form (rule 2) — and
-    // an unknown key has no row to name it by anyway.
+) -> Result<Recorded, Failure> {
+    let facts = resolve(state, key, &new_call).await?;
+
+    let admission = match admit(&facts, &new_call, &state.ingest) {
+        Decision::Admit { auto_populate } => {
+            perform(state, new_call, audio, &facts.resolved, auto_populate).await?
+        }
+        // Nothing is performed for a Call that is not stored, so a refusal is
+        // already the whole Admission.
+        Decision::Refused(admission) => admission,
+    };
+
+    // **The one line**, and the one place it is written (#96). Here rather than
+    // where the Admission is rendered, because Dirwatch (#72) decides one with
+    // no request to answer — and ADR-0011 rule 3 is about what the *server*
+    // wrote down, not about what a recorder was told. What comes back is the
+    // receipt, which is the only thing that can be rendered.
+    Ok(admission.record())
+}
+
+/// Everything the database knows about an arriving Call, read **once** (#96).
+///
+/// Before this the System and the Talkgroup were each looked up twice — once to
+/// decide the auto-populate/blacklist policy and again from scratch inside the
+/// insert — and the dedup question was a `COUNT` the decision could not see.
+///
+/// A struct rather than an authorized/unauthorized pair, because an
+/// unauthorized upload has simply had nothing read for it: nothing resolved and
+/// no candidates, which is what "nothing is known" looks like. Written as two
+/// shapes, every consumer would carry an arm that the decision above it has
+/// already ruled out and no test could ever reach.
+#[derive(Debug, Default)]
+struct Facts {
+    /// Whether the key authorizes ingesting into the System named (ADR-0008).
+    /// When it does not, nothing below was read at all — refusing costs one
+    /// statement, not four.
+    authorized: bool,
+    resolved: repo::Resolved,
+    /// The Calls already stored on that Talkgroup inside the dedup window.
+    candidates: Vec<Candidate>,
+}
+
+/// Read what the decision needs (ADR-0008's authorization first, so a recorder
+/// with a bad key never reaches the rest).
+///
+/// The key itself is never logged, at any level, in any form (rule 2) — and an
+/// unknown key has no row to name it by anyway.
+async fn resolve(state: &AppState, key: &str, new_call: &NewCall) -> Result<Facts, Failure> {
     if !repo::authorize_ingest(&state.db, key, new_call.system_ref)
         .await
         .map_err(Stage::Auth.failed())?
     {
-        return Err(Reason::InvalidApiKey {
-            system_ref: new_call.system_ref,
-            talkgroup_ref: new_call.talkgroup_ref,
-        }
-        .into());
+        return Ok(Facts::default());
     }
 
-    // Auto-populate + blacklist policy (#8): decide before any audio is written.
-    // A dropped Call still returns success so the recorder doesn't retry — which
-    // makes the WARN line the only record that it was dropped at all.
-    let (auto_populate, talkgroup_id) = match repo::ingest_disposition(
-        &state.db,
-        new_call.system_ref,
-        new_call.talkgroup_ref,
-        state.ingest.auto_populate,
-    )
-    .await
-    .map_err(Stage::AutoPopulatePolicy.failed())?
-    {
-        repo::Disposition::Store {
-            auto_populate,
-            talkgroup_id,
-        } => (auto_populate, talkgroup_id),
-        repo::Disposition::Drop(reason) => return Err(dropped(reason).into()),
-    };
+    let resolved = repo::resolve_refs(&state.db, new_call.system_ref, new_call.talkgroup_ref)
+        .await
+        .map_err(Stage::ResolveRefs.failed())?;
 
-    // Dedup (ADR-0001): the same *channel* within the window — the Talkgroup the
-    // Ref resolved to a moment ago, not the Ref itself (#45), so a transmission
-    // uploaded once per member Ref is stored once.
-    if repo::is_duplicate_call(
+    // Dedup (ADR-0001) looks on the same *channel* the Ref resolved to, not the
+    // Ref itself (#45), so a transmission uploaded once per member Ref is
+    // stored once.
+    let candidates = repo::calls_within(
         &state.db,
-        talkgroup_id,
-        new_call.call_at_ms,
-        state.ingest.dedup_window_ms,
+        resolved.talkgroup_id(),
+        dedup_window(new_call.call_at_ms, state.ingest.dedup_window_ms),
     )
     .await
-    .map_err(Stage::Dedup.failed())?
-    {
-        return Err(Reason::Duplicate.into());
+    .map_err(Stage::Dedup.failed())?;
+
+    Ok(Facts {
+        authorized: true,
+        resolved,
+        candidates,
+    })
+}
+
+/// Whether this Call is admitted — **the decision, and nothing else** (#96).
+///
+/// Pure: no database, no store, no clock. Every arm is therefore a value a test
+/// can construct, which is what lets the dedup window be property-tested at its
+/// edges and what #46's near-miss cases need. It was previously spread across
+/// three `await`s that each read something and then decided about it, so the
+/// only way to reach an arm was to arrange the whole world first.
+fn admit(facts: &Facts, call: &NewCall, config: &IngestConfig) -> Decision {
+    if !facts.authorized {
+        return Decision::Refused(Admission::Unauthorized {
+            system_ref: call.system_ref,
+            talkgroup_ref: call.talkgroup_ref,
+        });
     }
 
+    // Auto-populate + blacklist policy (#8): decided before any audio is
+    // written. A dropped Call still answers success so the recorder doesn't
+    // retry — which makes its line the only record that it was dropped at all.
+    let auto_populate =
+        match repo::disposition(&facts.resolved, call.talkgroup_ref, config.auto_populate) {
+            repo::Disposition::Store { auto_populate } => auto_populate,
+            repo::Disposition::Drop(reason) => {
+                return Decision::Refused(Admission::Dropped(reason));
+            }
+        };
+
+    match duplicate_of(&facts.candidates, call.call_at_ms, config.dedup_window_ms) {
+        Some(of) => Decision::Refused(Admission::Duplicate { of }),
+        None => Decision::Admit { auto_populate },
+    }
+}
+
+/// What [`admit`] decided: either something to perform, or an [`Admission`]
+/// that is already complete.
+#[derive(Debug, PartialEq, Eq)]
+enum Decision {
+    /// Admitted. `auto_populate` is the effective flag the insert needs, and
+    /// this becomes [`Admission::Stored`] once there is a row.
+    Admit { auto_populate: bool },
+    /// Not admitted — and there is nothing to perform, so this *is* the
+    /// Admission ingest answers with.
+    Refused(Admission),
+}
+
+/// Write the audio object, insert the row, publish it, offer it for
+/// enhancement — everything an admitted Call costs, and nothing that decides
+/// anything.
+async fn perform(
+    state: &AppState,
+    mut new_call: NewCall,
+    audio: Vec<u8>,
+    resolved: &repo::Resolved,
+    auto_populate: bool,
+) -> Result<Admission, Failure> {
     // The *playing* length, so a one-second kerchunk and a forty-second
     // dispatch are distinguishable everywhere (#42, spec US 8). The recorder's
     // own figure wins when it sent one — only Trunk Recorder's native meta
@@ -330,26 +462,37 @@ async fn run_pipeline(
     // The bytes are still *required* on the wire: this endpoint's dialect asks
     // for an audio part and refusing one for some Calls and not others would
     // make a recorder's success depend on a flag it also sent.
-    if !new_call.encrypted {
-        new_call.object_key = crate::blob::new_object_key(&audio_extension(&new_call.audio_name));
-        // The byte length rides along on the row so retention's size cap is a
-        // `SUM()` rather than a stat per object (#10).
-        new_call.audio_size = Some(audio.len() as i64);
+    let stored = match new_call.encrypted {
+        true => None,
+        false => {
+            let key = crate::blob::new_object_key(&audio_extension(&new_call.audio_name));
+            let bytes = audio.len();
+            // Write the audio object first (ADR-0001); a failed DB insert
+            // afterward leaves an orphan the GC sweep reclaims (#10). The row
+            // below cannot be inserted without the value this produces, which
+            // is that ordering expressed rather than commented (#96).
+            state
+                .audio
+                .put(&key, bytes::Bytes::from(audio))
+                .await
+                .map_err(Stage::StoreAudio.failed())?;
+            Some(crate::blob::StoredAudio::written(key, bytes))
+        }
+    };
+    let audio_bytes = stored.as_ref().map(|a| a.bytes()).unwrap_or_default();
 
-        // Write the audio object first (ADR-0001); a failed DB insert afterward
-        // leaves an orphan the GC sweep reclaims (#10).
-        state
-            .audio
-            .put(&new_call.object_key, bytes::Bytes::from(audio))
-            .await
-            .map_err(Stage::StoreAudio.failed())?;
-    }
-    let audio_bytes = new_call.audio_size.unwrap_or_default();
-
-    // Insert the row (+ children) atomically.
-    let call = insert_in_txn(&state.db, &new_call, auto_populate, state.clock.now_ms())
-        .await
-        .map_err(Stage::StoreCall.failed())?;
+    // Insert the row (+ children) atomically, into the channel already resolved
+    // for this Call rather than one looked up a second time (#96).
+    let call = insert_in_txn(
+        &state.db,
+        &new_call,
+        stored,
+        resolved,
+        auto_populate,
+        state.clock.now_ms(),
+    )
+    .await
+    .map_err(Stage::StoreCall.failed())?;
     // Everything this upload says from here on names the row it became.
     Span::current().record("call_id", call.id);
 
@@ -377,30 +520,147 @@ async fn run_pipeline(
     // WARN — once per Call, forever, on a System whose traffic is mostly
     // encrypted. Asked here rather than inside the worker so the three queries
     // the scope lookup costs are never spent either.
+    // Deliberately not part of the Admission, and not on its line: the Call is
+    // stored, answered and already on the live feed, so what the queue makes of
+    // it costs a listener nothing either way — and an `enhancement=not-enhancing`
+    // field on every Call would be a per-Call field about a feature nobody
+    // turned on. The outcome exists so the arms are assertable (#96) and for
+    // #70's status surface to read.
     if call.has_audio() {
-        queue_for_enhancement(state, call.id).await;
+        let _queued = queue_for_enhancement(state, call.id).await;
     }
 
-    // The other half of rule 3: an ingest that *did* become a row is a notable
-    // normal event, so "nothing is arriving" is answerable without waiting for
-    // something to go wrong. Per-Call, never per-anything-smaller (rule 8).
-    info!(audio_bytes, "call stored");
-    Ok(Imported)
+    Ok(Admission::Stored {
+        call_id: call.id,
+        audio_bytes,
+    })
 }
 
-/// The Call became a row — the one answer this endpoint gives that isn't a
-/// [`Failure`].
+/// **What Ingest decided about one Call** (CONTEXT.md's *Admission*).
 ///
-/// Its string is a wire contract (ADR-0001): SDRTrunk reads the body on a 200
-/// and branches on it. Two *rejections* answer with the same string so that a
-/// recorder never retries a Call we deliberately dropped — which is why they
-/// carry a WARN line and this carries an INFO one.
-pub struct Imported;
+/// A *value*, not a response. The two HTTP endpoints render one into the rdio
+/// wire strings; Dirwatch (#72) will decide one with no request in reach, and
+/// #46 will decide one over candidate copies rather than a count. Everything
+/// that says what happened to a Call says it here, once.
+///
+/// Its reason is one closed vocabulary — [`Reason`], which owns the wire
+/// strings, the status codes and the levels (#92) — so the slug an operator
+/// greps and the bytes a recorder branches on derive from the same value, and a
+/// new rejection path cannot skip the funnel because there is nowhere else to
+/// obtain one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// The Call became a row.
+    Stored {
+        call_id: CallId,
+        /// How many bytes of audio were stored — `0` for an **Encrypted Call**,
+        /// which is a row and nothing else (#42).
+        audio_bytes: i64,
+    },
+    /// The same transmission, already stored inside the dedup window (ADR-0001).
+    Duplicate { of: CallId },
+    /// The auto-populate/blacklist policy said no (#8).
+    Dropped(repo::DropReason),
+    /// The key was not valid for the System the upload named (ADR-0008).
+    Unauthorized { system_ref: i64, talkgroup_ref: i64 },
+}
 
-impl IntoResponse for Imported {
-    fn into_response(self) -> Response {
-        (StatusCode::OK, crate::failure::CALL_IMPORTED).into_response()
+impl Admission {
+    /// What the caller is told, as the one closed vocabulary — `None` for a
+    /// Call that was stored, which is the only arm that is not a refusal.
+    fn reason(&self) -> Option<Reason> {
+        match self {
+            Admission::Stored { .. } => None,
+            Admission::Duplicate { of } => Some(Reason::Duplicate { of: *of }),
+            Admission::Dropped(repo::DropReason::Blacklisted) => Some(Reason::Blacklisted),
+            Admission::Dropped(repo::DropReason::NotPopulated) => Some(Reason::NotPopulated),
+            Admission::Unauthorized {
+                system_ref,
+                talkgroup_ref,
+            } => Some(Reason::InvalidApiKey {
+                system_ref: *system_ref,
+                talkgroup_ref: *talkgroup_ref,
+            }),
+        }
     }
+
+    /// **Write it down**, and hand back the receipt — ADR-0011 rule 3, made
+    /// structural for a caller that has no response to render (#96).
+    ///
+    /// Every ingest leaves exactly one line here, whether or not anybody is
+    /// waiting for an answer: three of the four arms below tell the recorder
+    /// `200`, two of them with the *success* string, so the server's own log is
+    /// the only place the truth exists.
+    pub fn record(self) -> Recorded {
+        match &self {
+            // An ingest that became a row is a notable normal event, so
+            // "nothing is arriving" is answerable without waiting for something
+            // to go wrong. Per-Call, never per-anything-smaller (rule 8).
+            Admission::Stored { audio_bytes, .. } => info!(audio_bytes, "call stored"),
+            // Iterated rather than unwrapped: the arm above is the only one
+            // with no reason, so an `if let Some` here would be a branch whose
+            // empty half no test can reach.
+            refused => refused.reason().iter().for_each(Reason::record),
+        }
+        Recorded(self)
+    }
+}
+
+/// An [`Admission`] that **has been written down** — and the only thing that
+/// can become a response.
+///
+/// [`Reason::into_response`] records and renders in one step, which is what
+/// makes ADR-0011 rule 3 structural rather than a convention (#92). Ingest has
+/// to do the two at different moments, because the line belongs where the
+/// Admission is *decided* — so that #72's Dirwatch, which has no request to
+/// answer, still leaves one. This type is what keeps that from being a
+/// weakening: [`Admission::record`] is the only way to make one, and this is
+/// the only thing that renders. An unrecorded Admission cannot reach a caller,
+/// exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded(Admission);
+
+impl Recorded {
+    /// What was decided — for a caller that wants the value rather than a
+    /// response.
+    pub fn admission(&self) -> &Admission {
+        &self.0
+    }
+}
+
+impl IntoResponse for Recorded {
+    /// The rdio wire contract (ADR-0001): SDRTrunk reads the body on a 200 and
+    /// branches on it. Two *rejections* answer with the success string so that
+    /// a recorder never retries a Call we deliberately dropped — which is
+    /// exactly why the line was written when the Admission was decided and not
+    /// here.
+    fn into_response(self) -> Response {
+        match self.0.reason() {
+            Some(reason) => reason.respond(),
+            None => (StatusCode::OK, crate::failure::CALL_IMPORTED).into_response(),
+        }
+    }
+}
+
+/// What became of the offer to enhance a stored Call (#96).
+///
+/// Returned rather than only logged, because every arm below is a decision an
+/// Operator can be shown and a test can assert on — where before, four
+/// different endings were all `()` and three of them were silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Queued {
+    /// Marked `pending` and handed to the enhancement worker.
+    Offered,
+    /// This Instance does not enhance at all — the shipped default.
+    NotEnhancing,
+    /// It does, but not for this Call's System or Talkgroup (#20's scope).
+    OutOfScope,
+    /// The Call was pruned between its insert and this decision, which
+    /// retention is entitled to do.
+    Vanished,
+    /// Something went wrong, named by the `reason` it logged. The Call keeps
+    /// the audio the recorder sent, which is the whole cost.
+    Failed(&'static str),
 }
 
 /// Offer a stored Call to the enhancement queue, if this instance enhances it.
@@ -413,24 +673,23 @@ impl IntoResponse for Imported {
 /// there is nothing to enhance, and an ingest path that spent three SELECTs
 /// rediscovering that would make every operator pay for a feature none of them
 /// turned on — on the hardware least able to afford it.
-async fn queue_for_enhancement(state: &AppState, call_id: crate::call::CallId) {
+async fn queue_for_enhancement(state: &AppState, call_id: CallId) -> Queued {
     if !state.enhancer.is_enabled() {
-        return;
+        return Queued::NotEnhancing;
     }
     let scope = match repo::enhancement_scope(&state.db, call_id).await {
         Ok(Some(scope)) => scope,
-        // Pruned between the insert and here, which retention is entitled to do.
-        Ok(None) => return,
+        Ok(None) => return Queued::Vanished,
         Err(error) => {
-            return warn!(
-                reason = %"scope-unreadable",
-                %error,
-                "could not decide whether to enhance this Call"
-            );
+            // One slug, bound once: the field an operator greps and the value
+            // this returns cannot drift into two spellings.
+            let reason = "scope-unreadable";
+            warn!(%reason, %error, "could not decide whether to enhance this Call");
+            return Queued::Failed(reason);
         }
     };
     if !state.enhancer.applies_to(scope) {
-        return;
+        return Queued::OutOfScope;
     }
     // Marked before it is offered, so a process that dies between the two finds
     // it again at the next boot rather than losing it. The reverse order would
@@ -438,23 +697,24 @@ async fn queue_for_enhancement(state: &AppState, call_id: crate::call::CallId) {
     if let Err(error) =
         repo::mark_enhancement(&state.db, call_id, call::EnhancementState::PENDING).await
     {
-        return warn!(
-            reason = %"mark-pending-failed",
-            %error,
-            "could not mark a Call for enhancement"
-        );
+        let reason = "mark-pending-failed";
+        warn!(%reason, %error, "could not mark a Call for enhancement");
+        return Queued::Failed(reason);
     }
     state.enhancer.offer(state, call_id).await;
+    Queued::Offered
 }
 
 async fn insert_in_txn(
     db: &crate::db::Db,
     new_call: &NewCall,
+    audio: Option<crate::blob::StoredAudio>,
+    resolved: &repo::Resolved,
     auto_populate: bool,
     now_ms: i64,
 ) -> Result<crate::db::entities::call::Model, sea_orm::DbErr> {
     let txn = db.begin().await?;
-    let call = repo::insert_call(&txn, new_call, auto_populate, now_ms).await?;
+    let call = repo::insert_call(&txn, new_call, audio, resolved, auto_populate, now_ms).await?;
     txn.commit().await?;
     Ok(call)
 }
@@ -465,7 +725,7 @@ async fn insert_in_txn(
 pub async fn trunk_recorder_call_upload(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Imported, Failure> {
+) -> Result<Recorded, Failure> {
     let mut key = String::new();
     let mut meta_json: Option<String> = None;
     let mut audio: Option<Vec<u8>> = None;
@@ -708,10 +968,8 @@ fn build_tr_call(
         call_at_ms,
         frequency: meta.freq.map(|f| f as i64),
         source_ref: None,
-        object_key: String::new(),
         audio_mime,
         audio_name,
-        audio_size: None,
         // The recorder counted the samples it wrote, so its figure beats
         // anything its encoder's header would say — and it is the only figure
         // an *encrypted* Call has, since no audio is kept to measure (#42).
@@ -747,19 +1005,6 @@ fn seconds_to_ms(seconds: f64) -> i64 {
 /// pressed, which is the reading #53 alerts on.
 fn is_set(flag: Option<i64>) -> bool {
     flag.is_some_and(|value| value != 0)
-}
-
-/// Why the auto-populate/blacklist policy dropped a Call (#8), as the
-/// [`Reason`] that carries its wire form and its log line.
-///
-/// Both answer HTTP 200 `Call imported successfully.` so the recorder never
-/// retries — which is exactly why the WARN line beside them is the only record
-/// they happened at all.
-fn dropped(reason: repo::DropReason) -> Reason {
-    match reason {
-        repo::DropReason::Blacklisted => Reason::Blacklisted,
-        repo::DropReason::NotPopulated => Reason::NotPopulated,
-    }
 }
 
 /// Parse a decimal integer field, tolerating surrounding whitespace.
@@ -944,8 +1189,161 @@ fn parse_units(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
     use sea_orm::ConnectionTrait;
+
+    // -- The dedup window, decided over candidate Calls (#96) ---------------
+
+    /// One stored Call, `offset` milliseconds from the arriving one.
+    fn stored_at(offset: i64) -> Vec<Candidate> {
+        vec![Candidate {
+            id: 7,
+            call_at_ms: 1_000_000 + offset,
+        }]
+    }
+
+    /// **Adjacency is the whole of this decision**, so both edges are named and
+    /// both are named twice — on the edge, and one millisecond past it.
+    ///
+    /// The window is symmetric because a recorder catching up after a network
+    /// blip uploads older Calls after newer ones: the Call already stored is
+    /// routinely *later* than the one arriving. A mutation of the forward bound
+    /// survived the entire integration suite for exactly that reason (#83), and
+    /// it is what a table of near misses closes.
+    #[rstest]
+    #[case::the_same_instant(0, true)]
+    #[case::inside_the_window_behind(-499, true)]
+    #[case::on_the_trailing_edge(-500, true)]
+    #[case::one_past_the_trailing_edge(-501, false)]
+    #[case::inside_the_window_ahead(499, true)]
+    #[case::on_the_leading_edge(500, true)]
+    #[case::one_past_the_leading_edge(501, false)]
+    #[case::an_out_of_order_backfill(100_000, false)]
+    fn a_stored_call_within_the_window_is_the_same_transmission(
+        #[case] offset: i64,
+        #[case] duplicate: bool,
+    ) {
+        assert_eq!(
+            duplicate_of(&stored_at(offset), 1_000_000, 500).is_some(),
+            duplicate,
+            "a Call stored {offset}ms away, window 500ms"
+        );
+    }
+
+    /// A window of zero is the operator saying "only the very same instant",
+    /// and it must not collapse into "everything" or "nothing".
+    #[rstest]
+    #[case::exactly_now(0, true)]
+    #[case::one_millisecond_later(1, false)]
+    #[case::one_millisecond_earlier(-1, false)]
+    fn a_zero_window_admits_only_the_same_instant(#[case] offset: i64, #[case] duplicate: bool) {
+        assert_eq!(
+            duplicate_of(&stored_at(offset), 1_000_000, 0).is_some(),
+            duplicate
+        );
+    }
+
+    /// A clock at the end of time is still a clock. The bounds saturate rather
+    /// than wrap, so a recorder that sends `i64::MAX` as its timestamp gets a
+    /// decision — never a panic in the middle of an upload.
+    ///
+    /// The answers are what a saturated window really says: at `i64::MAX` with
+    /// the widest window there is, the range is `0..=MAX` and an ordinary
+    /// stored Call is inside it; at `i64::MIN` the range ends at `-1` and it is
+    /// not. Both are absurd inputs, and both are answered.
+    #[rstest]
+    #[case::the_end_of_time(i64::MAX, true)]
+    #[case::before_the_beginning(i64::MIN, false)]
+    fn an_absurd_call_time_decides_rather_than_overflows(#[case] at: i64, #[case] duplicate: bool) {
+        assert_eq!(
+            duplicate_of(&stored_at(0), at, i64::MAX).is_some(),
+            duplicate
+        );
+        // ...and a Call at that same absurd instant is a duplicate of itself
+        // however far apart the two ends of the epoch are.
+        assert_eq!(
+            duplicate_of(
+                &[Candidate {
+                    id: 7,
+                    call_at_ms: at
+                }],
+                at,
+                i64::MAX
+            ),
+            Some(7)
+        );
+    }
+
+    /// The Call it names is the *nearest* stored one, which is what an operator
+    /// reading "duplicate of call 41" wants and what #46's keep-best will
+    /// compare against — never merely the first row the query happened to hand
+    /// back.
+    #[test]
+    fn the_duplicate_it_names_is_the_nearest_stored_call() {
+        let candidates = vec![
+            Candidate {
+                id: 41,
+                call_at_ms: 1_000_400,
+            },
+            Candidate {
+                id: 42,
+                call_at_ms: 1_000_100,
+            },
+        ];
+
+        assert_eq!(duplicate_of(&candidates, 1_000_000, 500), Some(42));
+    }
+
+    proptest! {
+        /// Whatever the candidates, the decision *is* the window: a Call is a
+        /// duplicate exactly when some stored Call lies within `window`
+        /// milliseconds of it, on either side.
+        ///
+        /// Written as `|offset| <= window` where the code is a range that
+        /// contains — two independent spellings of the same rule, so the
+        /// assertion cannot agree with the code by construction.
+        #[test]
+        fn a_call_is_a_duplicate_exactly_when_something_stored_is_within_the_window(
+            at in -1_000_000_000_000i64..1_000_000_000_000,
+            window in 0i64..86_400_000,
+            offsets in proptest::collection::vec(-200_000i64..200_000, 0..8),
+        ) {
+            let candidates: Vec<Candidate> = offsets
+                .iter()
+                .enumerate()
+                .map(|(i, offset)| Candidate { id: i as i64 + 1, call_at_ms: at + offset })
+                .collect();
+
+            let expected = offsets.iter().any(|offset| offset.abs() <= window);
+
+            prop_assert_eq!(duplicate_of(&candidates, at, window).is_some(), expected);
+        }
+
+        /// ...and the one it names is inside the window and no further away
+        /// than any other candidate.
+        #[test]
+        fn the_named_duplicate_is_inside_the_window_and_nearest(
+            at in -1_000_000_000_000i64..1_000_000_000_000,
+            window in 0i64..86_400_000,
+            offsets in proptest::collection::vec(-200_000i64..200_000, 1..8),
+        ) {
+            let candidates: Vec<Candidate> = offsets
+                .iter()
+                .enumerate()
+                .map(|(i, offset)| Candidate { id: i as i64 + 1, call_at_ms: at + offset })
+                .collect();
+
+            if let Some(named) = duplicate_of(&candidates, at, window) {
+                let named = candidates.iter().find(|c| c.id == named).expect("a candidate");
+                let distance = (named.call_at_ms - at).abs();
+                prop_assert!(distance <= window);
+                for other in &candidates {
+                    prop_assert!(distance <= (other.call_at_ms - at).abs());
+                }
+            }
+        }
+    }
 
     #[test]
     fn call_time_prefers_timestamp_millis() {
@@ -1099,8 +1497,226 @@ mod tests {
     // What is asserted is the same as everywhere else: the operator's log line,
     // and that nothing panicked.
 
+    // -- The Admission itself (#96) -----------------------------------------
+
+    fn a_system(
+        auto_populate: bool,
+        blacklist: Option<&str>,
+    ) -> crate::db::entities::system::Model {
+        crate::db::entities::system::Model {
+            id: 1,
+            r#ref: 11,
+            label: None,
+            auto_populate,
+            blacklist: blacklist.map(str::to_string),
+            enhancement: None,
+            created_at_ms: 0,
+        }
+    }
+
+    fn a_talkgroup() -> crate::db::entities::talkgroup::Model {
+        crate::db::entities::talkgroup::Model {
+            id: 7,
+            system_id: 1,
+            r#ref: 54241,
+            label: None,
+            name: None,
+            tag_id: None,
+            led: None,
+            enhancement: None,
+            created_at_ms: 0,
+        }
+    }
+
+    /// What the database knew, as a value — the whole input to the decision.
+    fn facts(
+        authorized: bool,
+        system: Option<crate::db::entities::system::Model>,
+        talkgroup: Option<crate::db::entities::talkgroup::Model>,
+        candidates: Vec<Candidate>,
+    ) -> Facts {
+        Facts {
+            authorized,
+            resolved: repo::Resolved { system, talkgroup },
+            candidates,
+        }
+    }
+
+    fn a_stored_call_at(call_at_ms: i64) -> Vec<Candidate> {
+        vec![Candidate { id: 41, call_at_ms }]
+    }
+
+    /// The configuration an operator who changed nothing is running.
+    fn shipped() -> IngestConfig {
+        IngestConfig::default()
+    }
+
+    /// **The decision, as a table** — every way an upload can end, over facts a
+    /// test constructs rather than a world it has to arrange.
+    ///
+    /// The order of the arms is itself behaviour, and the last two cases pin
+    /// it: authorization is answered before anything is read, and the
+    /// auto-populate/blacklist policy is answered before the dedup window — so
+    /// a Call an Operator blacklisted is reported as blacklisted rather than as
+    /// a duplicate of the copy that arrived a moment earlier.
+    #[rstest]
+    #[case::a_bad_key_is_refused_before_anything_is_read(
+        facts(false, None, None, vec![]),
+        shipped(),
+        Decision::Refused(Admission::Unauthorized { system_ref: 11, talkgroup_ref: 54241 })
+    )]
+    #[case::an_ordinary_first_call_is_admitted(
+        facts(true, Some(a_system(false, None)), Some(a_talkgroup()), vec![]),
+        shipped(),
+        Decision::Admit { auto_populate: true }
+    )]
+    #[case::an_unknown_system_with_auto_populate_off_is_dropped(
+        facts(true, None, None, vec![]),
+        IngestConfig { auto_populate: false, ..shipped() },
+        Decision::Refused(Admission::Dropped(repo::DropReason::NotPopulated))
+    )]
+    #[case::a_blacklisted_talkgroup_is_dropped(
+        facts(true, Some(a_system(false, Some("54241"))), Some(a_talkgroup()), vec![]),
+        shipped(),
+        Decision::Refused(Admission::Dropped(repo::DropReason::Blacklisted))
+    )]
+    #[case::a_second_copy_inside_the_window_is_a_duplicate(
+        facts(true, Some(a_system(false, None)), Some(a_talkgroup()), a_stored_call_at(1_000_200)),
+        shipped(),
+        Decision::Refused(Admission::Duplicate { of: 41 })
+    )]
+    #[case::a_copy_outside_the_window_is_not(
+        facts(true, Some(a_system(false, None)), Some(a_talkgroup()), a_stored_call_at(1_000_501)),
+        shipped(),
+        Decision::Admit { auto_populate: true }
+    )]
+    // ...and the window it is outside of is the operator's, not a constant.
+    #[case::the_window_is_the_configured_one(
+        facts(true, Some(a_system(false, None)), Some(a_talkgroup()), a_stored_call_at(1_000_501)),
+        IngestConfig { dedup_window_ms: 2_000, ..shipped() },
+        Decision::Refused(Admission::Duplicate { of: 41 })
+    )]
+    #[case::the_policy_is_answered_before_the_window(
+        facts(
+            true,
+            Some(a_system(false, Some("54241"))),
+            Some(a_talkgroup()),
+            a_stored_call_at(1_000_000)
+        ),
+        shipped(),
+        Decision::Refused(Admission::Dropped(repo::DropReason::Blacklisted))
+    )]
+    fn every_way_an_upload_can_end(
+        #[case] facts: Facts,
+        #[case] config: IngestConfig,
+        #[case] expected: Decision,
+    ) {
+        let call = NewCall::new(11, 54241, 1_000_000);
+
+        assert_eq!(admit(&facts, &call, &config), expected);
+    }
+
+    /// **An Admission is written down where it is decided, and rendering it
+    /// does not write it down again** (#96).
+    ///
+    /// That is what makes ADR-0011 rule 3 hold for a caller with no request to
+    /// answer: Dirwatch (#72) will decide one of these with nothing to render,
+    /// and the line has to exist anyway. Two of the arms below answer the
+    /// recorder `200 Call imported successfully.`, so this line is the only
+    /// record that the Call was refused at all.
+    ///
+    /// The rendering below goes through the [`Recorded`] this returns, which is
+    /// the only thing that renders — so "recorded, then answered" is the shape
+    /// of the types rather than the order of two statements.
+    #[rstest]
+    #[case::stored(Admission::Stored { call_id: 1, audio_bytes: 44 }, "call stored", " INFO ")]
+    #[case::duplicate(Admission::Duplicate { of: 41 }, "reason=duplicate", " WARN ")]
+    #[case::blacklisted(
+        Admission::Dropped(repo::DropReason::Blacklisted),
+        "reason=blacklisted",
+        " WARN "
+    )]
+    #[case::not_populated(
+        Admission::Dropped(repo::DropReason::NotPopulated),
+        "reason=not-populated",
+        " WARN "
+    )]
+    #[case::unauthorized(
+        Admission::Unauthorized { system_ref: 11, talkgroup_ref: 54241 },
+        "reason=invalid-api-key",
+        " WARN "
+    )]
+    #[tokio::test]
+    async fn an_admission_leaves_exactly_one_line_and_rendering_adds_none(
+        #[case] admission: Admission,
+        #[case] expected: &str,
+        #[case] level: &str,
+    ) {
+        let capture = crate::testing::LogCapture::start();
+
+        let _rendered = admission.record().into_response();
+
+        let logged = capture.text();
+        assert_eq!(
+            logged.matches(expected).count(),
+            1,
+            "recorded once, at the decision: {logged}"
+        );
+        assert!(logged.contains(level), "{logged}");
+    }
+
+    /// **The recorder-facing wire contract, in one artifact** (ADR-0001).
+    ///
+    /// Every way an ingest can end, as the bytes and the status a recorder
+    /// actually branches on: SDRTrunk reads the body on a `200`, health-checks
+    /// on the `417`, and drops without retry on `duplicate call rejected`.
+    /// Two *rejections* answer `Call imported successfully.` on purpose — a
+    /// recorder must never retry a Call we deliberately dropped.
+    ///
+    /// A snapshot rather than five assertions because what matters is the
+    /// contract *as a whole*: a diff here is a diff every Trunk Recorder and
+    /// SDRTrunk in the field would see.
+    #[tokio::test]
+    async fn the_wire_contract_every_admission_answers_with() {
+        let mut rendered = String::new();
+        for admission in [
+            Admission::Stored {
+                call_id: 1,
+                audio_bytes: 44,
+            },
+            Admission::Duplicate { of: 41 },
+            Admission::Dropped(repo::DropReason::Blacklisted),
+            Admission::Dropped(repo::DropReason::NotPopulated),
+            Admission::Unauthorized {
+                system_ref: 11,
+                talkgroup_ref: 54241,
+            },
+        ] {
+            let name = format!("{admission:?}");
+            let response = admission.record().into_response();
+            let status = response.status().as_u16();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            rendered.push_str(&format!(
+                "{name}\n  {status} {:?}\n",
+                String::from_utf8_lossy(&body)
+            ));
+        }
+
+        insta::assert_snapshot!(rendered);
+    }
+
+    // -- `queue_for_enhancement`'s own arms (#37, reshaped by #96) ----------
+    //
+    // The decision now returns what it decided, so each arm is a value rather
+    // than only a log line — and the one arm that needs a failing read gets it
+    // by **closing the pool**, not by taking a column away from the schema.
+    // (`mark-pending-failed` needs the read to succeed and only the update to
+    // fail, which is `TestApp::refuse_updates_to` in `tests/enhance.rs`.)
+
     /// A Call, its System and its Talkgroup, in a database of this test's own.
-    async fn one_stored_call() -> (AppState, crate::call::CallId, tempfile::TempDir) {
+    async fn one_stored_call() -> (AppState, CallId, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
             .await
@@ -1108,13 +1724,9 @@ mod tests {
         let store = Arc::new(crate::BlobStore::filesystem(tmp.path().join("audio")).expect("blob"));
         let call = repo::insert_call(
             &db,
-            &NewCall {
-                system_ref: 11,
-                talkgroup_ref: 54241,
-                call_at_ms: 1_000,
-                object_key: "aa/1.wav".into(),
-                ..Default::default()
-            },
+            &NewCall::new(11, 54241, 1_000),
+            Some(crate::blob::StoredAudio::written("aa/1.wav".into(), 3)),
+            &repo::Resolved::unresolved(),
             true,
             0,
         )
@@ -1129,8 +1741,60 @@ mod tests {
         (state, call.id, tmp)
     }
 
-    /// The scope read fails — a half-applied migration, a table taken out from
-    /// under a running process.
+    /// This instance does not enhance at all — the shipped default — and finding
+    /// that out must cost no query, on the hardware least able to afford one.
+    #[tokio::test]
+    async fn an_instance_that_does_not_enhance_asks_the_database_nothing() {
+        let (mut state, call_id, _tmp) = one_stored_call().await;
+        state.enhancer = crate::enhance::Enhancer::disabled();
+
+        assert_eq!(
+            queue_for_enhancement(&state, call_id).await,
+            Queued::NotEnhancing
+        );
+    }
+
+    /// Enhancement is on, but not for this Call's Talkgroup (#20's nullable
+    /// scope). The Call keeps the audio the recorder sent.
+    #[tokio::test]
+    async fn a_call_outside_the_enhancement_scope_is_left_alone() {
+        let (state, call_id, _tmp) = one_stored_call().await;
+        state
+            .db
+            .execute_unprepared(r#"UPDATE "systems" SET "enhancement" = false"#)
+            .await
+            .expect("opt this System out");
+
+        assert_eq!(
+            queue_for_enhancement(&state, call_id).await,
+            Queued::OutOfScope
+        );
+    }
+
+    /// A Call inside the scope is marked `pending` before it is offered, so a
+    /// process that dies between the two finds it again at the next boot.
+    #[tokio::test]
+    async fn a_call_in_scope_is_marked_pending_and_offered() {
+        let (state, call_id, _tmp) = one_stored_call().await;
+
+        assert_eq!(
+            queue_for_enhancement(&state, call_id).await,
+            Queued::Offered
+        );
+
+        assert_eq!(
+            repo::find_call(&state.db, call_id)
+                .await
+                .expect("read it back")
+                .expect("the Call")
+                .enhancement,
+            call::EnhancementState::PENDING,
+            "marked on disk before it was offered in memory"
+        );
+    }
+
+    /// The scope read fails — a database that has gone away under a running
+    /// process.
     ///
     /// It must cost the recorder nothing. By the time this runs the Call is
     /// stored, answered and already on the live feed, so the only thing at stake
@@ -1140,25 +1804,18 @@ mod tests {
     async fn a_scope_that_cannot_be_read_leaves_the_call_alone_and_says_why() {
         let capture = crate::testing::LogCapture::start();
         let (state, call_id, _tmp) = one_stored_call().await;
-        // A column rather than the table: a Call row references its System, so
-        // dropping the table is refused outright — and a half-applied migration
-        // is what this actually looks like in the field anyway.
-        state
-            .db
-            .execute_unprepared("ALTER TABLE systems DROP COLUMN enhancement")
-            .await
-            .expect("take the column away");
+        // Closed rather than damaged: the arm is "the read failed", and a
+        // schema this test edited would be proving something about our
+        // migrations instead (#96).
+        state.db.close().await.expect("close the pool");
 
-        queue_for_enhancement(&state, call_id).await;
+        let queued = queue_for_enhancement(&state, call_id).await;
 
-        let logged = capture.text();
+        assert_eq!(queued, Queued::Failed("scope-unreadable"));
         assert!(
-            logged.contains("reason=scope-unreadable"),
-            "the operator must be told the decision could not be made: {logged}"
-        );
-        assert!(
-            logged.contains("no such column: systems.enhancement"),
-            "...and why: {logged}"
+            capture.text().contains("reason=scope-unreadable"),
+            "the operator must be told the decision could not be made: {}",
+            capture.text()
         );
     }
 
@@ -1170,7 +1827,10 @@ mod tests {
         let capture = crate::testing::LogCapture::start();
         let (state, _, _tmp) = one_stored_call().await;
 
-        queue_for_enhancement(&state, 999_999).await;
+        assert_eq!(
+            queue_for_enhancement(&state, 999_999).await,
+            Queued::Vanished
+        );
 
         capture.assert_never_logged("reason=");
     }

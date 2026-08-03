@@ -16,6 +16,20 @@ use serde::Serialize;
 /// Radio-Scout's internal primary key for a stored Call (matches the DB `i64`).
 pub type CallId = i64;
 
+/// A Call already stored on some Talkgroup, near enough in time that an
+/// arriving Call has to be compared against it (ADR-0001's duplicate detection).
+///
+/// A *row*, not a count (#96). The database can answer "is there one?" in a
+/// single `COUNT`, and that is what ingest asked before — but a count cannot be
+/// property-tested at the boundaries, cannot say *which* Call the duplicate was
+/// of, and cannot be widened into #46's keep-best, which has to compare the
+/// candidate copies to decide which one to keep. The rows cost the same query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Candidate {
+    pub id: CallId,
+    pub call_at_ms: i64,
+}
+
 /// A Call's place in the **emission** sequence — the order Calls went out on the
 /// live feed (#94).
 ///

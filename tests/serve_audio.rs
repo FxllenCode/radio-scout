@@ -17,14 +17,13 @@ use radio_scout::{BlobStore, S3Config};
 /// A Call row pointing at `object_key`. No audio object is written unless the
 /// test writes one.
 async fn insert_call(app: &TestApp, object_key: &str, mime: Option<&str>) -> i64 {
-    app.seed_call(NewCall {
-        system_ref: 11,
-        talkgroup_ref: 54241,
-        call_at_ms: 1000,
-        object_key: object_key.to_string(),
-        audio_mime: mime.map(str::to_string),
-        ..Default::default()
-    })
+    app.seed_call(
+        NewCall {
+            audio_mime: mime.map(str::to_string),
+            ..NewCall::new(11, 54241, 1000)
+        },
+        common::audio_at(object_key),
+    )
     .await
 }
 
@@ -193,14 +192,13 @@ fn max_age_of(resp: &reqwest::Response) -> u64 {
 async fn a_pending_calls_redirect_is_not_cached_past_its_enhancement() {
     let app = TestApp::builder().store(s3_store()).spawn().await;
     let id = app
-        .seed_call(NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: 1000,
-            object_key: "ab/pending.m4a".into(),
-            audio_mime: Some("audio/mp4".into()),
-            ..Default::default()
-        })
+        .seed_call(
+            NewCall {
+                audio_mime: Some("audio/mp4".into()),
+                ..NewCall::new(11, 54241, 1000)
+            },
+            common::audio_at("ab/pending.m4a"),
+        )
         .await;
     radio_scout::db::repo::mark_enhancement(&app.db, id, EnhancementState::PENDING)
         .await

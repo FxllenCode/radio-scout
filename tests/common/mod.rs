@@ -91,7 +91,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use radio_scout::admin::CSRF_HEADER;
-use radio_scout::blob::AudioStore;
+use radio_scout::blob::{AudioStore, StoredAudio};
 use radio_scout::config::{Cli, Config};
 use radio_scout::db::Db;
 use radio_scout::db::entities::{call, call_patch, system, tag, talkgroup, talkgroup_ref, unit};
@@ -104,6 +104,15 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, Set,
 };
+
+/// A seeded Call's row pointing at `key` — what ingest would have left behind
+/// after writing the object there.
+///
+/// The byte length is zero because nothing was written; a test that cares about
+/// the size says so with [`TestApp::put_object`] and its own value.
+pub fn audio_at(key: impl Into<String>) -> Option<StoredAudio> {
+    Some(StoredAudio::written(key.into(), 0))
+}
 
 /// A running Radio-Scout, and everything needed to observe it.
 ///
@@ -599,14 +608,20 @@ impl TestApp {
 
     /// Insert a Call row directly, for the read surfaces (archive search, audio
     /// serving) that care about rows rather than how they got there. Returns the
-    /// new Call's id. No audio object is written — use
-    /// [`TestApp::put_object`] when the bytes matter too.
+    /// new Call's id. No audio object is *written* — say [`audio_at`] for a row
+    /// that points at one, and pair it with [`TestApp::put_object`] when the
+    /// bytes matter too.
+    ///
+    /// `audio` is a second argument for the same reason ingest passes one (#96):
+    /// what a Recorder said and what our store holds are two different sets of
+    /// facts, and only one of them can be known before the object is written.
+    /// `None` is an **Encrypted Call** — a row with nothing behind it (#42).
     ///
     /// Always auto-populates, matching the shipped default. That flag gates only
     /// the Unit roster, so it is inert for a `NewCall` with no `units`; a test
     /// that needs it off should say why and take the knob then.
-    pub async fn seed_call(&self, new: NewCall) -> i64 {
-        repo::insert_call(&self.db, &new, true, 0)
+    pub async fn seed_call(&self, new: NewCall, audio: Option<StoredAudio>) -> i64 {
+        repo::insert_call(&self.db, &new, audio, &repo::Resolved::default(), true, 0)
             .await
             .expect("seed call")
             .id

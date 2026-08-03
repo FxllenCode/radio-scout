@@ -8,10 +8,11 @@
 
 mod common;
 
+use radio_scout::blob::StoredAudio;
 use radio_scout::db::entities::{
     api_key, call_frequency, call_patch, call_unit, group, system, tag, talkgroup, unit,
 };
-use radio_scout::db::repo::{Disposition, DropReason};
+use radio_scout::db::repo::{Disposition, DropReason, NewCall, Resolved};
 use radio_scout::db::{self, Db, repo};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
 
@@ -240,16 +241,12 @@ async fn insert_call_persists_call_with_children() {
     seed_talkgroup(&db, sys.id, 300).await;
 
     let new = repo::NewCall {
-        system_ref: 11,
         system_label: Some("Alpha".into()),
-        talkgroup_ref: 100,
         talkgroup_label: Some("Dispatch".into()),
         talkgroup_tag: Some("Fire".into()),
         talkgroup_groups: vec!["Emergency".into(), "Public".into()],
-        call_at_ms: NOW,
         frequency: Some(774_031_250),
         source_ref: Some(4_424_000),
-        object_key: "ab/abcd.wav".into(),
         audio_mime: Some("audio/x-wav".into()),
         audio_name: Some("audio.wav".into()),
         duration_ms: Some(4_250),
@@ -269,10 +266,19 @@ async fn insert_call_persists_call_with_children() {
             spike_count: Some(1),
             ..Default::default()
         }],
-        ..Default::default()
+        ..NewCall::new(11, 100, NOW)
     };
 
-    let stored = repo::insert_call(&db, &new, true, NOW).await.unwrap();
+    let stored = repo::insert_call(
+        &db,
+        &new,
+        common::audio_at("ab/abcd.wav"),
+        &Resolved::unresolved(),
+        true,
+        NOW,
+    )
+    .await
+    .unwrap();
 
     // System, Talkgroup, Tag resolved-and-created.
     assert_eq!(system::Entity::find().count(&db).await.unwrap(), 1);
@@ -460,14 +466,12 @@ async fn seed_sized_call(
 ) -> i64 {
     repo::insert_call(
         db,
-        &repo::NewCall {
-            system_ref,
-            talkgroup_ref,
-            call_at_ms: at_ms,
-            object_key: format!("{key}.wav"),
-            audio_size: Some(audio_size),
-            ..Default::default()
-        },
+        &repo::NewCall::new(system_ref, talkgroup_ref, at_ms),
+        Some(StoredAudio::written(
+            format!("{key}.wav"),
+            audio_size as usize,
+        )),
+        &Resolved::unresolved(),
         true,
         NOW,
     )
@@ -660,16 +664,22 @@ async fn seed_call(
     key: &str,
 ) -> i64 {
     let new = repo::NewCall {
-        system_ref,
         system_label: Some(system_label.into()),
-        talkgroup_ref,
         talkgroup_tag: Some(tag.into()),
         talkgroup_groups: groups.iter().map(|g| (*g).to_string()).collect(),
-        call_at_ms: at_ms,
-        object_key: format!("{key}.wav"),
-        ..Default::default()
+        ..NewCall::new(system_ref, talkgroup_ref, at_ms)
     };
-    repo::insert_call(db, &new, true, NOW).await.unwrap().id
+    repo::insert_call(
+        db,
+        &new,
+        common::audio_at(format!("{key}.wav")),
+        &Resolved::unresolved(),
+        true,
+        NOW,
+    )
+    .await
+    .unwrap()
+    .id
 }
 
 // ---------------------------------------------------------------------------
@@ -715,16 +725,12 @@ async fn seed_talkgroup(db: &Db, system_id: i64, ext_ref: i64) -> talkgroup::Mod
 /// recorder upload for an unknown talkgroup produces.
 fn minimal_call(system_ref: i64, talkgroup_ref: i64) -> repo::NewCall {
     repo::NewCall {
-        system_ref,
-        talkgroup_ref,
-        call_at_ms: NOW,
-        object_key: "ab/x.wav".into(),
         units: vec![repo::NewCallUnit {
             unit_ref: 4242,
             label: Some("Medic 7".into()),
             ..Default::default()
         }],
-        ..Default::default()
+        ..repo::NewCall::new(system_ref, talkgroup_ref, NOW)
     }
 }
 
@@ -734,9 +740,16 @@ fn minimal_call(system_ref: i64, talkgroup_ref: i64) -> repo::NewCall {
 async fn auto_populate_fills_rdio_defaults_on_create() {
     let (db, _dir) = sqlite().await;
 
-    let stored = repo::insert_call(&db, &minimal_call(11, 5), true, NOW)
-        .await
-        .unwrap();
+    let stored = repo::insert_call(
+        &db,
+        &minimal_call(11, 5),
+        common::audio_at("ab/x.wav"),
+        &Resolved::unresolved(),
+        true,
+        NOW,
+    )
+    .await
+    .unwrap();
 
     let sys = system::Entity::find_by_id(stored.system_id)
         .one(&db)
@@ -778,21 +791,33 @@ async fn auto_populate_leaves_existing_talkgroup_untouched() {
 
     // Curated create: tag "Fire", group "Law".
     let curated = repo::NewCall {
-        system_ref: 11,
-        talkgroup_ref: 5,
         talkgroup_label: Some("Dispatch".into()),
         talkgroup_tag: Some("Fire".into()),
         talkgroup_groups: vec!["Law".into()],
-        call_at_ms: NOW,
-        object_key: "ab/a.wav".into(),
-        ..Default::default()
+        ..NewCall::new(11, 5, NOW)
     };
-    repo::insert_call(&db, &curated, true, NOW).await.unwrap();
+    repo::insert_call(
+        &db,
+        &curated,
+        common::audio_at("ab/a.wav"),
+        &Resolved::unresolved(),
+        true,
+        NOW,
+    )
+    .await
+    .unwrap();
 
     // A bare later Call for the same talkgroup must not touch it.
-    repo::insert_call(&db, &minimal_call(11, 5), true, NOW + 1)
-        .await
-        .unwrap();
+    repo::insert_call(
+        &db,
+        &minimal_call(11, 5),
+        common::audio_at("ab/x.wav"),
+        &Resolved::unresolved(),
+        true,
+        NOW + 1,
+    )
+    .await
+    .unwrap();
 
     let tg = talkgroup::Entity::find()
         .filter(talkgroup::Column::Ref.eq(5))
@@ -826,9 +851,16 @@ async fn auto_populate_leaves_existing_talkgroup_untouched() {
 async fn insert_call_without_auto_populate_skips_unit_roster() {
     let (db, _dir) = sqlite().await;
 
-    repo::insert_call(&db, &minimal_call(11, 5), false, NOW)
-        .await
-        .unwrap();
+    repo::insert_call(
+        &db,
+        &minimal_call(11, 5),
+        common::audio_at("ab/x.wav"),
+        &Resolved::unresolved(),
+        false,
+        NOW,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         call_unit::Entity::find().count(&db).await.unwrap(),
@@ -896,20 +928,36 @@ async fn lowest_free_system_ref_fills_the_first_gap() {
     );
 }
 
+/// The auto-populate/blacklist policy over what the database actually holds —
+/// [`repo::resolve_refs`] and [`repo::disposition`] composed, which is what
+/// ingest does with them (#96). The *arms* are tabled in `repo`'s own unit
+/// tests, over channels a test constructs; what these prove is that the read
+/// finds the rows the rule is then applied to.
+async fn disposition_of(
+    db: &Db,
+    system_ref: i64,
+    talkgroup_ref: i64,
+    global_auto_populate: bool,
+) -> Disposition {
+    let channel = repo::resolve_refs(db, system_ref, talkgroup_ref)
+        .await
+        .expect("resolve the channel");
+    repo::disposition(&channel, talkgroup_ref, global_auto_populate)
+}
+
 #[tokio::test]
 async fn disposition_unknown_system_follows_global_toggle() {
     let (db, _dir) = sqlite().await;
     // Unknown system, global on -> store & auto-populate.
     assert_eq!(
-        repo::ingest_disposition(&db, 99, 5, true).await.unwrap(),
+        disposition_of(&db, 99, 5, true).await,
         Disposition::Store {
-            auto_populate: true,
-            talkgroup_id: None,
+            auto_populate: true
         }
     );
     // Unknown system, global off -> dropped (nothing to attach to).
     assert_eq!(
-        repo::ingest_disposition(&db, 99, 5, false).await.unwrap(),
+        disposition_of(&db, 99, 5, false).await,
         Disposition::Drop(DropReason::NotPopulated)
     );
 }
@@ -920,16 +968,15 @@ async fn disposition_blacklist_drops_even_with_auto_populate_on() {
     seed_system(&db, 11, "Alpha", true, Some("5,7")).await;
 
     assert_eq!(
-        repo::ingest_disposition(&db, 11, 5, true).await.unwrap(),
+        disposition_of(&db, 11, 5, true).await,
         Disposition::Drop(DropReason::Blacklisted),
         "blacklisted ref dropped regardless of auto-populate"
     );
     // A non-blacklisted talkgroup under the same system still stores.
     assert_eq!(
-        repo::ingest_disposition(&db, 11, 6, true).await.unwrap(),
+        disposition_of(&db, 11, 6, true).await,
         Disposition::Store {
-            auto_populate: true,
-            talkgroup_id: None,
+            auto_populate: true
         }
     );
 }
@@ -940,17 +987,16 @@ async fn disposition_per_system_flag_populates_when_global_off() {
     // Global off, but this system opts in -> unknown talkgroup auto-created.
     seed_system(&db, 11, "OptIn", true, None).await;
     assert_eq!(
-        repo::ingest_disposition(&db, 11, 5, false).await.unwrap(),
+        disposition_of(&db, 11, 5, false).await,
         Disposition::Store {
-            auto_populate: true,
-            talkgroup_id: None,
+            auto_populate: true
         }
     );
 
     // Global off, system opts out, unknown talkgroup -> dropped.
     let opted_out = seed_system(&db, 22, "OptOut", false, None).await;
     assert_eq!(
-        repo::ingest_disposition(&db, 22, 5, false).await.unwrap(),
+        disposition_of(&db, 22, 5, false).await,
         Disposition::Drop(DropReason::NotPopulated)
     );
 
@@ -958,13 +1004,19 @@ async fn disposition_per_system_flag_populates_when_global_off() {
     // with auto-populate off (no unit roster).
     let known = seed_talkgroup(&db, opted_out.id, 5).await;
     assert_eq!(
-        repo::ingest_disposition(&db, 22, 5, false).await.unwrap(),
+        disposition_of(&db, 22, 5, false).await,
         Disposition::Store {
-            auto_populate: false,
-            // The channel it resolved to rides along, so dedup two statements
-            // later does not have to ask again (#45).
-            talkgroup_id: Some(known.id),
+            auto_populate: false
         }
+    );
+    // ...and the channel it resolved to is carried, so dedup and the insert do
+    // not have to ask again (#96, #45).
+    assert_eq!(
+        repo::resolve_refs(&db, 22, 5)
+            .await
+            .expect("resolve")
+            .talkgroup_id(),
+        Some(known.id)
     );
 }
 
@@ -1000,10 +1052,6 @@ async fn link_talkgroup_group_is_idempotent() {
 async fn only_labeled_positive_units_are_rostered() {
     let (db, _dir) = sqlite().await;
     let new = repo::NewCall {
-        system_ref: 11,
-        talkgroup_ref: 5,
-        call_at_ms: NOW,
-        object_key: "ab/x.wav".into(),
         units: vec![
             repo::NewCallUnit {
                 unit_ref: 0, // junk Ref, even with a label -> skipped
@@ -1024,9 +1072,18 @@ async fn only_labeled_positive_units_are_rostered() {
                 ..Default::default()
             },
         ],
-        ..Default::default()
+        ..NewCall::new(11, 5, NOW)
     };
-    repo::insert_call(&db, &new, true, NOW).await.unwrap();
+    repo::insert_call(
+        &db,
+        &new,
+        common::audio_at("ab/x.wav"),
+        &Resolved::unresolved(),
+        true,
+        NOW,
+    )
+    .await
+    .unwrap();
 
     // All three are still recorded as per-call detail...
     assert_eq!(call_unit::Entity::find().count(&db).await.unwrap(), 3);
@@ -1248,14 +1305,9 @@ async fn audio_size_migration_converges_on_databases_that_predate_the_column() {
     // The column is back, and the size cap can read it.
     repo::insert_call(
         &db,
-        &repo::NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: NOW,
-            object_key: "aa/1.wav".into(),
-            audio_size: Some(4096),
-            ..Default::default()
-        },
+        &repo::NewCall::new(11, 54241, NOW),
+        Some(StoredAudio::written("aa/1.wav".into(), 4096)),
+        &Resolved::unresolved(),
         true,
         NOW,
     )
@@ -1293,20 +1345,19 @@ async fn auto_populate_migration_converges_on_databases_that_predate_the_columns
 
     // Ingest works again: reading the policy is what blew up (it selects the
     // whole System row), and a Call for an unknown System lands instead.
-    let disposition = repo::ingest_disposition(&db, 11, 54241, true)
+    let channel = repo::resolve_refs(&db, 11, 54241)
         .await
-        .expect("read the auto-populate policy");
-    assert!(matches!(disposition, repo::Disposition::Store { .. }));
+        .expect("read the System the policy is decided over");
+    assert!(matches!(
+        repo::disposition(&channel, 54241, true),
+        repo::Disposition::Store { .. }
+    ));
 
     let stored = repo::insert_call(
         &db,
-        &repo::NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: NOW,
-            object_key: "aa/1.wav".into(),
-            ..Default::default()
-        },
+        &repo::NewCall::new(11, 54241, NOW),
+        Some(StoredAudio::written("aa/1.wav".into(), 0)),
+        &Resolved::unresolved(),
         true,
         NOW,
     )
@@ -1474,13 +1525,11 @@ async fn stored_calls_attaches_patches_to_the_right_call() {
     let patched = repo::insert_call(
         &db,
         &repo::NewCall {
-            system_ref: 100,
-            talkgroup_ref: 2,
-            call_at_ms: 2000,
-            object_key: "p.wav".into(),
             patches: vec![9002, 9001],
-            ..Default::default()
+            ..NewCall::new(100, 2, 2000)
         },
+        common::audio_at("p.wav"),
+        &Resolved::unresolved(),
         true,
         NOW,
     )
@@ -1714,10 +1763,6 @@ async fn recorder_truth_migration_converges_on_databases_that_predate_the_column
     let stored = repo::insert_call(
         &db,
         &repo::NewCall {
-            system_ref: 11,
-            talkgroup_ref: 54241,
-            call_at_ms: NOW,
-            object_key: "aa/2.wav".into(),
             duration_ms: Some(8250),
             emergency: true,
             site_ref: Some(3),
@@ -1727,8 +1772,10 @@ async fn recorder_truth_migration_converges_on_databases_that_predate_the_column
                 emergency: true,
                 ..Default::default()
             }],
-            ..Default::default()
+            ..NewCall::new(11, 54241, NOW)
         },
+        common::audio_at("aa/2.wav"),
+        &Resolved::unresolved(),
         true,
         NOW,
     )

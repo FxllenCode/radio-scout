@@ -7,7 +7,7 @@ use radio_scout::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, site, system, talkgroup, unit,
 };
 use radio_scout::db::repo;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 
 mod common;
 use common::{CallUpload, TestApp};
@@ -47,6 +47,54 @@ async fn api_key_is_scoped_to_its_system() {
         .await;
     assert_eq!(status, 401, "key denied for another system");
     assert!(body.contains("Invalid API key for system 22"), "{body:?}");
+}
+
+/// **The System and the Talkgroup are resolved once per Call** (#96) — which is
+/// only observable from outside as a number of statements, because the answer
+/// the endpoint gives is identical either way and only the round-trips behind it
+/// differ (#86's argument, applied to ingest).
+///
+/// Before this, ingest read them twice: once to decide the auto-populate and
+/// blacklist policy, and again from scratch inside the insert, which resolved
+/// both rows for itself. On a Pi taking a Call a second against Postgres, each
+/// of those is a round-trip an Operator pays for.
+///
+/// The number is exact, with the breakdown below, so a change that adds a
+/// statement has to say so here rather than slipping under a ceiling. It counts
+/// a **steady-state** Call — a System and Talkgroup that already exist and no
+/// auto-populating to do — because that is every Call after the first.
+#[tokio::test]
+async fn a_steady_state_call_resolves_its_channel_once() {
+    let app = TestApp::with_key("k").await;
+    // The first Call creates the System and the Talkgroup; the second is the
+    // one every later Call looks like.
+    app.upload_ok(CallUpload::new().at(1_000)).await;
+    app.settle().await;
+
+    let before = app.statements_issued();
+    app.upload_ok(CallUpload::new().at(20_000)).await;
+    app.settle().await;
+    let spent = app.statements_issued() - before;
+
+    // Postgres inserts with `RETURNING`, so sea-orm gets the stored row back in
+    // the same statement; SQLite needs a `SELECT` after it. One statement of
+    // difference, and it is the dialect's rather than ours (ADR-0003) — which
+    // is exactly the kind of thing an absolute number has to say out loud
+    // rather than hide behind a ceiling.
+    let read_back = match app.db.get_database_backend() {
+        sea_orm::DatabaseBackend::Postgres => 0,
+        _ => 1,
+    };
+
+    assert_eq!(
+        spent,
+        13 + read_back,
+        "one steady-state Call, end to end: the API key; the System and the \
+         Talkgroup, once each; the dedup window; the insert (+ a read-back on \
+         SQLite); the six the live-feed view is denormalized from; the \
+         emission; and the push sender asking who is subscribed. Two more than \
+         this and the channel is being resolved twice again."
+    );
 }
 
 #[tokio::test]
