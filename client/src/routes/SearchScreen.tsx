@@ -6,7 +6,8 @@ import {
   SkipForward,
   Square,
 } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { skipToken } from '@reduxjs/toolkit/query'
+import { useEffect, useState, type ReactNode } from 'react'
 
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
@@ -14,6 +15,7 @@ import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
 import { callCategory, systemName, talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
+import type { RunSearch } from '@/lib/run'
 import {
   dateTimeLocalToMs,
   downloadUrl,
@@ -29,24 +31,35 @@ import {
   enterLiveFeed,
   enterPlaybackMode,
   next,
-  playResults,
   previous,
+  runPaged,
+  searchChanged,
   selectCurrentCall,
   selectHasNext,
   selectHasPrevious,
-  selectIsExhausted,
   selectIsInterrupting,
-  selectIsNearingPageEnd,
+  selectIsRolling,
   selectPlaybackMode,
   selectPlaybackPosition,
+  selectWantedPage,
+  startRun,
   stop,
 } from '@/store/playback'
 import { selectIsPaused, togglePause } from '@/store/transport'
-import type { Call, SearchQuery } from '@/types'
+import type { Call, SearchPage, SearchQuery } from '@/types'
 
 /** Results per page. Small enough to stay snappy on a Pi over a phone
  *  connection, large enough that scrolling beats paging. */
 const PAGE_SIZE = 50
+
+/** Stands in for the page until the first search lands. */
+const EMPTY_PAGE: SearchPage = {
+  results: [],
+  count: 0,
+  limit: PAGE_SIZE,
+  offset: 0,
+  hasMore: false,
+}
 
 const controlClass =
   'w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground'
@@ -62,151 +75,99 @@ const controlClass =
  */
 export function SearchScreen() {
   const dispatch = useAppDispatch()
-  const [filters, setFilters] = useState<SearchQuery>({ sort: 'newest' })
-  const [offset, setOffset] = useState(0)
+  /** The filters and the ordering — never the window, which is why this is a
+   *  [`RunSearch`] rather than a whole `SearchQuery`. A Run's identity is
+   *  exactly this value, so a `limit` or `offset` finding its way in here would
+   *  be a Run that ends whenever the Listener turned a page. */
+  const [filters, setFilters] = useState<RunSearch>({ sort: 'newest' })
+  /** Where the window **on screen** starts. Deliberately not the Run's own
+   *  offset (`Run.from`), which is where the Calls being *played* start: the
+   *  Listener may browse ahead with the paging buttons while a Run walks page
+   *  one, and neither should move the other (#89). */
+  const [windowOffset, setWindowOffset] = useState(0)
 
   const { data: options } = useGetFilterOptionsQuery(filters)
-  /** The search behind the results on screen. Named because #32's page-ahead has
-   *  to be able to say "the run playing is walking *this* page". */
-  const pageQuery = useMemo(
-    () => ({ ...filters, limit: PAGE_SIZE, offset }),
-    [filters, offset],
-  )
-  const { data: page, isFetching, isError } = useSearchCallsQuery(pageQuery)
+  const { data, isFetching, isError } = useSearchCallsQuery({
+    ...filters,
+    limit: PAGE_SIZE,
+    offset: windowOffset,
+  })
+  /** The window on screen. Empty rather than absent before the first page
+   *  lands, so a row that exists always has the page it came from to start a
+   *  Run with — `isFetching` and `isError` are what tell the two apart, and
+   *  they already do. */
+  const page = data ?? EMPTY_PAGE
 
   const mode = useAppSelector(selectPlaybackMode)
   const current = useAppSelector(selectCurrentCall)
   const interrupting = useAppSelector(selectIsInterrupting)
   const paused = useAppSelector(selectIsPaused)
-  const exhausted = useAppSelector(selectIsExhausted)
   const position = useAppSelector(selectPlaybackPosition)
   const hasNext = useAppSelector(selectHasNext)
   const hasPrevious = useAppSelector(selectHasPrevious)
-  const nearingPageEnd = useAppSelector(selectIsNearingPageEnd)
 
-  // Stable across renders while the page is, so the resume effect below can
-  // depend on it without re-firing every render.
-  const results = useMemo(() => page?.results ?? [], [page?.results])
+  const results = page.results
 
-  /** Set while waiting for the page playback rolled onto (US 25). */
-  const [resumeOnNextPage, setResumeOnNextPage] = useState(false)
-
-  /** The search whose page the run currently playing is walking (#32).
-   *
-   *  Playback's index counts into the result set it was *started* from, so it
-   *  only says anything about the page on screen while that is still the same
-   *  page. A filter change replaces the set; the paging buttons move the window
-   *  out from under it. In both cases the index keeps reporting "nearly at the
-   *  end" of a page nobody is on, and a page-ahead decided from it would fetch
-   *  — and warm the audio of — a boundary the listener is nowhere near. Holding
-   *  the *query* rather than a flag makes both cases one comparison; a boolean
-   *  caught the filter one and missed the paging one entirely.
-   *
-   *  **This is not RTK Query's cache key.** That one sorts its keys
-   *  (`defaultSerializeQueryArgs`); this is a plain `JSON.stringify`, so it is
-   *  key-*order* sensitive and only sound because `filters` is only ever
-   *  extended (`{ ...current, ...patch }`), never rebuilt or deleted from.
-   *  Something that rebuilds the object — a "clear filters" button — would
-   *  reorder the keys and leave this permanently false. That fails safe (no
-   *  page-ahead, never a wrong one) but it fails *silently*, so rebuild the
-   *  filters and you have to compare something order-independent instead. */
-  const [playingQuery, setPlayingQuery] = useState<string | null>(null)
-  const walkingThisPage = playingQuery === JSON.stringify(pageQuery)
-
-  /** Any filter change invalidates the page window the listener was on — and
-   *  any playback that was rolling onto the next page of the *old* filters. */
-  function updateFilters(patch: Partial<SearchQuery>) {
-    setFilters((current) => ({ ...current, ...patch }))
-    setOffset(0)
-    setResumeOnNextPage(false)
+  /** Any filter change moves the window back to the first page, and tells the
+   *  Run — which decides for itself whether it is still walking the search on
+   *  screen. */
+  function updateFilters(patch: Partial<RunSearch>) {
+    const changed = { ...filters, ...patch }
+    setFilters(changed)
+    setWindowOffset(0)
+    dispatch(searchChanged(changed))
   }
 
-  /** Start playing the `index`-th loaded result, recording which search those
-   *  results came from so the page-ahead knows what playback is walking. US 25's
-   *  roll onto the next page records the same thing where it resumes. */
-  function play(index: number) {
-    setPlayingQuery(JSON.stringify(pageQuery))
-    dispatch(
-      playResults({
-        results,
-        index,
-        offset: page?.offset ?? 0,
-        total: page?.count ?? results.length,
-      }),
-    )
-  }
+  /** The page of the Archive the Run needs on hand — the boundary it is about
+   *  to cross (#32's page-ahead) or the one it is waiting at (US 25's roll-on).
+   *
+   *  Both used to be worked out here, from playback's index plus two pieces of
+   *  local state that had to agree with it. Now there is one answer and one
+   *  subscription: RTK Query holds the page before the Run arrives, so crossing
+   *  the boundary costs no round trip, and `skipToken` means a Run with nothing
+   *  to page onto asks for nothing at all. */
+  const wanted = useAppSelector(selectWantedPage)
+  const rolling = useAppSelector(selectIsRolling)
+  // `currentData`, never `data`: RTK Query keeps the *previous* argument's
+  // answer in `data` while the next one is in flight, so a Run that re-armed
+  // onto a new search would be handed the page-ahead of the search the Listener
+  // just left — and go on playing Calls from it. `currentData` is undefined
+  // until the page for the argument now asked for is really in hand.
+  const { currentData: ahead } = useSearchCallsQuery(wanted ?? skipToken)
 
-  // Page-ahead (#32). The page boundary is the only transition that costs a
-  // search *and* a cold audio fetch, so it is the one a listener notices — and
-  // #14's prefetch stopped exactly there, because `selectNextCall` can only see
-  // the loaded page. Asking for the next page as a *second subscription* is what
-  // makes it free: this is the same cache key `offset + PAGE_SIZE` will use, so
-  // when playback rolls on, RTK Query already holds the answer and the roll-on
-  // effect below resumes without a round trip. `skip` keeps it to the cases that
-  // want it — nothing while the live feed owns the audio (the selector's job),
-  // nothing when there is no page to fetch, and nothing while what is playing
-  // belongs to a set the filters have since replaced.
-  const pagingAhead =
-    walkingThisPage && nearingPageEnd && page?.hasMore === true
-  const { data: nextPage } = useSearchCallsQuery(
-    { ...pageQuery, offset: offset + PAGE_SIZE },
-    { skip: !pagingAhead },
-  )
-
-  // ...and warm the first Call of it, which is the audio playback arrives at.
+  // Hand it over the moment the Run is actually at the boundary. Gated on
+  // `rolling` rather than on the data alone because the page-ahead's whole
+  // point is that the page is *already there* — RTK Query serves a cached one
+  // without a fulfilled action, so waiting for one to arrive would miss exactly
+  // the case #32 exists for.
   //
-  // `pagingAhead` is a dependency, and not for tidiness: RTK Query **keeps its
-  // `data` when `skip` flips to true**, so `nextPage` holds its identity when
-  // the page-ahead stands down. Without this the effect would never re-run,
-  // the cleanup would never fire, and an audio warm nobody wants any more would
-  // run to completion. Depending on the decision rather than only on its result
-  // is what makes the abort reach the case it exists for.
+  // `wanted` rides along as the request this page answers, which the Run checks
+  // against the one it named. That check is only ever as true as the caller: it
+  // is `currentData` above that makes the claim an honest one here, because
+  // with `data` the page could belong to a request nobody is making any more
+  // while `wanted` said otherwise.
+  useEffect(() => {
+    if (rolling && wanted && ahead) {
+      dispatch(runPaged({ window: wanted, page: ahead }))
+    }
+  }, [rolling, wanted, ahead, dispatch])
+
+  // ...and warm the first Call of that page, which is the audio the Run arrives
+  // at. #14's prefetch stops at the end of the loaded page, because what
+  // follows the last Call of one is not in the store yet.
+  //
+  // The gate is a boolean rather than `wanted` itself, and not for tidiness:
+  // `wanted` is rebuilt whenever the Run changes at all, so depending on it
+  // would abort and restart the warm on every Call the Run advances through.
+  const pagingAhead = wanted !== null
   useEffect(() => {
     if (!pagingAhead) return
-    const first = nextPage?.results[0]
+    const first = ahead?.results[0]
     if (!first) return
     const controller = new AbortController()
     void prefetchAudio(first.audioUrl, controller.signal)
     return () => controller.abort()
-  }, [pagingAhead, nextPage?.results])
-
-  // Playback ran off the end of the loaded page. US 25 asks for sequential
-  // playback through the *filtered results*, not through one page of them, so
-  // roll onto the next page and keep going. `stop()` consumes the cue straight
-  // away, so this can't fire twice for one exhaustion.
-  useEffect(() => {
-    if (!exhausted) return
-    if (page?.hasMore) {
-      setOffset((current) => current + PAGE_SIZE)
-      setResumeOnNextPage(true)
-    }
-    dispatch(stop())
-  }, [exhausted, page?.hasMore, dispatch])
-
-  // ...and pick up at the top of that page once it lands — which re-arms the
-  // page-ahead against the page now playing, so a long run keeps warming each
-  // boundary rather than only the first.
-  useEffect(() => {
-    if (!resumeOnNextPage || isFetching || results.length === 0) return
-    setResumeOnNextPage(false)
-    setPlayingQuery(JSON.stringify(pageQuery))
-    dispatch(
-      playResults({
-        results,
-        index: 0,
-        offset: page?.offset ?? 0,
-        total: page?.count ?? results.length,
-      }),
-    )
-  }, [
-    resumeOnNextPage,
-    isFetching,
-    results,
-    pageQuery,
-    page?.offset,
-    page?.count,
-    dispatch,
-  ])
+  }, [pagingAhead, ahead?.results])
 
   return (
     <Screen
@@ -417,7 +378,7 @@ export function SearchScreen() {
         className="mt-5 flex items-baseline justify-between font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
         aria-live="polite"
       >
-        <span>{pageSummary(offset, results.length, page?.count ?? 0)}</span>
+        <span>{pageSummary(windowOffset, results.length, page.count)}</span>
         {isFetching && <span>Searching…</span>}
       </div>
 
@@ -441,7 +402,7 @@ export function SearchScreen() {
               key={call.id}
               call={call}
               isCurrent={current?.id === call.id}
-              onPlay={() => play(index)}
+              onPlay={() => dispatch(startRun({ search: filters, page, index }))}
             />
           ))}
         </ul>
@@ -451,16 +412,16 @@ export function SearchScreen() {
         <Button
           variant="outline"
           size="sm"
-          disabled={offset === 0}
-          onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+          disabled={windowOffset === 0}
+          onClick={() => setWindowOffset(Math.max(0, windowOffset - PAGE_SIZE))}
         >
           Previous page
         </Button>
         <Button
           variant="outline"
           size="sm"
-          disabled={!page?.hasMore}
-          onClick={() => setOffset(offset + PAGE_SIZE)}
+          disabled={!page.hasMore}
+          onClick={() => setWindowOffset(windowOffset + PAGE_SIZE)}
         >
           Next page
         </Button>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ARCHIVE } from '@/test/handlers'
+import { ARCHIVE, searchPage } from '@/test/handlers'
 import type { Call } from '@/types'
 
 import {
@@ -10,7 +10,7 @@ import {
   selectHistory,
   turnFeedOff,
 } from './live'
-import { enterPlaybackMode, playResults, selectCurrentCall } from './playback'
+import { enterPlaybackMode, selectCurrentCall, startRun } from './playback'
 import { makeStore, type AppStore } from './store'
 import {
   nextCall,
@@ -58,7 +58,7 @@ describe('transport', () => {
     it('is the archived Call when one interrupts the feed', () => {
       const store = listening(call(1))
 
-      store.dispatch(playResults({ results: ARCHIVE, index: 0 }))
+      store.dispatch(startRun({ search: {}, page: searchPage(), index: 0 }))
 
       expect(selectNowPlaying(store.getState())).toEqual(ARCHIVE[0])
       // The feed's own Call is untouched underneath, and comes back after.
@@ -157,7 +157,7 @@ describe('transport', () => {
     it('walks the archive results when an archived Call owns the audio', () => {
       const store = listening(call(1))
       store.dispatch(enterPlaybackMode())
-      store.dispatch(playResults({ results: ARCHIVE, index: 0 }))
+      store.dispatch(startRun({ search: {}, page: searchPage(), index: 0 }))
 
       store.dispatch(nextCall())
 
@@ -187,7 +187,7 @@ describe('transport', () => {
     it('steps back through the archive when it owns the audio', () => {
       const store = makeStore()
       store.dispatch(enterPlaybackMode())
-      store.dispatch(playResults({ results: ARCHIVE, index: 1 }))
+      store.dispatch(startRun({ search: {}, page: searchPage(), index: 1 }))
 
       store.dispatch(previousCall())
 

@@ -1,6 +1,13 @@
 /** A stored Call as delivered over the live feed and the archive API. Mirrors
  *  the backend `StoredCall` (compact camelCase). Per CONTEXT.md, **Ref** is the
- *  recorder-supplied external id and **id** is Radio-Scout's internal key. */
+ *  recorder-supplied external id and **id** is Radio-Scout's internal key.
+ *
+ *  **What the client reads, not everything the wire carries** (#89). The server
+ *  also sends `dateTime` (`timestamp` in ISO-8601, which nothing here renders —
+ *  `formatCallTime` works from the millisecond value) and `audioMime` (the
+ *  `<audio>` element sniffs the response's own Content-Type). Declaring a field
+ *  nobody reads invites code to be written against it, and both of those have a
+ *  better source already in use. */
 export interface Call {
   id: number
   systemRef: number
@@ -17,9 +24,7 @@ export interface Call {
   patches?: number[]
   frequency?: number
   source?: number
-  dateTime?: string
   timestamp?: number
-  audioMime?: string
   /** How long the transmission is, in milliseconds (#42, spec US 8) — from the
    *  recorder's metadata or an audio-header parse at ingest. Absent when
    *  neither could say, which is every Call stored before #42. */

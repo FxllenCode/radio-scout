@@ -4,9 +4,9 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 
 import { ARTWORK_SIZES } from '@/lib/artwork'
 import { keepAliveLoopUrl } from '@/lib/silence'
-import { enterPlaybackMode, next, playResults, stop } from '@/store/playback'
+import { enterPlaybackMode, next, startRun, stop } from '@/store/playback'
 import { makeStore, type AppStore } from '@/store/store'
-import { ARCHIVE, ORIGIN } from '@/test/handlers'
+import { ARCHIVE, ORIGIN, searchPage } from '@/test/handlers'
 import { audioSessionType, installMediaSession } from '@/test/mediaSession'
 import { server } from '@/test/setup'
 import { renderWithProviders } from '@/test/utils'
@@ -74,7 +74,7 @@ function playFrom(index: number, store: AppStore = makeStore()) {
   renderWithProviders(<CallPlayer />, { store })
   act(() => {
     store.dispatch(enterPlaybackMode())
-    store.dispatch(playResults({ results: ARCHIVE, index }))
+    store.dispatch(startRun({ search: {}, page: searchPage(), index }))
   })
   return store
 }
@@ -187,7 +187,7 @@ describe('CallPlayer', () => {
       const element = player()
 
       act(() => {
-        store.dispatch(playResults({ results: ARCHIVE, index: 1 }))
+        store.dispatch(startRun({ search: {}, page: searchPage(), index: 1 }))
       })
 
       // Same element, new source: a fresh element per Call is what tears the

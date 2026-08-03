@@ -393,8 +393,10 @@ describe('makeStore', () => {
         'enterLiveFeed',
         'enterPlaybackMode',
         'next',
-        'playResults',
         'previous',
+        'runPaged',
+        'searchChanged',
+        'startRun',
         'stop',
       ])
     })

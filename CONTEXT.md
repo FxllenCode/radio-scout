@@ -101,7 +101,9 @@ The mode where the listener plays archived calls from the searchable history ins
 _Avoid_: archive mode, replay mode.
 
 **Run**:
-The ordered set of archived **Calls** a **Listener** is walking, and where they are within it — which **Call** is playing, what follows, and which page of the **Archive** has to be on hand for it. One concept with an ordering: walking search results newest-first, playing forward in time from a row, and a **DVR** across a time range are the same **Run** configured differently. A Run knows which search it belongs to, so a search that changes ends it rather than silently walking the wrong results.
+The ordered set of archived **Calls** a **Listener** is walking, and where they are within it — which **Call** is playing, what follows, and which page of the **Archive** has to be on hand for it. One concept with an ordering: walking search results newest-first, playing forward in time from a row, and a **DVR** across a time range are the same **Run** configured differently. A Run knows which search it belongs to, so a search that changes ends it rather than silently walking the wrong results — at the *boundary*, not mid-Call: what is loaded plays out, and what stops is rolling onto a page of a search the Listener has not seen. Identity is the search **compared structurally**, so a filter object rebuilt from the URL or cleared to `undefined` is the same Run.
+
+A Run carries **its own window** into the Archive, which is not the window on screen. The Listener browsing ahead with the paging buttons moves the screen; the Run keeps walking, keeps naming the page after its own, and does not drag the visible list along behind it (#89).
 _Avoid_: session (the **Operator's** admin login), playlist, queue (the **listening queue** is a different set), walk.
 
 **Listening queue**:

@@ -10,10 +10,10 @@ import {
   selectLiveMatrix,
   selectQueueDepth,
 } from '@/store/live'
-import { enterPlaybackMode, playResults } from '@/store/playback'
+import { enterPlaybackMode, startRun } from '@/store/playback'
 import { progressed, selectProgress } from '@/store/transport'
 import { makeStore, type AppStore } from '@/store/store'
-import { liveFeed } from '@/test/handlers'
+import { liveFeed, searchPage } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderApp } from '@/test/utils'
 import type { Call } from '@/types'
@@ -317,7 +317,11 @@ describe('LiveScreen', () => {
     const store = listening(call())
     act(() => {
       store.dispatch(
-        playResults({ results: [{ ...call(), id: 900 }], index: 0 }),
+        startRun({
+          search: {},
+          page: searchPage({ results: [{ ...call(), id: 900 }] }),
+          index: 0,
+        }),
       )
     })
     // Separately, because taking over the element resets the transport first.

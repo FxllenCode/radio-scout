@@ -1,6 +1,13 @@
 import { http, HttpResponse, ws } from 'msw'
 
-import type { Call, Catalog, FilterOptions, LogEvent, LogPage } from '@/types'
+import type {
+  Call,
+  Catalog,
+  FilterOptions,
+  LogEvent,
+  LogPage,
+  SearchPage,
+} from '@/types'
 
 /** Same-origin base our relative RTK Query calls resolve to under jsdom (the
  *  Request shim in setup.ts rewrites `/foo` → `http://localhost/foo`). Handlers
@@ -47,6 +54,34 @@ export const ARCHIVE: Call[] = [
     audioUrl: '/api/call/1/audio',
   },
 ]
+
+/** The barest Call a **Run** can walk: an id, somewhere it came from, and audio
+ *  to play. A test about *walking* Calls cares about which one is playing and
+ *  nothing else, so everything a test would have to skip past is left off. */
+export function searchCall(id: number): Call {
+  return {
+    id,
+    systemRef: 100,
+    talkgroupRef: 1,
+    audioUrl: `/api/call/${id}/audio`,
+  }
+}
+
+/** [`ARCHIVE`] as one page of `GET /api/calls`, which is what a **Run** is
+ *  started from (#89) — so a test that only wants "play these Calls" says so
+ *  without hand-building the paging fields it does not care about. Unlike
+ *  [`archivePage`], which slices a real request, this builds a page directly
+ *  for a test driving the store rather than the network. */
+export function searchPage(partial: Partial<SearchPage> = {}): SearchPage {
+  const results = partial.results ?? ARCHIVE
+  return {
+    results,
+    count: partial.count ?? results.length,
+    limit: partial.limit ?? results.length,
+    offset: partial.offset ?? 0,
+    hasMore: partial.hasMore ?? false,
+  }
+}
 
 export const FILTER_OPTIONS: FilterOptions = {
   systems: [

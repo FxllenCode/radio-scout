@@ -565,13 +565,17 @@ describe('SearchScreen', () => {
       )
     })
 
-    /** The paging buttons move the loaded window out from under a run that is
-     *  still playing — the same desync a filter change causes, by a different
-     *  route. Playback's index would still read "nearly at the end", so a
-     *  page-ahead decided from it would fetch a boundary nobody is near. */
-    it('stands the page-ahead down when the listener pages by hand', async () => {
+    /**
+     * The window on screen and the Run's own window are two different things
+     * (#89), and this is what naming them apart buys: a Listener who browses
+     * ahead while a Run plays moves only the screen. The Run keeps walking page
+     * one and keeps warming *its* boundary — where before, the two were one
+     * number, so glancing at page two stood the page-ahead down and the run
+     * playing lost the warm it was about to need.
+     */
+    it('keeps the Run on its own page while the listener browses ahead', async () => {
       const user = userEvent.setup()
-      pagedArchive(120)
+      const { rows: many } = pagedArchive(120)
       renderApp('/search')
 
       await user.click(
@@ -588,11 +592,141 @@ describe('SearchScreen', () => {
       await user.click(screen.getByRole('button', { name: 'Next page' }))
       await waitFor(() => expect(lastSearch().get('offset')).toBe('50'))
 
-      // Page two is on screen and page three was never asked for: the run still
-      // playing belongs to page one.
+      // Page two is on screen, and page three was never asked for: what the Run
+      // is walking towards is page two, wherever the Listener happens to be
+      // looking.
       expect(searches.filter((search) => search.includes('offset=100'))).toEqual(
         [],
       )
+
+      // ...and it still crosses onto page two when it gets there: the Run was
+      // on the 48th of 50, so three Calls end before the boundary.
+      for (let ended = 0; ended < 3; ended += 1) {
+        screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
+      }
+
+      await waitFor(() =>
+        expect(screen.getByTestId('call-player')).toHaveAttribute(
+          'src',
+          `/api/call/${many[50].id}/audio`,
+        ),
+      )
+    })
+
+    /**
+     * The Listener changes the search while a Run is playing, then starts a new
+     * Run on the results that arrive — and the new Run crosses its first
+     * boundary before the new search's page two has landed.
+     *
+     * What must never happen is that it carries on with a Call from the search
+     * that ended, and there is a real mechanism that would do it: an HTTP cache
+     * keyed by request hands back the answer to the *previous* argument while
+     * the next is in flight, so the page-ahead of the old search is still on
+     * hand at exactly the moment the new Run asks for one. Both halves of the
+     * fix are load-bearing — the screen reads the page for the argument it is
+     * actually asking for, and the Run refuses a page whose request is not the
+     * one it named.
+     *
+     * CONTEXT.md: "a search that changes ends it rather than silently walking
+     * the wrong results."
+     */
+    it('never carries a Run on with a page belonging to the search that ended', async () => {
+      const user = userEvent.setup()
+      const before = Array.from({ length: 120 }, (_, at) => ({
+        ...ARCHIVE[0],
+        id: 1000 + at,
+        audioUrl: `/api/call/${1000 + at}/audio`,
+      }))
+      const after = before.map((call, at) => ({
+        ...call,
+        id: 2000 + at,
+        audioUrl: `/api/call/${2000 + at}/audio`,
+        talkgroupTag: 'Fire',
+      }))
+      server.use(
+        http.get(`${ORIGIN}/api/calls`, async ({ request }) => {
+          const url = new URL(request.url)
+          searches.push(url.search)
+          const filtered = url.searchParams.get('tag') === 'Fire'
+          // The new search's *second* page is slow, so the boundary is crossed
+          // while the only page in hand is the old search's.
+          if (filtered && url.searchParams.get('offset') === '50') {
+            await delay(3000)
+          }
+          return HttpResponse.json(archivePage(url, filtered ? after : before))
+        }),
+      )
+      renderApp('/search')
+      await filtersLoaded()
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const first = await resultRows()
+      await user.click(within(first[47]).getByRole('button', { name: /^Play / }))
+      // The old search's page two is now in hand — this is the page that must
+      // not be taken.
+      await waitFor(() => expect(audioRequests).toContain('/api/call/1050/audio'))
+
+      await user.selectOptions(screen.getByLabelText('Tag'), 'Fire')
+      // The new search's rows, really on screen — every row here reads
+      // identically, so the download link's Call id is what tells them apart.
+      await waitFor(async () =>
+        expect(within((await resultRows())[0]).getByRole('link')).toHaveAttribute(
+          'href',
+          '/api/call/2000/download',
+        ),
+      )
+      const second = await resultRows()
+      await user.click(within(second[47]).getByRole('button', { name: /^Play / }))
+      await waitFor(() =>
+        expect(screen.getByTestId('call-player')).toHaveAttribute(
+          'src',
+          '/api/call/2047/audio',
+        ),
+      )
+
+      // Walk it off the end of the loaded page while page two is still coming.
+      for (let ended = 0; ended < 3; ended += 1) {
+        screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
+      }
+
+      await waitFor(() =>
+        expect(
+          screen.queryByRole('region', { name: 'Now playing' }),
+        ).not.toBeInTheDocument(),
+      )
+      expect(screen.getByTestId('call-player')).not.toHaveAttribute(
+        'src',
+        '/api/call/1050/audio',
+      )
+    })
+
+    /**
+     * ...and the list does *not* follow it there. The window is the Listener's,
+     * moved by the paging buttons and by nothing else — a run crossing a
+     * boundary every few minutes must not keep yanking the page out from under
+     * someone reading it. Where playback has got to is the "Now playing"
+     * readout's job, and it counts against the whole archive.
+     */
+    it('leaves the visible page where the listener left it as a Run rolls on', async () => {
+      const user = userEvent.setup()
+      pagedArchive(120)
+      renderApp('/search')
+
+      await user.click(
+        await screen.findByRole('button', { name: 'Playback mode' }),
+      )
+      const rows = await resultRows()
+      await user.click(within(rows[49]).getByRole('button', { name: /^Play / }))
+      expect(screen.getByText('50 of 120')).toBeInTheDocument()
+
+      screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
+
+      // The Run is on page two...
+      expect(await screen.findByText('51 of 120')).toBeInTheDocument()
+      // ...and the list is still showing page one.
+      expect(screen.getByText('1–50 of 120')).toBeInTheDocument()
     })
 
     /** No next page, nothing to fetch. The last page must not ask for a
