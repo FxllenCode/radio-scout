@@ -8,6 +8,7 @@ import {
   type FeedStatus,
 } from '@/lib/feed'
 import type { LiveStatus, Subscription } from '@/lib/liveFeed'
+import { enqueue, retain, takeNext, type QueuePolicy } from '@/lib/queue'
 import {
   EVERYTHING,
   avoidKey,
@@ -35,9 +36,19 @@ import { enterLiveFeed, enterPlaybackMode } from './playback'
 export const HISTORY_DEPTH = 5
 
 /** Ceiling on the listening queue. A phone that fell far behind must not grow
- *  an unbounded queue of stale traffic on a Pi-class device; past this the
- *  oldest waiting Calls are dropped and counted as missed. */
+ *  an unbounded queue of stale traffic on a Pi-class device; past this
+ *  [`QUEUE_POLICY`] decides what goes, and it is counted as missed. */
 export const QUEUE_LIMIT = 100
+
+/**
+ * How the listening queue orders itself (#95, `@/lib/queue`).
+ *
+ * **FIFO** — no `priorityOf` — because nothing yet gives a Listener a way to
+ * mark a Talkgroup **Priority**; #58 is where that arrives, and it arrives
+ * *here*, as one field, rather than as an edit to the three reducers below and
+ * the cap rule. The cap already honours a Priority the day one exists.
+ */
+const QUEUE_POLICY: QueuePolicy = { limit: QUEUE_LIMIT }
 
 /** How many Call ids are remembered for de-duplication. Catch-up delivery is
  *  *at-least-once* (ADR-0004), so a Call can arrive twice; ids are compared as
@@ -47,7 +58,9 @@ const SEEN_LIMIT = 256
 
 export interface LiveState {
   status: LiveStatus
-  /** Calls waiting to play, oldest first (CONTEXT.md **Listening queue**). */
+  /** Calls waiting to play, **in the order they will play** (CONTEXT.md
+   *  **Listening queue**) — arrival order until a Talkgroup has **Priority**,
+   *  and the policy's order after (`@/lib/queue`, #95). */
   queue: Call[]
   /** What the feed is playing now. */
   current: Call | null
@@ -186,9 +199,12 @@ function play(state: LiveState, call: Call | null) {
   state.playId += 1
 }
 
-/** Take the next Call off the queue, or fall quiet. */
+/** Take the next Call off the queue, or fall quiet. Which Call that is belongs
+ *  to the policy (`@/lib/queue`), not to this reducer. */
 function next(state: LiveState) {
-  play(state, state.queue.shift() ?? null)
+  const taken = takeNext(state.queue)
+  state.queue = taken.queue
+  play(state, taken.next)
 }
 
 /**
@@ -213,7 +229,7 @@ function expire(state: LiveState, now: number) {
  *  hold, or an avoid. */
 function purge(state: LiveState) {
   const matrix = matrixOf(state)
-  state.queue = state.queue.filter((call) => wants(matrix, call))
+  state.queue = retain(state.queue, (call) => wants(matrix, call))
   if (state.current && !wants(matrix, state.current)) next(state)
 }
 
@@ -409,12 +425,13 @@ const liveSlice = createSlice({
           play(state, call)
           return
         }
-        state.queue.push(call)
-        if (state.queue.length > QUEUE_LIMIT) {
-          // The stalest go first, and are admitted rather than vanishing.
-          state.missed += state.queue.length - QUEUE_LIMIT
-          state.queue = state.queue.slice(-QUEUE_LIMIT)
-        }
+        // Where it lands, and what the cap gives up to fit it, are the policy's
+        // (#95) — lowest **Priority** first and stalest within it, so a full
+        // queue can no longer discard the one Talkgroup the Listener said
+        // mattered. Whatever went is counted rather than vanishing.
+        const { queue, dropped } = enqueue(state.queue, call, QUEUE_POLICY)
+        state.queue = queue
+        state.missed += dropped.length
       },
     },
 
@@ -585,7 +602,8 @@ export const selectLiveCall = (state: WithLive): Call | null => state.live.curre
 /** The `Q` count on the display. */
 export const selectQueueDepth = (state: WithLive): number => state.live.queue.length
 
-/** The Calls waiting their turn, oldest first. */
+/** The Calls waiting their turn, in the order they will play — so a queue sheet
+ *  (#58) reads top-down without knowing the ordering rule. */
 export const selectQueue = (state: WithLive): Call[] => state.live.queue
 
 export const selectHistory = (state: WithLive): Call[] => state.live.history
