@@ -14,15 +14,8 @@
 
 use std::path::Path;
 
-/// Every workflow, as (file name, what the runner will actually do).
-///
-/// **The commentary is stripped**, and that is the load-bearing part. These
-/// files explain themselves at length, so `-D warnings` appears in the header
-/// comment as well as in the clippy step — and a test that searched the raw file
-/// would stay green after the flag itself was deleted, asserting about the prose
-/// instead of the pipeline. Only whole-line comments are removed: a `#` can
-/// legitimately sit inside a value (`COVERAGE_IGNORE`'s regex), and mangling one
-/// would be its own kind of wrong answer.
+/// Every workflow, as (file name, what the runner will actually do) — the
+/// commentary [stripped](without_comments).
 fn workflows() -> Vec<(String, String)> {
     let dir = repo_file(".github/workflows");
     let mut found: Vec<_> = std::fs::read_dir(&dir)
@@ -31,20 +24,36 @@ fn workflows() -> Vec<(String, String)> {
         .filter(|path| path.extension().is_some_and(|ext| ext == "yml"))
         .map(|path| {
             let text = std::fs::read_to_string(&path).expect("read workflow");
-            let steps = text
-                .lines()
-                .filter(|line| !line.trim_start().starts_with('#'))
-                .collect::<Vec<_>>()
-                .join("\n");
             (
                 path.file_name().expect("name").to_string_lossy().into(),
-                steps,
+                without_comments(&text),
             )
         })
         .collect();
     found.sort();
     assert!(!found.is_empty(), "no workflows in {}", dir.display());
     found
+}
+
+/// A pipeline file's settings, with its prose removed — **the load-bearing part
+/// of every assertion here.**
+///
+/// These files explain themselves at length, and the words they argue about are
+/// the same words an assertion looks for: `-D warnings` appears in `ci.yml`'s
+/// header comment as well as in the clippy step, and `.config/nextest.toml`
+/// spends a screen explaining why it sets neither `retries` nor `fail-fast`. A
+/// test that searched the raw text would find the argument and stay green after
+/// the setting itself was deleted — asserting about the writing instead of the
+/// run, which is the one failure this file cannot afford.
+///
+/// Only whole-line comments go: a `#` can legitimately sit inside a value
+/// (`COVERAGE_IGNORE`'s regex), and mangling one would be its own kind of wrong
+/// answer.
+fn without_comments(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A workflow split into its jobs: `(job name, the job's block)`.
@@ -131,6 +140,179 @@ fn ci_runs_the_integration_suites_and_the_doctests_not_just_the_lib() {
         ci.contains("cargo test --doc"),
         "nextest does not run doctests; something has to"
     );
+}
+
+/// Every run of the suite is on the profile the config describes (#103).
+///
+/// `.config/nextest.toml` was written two days before `ci.yml` existed, with a
+/// `[profile.ci]` in it for the pipeline to select — and the pipeline never
+/// selected it. So CI has always run `[profile.default]`, and the retries, the
+/// looser slow-timeout and the JUnit file that other profile promised were all
+/// silently off. A profile nobody selects reads exactly like one everybody
+/// does: green, fast, and describing a run that never happened.
+///
+/// Asked **per call site**, which is the part a set union over the workflows
+/// would get wrong. What started this was two bare invocations, and a profile
+/// named on one `cargo nextest` line but not its neighbours is the same failure
+/// wearing a smaller hat — half the pipeline on the settings somebody wrote
+/// down, half on the ones they didn't.
+///
+/// `default` is what a silent command line gets, so it is the profile an
+/// un-naming call site is holding; the config may then define nothing else.
+#[test]
+fn every_run_of_the_suite_is_on_the_profile_the_config_defines() {
+    let in_force = profiles_in_force();
+    let (first_at, first) = in_force.first().expect("no workflow runs the suite");
+
+    for (at, profile) in &in_force {
+        assert_eq!(
+            profile, first,
+            "{at} runs the suite on nextest profile `{profile}` while {first_at} \
+             runs it on `{first}` — half a pipeline on a profile is how this \
+             started"
+        );
+    }
+
+    let profiles = nextest_profiles();
+    let defined: Vec<&str> = profiles
+        .keys()
+        .map(String::as_str)
+        .filter(|name| *name != DEFAULT_PROFILE)
+        .collect();
+    let expected: Vec<&str> = std::iter::once(first.as_str())
+        .filter(|profile| *profile != DEFAULT_PROFILE)
+        .collect();
+    assert_eq!(
+        defined, expected,
+        "`{NEXTEST_CONFIG}` defines {defined:?} while the pipeline runs on \
+         `{first}`: a profile nobody selects has never run"
+    );
+}
+
+/// [`profile_named`] can read a selection at all (#103).
+///
+/// This is the one assertion above that today's pipeline cannot make for
+/// itself. **Nothing** in the repository names a nextest profile — that is the
+/// decision — so every call site resolves to [`DEFAULT_PROFILE`], and a
+/// [`profile_named`] that had quietly stopped parsing would agree with a
+/// working one on every line there is. The guard against reintroducing an
+/// unselected profile would be retired and the suite would stay green about it,
+/// which is this file's own failure mode turned on itself.
+///
+/// So the spellings a future editor might reach for are exercised directly,
+/// each written the way it would appear in a workflow — and the two lines that
+/// select nothing are pinned too, since reading a selection where there is none
+/// would raise a false alarm on a correct pipeline.
+#[test]
+fn the_profile_reader_can_read_a_selection_at_all() {
+    for (line, spelling) in [
+        ("      NEXTEST_PROFILE: ci", "a job's environment"),
+        (
+            "        run: NEXTEST_PROFILE=ci cargo nextest run --no-fail-fast",
+            "an inline variable",
+        ),
+        (
+            "      - run: cargo nextest run --profile ci --locked --no-fail-fast",
+            "the long flag",
+        ),
+        (
+            "      - run: cargo nextest run --profile=ci --locked --no-fail-fast",
+            "the long flag, joined",
+        ),
+        (
+            "      - run: cargo nextest run -P ci --locked --no-fail-fast",
+            "nextest's short flag",
+        ),
+    ] {
+        assert_eq!(
+            profile_named(line).as_deref(),
+            Some("ci"),
+            "{spelling} selects a profile and is read as selecting none"
+        );
+    }
+
+    for (line, why) in [
+        (
+            "      - run: cargo nextest run --locked --no-fail-fast",
+            "a bare invocation selects nothing",
+        ),
+        (
+            "      - run: cargo mutants --test-tool nextest --profile release --no-shuffle",
+            "`cargo mutants --profile` names cargo's build profile, not nextest's",
+        ),
+    ] {
+        assert_eq!(profile_named(line), None, "{why}");
+    }
+}
+
+/// The suite does not retry (#103).
+///
+/// This is the decision the ticket turned on, and it is a *value in a file*
+/// rather than anything the code does — so an assertion is the only thing that
+/// can hold it. `[profile.ci]` said `retries = 2` while `[profile.default]`
+/// said "a test that only passes on retry is reported flaky, not green", and
+/// the contradiction sat there for months precisely because no test ever read
+/// either line.
+///
+/// Every profile, not only the one in force: a retrying profile that nothing
+/// selects is what the test above rejects, and this one should not have to
+/// wait its turn to say the same thing about the setting itself.
+#[test]
+fn no_nextest_profile_retries_a_failing_test() {
+    for (name, settings) in nextest_profiles() {
+        let retries = match settings.get("retries") {
+            None => 0,
+            Some(toml::Value::Integer(count)) => *count,
+            // nextest also spells it `{ backoff = "exponential", count = 2 }`.
+            // An unrecognised shape counts as *some*, so a spelling this test
+            // has not met fails loudly rather than passing quietly.
+            Some(table) => table
+                .get("count")
+                .and_then(toml::Value::as_integer)
+                .unwrap_or(1),
+        };
+        assert_eq!(
+            retries, 0,
+            "profile `{name}` retries a failing test {retries} times, so a \
+             flaky test reports green"
+        );
+    }
+}
+
+/// The suite's fail-fast policy is written once, on the command line (#103).
+///
+/// `[profile.ci]` said `fail-fast = false` while every step that runs the suite
+/// passed `--no-fail-fast` by hand, so two places claimed the same thing — and
+/// which of them was actually in force was invisible, because the profile was
+/// never selected. Deleting either would have looked effective and changed
+/// nothing.
+///
+/// The command line is the copy that survived, because it is the one a reader
+/// of the workflow can see without opening another file. So no profile may set
+/// `fail-fast`, and every step that runs the suite must say `--no-fail-fast`
+/// itself: one failure on one architecture or one dialect should report every
+/// other failure in the same push, not the first. `cargo mutants` is not one of
+/// these steps — see [`runs_the_suite_directly`].
+#[test]
+fn the_suite_never_stops_at_the_first_failure_and_says_so_in_one_place() {
+    assert!(
+        !nextest_config().contains("fail-fast"),
+        "{NEXTEST_CONFIG} sets fail-fast, which the workflows already pass on \
+         the command line — so one of the two is dead text and neither reader \
+         can tell which"
+    );
+
+    for (name, workflow) in workflows() {
+        for (job, block) in jobs(&workflow) {
+            for step in block.lines().filter(|line| runs_the_suite_directly(line)) {
+                assert!(
+                    step.contains("--no-fail-fast"),
+                    "{name}: job `{job}` stops the suite at the first failure \
+                     and hides every other one in the same push: {step:?}"
+                );
+            }
+        }
+    }
 }
 
 /// The dual-dialect run is a second, real run of the suite.
@@ -231,6 +413,112 @@ fn bring_up_command() -> &'static str {
 /// order-of-steps assertion answer about the wrong line.
 fn runs_the_suite(step: &str) -> bool {
     step.contains("cargo ") && step.contains("nextest")
+}
+
+/// Whether this step runs the suite *itself*, rather than handing nextest to
+/// something else that drives it.
+///
+/// `cargo mutants --test-tool nextest` is the exception, and both halves of the
+/// distinction matter: mutants owns the arguments it passes (so it is not ours
+/// to require `--no-fail-fast` of — inside a single mutant, stopping at the
+/// first failing test *is* the answer), and its own `--profile` names a cargo
+/// build profile rather than a nextest one.
+fn runs_the_suite_directly(step: &str) -> bool {
+    runs_the_suite(step) && !step.contains("--test-tool")
+}
+
+/// nextest's own configuration, which every `cargo nextest` in the project
+/// reads — the local loop's and the pipeline's alike.
+const NEXTEST_CONFIG: &str = ".config/nextest.toml";
+
+/// What nextest runs when a command line names no profile.
+const DEFAULT_PROFILE: &str = "default";
+
+/// [`NEXTEST_CONFIG`]'s settings, the commentary [stripped](without_comments).
+fn nextest_config() -> String {
+    let text = std::fs::read_to_string(repo_file(NEXTEST_CONFIG))
+        .unwrap_or_else(|err| panic!("read {NEXTEST_CONFIG}: {err}"));
+    without_comments(&text)
+}
+
+/// The `[profile.*]` table of [`NEXTEST_CONFIG`], each profile with its
+/// settings.
+///
+/// Parsed rather than grepped, because `[profile.ci.junit]` is a *setting of*
+/// `ci` and not a second profile — a line-matching answer would have to know
+/// that, and would be wrong about `[profile."ci"]` besides. There is no
+/// actionlint for TOML, and the parser is already a dependency.
+fn nextest_profiles() -> toml::Table {
+    let config: toml::Table = toml::from_str(&nextest_config())
+        .unwrap_or_else(|err| panic!("{NEXTEST_CONFIG} is not TOML: {err}"));
+    config
+        .get("profile")
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{NEXTEST_CONFIG} defines no profiles at all"))
+        .clone()
+}
+
+/// Every step in the pipeline that runs the suite, paired with the nextest
+/// profile it will actually run on: `(where it is, which profile)`.
+///
+/// The profile is resolved the way the runner resolves it — the narrowest
+/// scope that names one wins, so a step's own flag beats its job's environment,
+/// which beats the workflow's, and a call site that names none is on
+/// [`DEFAULT_PROFILE`]. Answering per step rather than per workflow is what
+/// makes "one job selects it and three do not" visible, which is the shape the
+/// original failure had.
+fn profiles_in_force() -> Vec<(String, String)> {
+    let mut in_force = Vec::new();
+    for (name, workflow) in workflows() {
+        let preamble: String = workflow
+            .lines()
+            .take_while(|line| !line.starts_with("jobs:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (job, block) in jobs(&workflow) {
+            for step in block.lines().filter(|line| runs_the_suite_directly(line)) {
+                let profile = profile_named(step)
+                    .or_else(|| profile_named(&block))
+                    .or_else(|| profile_named(&preamble))
+                    .unwrap_or_else(|| DEFAULT_PROFILE.to_string());
+                in_force.push((format!("{name}: job `{job}`"), profile));
+            }
+        }
+    }
+    in_force
+}
+
+/// The nextest profile this text selects, if it names one at all.
+///
+/// Two spellings reach nextest, and both are read because either is a
+/// reasonable thing for a future editor to write. `NEXTEST_PROFILE` in the
+/// environment covers every call site in its scope at a stroke, including the
+/// ones that reach nextest through `cargo llvm-cov`; `--profile` (or nextest's
+/// `-P`) is read only off a line that runs the suite itself, because cargo
+/// spells its own *build* profile the same way. Either separator is accepted
+/// after the flag, since `--profile=ci` and `--profile ci` are the same request
+/// and a parser that understood only one would raise a false alarm about the
+/// other.
+fn profile_named(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let named = match line.split_once("NEXTEST_PROFILE") {
+            Some((_, rest)) => rest,
+            None if runs_the_suite_directly(line) => {
+                line.split_once("--profile")
+                    .or_else(|| line.split_once(" -P"))?
+                    .1
+            }
+            None => return None,
+        };
+        Some(
+            named
+                .trim_start_matches([':', '=', ' '])
+                .split_whitespace()
+                .next()?
+                .trim_matches(['\'', '"'])
+                .to_string(),
+        )
+    })
 }
 
 /// Merging is gated on formatting, lints, the ratcheting project floor **and**

@@ -79,3 +79,19 @@ Its value is a different one, and worth stating precisely: it changes **whose ju
 One trap, recorded because it cost a rewrite: Chromium accepts Media-Session artwork **without reading the bytes** — it stores URLs and decodes them when something paints a lock screen. So `metadata.artwork` being non-empty proves nothing, and the first version of that test passed with every PNG chunk CRC corrupted. It now decodes each URL through `createImageBitmap` and checks the dimensions against the size the metadata advertises. The same shape of trap applies to `setPositionState`, which `lib/mediaSession.ts` deliberately wraps in a `catch` — a browser refusing the pair is invisible from outside, so that test spies the real implementation and asserts the recorded result was not a throw.
 
 Advisory in CI to start with, on the same terms #15's PWA suite got: a browser in CI earns a required check by first showing it does not flake.
+
+## Amendment (#103, 2026-08-09): the suite does not retry, and there is one nextest profile
+
+`.config/nextest.toml` carried a `[profile.ci]` — `retries = 2`, `fail-fast = false`, a 60s/3 slow-timeout, `junit.xml` — and **nothing ever selected it**. No workflow passed `--profile`, none set `NEXTEST_PROFILE`, so every run since the pipeline was built has been on `[profile.default]`. A profile nobody selects reads exactly like one everybody does: green, fast, and describing a run that never happened. It is the same invisible-pipeline class `tests/ci.rs` exists for, and that file did not cover it.
+
+The ticket framed this as a real decision rather than a fix, and it is: **either** the pipeline selects the profile, **or** the profile is decoration and goes. It is deleted, for three reasons.
+
+**Retries contradict the position this repository already holds.** `[profile.default]`'s own comment says "a test that only passes on retry is reported flaky, not green". Switching the `ci` profile on would have meant arguing the opposite in the same file, and the tension the ticket asked to see resolved is resolved by removing the side nobody had ever run.
+
+**The premise it was written on has retired.** It existed, per its own header, because "the WebSocket / live-feed suite is timing-sensitive". Since then #93 replaced the suite's bespoke pollers and its fixed sleeps with `settle()`, which returns when every Worker owes nothing, and #94 made a live connection a pure state machine whose reaping is provable under `tokio::time::pause`. Four `sleep` calls remain in the whole suite; the timing-sensitivity the profile was insuring against is largely gone.
+
+**The evidence was already in, because the profile was never on.** Every CI run in this repository's history has been at `retries = 0`. At the time of writing, the last thirty runs of `ci.yml` contain exactly one failure — a `proptest` counterexample in `trusted_proxies` address resolution (`header = "::0a"`), a real bug found — and no timing flake at all. The retry policy has never had a question to answer, and turning it on now would buy a mask for a problem that has not appeared.
+
+Two smaller consequences. **`fail-fast` lives on the command line.** Every workflow step that runs the suite already passed `--no-fail-fast` by hand, so the profile's `fail-fast = false` was a duplicate whose deletion would have looked effective and changed nothing; the command-line copy survives because it is the one a reader of the workflow can see. `cargo mutants --test-tool nextest` is deliberately outside this rule — inside a single mutant, stopping at the first failing test *is* the answer. And **JUnit goes with the profile**: nothing consumed `junit.xml`, and an unread report is the same decoration in a different file.
+
+`tests/ci.rs` now pins all of it, and pins the profile **per call site** rather than per pipeline — a set union over the workflows cannot tell "every run selects it" from "one of four does", which is precisely the shape the original failure had.

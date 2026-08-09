@@ -1,16 +1,21 @@
-# cargo-nextest configuration (ADR-0010). The default local profile is fast and
-# quiet; the `ci` profile retries flaky timing-sensitive tests (the WebSocket /
-# live-feed suite) and emits JUnit for CI (#22).
+# cargo-nextest configuration (ADR-0010, amended by #103).
+#
+# **One profile, and it is the one CI runs.** There was a `[profile.ci]` here —
+# `retries = 2`, a looser slow-timeout, a JUnit file — written two days before
+# `ci.yml` existed, for a pipeline to select. No call site ever named it, so CI
+# has always run the settings below and the other profile was decoration that
+# read like policy. It is deleted rather than switched on; ADR-0010's #103
+# amendment is the argument, and the date it was true.
+#
+# `fail-fast` is deliberately not here: the workflow steps that run the suite
+# pass `--no-fail-fast` themselves, where a reader of the workflow can see it.
+# Nothing emits JUnit, because nothing consumed it.
+#
+# `tests/ci.rs` holds all three. A profile defined here and not in force at
+# every run of the suite, a non-zero `retries` on any profile, and a `fail-fast`
+# written in two places each fail the suite.
 [profile.default]
 # A test that only passes on retry is reported flaky, not green.
 retries = 0
 # The live-feed tests use short timeouts; flag anything that hangs.
 slow-timeout = { period = "30s", terminate-after = 2 }
-
-[profile.ci]
-retries = 2
-fail-fast = false
-slow-timeout = { period = "60s", terminate-after = 3 }
-
-[profile.ci.junit]
-path = "junit.xml"
