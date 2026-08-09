@@ -11,6 +11,8 @@
 //! These live here rather than beside their handlers so anything may build them
 //! without depending on the HTTP layer.
 
+use std::cmp::Ordering;
+
 use serde::Serialize;
 
 /// Radio-Scout's internal primary key for a stored Call (matches the DB `i64`).
@@ -56,6 +58,11 @@ pub struct Candidate {
     pub patches: Vec<i64>,
     /// How good a copy of its transmission this one is (#46).
     pub quality: Quality,
+    /// Whether there is anything to hear. An **Encrypted Call** is a row with
+    /// no audio object at all (spec US 9), and keep-best ranks audio above
+    /// every quality figure in both directions — so a copy somebody decoded
+    /// replaces this one, and this one never replaces a copy somebody decoded.
+    pub has_audio: bool,
 }
 
 impl Candidate {
@@ -109,13 +116,19 @@ impl Quality {
             (self.duration_ms, stored.duration_ms),
         ]
         .into_iter()
-        .find_map(|(mine, theirs)| match (mine, theirs) {
-            (Some(mine), Some(theirs)) if mine != theirs => Some(mine > theirs),
-            // Either side could not answer, or both answered the same: this
-            // criterion decides nothing and the next one is asked.
-            _ => None,
+        // `cmp` rather than a `>` behind a `!=` guard: written that way the
+        // guard already excludes equality, so `>` and `>=` are the same
+        // function and no test could ever tell them apart — an unkillable
+        // mutation bought with a redundant comparison (#83's rule, applied
+        // rather than excluded). Three orderings, three answers, none spare.
+        .find_map(|(mine, theirs)| match mine?.cmp(&theirs?) {
+            // Both answered the same: this criterion decides nothing, and the
+            // next one is asked. (`?` above is the other way to decide
+            // nothing — one side could not answer at all.)
+            Ordering::Equal => None,
+            decided => Some(decided == Ordering::Greater),
         })
-        // Nothing decided: what is stored stays.
+        // Nothing decided, all the way down: what is stored stays.
         .unwrap_or(false)
     }
 }

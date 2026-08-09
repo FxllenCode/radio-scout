@@ -140,6 +140,9 @@ pub struct TestApp {
     /// cookie and the CSRF token bound to it. The client's jar carries the
     /// cookie too — this is the copy a test can still present after logout.
     session: std::sync::Mutex<Option<(String, String)>>,
+    /// The clock this Instance was wired with (#90) — so a test that arranges
+    /// "this Call is older than X" measures from the same instant the app does.
+    clock: Clock,
     tmp: tempfile::TempDir,
 }
 
@@ -568,7 +571,11 @@ impl TestApp {
             .expect("read call")
             .expect("a Call to age");
         let mut row: call::ActiveModel = call.into();
-        row.created_at_ms = sea_orm::Set(radio_scout::now_ms() - by_ms);
+        // The **app's** clock, not the machine's: an Instance built with a
+        // frozen one reads that instant everywhere, and a Call aged against
+        // wall-clock time would be older or younger than this asked for by
+        // however far the two have drifted.
+        row.created_at_ms = sea_orm::Set(self.clock.now_ms() - by_ms);
         row.update(&self.db).await.expect("age call");
     }
 
@@ -1245,6 +1252,7 @@ impl TestAppBuilder {
                 .build()
                 .expect("client"),
             session: std::sync::Mutex::new(None),
+            clock: self.clock.unwrap_or_default(),
             tmp,
         }
     }

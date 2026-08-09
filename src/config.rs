@@ -854,6 +854,16 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "ingest.dedup_replace_secs",
+        var: "RADIO_SCOUT_INGEST_DEDUP_REPLACE_SECS",
+        expected: "a number of seconds",
+        example: "60",
+        set: |setting, config, value| {
+            config.ingest.dedup_replace = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
         key: "ingest.auto_populate",
         var: "RADIO_SCOUT_INGEST_AUTO_POPULATE",
         expected: "true or false",
@@ -1375,6 +1385,16 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # copy arriving second replaces the stored one without changing its id, so
 # nothing a listener is holding breaks. "first" keeps whichever arrived first.
 # dedup_keep = "best"
+
+# How long a stored call stays open to a better copy — measured from when it
+# was stored, not from when the transmission happened. A different quantity
+# from dedup_window_ms above, which is why it is a different setting: that one
+# is how far apart two *transmissions* may be to be one, this is how far apart
+# their *uploads* may be. A recorder posting one file per patched talkgroup
+# takes longer than half a second to get through them. It is also how long a
+# call's audio is served without `immutable`, since for that long it can still
+# change.
+# dedup_replace_secs = 30
 
 # Create Systems, Talkgroups and Units the first time a recorder mentions them.
 # With this off, only Systems you have already defined are accepted.
@@ -3067,6 +3087,7 @@ mod tests {
             dedup in 0i64..10_000,
             dedup_scope in "(talkgroup|patched)",
             dedup_keep in "(first|best)",
+            dedup_replace_secs in 0u64..3600,
             auto_populate in proptest::bool::ANY,
             directives in "(info|debug|warn|trace)",
             log_days in 0u32..4000,
@@ -3084,6 +3105,7 @@ mod tests {
                     dedup_window_ms: dedup,
                     dedup_scope: dedup_scope.parse().expect("a dedup scope"),
                     dedup_keep: dedup_keep.parse().expect("a dedup keep policy"),
+                    dedup_replace: Duration::from_secs(dedup_replace_secs),
                     auto_populate,
                 },
                 log: LogConfig {

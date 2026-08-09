@@ -430,6 +430,128 @@ async fn a_replacement_takes_the_winners_signal_detail_and_both_copies_patches()
     );
 }
 
+/// **"Listeners notice nothing" is one frame, and this is what proves it.**
+///
+/// A Listener already has this Call — in their listening queue, or played, or
+/// on an Archive page in front of them. Publishing the replacement would carry
+/// the same Call id onto the socket a second time, which is precisely the
+/// double-play keep-best exists to end; the audio URL is stable, so a Listener
+/// who has not fetched yet simply gets the better copy.
+///
+/// Asserted over a real socket rather than by reading the code, because "we
+/// deliberately do not publish" is a claim about what a client receives, and
+/// the only honest form of it is a client that received nothing more.
+#[tokio::test]
+async fn a_replacement_puts_no_second_frame_on_the_live_feed() {
+    let app = TestApp::with_key("k").await;
+    let mut ws = app.connect_ws().await;
+    common::subscribe(&mut ws, r#"{"t":"sub","sel":{"11":{"54241":true}}}"#).await;
+
+    app.upload_ok(copy(54241, "[]", 9, b"the-copy-with-errors"))
+        .await;
+    let first = common::frame_within(&mut ws, std::time::Duration::from_secs(2))
+        .await
+        .expect("the Call is delivered once");
+    assert_eq!(first["t"], "call");
+    let id = first["call"]["id"].as_i64().expect("a Call id");
+
+    // ...and now a better copy of the very same transmission.
+    app.upload_ok(copy(54241, "[]", 0, b"the-clean-copy-which-is-longer"))
+        .await;
+    app.settle().await;
+
+    common::no_frame_within(&mut ws, std::time::Duration::from_millis(300)).await;
+    let call = app.the_call().await;
+    assert_eq!(call.id, id, "the same Call, quietly improved");
+    assert_eq!(
+        app.object_bytes(&call.object_key).await.as_deref(),
+        Some(&b"the-clean-copy-which-is-longer"[..]),
+        "the audio behind the URL the Listener already holds is the better copy"
+    );
+}
+
+/// **A replacement carries the winner's whole field set** — the replace-path
+/// counterpart to `ingest_persists_the_full_field_set`.
+///
+/// Every column `describe_transmission` writes is asserted here, because a
+/// replacement that kept even one of the losing copy's would leave the Archive
+/// describing audio nobody holds any more, and a column that is merely *set*
+/// on this path proves nothing. It is also the test that fails when a later
+/// ticket adds a field to one writer and not the other.
+#[tokio::test]
+async fn a_replacement_carries_every_field_the_winner_sent() {
+    let app = TestApp::with_key("k").await;
+    repo::resolve_or_create_system(&app.db, 1, Some("butco".into()), 0)
+        .await
+        .expect("seed the short_name's system");
+
+    // The loser: everything set, and set differently.
+    let (status, body) = app
+        .upload_tr(CallUpload::tr(
+            r#"{"short_name":"butco","talkgroup":54241,"timestamp":1669740338000,
+            "call_length_ms":1000,"stop_time":1669740339,"emergency":1,
+            "priority":9,"audio_type":"analog","freq":770000000,
+            "freqList":[{"freq":770000000,"pos":0,"len":1,"error_count":40}],
+            "srcList":[{"src":111,"pos":0,"tag":"Loser"}]}"#,
+        ))
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+    let loser = app.the_call().await;
+
+    // The winner: cleaner, and disagreeing about every one of them.
+    let (status, body) = app
+        .upload_tr(CallUpload::tr(
+            r#"{"short_name":"butco","talkgroup":54241,"timestamp":1669740338000,
+            "call_length_ms":8000,"stop_time":1669740346,"emergency":0,
+            "priority":3,"audio_type":"digital tdma","freq":774031250,
+            "freqList":[{"freq":774031250,"pos":0,"len":8,"error_count":0}],
+            "srcList":[{"src":222,"pos":0,"tag":"Winner"}]}"#,
+        ))
+        .await;
+    assert!(
+        body.contains("Call imported successfully."),
+        "{status} {body:?}"
+    );
+    app.settle().await;
+    let won = app.the_call().await;
+
+    assert_eq!(won.id, loser.id, "the same Call throughout");
+    assert_eq!(won.duration_ms, Some(8_000));
+    assert_eq!(won.stop_at_ms, Some(1_669_740_346_000));
+    assert!(!won.emergency, "the winner said no, so the row says no");
+    assert!(!won.encrypted);
+    assert_eq!(won.priority, Some(3));
+    assert_eq!(won.audio_type.as_deref(), Some("digital tdma"));
+    assert_eq!(won.frequency, Some(774_031_250));
+    assert_eq!(won.audio_mime.as_deref(), loser.audio_mime.as_deref());
+    assert_ne!(won.object_key, loser.object_key);
+    assert_eq!(won.audio_size, Some(CallUpload::DEFAULT_AUDIO.len() as i64));
+    assert_eq!(
+        won.enhancement, "none",
+        "a replaced Call goes back to passthrough: the levelled audio a \
+         previous pass produced describes a copy that no longer exists"
+    );
+    // ...and the identity columns are untouched.
+    assert_eq!(won.call_at_ms, loser.call_at_ms);
+    assert_eq!(won.talkgroup_id, loser.talkgroup_id);
+    assert_eq!(won.system_id, loser.system_id);
+    assert_eq!(won.created_at_ms, loser.created_at_ms);
+    assert_eq!(
+        won.talkgroup_ref, loser.talkgroup_ref,
+        "the Ref this Call arrived under is what unmerge gives it back to (#45)"
+    );
+
+    let units: Vec<Option<String>> = call_unit::Entity::find()
+        .filter(call_unit::Column::CallId.eq(won.id))
+        .all(&app.db)
+        .await
+        .expect("read units")
+        .into_iter()
+        .map(|u| u.label)
+        .collect();
+    assert_eq!(units, vec![Some("Winner".to_string())]);
+}
+
 /// A replacement takes the winner's **Site**, and only when it named one.
 ///
 /// This is the multi-site case the ticket exists for: one transmission heard on
@@ -1439,6 +1561,60 @@ async fn an_encrypted_copy_never_displaces_a_call_that_plays() {
         app.object_bytes(&after.object_key).await.as_deref(),
         Some(&b"noisy-but-audible"[..]),
         "and its audio is untouched"
+    );
+}
+
+/// ...and **the other direction**, which is the one that costs a Listener the
+/// call entirely (#46).
+///
+/// An encrypted copy lands first: Trunk Recorder gives it a duration and no
+/// `freqList`, so it wins the errors criterion by abstention and can win on
+/// length too. If it could not be displaced, the audio a second recorder
+/// really did capture would be refused as a duplicate and thrown away — and
+/// US 10's "so that I hear each call exactly once" would be zero times.
+///
+/// So audio outranks every quality figure, in both directions: a copy that has
+/// it replaces a Call that has none, however the numbers compare.
+#[tokio::test]
+async fn a_decodable_copy_replaces_a_call_that_arrived_encrypted() {
+    let app = TestApp::with_key("k").await;
+    repo::resolve_or_create_system(&app.db, 1, Some("butco".into()), 0)
+        .await
+        .expect("seed the short_name's system");
+
+    // Encrypted first — four seconds long, and no signal detail to fault.
+    let (status, _) = app.upload_tr(CallUpload::tr(TR_ENCRYPTED_META)).await;
+    assert_eq!(status, 200);
+    let encrypted = app.the_call().await;
+    assert!(encrypted.encrypted && encrypted.object_key.is_empty());
+
+    // ...then a copy somebody decoded: shorter, and full of errors.
+    let (status, body) = app
+        .upload(
+            CallUpload::new()
+                .system(1)
+                .at(1_669_740_338_000)
+                .set(
+                    "frequencies",
+                    r#"[{"freq":774031250,"pos":0,"len":0.5,"errorCount":400}]"#,
+                )
+                .audio(b"noisy-but-audible"),
+        )
+        .await;
+    app.settle().await;
+
+    assert_eq!(status, 200);
+    assert!(body.contains("Call imported successfully."), "{body:?}");
+    let after = app.the_call().await;
+    assert_eq!(after.id, encrypted.id, "one Call, not two");
+    assert!(
+        !after.encrypted,
+        "the Call a recorder actually decoded is the one a Listener gets"
+    );
+    assert_eq!(
+        app.object_bytes(&after.object_key).await.as_deref(),
+        Some(&b"noisy-but-audible"[..]),
+        "and the audio is there to play, which it was not a moment ago"
     );
 }
 

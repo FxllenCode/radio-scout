@@ -65,6 +65,22 @@ pub struct IngestConfig {
     pub dedup_scope: Scope,
     /// Which copy of it is kept (#46).
     pub dedup_keep: Keep,
+    /// How long a stored Call stays open to a better copy of its transmission
+    /// (#46) — **a different quantity from [`Self::dedup_window_ms`]**, and
+    /// that is why it is its own setting.
+    ///
+    /// The window above measures how far apart two *transmissions* may be to be
+    /// one, over `call_at_ms`, which every copy of a transmission reports
+    /// identically. This one measures how far apart their *uploads* may be, over
+    /// the clock — and Trunk Recorder posting one file per patched member,
+    /// back to back, routinely takes longer than half a second. Sharing the one
+    /// number would mean either keep-best almost never firing or the matching
+    /// window widening until genuinely distinct back-to-back Calls collapse.
+    ///
+    /// It is also exactly how long [`crate::serve`] withholds `immutable` from
+    /// a Call's audio, because for that long the bytes really can change.
+    #[serde(with = "crate::config::secs", rename = "dedup_replace_secs")]
+    pub dedup_replace: std::time::Duration,
     /// Global auto-populate toggle (#8). On by default, matching rdio-scanner.
     /// When off, unknown Systems are dropped and only Systems whose own
     /// per-system flag is set still auto-create Talkgroups/Units.
@@ -77,6 +93,10 @@ impl Default for IngestConfig {
             dedup_window_ms: 500,
             dedup_scope: Scope::Patched,
             dedup_keep: Keep::Best,
+            // Generous enough that a Recorder posting one file per patched
+            // member lands them all inside it, short enough that the caching it
+            // costs is only ever on a Call somebody is playing live.
+            dedup_replace: std::time::Duration::from_secs(30),
             auto_populate: true,
         }
     }
@@ -210,10 +230,10 @@ struct Arriving<'a> {
     patches: &'a [i64],
     call_at_ms: i64,
     quality: Quality,
-    /// This copy is on an encrypted Talkgroup, so it will store **no audio at
-    /// all** (spec US 9) — which is what stops it from ever displacing a Call a
-    /// Listener can play. See [`replaces`].
-    encrypted: bool,
+    /// Whether this copy will store audio at all. An **Encrypted Call** stores
+    /// none (spec US 9), and that outranks every quality figure in [`replaces`]
+    /// — in both directions.
+    has_audio: bool,
 }
 
 impl Arriving<'_> {
@@ -482,6 +502,8 @@ async fn run_pipeline(
     mut new_call: NewCall,
     audio: Vec<u8>,
 ) -> Result<Recorded, Failure> {
+    let facts = resolve(state, key, &new_call).await?;
+
     // The *playing* length, so a one-second kerchunk and a forty-second
     // dispatch are distinguishable everywhere (#42, spec US 8). The recorder's
     // own figure wins when it sent one — only Trunk Recorder's native meta
@@ -491,17 +513,21 @@ async fn run_pipeline(
     // header says nothing leaves the column `NULL`, which is the honest answer
     // and never a failed ingest.
     //
-    // Read **before the decision** since #46, not inside `perform`: keep-best
-    // compares durations, so how long this copy runs is one of the facts the
-    // Admission depends on rather than something discovered while storing it.
-    // It stays on this side of the encrypted check for the same reason it
-    // always did — the bytes are in hand either way, and an encrypted Call that
-    // never stores them still gets a length.
-    if new_call.duration_ms.is_none() {
+    // Read **before the decision** since #46, where it used to be read inside
+    // `perform`: keep-best compares durations, so how long this copy runs is one
+    // of the facts the Admission depends on rather than something discovered
+    // while storing it.
+    //
+    // ...but **after authorization** (ADR-0008), which is the one thing that
+    // must not move: parsing a container header is small, and it is still
+    // arbitrary bytes from an unauthenticated caller, on the hardware least able
+    // to afford spending anything on them. An unauthorized upload is refused
+    // having had nothing read for it and nothing parsed of it. The encrypted
+    // check is deliberately still below this — the bytes are in hand either way,
+    // and an **Encrypted Call** that stores none of them still gets a length.
+    if facts.authorized && new_call.duration_ms.is_none() {
         new_call.duration_ms = crate::audio_meta::duration_ms(&audio);
     }
-
-    let facts = resolve(state, key, &new_call).await?;
 
     let admission = match admit(&facts, &new_call, &state.ingest, state.clock.now_ms()) {
         Decision::Admit { auto_populate } => {
@@ -630,7 +656,7 @@ fn admit(facts: &Facts, call: &NewCall, config: &IngestConfig, now_ms: i64) -> D
         patches: facts.resolved.patches.as_deref().unwrap_or_default(),
         call_at_ms: call.call_at_ms,
         quality: call.quality(),
-        encrypted: call.encrypted,
+        has_audio: !call.encrypted,
     };
 
     match duplicate_of(&facts.candidates, &arriving, config) {
@@ -677,10 +703,25 @@ fn admit(facts: &Facts, call: &NewCall, config: &IngestConfig, now_ms: i64) -> D
 /// reading a Listener would recognise. It stays a duplicate — the activity is
 /// recorded once, as it should be — it just cannot displace what plays.
 fn replaces(arriving: &Arriving, stored: &Candidate, config: &IngestConfig, now_ms: i64) -> bool {
-    config.dedup_keep == Keep::Best
-        && !arriving.encrypted
-        && still_replaceable(stored.stored_ms, now_ms, config.dedup_window_ms)
-        && arriving.quality.better_than(&stored.quality)
+    if config.dedup_keep != Keep::Best
+        || !still_replaceable(stored.stored_ms, now_ms, config.dedup_replace)
+    {
+        return false;
+    }
+    match (arriving.has_audio, stored.has_audio) {
+        // **Audio beats no audio, in both directions and before anything
+        // else.** An Encrypted Call is a row with nothing to hear (spec US 9),
+        // and a copy of the same transmission that somebody did decode is worth
+        // more than any quality figure — so it replaces one, and one never
+        // replaces it. The comparison is not even asked: an encrypted copy can
+        // *win* it on Trunk Recorder's own duration while carrying no audio at
+        // all, and either arm of that would leave a Listener hearing a call
+        // they could have heard.
+        (true, false) => true,
+        (false, true) => false,
+        // Both have audio, or neither does. Now quality decides.
+        _ => arriving.quality.better_than(&stored.quality),
+    }
 }
 
 /// How long a stored Call stays open to a better copy of its transmission —
@@ -695,8 +736,12 @@ fn replaces(arriving: &Arriving, stored: &Candidate, config: &IngestConfig, now_
 /// Saturating for the same reason as [`dedup_window`]: a Recorder is entitled to
 /// send an absurd timestamp, and no arithmetic on the ingest path may be the
 /// thing that panics because of it.
-pub(crate) fn still_replaceable(stored_ms: i64, now_ms: i64, window_ms: i64) -> bool {
-    now_ms.saturating_sub(stored_ms) <= window_ms
+pub(crate) fn still_replaceable(
+    stored_ms: i64,
+    now_ms: i64,
+    replace_window: std::time::Duration,
+) -> bool {
+    now_ms.saturating_sub(stored_ms) <= replace_window.as_millis() as i64
 }
 
 /// What [`admit`] decided: something to perform, or an [`Admission`] that is
@@ -1604,6 +1649,7 @@ mod tests {
             talkgroup,
             patches: patches.to_vec(),
             quality: Quality::default(),
+            has_audio: true,
         }
     }
 
@@ -1620,7 +1666,7 @@ mod tests {
             patches,
             call_at_ms: 1_000_000,
             quality: Quality::default(),
-            encrypted: false,
+            has_audio: true,
         }
     }
 
@@ -1729,14 +1775,23 @@ mod tests {
     /// recognise. It is still recognised as the same transmission and still
     /// refused as a duplicate — it simply cannot displace what plays.
     #[rstest]
-    #[case::a_better_copy_replaces(false, false, Keep::Best, 0, true)]
-    #[case::a_worse_one_does_not(true, false, Keep::Best, 0, false)]
-    #[case::not_after_the_window_has_closed(false, false, Keep::Best, 501, false)]
-    #[case::not_with_keep_best_off(false, false, Keep::First, 0, false)]
-    #[case::and_never_a_copy_with_no_audio_to_give(false, true, Keep::Best, 0, false)]
+    #[case::a_better_copy_replaces(false, true, true, Keep::Best, 0, true)]
+    #[case::a_worse_one_does_not(true, true, true, Keep::Best, 0, false)]
+    #[case::not_after_the_window_has_closed(false, true, true, Keep::Best, 30_001, false)]
+    #[case::not_with_keep_best_off(false, true, true, Keep::First, 0, false)]
+    // **Audio outranks quality, in both directions.** The first row is the one
+    // that costs a Listener the call entirely if it is missed: an encrypted copy
+    // lands first (Trunk Recorder gives it a duration and no `freqList`, so it
+    // wins on abstention alone), and unless a decodable copy can displace it,
+    // the audio somebody really captured is discarded and the call is heard
+    // *zero* times.
+    #[case::audio_replaces_a_call_with_none_however_bad(true, true, false, Keep::Best, 0, true)]
+    #[case::and_a_copy_with_no_audio_never_replaces_one(false, false, true, Keep::Best, 0, false)]
+    #[case::two_encrypted_copies_are_compared_as_usual(false, false, false, Keep::Best, 0, true)]
     fn a_copy_replaces_only_when_every_condition_holds(
         #[case] worse: bool,
-        #[case] encrypted: bool,
+        #[case] arriving_has_audio: bool,
+        #[case] stored_has_audio: bool,
         #[case] dedup_keep: Keep,
         #[case] aged_by_ms: i64,
         #[case] replaces_it: bool,
@@ -1747,6 +1802,7 @@ mod tests {
                 duration_ms: Some(4_000),
             },
             stored_ms: NOW - aged_by_ms,
+            has_audio: stored_has_audio,
             ..stored(0, OURS, &[])
         };
         let arriving = Arriving {
@@ -1755,7 +1811,7 @@ mod tests {
                 decode_errors: Some(if worse { 400 } else { 0 }),
                 duration_ms: Some(4_000),
             },
-            encrypted,
+            has_audio: arriving_has_audio,
             ..arriving(&[])
         };
         let config = IngestConfig {
@@ -1945,36 +2001,62 @@ mod tests {
             }
         }
 
-        /// **The widened test is exactly an intersection**, and the near misses
-        /// are the overwhelming majority of these cases (#46).
+        /// **The widened test is exactly "the channel sets intersect *and* the
+        /// times are within the window"** — both halves, over the same inputs,
+        /// so the near misses of each are generated against every state of the
+        /// other (#46).
         ///
-        /// Refs are drawn from a deliberately tiny pool so that overlaps happen
-        /// often enough to be interesting — over a realistic Ref space almost
-        /// every generated pair would be disjoint and the property would prove
-        /// only that unrelated Calls stay distinct, which is half the rule.
+        /// Two things make this a real check rather than a re-derivation.
         ///
-        /// The expectation is computed as set intersection over `HashSet`s,
-        /// which is a different spelling from the iterator scan the predicate
-        /// runs, so the two cannot agree by construction.
+        /// The **sets are the generated values**, and the inputs are built
+        /// *from* them — a Talkgroup plus the rest as patches — rather than the
+        /// expectation being rebuilt by chaining `talkgroup` onto `patches` the
+        /// way `Arriving::talkgroups` does. Written the other way round the
+        /// property re-runs the membership rule it is meant to be checking and
+        /// cannot fail if that rule is wrong.
+        ///
+        /// And Refs come from a deliberately tiny pool, so overlaps happen often
+        /// enough to be interesting; over a realistic Ref space almost every
+        /// pair would be disjoint and this would only ever prove that unrelated
+        /// Calls stay distinct, which is half the rule.
+        ///
+        /// The System half is *not* here, and deliberately: it is enforced by
+        /// the candidate query rather than by this decision, so it is proved
+        /// over real rows on both dialects
+        /// (`tests/ingest.rs::two_systems_numbering_a_talkgroup_alike_do_not_dedup_against_each_other`).
         #[test]
-        fn one_transmission_is_two_copies_reaching_a_channel_in_common(
-            talkgroup in proptest::option::of(1i64..5),
-            patches in proptest::collection::vec(1i64..5, 0..4),
-            stored_talkgroup in 1i64..5,
-            stored_patches in proptest::collection::vec(1i64..5, 0..4),
+        fn one_transmission_is_two_copies_that_overlap_in_channel_and_in_time(
+            mine in proptest::collection::hash_set(1i64..6, 1..4),
+            theirs in proptest::collection::hash_set(1i64..6, 1..4),
+            offset in -800i64..800,
+            window in 0i64..600,
         ) {
-            use std::collections::HashSet;
+            // The sets are the subject; which member is "its own Talkgroup" and
+            // which are patches is an encoding detail the rule must not depend
+            // on, so the first of each is taken as the Talkgroup.
+            let split = |set: &std::collections::HashSet<i64>| {
+                let mut refs: Vec<i64> = set.iter().copied().collect();
+                refs.sort();
+                (refs[0], refs[1..].to_vec())
+            };
+            let (my_talkgroup, my_patches) = split(&mine);
+            let (their_talkgroup, their_patches) = split(&theirs);
 
-            let candidates = [stored(0, stored_talkgroup, &stored_patches)];
-            let arriving = Arriving { talkgroup, patches: &patches, ..arriving(&[]) };
+            let candidates = [stored(offset, their_talkgroup, &their_patches)];
+            let arriving = Arriving {
+                talkgroup: Some(my_talkgroup),
+                patches: &my_patches,
+                ..arriving(&[])
+            };
+            let config = IngestConfig { dedup_window_ms: window, ..IngestConfig::default() };
 
-            let mine: HashSet<i64> = talkgroup.into_iter().chain(patches.iter().copied()).collect();
-            let theirs: HashSet<i64> =
-                std::iter::once(stored_talkgroup).chain(stored_patches.iter().copied()).collect();
-            let expected = !mine.is_disjoint(&theirs);
+            // Both halves, spelled independently of the code: set intersection
+            // over the *generated* sets, and `|offset| <= window` where the code
+            // is a range that contains.
+            let expected = !mine.is_disjoint(&theirs) && offset.abs() <= window;
 
             prop_assert_eq!(
-                duplicate_of(&candidates, &arriving, &IngestConfig::default()).is_some(),
+                duplicate_of(&candidates, &arriving, &config).is_some(),
                 expected
             );
         }
@@ -2192,6 +2274,7 @@ mod tests {
             talkgroup: 54241,
             patches: Vec::new(),
             quality: Quality::default(),
+            has_audio: true,
         }]
     }
 

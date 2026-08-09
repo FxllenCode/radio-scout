@@ -71,8 +71,12 @@ pub enum DedupWindow {
 /// so the two cannot be allowed to disagree about an edge: written twice, a
 /// mutation of either would move one and not the other, and what a Listener
 /// would get is a week-long cache of audio that was replaced a moment later.
-fn dedup_window_of(created_at_ms: i64, now_ms: i64, window_ms: i64) -> DedupWindow {
-    match crate::ingest::still_replaceable(created_at_ms, now_ms, window_ms) {
+fn dedup_window_of(
+    created_at_ms: i64,
+    now_ms: i64,
+    replace_window: std::time::Duration,
+) -> DedupWindow {
+    match crate::ingest::still_replaceable(created_at_ms, now_ms, replace_window) {
         true => DedupWindow::Open,
         false => DedupWindow::Closed,
     }
@@ -321,7 +325,7 @@ pub async fn audio(
         window: dedup_window_of(
             call.created_at_ms,
             state.clock.now_ms(),
-            state.ingest.dedup_window_ms,
+            state.ingest.dedup_replace,
         ),
         mime: call.mime.as_deref(),
         signed,
@@ -552,7 +556,14 @@ mod tests {
         #[case] window_ms: i64,
         #[case] expected: DedupWindow,
     ) {
-        assert_eq!(dedup_window_of(1_000_000, now_ms, window_ms), expected);
+        assert_eq!(
+            dedup_window_of(
+                1_000_000,
+                now_ms,
+                std::time::Duration::from_millis(window_ms as u64)
+            ),
+            expected
+        );
     }
 
     /// The facts of an ordinary settled Call whose object the store has, with

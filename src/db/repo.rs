@@ -440,7 +440,7 @@ pub async fn insert_call<C: ConnectionTrait>(
         None => None,
     };
 
-    let stored = call::ActiveModel {
+    let mut row = call::ActiveModel {
         system_id: Set(sys.id),
         talkgroup_id: Set(tg.id),
         // What the recorder said, beside what it resolved to (#45). Written on
@@ -449,35 +449,12 @@ pub async fn insert_call<C: ConnectionTrait>(
         // would be empty in exactly the archive an operator wants to unfold.
         talkgroup_ref: Set(Some(new.talkgroup_ref)),
         call_at_ms: Set(new.call_at_ms),
-        frequency: Set(new.frequency),
-        source_ref: Set(new.source_ref),
-        // An **Encrypted Call** has no object: the empty key is what the serve
-        // path and the wire both read as "there is nothing here", and a `NULL`
-        // size is what keeps retention's cap counting only what exists.
-        object_key: Set(audio
-            .as_ref()
-            .map(|a| a.key().to_owned())
-            .unwrap_or_default()),
-        audio_mime: Set(new.audio_mime.clone()),
-        audio_name: Set(new.audio_name.clone()),
-        audio_size: Set(audio.as_ref().map(StoredAudio::bytes)),
-        duration_ms: Set(new.duration_ms),
-        stop_at_ms: Set(new.stop_at_ms),
-        emergency: Set(new.emergency),
-        encrypted: Set(new.encrypted),
-        priority: Set(new.priority),
-        audio_type: Set(new.audio_type.clone()),
         site_id: Set(site_id),
-        // Every Call arrives passthrough. Set explicitly rather than left to a
-        // column default, because a fresh database gets its `calls` table from
-        // the entity-derived DDL in `m0001_init`, which carries no defaults —
-        // only an upgraded database goes through `m0006`'s `ALTER`.
-        enhancement: Set(call::EnhancementState::NONE.to_string()),
         created_at_ms: Set(now_ms),
         ..Default::default()
-    }
-    .insert(db)
-    .await?;
+    };
+    describe_transmission(&mut row, new, audio);
+    let stored = row.insert(db).await?;
 
     // Patch members (#81). A patch ref is kept only when this System has a
     // Talkgroup for it. SDRTrunk builds one unseparated array as
@@ -517,7 +494,7 @@ pub async fn insert_call<C: ConnectionTrait>(
 /// deliberately silent on the live feed (the Listener already has this Call),
 /// where a Call stored for the first time has to be published or nobody hears
 /// it at all.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Replacement {
     /// The stored Call now carries this copy — same id, same channel, same
     /// place in the Archive.
@@ -575,27 +552,16 @@ pub async fn store_replacement<C: ConnectionTrait>(
 
     let system_id = stored.system_id;
     let mut row: call::ActiveModel = stored.into();
-    // The audio, and the columns that describe it.
-    row.object_key = Set(audio
-        .as_ref()
-        .map(|a| a.key().to_owned())
-        .unwrap_or_default());
-    row.audio_size = Set(audio.as_ref().map(StoredAudio::bytes));
-    row.audio_mime = Set(new.audio_mime.clone());
-    row.audio_name = Set(new.audio_name.clone());
-    // ...and what this copy's Recorder said about the transmission.
-    row.duration_ms = Set(new.duration_ms);
-    row.stop_at_ms = Set(new.stop_at_ms);
-    row.emergency = Set(new.emergency);
-    row.encrypted = Set(new.encrypted);
-    row.priority = Set(new.priority);
-    row.audio_type = Set(new.audio_type.clone());
-    row.frequency = Set(new.frequency);
-    row.source_ref = Set(new.source_ref);
+    // Everything this copy's Recorder said about the transmission — the same
+    // mapping the insert uses, so the two cannot describe a Call differently.
+    describe_transmission(&mut row, new, audio);
     // A Site only when this copy named one: a multi-site System hears one
     // transmission on several towers, and the copy that won says which tower
     // the audio a Listener now gets came off. A copy that named none knows
-    // nothing about towers and must not erase what the other copy knew.
+    // nothing about towers and must not erase what the other copy knew. It is
+    // outside `describe_transmission` because it is the one such column that
+    // costs a query, and because that function must stay pure enough for the
+    // insert to call it before the row exists.
     if let Some(site_ref) = new.site_ref {
         row.site_id = Set(Some(
             resolve_or_create_site(db, system_id, site_ref, now_ms)
@@ -603,7 +569,13 @@ pub async fn store_replacement<C: ConnectionTrait>(
                 .id,
         ));
     }
-    row.enhancement = Set(call::EnhancementState::NONE.to_string());
+    // **`talkgroup_ref` is deliberately not touched.** It records the Ref the
+    // recorder sent, and its one consumer is unmerge (#45): "which of this
+    // channel's Calls arrived under the Ref being unfolded". The stored Call is
+    // the one a Listener has always seen, on the channel it has always been on,
+    // so unfolding must give it back to the Ref *it* arrived under — not to the
+    // one a later copy happened to name. Every other column here describes the
+    // audio, which is why every other column moves.
     let replaced = row.update(db).await?;
 
     // The signal detail belongs to the audio, so it is this copy's outright.
@@ -643,6 +615,51 @@ pub async fn store_replacement<C: ConnectionTrait>(
     roster_units(db, system_id, new, auto_populate, now_ms).await?;
 
     Ok(Replacement::Replaced(replaced))
+}
+
+/// Write everything a Recorder said about **this transmission** onto a Call
+/// row: the audio object it produced, and every column that describes what was
+/// heard rather than which channel it was on or when.
+///
+/// **One mapping, two writers** (#46). [`insert_call`] uses it for a Call
+/// arriving for the first time and [`store_replacement`] for a better copy of
+/// one already stored, and the two must agree exactly — a replacement that
+/// carried the losing copy's `error_count` or `duration_ms` would leave the
+/// Archive describing audio nobody holds any more. Written twice, a field added
+/// by a later ticket would silently reach only one of them, and nothing about
+/// either path would look wrong; that is the same failure the shipped Trunk
+/// Recorder artifacts have a whole test to prevent (CLAUDE.md's two-artifact
+/// rule), applied to the two ways a row is written here.
+///
+/// Deliberately *not* the identity columns — `system_id`, `talkgroup_id`,
+/// `talkgroup_ref`, `call_at_ms`, `created_at_ms`, `site_id` — which the two
+/// writers treat differently on purpose: a replacement keeps the stored Call's.
+fn describe_transmission(row: &mut call::ActiveModel, new: &NewCall, audio: Option<StoredAudio>) {
+    // An **Encrypted Call** has no object: the empty key is what the serve path
+    // and the wire both read as "there is nothing here", and a `NULL` size is
+    // what keeps retention's cap counting only what exists.
+    row.object_key = Set(audio
+        .as_ref()
+        .map(|a| a.key().to_owned())
+        .unwrap_or_default());
+    row.audio_size = Set(audio.as_ref().map(StoredAudio::bytes));
+    row.audio_mime = Set(new.audio_mime.clone());
+    row.audio_name = Set(new.audio_name.clone());
+    row.duration_ms = Set(new.duration_ms);
+    row.stop_at_ms = Set(new.stop_at_ms);
+    row.emergency = Set(new.emergency);
+    row.encrypted = Set(new.encrypted);
+    row.priority = Set(new.priority);
+    row.audio_type = Set(new.audio_type.clone());
+    row.frequency = Set(new.frequency);
+    row.source_ref = Set(new.source_ref);
+    // Every Call arrives passthrough, and a replaced one goes back to it: the
+    // levelled audio a previous pass produced describes a copy that no longer
+    // exists. Set explicitly rather than left to a column default, because a
+    // fresh database gets its `calls` table from the entity-derived DDL in
+    // `m0001_init`, which carries no defaults — only an upgraded database goes
+    // through `m0006`'s `ALTER`.
+    row.enhancement = Set(call::EnhancementState::NONE.to_string());
 }
 
 /// The patch rows for a Call, given the canonical Refs [`resolve_patches`]
@@ -1582,7 +1599,7 @@ pub async fn calls_within<C: ConnectionTrait>(
     // The canonical Talkgroup **Ref**, not the `calls.talkgroup_ref` column —
     // that one records what the recorder said, which for a Call that arrived
     // under a member Ref is precisely not the channel it is on (#45).
-    let found: Vec<(CallId, i64, i64, i64, Option<i64>)> = call::Entity::find()
+    let found: Vec<(CallId, i64, i64, i64, Option<i64>, bool)> = call::Entity::find()
         .filter(call::Column::SystemId.eq(system_id))
         .filter(call::Column::CallAtMs.gte(*window.start()))
         .filter(call::Column::CallAtMs.lte(*window.end()))
@@ -1593,6 +1610,7 @@ pub async fn calls_within<C: ConnectionTrait>(
         .column(call::Column::CreatedAtMs)
         .column_as(talkgroup::Column::Ref, "talkgroup_ref")
         .column(call::Column::DurationMs)
+        .column(call::Column::Encrypted)
         .into_tuple()
         .all(db)
         .await?;
@@ -1637,7 +1655,7 @@ pub async fn calls_within<C: ConnectionTrait>(
     Ok(found
         .into_iter()
         .map(
-            |(id, call_at_ms, stored_ms, talkgroup, duration_ms)| Candidate {
+            |(id, call_at_ms, stored_ms, talkgroup, duration_ms, encrypted)| Candidate {
                 id,
                 call_at_ms,
                 stored_ms,
@@ -1647,6 +1665,10 @@ pub async fn calls_within<C: ConnectionTrait>(
                     decode_errors: errors.remove(&id).flatten(),
                     duration_ms,
                 },
+                // Read from the flag rather than from an empty `object_key`:
+                // the two agree by construction, and the flag is the one that
+                // says *why* there is nothing to hear (spec US 9).
+                has_audio: !encrypted,
             },
         )
         .collect())

@@ -241,8 +241,9 @@ A console patch makes your recorder upload the same transmission once for every 
 patch, and a multi-site system can hand you the same call off two towers. rdio-scanner plays each
 of those, because the only thing it compares is the talkgroup and the timestamp. Radio-Scout treats
 them as one call: same system, within the dedup window, and reaching a talkgroup in common — its
-own, or one either copy says it is patched to. You get one call, and no button appears for a
-talkgroup id the patch invented.
+own, or one either copy says it is patched to. You get one call. (A talkgroup id the patch
+invented still gets a button if a copy naming it is the *first* to arrive — nothing exists to
+match it against yet. Merge it into the real channel, or blacklist it.)
 
 When the same transmission does arrive twice, **the better copy is the one you keep** — fewer
 decode errors first, then longer audio. A better copy arriving a moment later takes the stored
@@ -255,14 +256,19 @@ systems whose patch data cannot be trusted:
 
 ```toml
 [ingest]
-dedup_window_ms = 500       # how far apart two uploads can be and still be one transmission
+dedup_window_ms = 500       # how far apart two calls can be *on the air* and still be one
 dedup_scope = "patched"     # or "talkgroup": ignore patch membership, match the channel only
 dedup_keep = "best"         # or "first": keep whichever copy arrived first, like rdio-scanner
+dedup_replace_secs = 30     # how long a stored call stays open to a better copy
 ```
 
-Raise `dedup_window_ms` if your recorders upload the same call more than half a second apart — it
-widens both meanings at once, which is what you want: how far apart two copies may be, and how long
-a stored call stays open to a better one.
+The two windows measure different things and that is why there are two. `dedup_window_ms` is about
+the *air*: how far apart two transmissions can start and still be the same one — every copy reports
+the same start time, so half a second is plenty, and widening it starts merging genuinely different
+back-to-back calls. `dedup_replace_secs` is about your *network*: how long after storing a call
+Radio-Scout will still accept a better copy of it. A recorder posting one file per patched talkgroup
+takes a few seconds to get through them, so raise this one — not the other — if better copies are
+arriving too late to count.
 
 Every rejected copy leaves a line saying `reason=duplicate` and naming the call that beat it, so
 "why is this call not in the archive?" has an answer.

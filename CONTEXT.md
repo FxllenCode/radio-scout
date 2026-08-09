@@ -20,7 +20,9 @@ _Avoid_: user, client, subscriber, viewer.
 
 **Call**:
 A single recorded radio transmission (or conversation) — audio plus its metadata (when, which talkgroup/system, frequency, units heard). The atomic unit Radio-Scout stores and plays.
-_Avoid_: recording, clip, transmission, audio file.
+
+**A *transmission* is the radio event; a Call is the row.** Usually one each, but not always: a **Patch** or a multi-site System makes several **Copies** of one transmission arrive, and they become one Call. So "transmission" is the right word for what was on the air and never a synonym for the thing stored — which is what the avoid-list below means.
+_Avoid_: recording, clip, transmission (for the Call itself), audio file.
 
 **System**:
 A radio network Radio-Scout receives calls from (e.g. a P25 trunked system). Owns talkgroups, sites, and units.
@@ -195,11 +197,11 @@ _Avoid_: match, neighbour, dupe.
 
 **Copy**:
 One **Recorder**'s upload of a transmission that Radio-Scout may already have. A Patch re-broadcast and a multi-site duplicate are two copies of one transmission, not two **Calls** — and which of them a **Listener** ends up hearing is decided by comparing them: fewer decode errors, then longer **Duration**. Deliberately a word for the *upload*, where **Call** is the row it becomes: N copies arrive and one Call exists.
-_Avoid_: version, variant, instance (an **Instance** is a running Radio-Scout), dupe.
+_Avoid_: version, variant, instance (an **Instance** is a running Radio-Scout), dupe. (It collides with Rust's `Copy` trait, which is why it stays a prose term: the code names the two sides `Arriving` and `Candidate` instead.)
 
 **Replacement**:
 A later-arriving **Copy** that turns out to be better taking the stored **Call**'s place — its audio and everything the Recorder said about the transmission — **under the same Call id**. Not a new Call and not an edit to one: the id, the **Talkgroup**, the instant and the position in the **Archive** are what a **listening queue**, a **Run** and an open page are all keyed on, so they stay. Nothing is published to the **live feed** for one, because the Listener already has that Call and a second frame would play it twice. Bounded: a Call stops being replaceable once its dedup window has closed, which is what lets its audio URL be promised immutable.
-_Avoid_: update, overwrite, upgrade, swap (the mechanism, shared with **Enhancement**).
+_Avoid_: update, overwrite, upgrade. (*Swap* is fine for the **mechanism** — it is what **Enhancement** does to an object too — but a Replacement is the whole act, not the write.)
 
 **Auto-populate**:
 Automatically creating an unknown system/talkgroup/unit the first time a call for it is ingested, so the archive is usable with zero manual configuration.
