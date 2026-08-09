@@ -25,6 +25,29 @@ describe('the notification a push becomes', () => {
     expect(options.body).toBe('4 new calls · Fulton County')
   })
 
+  /** Who keyed it (#47, spec US 42) — last in the line, so a narrow lock
+   *  screen cuts the name rather than the count. */
+  it('names the radio that keyed it', () => {
+    const { options } = notificationFor({ ...call, unit: 'MEDIC 7' })
+
+    expect(options.body).toBe('New call · Fulton County · MEDIC 7')
+  })
+
+  /** A coalesced notification carries the radio from the most recent of the
+   *  Calls it folded in, so naming it beside "6 new calls" would claim one
+   *  radio made all six. */
+  it('names no radio when it stands for more than one Call', () => {
+    const { options } = notificationFor({ ...call, count: 6, unit: 'MEDIC 7' })
+
+    expect(options.body).toBe('6 new calls · Fulton County')
+  })
+
+  it('says the Call and the System when nobody has named the radio', () => {
+    const { options } = notificationFor({ ...call, unit: undefined })
+
+    expect(options.body).toBe('New call · Fulton County')
+  })
+
   // The server's coalescing window has already fired; this is the device's own
   // half of the same rule — a Talkgroup occupies one notification, replaced
   // rather than stacked, so a shift's traffic can't bury the lock screen.

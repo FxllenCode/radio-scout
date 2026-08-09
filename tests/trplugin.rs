@@ -742,7 +742,7 @@ async fn as_ingested(app: &TestApp) -> String {
     units.sort_by_key(|u| (u.unit_ref, u.offset_ms));
 
     let mut rendered = format!(
-        "system={} talkgroup={} at={} freq={:?} source={:?}\n\
+        "system={} talkgroup={} at={} freq={:?}\n\
          audio: mime={:?} name={:?} size={:?}\n\
          duration={:?} stop={:?} emergency={} encrypted={} priority={:?} \
          audio_type={:?} site={:?}\n",
@@ -750,7 +750,6 @@ async fn as_ingested(app: &TestApp) -> String {
         talkgroup.r#ref,
         call.call_at_ms,
         call.frequency,
-        call.source_ref,
         call.audio_mime,
         call.audio_name,
         call.audio_size,

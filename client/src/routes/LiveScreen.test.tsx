@@ -47,7 +47,7 @@ function call(overrides: Partial<Call> = {}): Call {
     talkgroupTag: 'Fire Dispatch',
     talkgroupGroup: 'Fire',
     frequency: 853_412_500,
-    source: 1602381,
+    unitRef: 1602381,
     timestamp: Date.parse('2026-07-25T14:32:05'),
     audioUrl: '/api/call/1/audio',
     ...overrides,
@@ -127,10 +127,36 @@ describe('LiveScreen', () => {
       expect(within(readout).getByText('FD Dispatch')).toBeInTheDocument()
       expect(within(readout).getByText('Fulton County')).toBeInTheDocument()
       expect(within(readout).getByText(/Fire Dispatch/)).toBeInTheDocument()
-      // Frequency in MHz, TGID and Unit ID as the recorder sent them.
+      // Frequency in MHz, TGID and the radio as the recorder sent them.
       expect(screen.getByTestId('stat-frequency')).toHaveTextContent('853.412500')
       expect(screen.getByTestId('stat-talkgroup')).toHaveTextContent('54241')
       expect(screen.getByTestId('stat-unit')).toHaveTextContent('1602381')
+    })
+
+    /** The radio that keyed, named where anybody has named it and tappable
+     *  through to its history either way (#47, spec US 42/44). rdio-scanner
+     *  shows the bare number and nothing behind it. */
+    it('names the radio that keyed, and links to its history', () => {
+      listening(call({ unitRef: 1602381, unitLabel: 'MEDIC 7' }))
+
+      const unit = within(display()).getByRole('link', {
+        name: 'History for unit MEDIC 7',
+      })
+      expect(unit).toHaveTextContent('MEDIC 7')
+      expect(unit).toHaveAttribute('href', '/unit/11/1602381')
+    })
+
+    /** "Who was that ten minutes ago" answered from the list it happened in —
+     *  the recent rows carry the same link. */
+    it('links the radio on every recent row too', async () => {
+      const user = userEvent.setup()
+      listening(call({ id: 1, unitRef: 1602381, unitLabel: 'MEDIC 7' }))
+      await user.click(screen.getByRole('button', { name: 'Skip' }))
+
+      const recent = screen.getByRole('list', { name: 'Recent calls' })
+      expect(
+        within(recent).getByRole('link', { name: 'History for unit MEDIC 7' }),
+      ).toHaveAttribute('href', '/unit/11/1602381')
     })
 
     it('falls back to Refs when the recorder sent no labels', () => {
@@ -140,7 +166,7 @@ describe('LiveScreen', () => {
           talkgroupLabel: undefined,
           talkgroupTag: undefined,
           talkgroupGroup: undefined,
-          source: undefined,
+          unitRef: undefined,
         }),
       )
 

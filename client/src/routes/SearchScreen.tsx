@@ -6,12 +6,12 @@ import {
   SkipForward,
   Square,
 } from 'lucide-react'
-import { skipToken } from '@reduxjs/toolkit/query'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
+import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
 import { callCategory, systemName, talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
@@ -23,7 +23,7 @@ import {
   formatDuration,
   pageSummary,
 } from '@/lib/archive'
-import { prefetchAudio } from '@/lib/prefetch'
+import { useRunPageAhead } from '@/hooks/useRunPageAhead'
 import { cn } from '@/lib/utils'
 import { useGetFilterOptionsQuery, useSearchCallsQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -32,16 +32,13 @@ import {
   enterPlaybackMode,
   next,
   previous,
-  runPaged,
   searchChanged,
   selectCurrentCall,
   selectHasNext,
   selectHasPrevious,
   selectIsInterrupting,
-  selectIsRolling,
   selectPlaybackMode,
   selectPlaybackPosition,
-  selectWantedPage,
   startRun,
   stop,
 } from '@/store/playback'
@@ -118,56 +115,9 @@ export function SearchScreen() {
     dispatch(searchChanged(changed))
   }
 
-  /** The page of the Archive the Run needs on hand — the boundary it is about
-   *  to cross (#32's page-ahead) or the one it is waiting at (US 25's roll-on).
-   *
-   *  Both used to be worked out here, from playback's index plus two pieces of
-   *  local state that had to agree with it. Now there is one answer and one
-   *  subscription: RTK Query holds the page before the Run arrives, so crossing
-   *  the boundary costs no round trip, and `skipToken` means a Run with nothing
-   *  to page onto asks for nothing at all. */
-  const wanted = useAppSelector(selectWantedPage)
-  const rolling = useAppSelector(selectIsRolling)
-  // `currentData`, never `data`: RTK Query keeps the *previous* argument's
-  // answer in `data` while the next one is in flight, so a Run that re-armed
-  // onto a new search would be handed the page-ahead of the search the Listener
-  // just left — and go on playing Calls from it. `currentData` is undefined
-  // until the page for the argument now asked for is really in hand.
-  const { currentData: ahead } = useSearchCallsQuery(wanted ?? skipToken)
-
-  // Hand it over the moment the Run is actually at the boundary. Gated on
-  // `rolling` rather than on the data alone because the page-ahead's whole
-  // point is that the page is *already there* — RTK Query serves a cached one
-  // without a fulfilled action, so waiting for one to arrive would miss exactly
-  // the case #32 exists for.
-  //
-  // `wanted` rides along as the request this page answers, which the Run checks
-  // against the one it named. That check is only ever as true as the caller: it
-  // is `currentData` above that makes the claim an honest one here, because
-  // with `data` the page could belong to a request nobody is making any more
-  // while `wanted` said otherwise.
-  useEffect(() => {
-    if (rolling && wanted && ahead) {
-      dispatch(runPaged({ window: wanted, page: ahead }))
-    }
-  }, [rolling, wanted, ahead, dispatch])
-
-  // ...and warm the first Call of that page, which is the audio the Run arrives
-  // at. #14's prefetch stops at the end of the loaded page, because what
-  // follows the last Call of one is not in the store yet.
-  //
-  // The gate is a boolean rather than `wanted` itself, and not for tidiness:
-  // `wanted` is rebuilt whenever the Run changes at all, so depending on it
-  // would abort and restart the warm on every Call the Run advances through.
-  const pagingAhead = wanted !== null
-  useEffect(() => {
-    if (!pagingAhead) return
-    const first = ahead?.results[0]
-    if (!first) return
-    const controller = new AbortController()
-    void prefetchAudio(first.audioUrl, controller.signal)
-    return () => controller.abort()
-  }, [pagingAhead, ahead?.results])
+  // The page the Run is about to need, fetched and handed over (#32, US 25).
+  // Every screen that starts a Run owes this; #47's per-Unit view is the other.
+  useRunPageAhead()
 
   return (
     <Screen
@@ -335,6 +285,27 @@ export function SearchScreen() {
             <option value="5">5s or longer</option>
             <option value="15">15s or longer</option>
           </select>
+        </Field>
+
+        {/* Search by radio (#47, spec US 44). A typed Ref rather than a
+            dropdown: a county has tens of thousands of radios, so offering them
+            as options would put an unbounded list in every filter response —
+            and the way a Listener actually arrives here is by tapping a unit
+            label, which sets this. */}
+        <Field label="Unit" htmlFor="filter-unit">
+          <input
+            id="filter-unit"
+            type="number"
+            inputMode="numeric"
+            placeholder="Any unit"
+            className={controlClass}
+            value={filters.unit ?? ''}
+            onChange={(event) =>
+              updateFilters({
+                unit: event.target.value ? Number(event.target.value) : undefined,
+              })
+            }
+          />
         </Field>
 
         <Field label="Sort" htmlFor="filter-sort">
@@ -506,6 +477,15 @@ function ResultRow({
           {[system, callCategory(call)].filter(Boolean).join(' · ')}
         </p>
       </div>
+      {/* Who keyed it (#47, spec US 42/44) — its own column beside the length,
+          for the reason that one is a column: a name in the same place on every
+          row is readable down the page without reading any of it, where a name
+          appended to a variable-length line is not. Truncating rather than
+          wrapping, so the column stays a column on a phone; the whole name is
+          one tap away on the radio's own history, which is what it links to. */}
+      <span className="w-20 shrink-0 truncate text-right font-mono text-[11px] text-muted-foreground">
+        <UnitLink call={call} />
+      </span>
       <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
         {formatCallTime(call.timestamp)}
       </time>

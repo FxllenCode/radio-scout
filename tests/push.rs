@@ -101,7 +101,12 @@ async fn a_matching_call_notifies_the_subscribed_device() {
     )
     .await;
 
-    app.upload_ok(CallUpload::new()).await;
+    app.upload_ok(
+        CallUpload::new()
+            .set("unit", "4424000")
+            .set("talkerAlias", "MEDIC 7"),
+    )
+    .await;
 
     let pushed = service.wait_for(&app, 1).await;
     let sent = &pushed[0];
@@ -119,6 +124,10 @@ async fn a_matching_call_notifies_the_subscribed_device() {
     assert_eq!(payload["systemRef"], 11);
     assert_eq!(payload["talkgroupRef"], 54241);
     assert_eq!(payload["count"], 1, "one Call, so it stands for one");
+    assert_eq!(
+        payload["unit"], "MEDIC 7",
+        "who keyed it (#47) — the radio named itself, and nobody configured it"
+    );
     assert_eq!(
         payload["id"],
         app.the_call().await.id,

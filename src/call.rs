@@ -18,6 +18,27 @@ use serde::Serialize;
 /// Radio-Scout's internal primary key for a stored Call (matches the DB `i64`).
 pub type CallId = i64;
 
+/// What to call the radio a Call heard: the alias its **Recorder** had
+/// configured, else the **OTA alias** the radio broadcast about itself (#47,
+/// spec US 12).
+///
+/// One function because two places decide it and they must not disagree: the
+/// **Unit** roster, which decides what an apparatus is *named*
+/// ([`crate::db::repo::NewCallUnit::name`]), and this module's view, which
+/// decides what a Call is *shown as*. A Listener reading one and searching the
+/// other would find nothing and have no way to tell why.
+///
+/// The configured name wins because it is what somebody meant. The Call keeps
+/// both columns either way, so where the two disagree that stays visible on the
+/// Call detail — which is the reason they are separate columns at all
+/// (CONTEXT.md, **OTA alias**).
+pub fn unit_name<'a>(
+    configured: Option<&'a str>,
+    over_the_air: Option<&'a str>,
+) -> Option<&'a str> {
+    configured.or(over_the_air)
+}
+
 /// A Call already stored on this **System**, near enough in time that an
 /// arriving Call has to be compared against it (ADR-0001's duplicate detection,
 /// widened by #46).
@@ -175,8 +196,28 @@ pub struct StoredCall {
     pub patches: Vec<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency: Option<i64>,
+    /// The **Ref of the first radio heard** on this Call (#47, spec US 42) — the
+    /// canonical one, so a member Ref or a Ref inside a **Range** is shown as
+    /// the apparatus it belongs to rather than as the portable that keyed.
+    ///
+    /// This replaced a `source`, which was the rdio dialect's singular field
+    /// read straight off the Call row. Trunk Recorder's native meta has no such
+    /// field — it sends a `srcList` — so `source` was absent on every TR Call
+    /// there has ever been, and "units are bare numbers" was in fact "units are
+    /// nothing at all" for the recorder the maintainer runs. Read from
+    /// `call_units` instead, which every dialect fills.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<i64>,
+    pub unit_ref: Option<i64>,
+    /// What to call that radio: the **Unit**'s own alias when it has one, else
+    /// the name this Call carried for it — the alias its Recorder had
+    /// configured, else the **OTA alias** the radio broadcast about itself.
+    ///
+    /// The Unit's own comes first because that is the curated answer, and it is
+    /// what a unit CSV (#47) and #49's admin surface write. Absent when nobody
+    /// has named the radio at any of the three, which is what every Call looked
+    /// like before this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit_label: Option<String>,
     /// When the transmission started, unix milliseconds.
     ///
     /// **The only time field on the wire** (#98). There used to be a `dateTime`
@@ -279,7 +320,7 @@ pub struct CallDetail {
 
 // How one Call, and the cascading filter options beside it, reach a client —
 // decided beside the types rather than at the handlers (#92).
-crate::answers_json!(CallDetail, FilterOptions);
+crate::answers_json!(CallDetail, FilterOptions, UnitHistory);
 
 /// One frequency segment of a Call: where it sat and how badly it decoded.
 #[derive(Debug, Clone, Serialize)]
@@ -315,6 +356,19 @@ pub struct CallUnitDetail {
     /// from `label` because when the two disagree, that *is* the information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_ota: Option<String>,
+    /// The **Unit**'s own alias, where an Operator has curated one (#47) — the
+    /// most authoritative of the three names a Call can carry for a radio, and
+    /// the only one a unit CSV writes.
+    ///
+    /// A third field rather than one resolved name, for the reason `label` and
+    /// `tag_ota` are already two: each records where a name *came from*, and on
+    /// the one endpoint that exists to show what the recorder said, collapsing
+    /// them would throw that away. The best name to render is
+    /// [`unit_name`] over the first two with this ahead of both — which is
+    /// exactly what [`StoredCall::unit_label`] already carries for the radio a
+    /// Call is shown under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit_label: Option<String>,
     /// Offset into the Call, milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset_ms: Option<i64>,
@@ -327,6 +381,67 @@ pub struct CallUnitDetail {
     /// Wall-clock start, unix milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at_ms: Option<i64>,
+}
+
+/// One radio's history — the contract of `GET /api/unit/{systemRef}/{ref}`
+/// (#47, spec US 44).
+///
+/// **A summary, not a page of Calls.** The Calls themselves are an ordinary
+/// archive search (`?unit=`), which already pages, filters and plays; what this
+/// adds is the part a search cannot answer without reading the whole archive —
+/// which channels this radio lives on, and how long it has been around.
+///
+/// rdio-scanner stores unit rows and has no way to show one at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitHistory {
+    pub system_ref: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_label: Option<String>,
+    /// The **canonical** Ref — the one the apparatus is displayed and exported
+    /// under, which is what a Listener arriving from a unit label asked for.
+    pub r#ref: i64,
+    /// Absent when nobody has named this radio: an uncurated archive is full of
+    /// them, and a bare number is still a history worth reading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The **Ranges** and lone member Refs this apparatus also answers to (#45,
+    /// spec US 16), in the order an Operator wrote them. Omitted when it owns
+    /// none, which is every Unit until somebody merges one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub member_refs: Vec<RefSpan>,
+    /// How many Calls in the Archive this radio was heard on.
+    pub call_count: u64,
+    /// The oldest and newest of them. Absent together when there are none —
+    /// which a curated Unit that has never keyed genuinely is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_heard_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heard_ms: Option<i64>,
+    /// Where it talks, **busiest first**: which channel a radio lives on is the
+    /// question this view exists for, and any other ordering buries it under
+    /// whatever the radio touched once.
+    pub talkgroups: Vec<UnitTalkgroup>,
+}
+
+/// A span of Refs an entity answers to (CONTEXT.md: **Range**), both ends
+/// inclusive. A lone member Ref is a span of one, which is how it is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefSpan {
+    pub from: i64,
+    pub to: i64,
+}
+
+/// One Talkgroup a radio has been heard on, and how much.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitTalkgroup {
+    pub r#ref: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub calls: u64,
+    pub last_heard_ms: i64,
 }
 
 /// One System that has Calls matching the current archive-search filters.
@@ -506,7 +621,8 @@ mod tests {
             led: Some("red".into()),
             patches: vec![54001, 54002],
             frequency: Some(774_031_250),
-            source: Some(1_610_092),
+            unit_ref: Some(1_610_092),
+            unit_label: Some("MEDIC 7".to_string()),
             timestamp: Some(1_669_740_338_000),
             audio_mime: Some("audio/mp4".into()),
             duration_ms: Some(8250),
@@ -561,7 +677,8 @@ mod tests {
             led: None,
             patches: vec![],
             frequency: None,
-            source: None,
+            unit_ref: None,
+            unit_label: None,
             timestamp: None,
             audio_mime: None,
             duration_ms: None,

@@ -29,8 +29,14 @@ pub struct Model {
     /// When the transmission happened, unix milliseconds (dialect-agnostic).
     pub call_at_ms: i64,
     pub frequency: Option<i64>,
-    /// The primary transmitting unit's `ref`, if known.
-    pub source_ref: Option<i64>,
+    // A `source_ref` — the rdio dialect's singular `source` — sat here until
+    // #47. It recorded one radio id that `call_units` already held, on the one
+    // dialect that sends it: Trunk Recorder's native meta sends a `srcList` and
+    // never a singular source, so the column was `NULL` on every TR Call and
+    // the wire field built from it was absent on every one of them. The radio a
+    // Call is *shown* under is now the first row of `call_units`, which every
+    // dialect fills, so nothing read this and it is gone rather than kept
+    // written.
     /// Where the audio lives in the object store (ADR-0002).
     pub object_key: String,
     pub audio_mime: Option<String>,

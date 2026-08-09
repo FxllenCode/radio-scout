@@ -7,6 +7,7 @@ import type {
   LogEvent,
   LogPage,
   SearchPage,
+  UnitHistory,
 } from '@/types'
 
 /** Same-origin base our relative RTK Query calls resolve to under jsdom (the
@@ -51,9 +52,35 @@ export const ARCHIVE: Call[] = [
     talkgroupTag: 'Fire',
     talkgroupGroup: 'Emergency',
     timestamp: Date.parse('2026-07-25T14:00:00'),
+    unitRef: 1200,
+    unitLabel: 'Engine 1',
     audioUrl: '/api/call/1/audio',
   },
 ]
+
+/** One radio's history (#47, spec US 44) — the apparatus `ARCHIVE`'s oldest
+ *  Call was keyed by, with a Range beside it so the summary has one to show. */
+export const UNIT_HISTORY: UnitHistory = {
+  systemRef: 100,
+  systemLabel: 'Alpha',
+  ref: 1200,
+  label: 'Engine 1',
+  memberRefs: [
+    { from: 1201, to: 1299 },
+    { from: 4471, to: 4471 },
+  ],
+  callCount: 2,
+  firstHeardMs: Date.parse('2026-07-25T14:00:00'),
+  lastHeardMs: Date.parse('2026-07-25T14:30:00'),
+  talkgroups: [
+    {
+      ref: 1,
+      label: 'Alpha Fire',
+      calls: 2,
+      lastHeardMs: Date.parse('2026-07-25T14:30:00'),
+    },
+  ],
+}
 
 /** The barest Call a **Run** can walk: an id, somewhere it came from, and audio
  *  to play. A test about *walking* Calls cares about which one is playing and
@@ -229,6 +256,13 @@ export const handlers = [
     HttpResponse.json(FILTER_OPTIONS),
   ),
   http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(CATALOG)),
+  // One radio's history (#47). Answers for the one radio `ARCHIVE` names and
+  // 404s for anything else, which is the server's own rule.
+  http.get(`${ORIGIN}/api/unit/:system/:ref`, ({ params }) =>
+    params.system === '100' && params.ref === '1200'
+      ? HttpResponse.json(UNIT_HISTORY)
+      : new HttpResponse('unit not found\n', { status: 404 }),
+  ),
   // The admin surface (#19) as an unauthenticated browser sees it: no session,
   // so the Logs view (#30) asks for a password. Tests that sign in override
   // these through `server.use(...)`.

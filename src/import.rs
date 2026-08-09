@@ -44,12 +44,13 @@ use std::collections::HashMap;
 use axum::extract::{Query, State};
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, IntoActiveModel,
+    QueryFilter, Set,
 };
 use serde::Serialize;
 
 use crate::AppState;
-use crate::db::entities::{group, system, tag, talkgroup, talkgroup_group};
+use crate::db::entities::{group, system, tag, talkgroup, talkgroup_group, unit};
 use crate::db::repo;
 use crate::failure::{Failure, Reason, Stage};
 
@@ -191,6 +192,14 @@ pub enum ParseError {
     Malformed(String),
     /// Parsed fine, but there is not a single data row to apply.
     Empty,
+    /// A **unit** CSV with no header naming the radio-id column (#47).
+    ///
+    /// Its own arm rather than a reuse of [`ParseError::NoRefColumn`] because
+    /// the advice differs: a Talkgroup file has a positional fallback every
+    /// RadioReference export uses, and a unit file has none. No third party
+    /// exports unit lists, so guessing at columns would mean silently renaming
+    /// a fleet from whatever happened to sit in the first column.
+    NoUnitRefColumn,
 }
 
 impl ParseError {
@@ -200,6 +209,7 @@ impl ParseError {
             ParseError::NoRefColumn => "no-ref-column",
             ParseError::Malformed(_) => "malformed-csv",
             ParseError::Empty => "empty-csv",
+            ParseError::NoUnitRefColumn => "no-unit-ref-column",
         }
     }
 }
@@ -216,6 +226,10 @@ impl std::fmt::Display for ParseError {
                 "could not read the CSV (is it saved as UTF-8?): {detail}"
             ),
             ParseError::Empty => f.write_str("the CSV has no data rows"),
+            ParseError::NoUnitRefColumn => f.write_str(
+                "no unit-ref column: name one (ref/unit/radioid) in a header row — \
+                 a unit CSV has no positional layout to fall back on",
+            ),
         }
     }
 }
@@ -293,16 +307,19 @@ fn normalize_header(raw: &str) -> String {
 /// Map a header record to column positions, or `None` for each column the
 /// header doesn't name. The first spelling of a column wins, so a stray later
 /// duplicate can't hijack it.
-fn map_headers(record: &csv::StringRecord) -> HashMap<Column, usize> {
+fn map_headers<C: Copy + Eq + std::hash::Hash>(
+    record: &csv::StringRecord,
+    aliases_of: &[(C, &[&str])],
+) -> HashMap<C, usize> {
     let mut mapped = HashMap::new();
     for (index, raw) in record.iter().enumerate() {
         let normalized = normalize_header(raw);
         if normalized.is_empty() {
             continue;
         }
-        for (column, aliases) in COLUMN_ALIASES {
+        for (column, aliases) in aliases_of {
             if aliases.contains(&normalized.as_str()) {
-                mapped.entry(column).or_insert(index);
+                mapped.entry(*column).or_insert(index);
             }
         }
     }
@@ -323,13 +340,68 @@ fn map_headers(record: &csv::StringRecord) -> HashMap<Column, usize> {
 /// fixes the named lines and re-imports, and the upsert makes that safe. Only a
 /// file we can't read at all is an `Err`.
 pub fn parse(bytes: &[u8], default_system: Option<&SystemSelector>) -> Result<Parsed, ParseError> {
+    let mut records = records(bytes)?.into_iter();
+    let Some((first_line, first)) = records.next() else {
+        return Err(ParseError::Empty);
+    };
+
+    // Layout detection, in the only order that can't misread a file:
+    //  1. If the first record *names* a Ref column, it's a header.
+    //  2. Otherwise, if its first field is a number, it's positional data.
+    //  3. Otherwise we would be guessing — say so instead.
+    let (layout, columns, first_data) = {
+        let named = map_headers(&first, &COLUMN_ALIASES);
+        if named.contains_key(&Column::Ref) {
+            (Layout::Named, named, None)
+        } else if first
+            .get(0)
+            .is_some_and(|f| f.trim().parse::<i64>().is_ok())
+        {
+            let positional = RADIO_REFERENCE_COLUMNS.into_iter().collect();
+            (
+                Layout::RadioReference,
+                positional,
+                Some((first_line, first)),
+            )
+        } else {
+            return Err(ParseError::NoRefColumn);
+        }
+    };
+
+    let mut parsed = Parsed {
+        layout,
+        edits: Vec::new(),
+        rejected: Vec::new(),
+    };
+    for (line, record) in first_data.into_iter().chain(records) {
+        match parse_row(&record, &columns, line, default_system) {
+            Ok(edit) => parsed.edits.push(edit),
+            Err(rejected) => parsed.rejected.push(rejected),
+        }
+    }
+
+    if parsed.edits.is_empty() && parsed.rejected.is_empty() {
+        return Err(ParseError::Empty);
+    }
+    Ok(parsed)
+}
+
+/// Every non-blank record of a CSV, each with the **line an operator sees in
+/// their editor** — the reading both importers share (#18, #47).
+///
+/// The line number is the whole reason this is a function. `csv`'s own
+/// `Position::line` does not count the blank lines it skips, so every number
+/// after the first blank line would point at the wrong row, and a report that
+/// sends an operator to the wrong line is worse than one that gives no line at
+/// all.
+fn records(bytes: &[u8]) -> Result<Vec<(u64, csv::StringRecord)>, ParseError> {
     // A UTF-8 BOM is what a spreadsheet writes on export; it would otherwise
     // glue itself to the first header name (or the first Ref) and break it.
     let bytes = bytes.strip_prefix(BOM).unwrap_or(bytes);
 
     let mut reader = csv::ReaderBuilder::new()
-        // Headers are detected below, not by the reader: which layout we're in
-        // is only decidable after looking at the first record.
+        // Headers are detected by the caller, not by the reader: which layout a
+        // file is in is only decidable after looking at the first record.
         .has_headers(false)
         // Real files have ragged rows; a short row means "no value here", which
         // is a per-row decision, not a parse failure.
@@ -337,10 +409,6 @@ pub fn parse(bytes: &[u8], default_system: Option<&SystemSelector>) -> Result<Pa
         .trim(csv::Trim::All)
         .from_reader(bytes);
 
-    // Where every line begins, so a record's byte offset can be turned into the
-    // line number an operator sees in their editor. `csv`'s own `Position::line`
-    // does not count the blank lines it skips, which would make every number
-    // after the first blank line point at the wrong row.
     // Line 1 starts at 0; every later line starts just past a newline.
     let line_starts: Vec<usize> = std::iter::once(0)
         .chain(
@@ -380,51 +448,7 @@ pub fn parse(bytes: &[u8], default_system: Option<&SystemSelector>) -> Result<Pa
         let line = line_of(&record);
         records.push((line, record));
     }
-
-    let mut records = records.into_iter();
-    let Some((first_line, first)) = records.next() else {
-        return Err(ParseError::Empty);
-    };
-
-    // Layout detection, in the only order that can't misread a file:
-    //  1. If the first record *names* a Ref column, it's a header.
-    //  2. Otherwise, if its first field is a number, it's positional data.
-    //  3. Otherwise we would be guessing — say so instead.
-    let (layout, columns, first_data) = {
-        let named = map_headers(&first);
-        if named.contains_key(&Column::Ref) {
-            (Layout::Named, named, None)
-        } else if first
-            .get(0)
-            .is_some_and(|f| f.trim().parse::<i64>().is_ok())
-        {
-            let positional = RADIO_REFERENCE_COLUMNS.into_iter().collect();
-            (
-                Layout::RadioReference,
-                positional,
-                Some((first_line, first)),
-            )
-        } else {
-            return Err(ParseError::NoRefColumn);
-        }
-    };
-
-    let mut parsed = Parsed {
-        layout,
-        edits: Vec::new(),
-        rejected: Vec::new(),
-    };
-    for (line, record) in first_data.into_iter().chain(records) {
-        match parse_row(&record, &columns, line, default_system) {
-            Ok(edit) => parsed.edits.push(edit),
-            Err(rejected) => parsed.rejected.push(rejected),
-        }
-    }
-
-    if parsed.edits.is_empty() && parsed.rejected.is_empty() {
-        return Err(ParseError::Empty);
-    }
-    Ok(parsed)
+    Ok(records)
 }
 
 /// Read one data record into an edit, or say why it can't be one.
@@ -488,30 +512,9 @@ fn parse_row(
         })
         .unwrap_or_default();
 
-    // `-` is rdio's placeholder token, and here it is the one column where it
-    // is a *value*: "this channel answers to no other Refs". Everywhere else a
-    // placeholder means silence, and a blank cell still does mean silence here —
-    // the two are different sentences and an unmerge needs the first one.
-    let member_refs = match cell(Column::MemberRefs) {
-        None => None,
-        Some("-") => Some(Vec::new()),
-        Some(raw) => {
-            let mut refs = Vec::new();
-            for entry in raw.split(GROUP_SEPARATOR).map(str::trim) {
-                if entry.is_empty() {
-                    continue;
-                }
-                // A row that half-applies its merge is worse than one that does
-                // not apply at all: the operator would have to work out which of
-                // their Refs landed. Reject the row, name the cell.
-                let member = entry
-                    .parse::<i64>()
-                    .map_err(|_| RejectedRow::new(line, "member-ref-not-a-number", entry))?;
-                refs.push(member);
-            }
-            Some(refs)
-        }
-    };
+    let member_refs = member_cell(cell(Column::MemberRefs), line, |entry| {
+        entry.parse::<i64>().ok()
+    })?;
 
     Ok(TalkgroupEdit {
         line,
@@ -647,10 +650,9 @@ async fn apply<C: ConnectionTrait>(
     let mut resolver = Resolver::default();
 
     for edit in &parsed.edits {
-        let Some(system_id) = resolver
-            .system(db, &edit.system, now_ms, &mut report)
-            .await?
-        else {
+        let (system_id, created) = resolver.system(db, &edit.system, now_ms).await?;
+        report.systems_created += u64::from(created);
+        let Some(system_id) = system_id else {
             report.rejected.push(RejectedRow::new(
                 edit.line,
                 "unknown-system",
@@ -678,30 +680,31 @@ struct Resolver {
 }
 
 impl Resolver {
-    /// Resolve a row's System to its id. A Ref may create it — curating ahead of
-    /// the first Call is a legitimate workflow, and the report says how many
-    /// Systems that made, so a mistyped column is visible. A label may not; see
-    /// [`SystemSelector`].
+    /// Resolve a row's System to its id, and say whether resolving it **created**
+    /// one. A Ref may create it — curating ahead of the first Call is a
+    /// legitimate workflow, and both reports say how many Systems that made, so
+    /// a mistyped column is visible. A label may not; see [`SystemSelector`].
+    ///
+    /// The count is returned rather than written into a report, because the two
+    /// importers keep different ones and this lookup is the same either way.
     async fn system<C: ConnectionTrait>(
         &mut self,
         db: &C,
         selector: &SystemSelector,
         now_ms: i64,
-        report: &mut ImportReport,
-    ) -> Result<Option<i64>, DbErr> {
+    ) -> Result<(Option<i64>, bool), DbErr> {
         if let Some(cached) = self.systems.get(selector) {
-            return Ok(*cached);
+            return Ok((*cached, false));
         }
-        let resolved = match selector {
+        let (resolved, created) = match selector {
             SystemSelector::Ref(system_ref) => {
                 let existing = system::Entity::find()
                     .filter(system::Column::Ref.eq(*system_ref))
                     .one(db)
                     .await?;
                 match existing {
-                    Some(found) => Some(found.id),
-                    None => {
-                        report.systems_created += 1;
+                    Some(found) => (Some(found.id), false),
+                    None => (
                         Some(
                             repo::resolve_or_create_system(
                                 db,
@@ -711,18 +714,22 @@ impl Resolver {
                             )
                             .await?
                             .id,
-                        )
-                    }
+                        ),
+                        true,
+                    ),
                 }
             }
-            SystemSelector::Label(label) => system::Entity::find()
-                .filter(system::Column::Label.eq(label.as_str()))
-                .one(db)
-                .await?
-                .map(|found| found.id),
+            SystemSelector::Label(label) => (
+                system::Entity::find()
+                    .filter(system::Column::Label.eq(label.as_str()))
+                    .one(db)
+                    .await?
+                    .map(|found| found.id),
+                false,
+            ),
         };
         self.systems.insert(selector.clone(), resolved);
-        Ok(resolved)
+        Ok((resolved, created))
     }
 
     /// Resolve a Tag by name, creating it if new and counting that.
@@ -1094,6 +1101,383 @@ async fn replace_groups<C: ConnectionTrait>(
 }
 
 // ---------------------------------------------------------------------------
+// Units (#47, spec US 43)
+// ---------------------------------------------------------------------------
+
+/// The columns a **unit** CSV understands.
+///
+/// Header-named only. Every alias here is a spelling an operator's own fleet
+/// list plausibly uses — there is no third-party export to be compatible with,
+/// which is also why there is no positional layout (see
+/// [`ParseError::NoUnitRefColumn`]).
+const UNIT_COLUMN_ALIASES: [(UnitColumn, &[&str]); 4] = [
+    (
+        UnitColumn::Ref,
+        &["ref", "unitref", "unit", "radioid", "rid", "id", "decimal"],
+    ),
+    (UnitColumn::Label, &["label", "alias", "name", "alphatag"]),
+    (
+        UnitColumn::MemberRefs,
+        &[
+            "memberrefs",
+            "memberref",
+            "members",
+            "ranges",
+            "range",
+            "unitrange",
+        ],
+    ),
+    (
+        UnitColumn::System,
+        &["system", "systemref", "sys", "shortname", "sysid"],
+    ),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum UnitColumn {
+    Ref,
+    Label,
+    /// The **Ranges** and lone member Refs this apparatus also answers to (#45,
+    /// CONTEXT.md), `1201-1299;4471`.
+    MemberRefs,
+    System,
+}
+
+/// One Unit's curated values, as a single CSV row asks for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitEdit {
+    /// 1-based line in the uploaded file.
+    pub line: u64,
+    pub system: SystemSelector,
+    pub unit_ref: i64,
+    /// `None` is a blank cell — leave the stored alias alone.
+    pub label: Option<String>,
+    /// `None` is a blank cell; `Some` **replaces** the set, and `Some(vec![])`
+    /// (written `-`) is the empty set. The same three sentences the Talkgroup
+    /// importer's member-Refs cell speaks, because an operator should not have
+    /// to learn two dialects for one idea.
+    pub member_refs: Option<Vec<crate::merge::Range>>,
+}
+
+/// A unit CSV read into the rows it asks for, plus the ones that never will be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedUnits {
+    pub edits: Vec<UnitEdit>,
+    pub rejected: Vec<RejectedRow>,
+}
+
+/// Read CSV text into the Unit edits it asks for (#47, spec US 43).
+pub fn parse_units(
+    bytes: &[u8],
+    default_system: Option<&SystemSelector>,
+) -> Result<ParsedUnits, ParseError> {
+    let mut records = records(bytes)?.into_iter();
+    let Some((_, header)) = records.next() else {
+        return Err(ParseError::Empty);
+    };
+    let columns = map_headers(&header, &UNIT_COLUMN_ALIASES);
+    if !columns.contains_key(&UnitColumn::Ref) {
+        return Err(ParseError::NoUnitRefColumn);
+    }
+
+    let mut parsed = ParsedUnits {
+        edits: Vec::new(),
+        rejected: Vec::new(),
+    };
+    for (line, record) in records {
+        match parse_unit_row(&record, &columns, line, default_system) {
+            Ok(edit) => parsed.edits.push(edit),
+            Err(rejected) => parsed.rejected.push(rejected),
+        }
+    }
+
+    if parsed.edits.is_empty() && parsed.rejected.is_empty() {
+        return Err(ParseError::Empty);
+    }
+    Ok(parsed)
+}
+
+/// Read one unit record into an edit, or say why it can't be one.
+fn parse_unit_row(
+    record: &csv::StringRecord,
+    columns: &HashMap<UnitColumn, usize>,
+    line: u64,
+    default_system: Option<&SystemSelector>,
+) -> Result<UnitEdit, RejectedRow> {
+    let cell = |column: UnitColumn| -> Option<&str> {
+        columns
+            .get(&column)
+            .and_then(|&index| record.get(index))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+
+    let Some(raw_ref) = cell(UnitColumn::Ref) else {
+        return Err(RejectedRow {
+            line,
+            reason: "missing-ref",
+            detail: None,
+        });
+    };
+    let unit_ref = raw_ref
+        .parse::<i64>()
+        .map_err(|_| RejectedRow::new(line, "ref-not-a-number", raw_ref))?;
+
+    let system = match cell(UnitColumn::System) {
+        Some(raw) => SystemSelector::parse(raw),
+        None => default_system.cloned().ok_or(RejectedRow {
+            line,
+            reason: "no-system",
+            detail: None,
+        })?,
+    };
+
+    let member_refs = member_cell(cell(UnitColumn::MemberRefs), line, parse_span)?;
+
+    Ok(UnitEdit {
+        line,
+        system,
+        unit_ref,
+        label: cell(UnitColumn::Label).map(str::to_owned),
+        member_refs,
+    })
+}
+
+/// A **set-valued cell** — the member-Refs column both importers carry — read
+/// into the values it names, or the reported row that says which entry could
+/// not be one.
+///
+/// Three sentences, and an operator should not have to learn two dialects for
+/// them: a **blank cell says nothing** (leave the stored set alone), **`-` is
+/// the empty set** (rdio's placeholder token, and the one column where it is a
+/// *value* — a set with no way to spell "none" could fold a Ref in and never let
+/// it out), and anything else **replaces** the set.
+///
+/// A row that half-applies is worse than one that does not apply at all: the
+/// operator would have to work out which of their entries landed. So one
+/// unreadable entry rejects the whole row and names it.
+fn member_cell<T>(
+    raw: Option<&str>,
+    line: u64,
+    read: impl Fn(&str) -> Option<T>,
+) -> Result<Option<Vec<T>>, RejectedRow> {
+    let Some(raw) = raw else { return Ok(None) };
+    if raw == "-" {
+        return Ok(Some(Vec::new()));
+    }
+    let mut values = Vec::new();
+    for entry in raw.split(GROUP_SEPARATOR).map(str::trim) {
+        // A stray separator is punctuation, not an entry that failed to parse.
+        if entry.is_empty() {
+            continue;
+        }
+        values.push(
+            read(entry).ok_or_else(|| RejectedRow::new(line, "member-ref-not-a-number", entry))?,
+        );
+    }
+    Ok(Some(values))
+}
+
+/// One entry of a unit member-Refs cell: `1201-1299` (a **Range**) or `4471` (a
+/// lone member Ref, which is a Range of one — CONTEXT.md).
+///
+/// The separator is the last `-` that is not itself part of a number's sign, so
+/// every span an `i64` pair can spell reads correctly: `1201-1299`, `-5` as one
+/// Ref, and `-9--5` as the span between two. Recorders send unsigned radio ids,
+/// so the negative cases are not something an operator will write — but a parser
+/// that quietly mis-split one would write down a Range nobody asked for, and
+/// refusing what cannot be meant is cheaper than being clever about it.
+fn parse_span(entry: &str) -> Option<crate::merge::Range> {
+    let separator = entry
+        .char_indices()
+        .rfind(|(at, c)| *c == '-' && *at > 0 && !entry[..*at].ends_with('-'))
+        .map(|(at, _)| at);
+    match separator {
+        Some(at) => Some(crate::merge::Range::new(
+            entry[..at].trim().parse().ok()?,
+            entry[at + 1..].trim().parse().ok()?,
+        )),
+        None => {
+            let only = entry.parse().ok()?;
+            Some(crate::merge::Range::new(only, only))
+        }
+    }
+}
+
+/// What a unit import did (or, on a dry run, would have done).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitImportReport {
+    /// True when nothing was written — the same work, rolled back.
+    pub dry_run: bool,
+    /// Data rows read, rejected ones included (blank lines and the header not).
+    pub rows: u64,
+    pub units_created: u64,
+    pub units_updated: u64,
+    /// Rows whose values the archive already had — the count that proves a
+    /// re-import is a no-op.
+    pub units_unchanged: u64,
+    /// Systems the import brought into existence. Non-zero on a run you expected
+    /// to only touch known Systems means a mistyped `system` column.
+    pub systems_created: u64,
+    pub ranges_added: u64,
+    pub ranges_removed: u64,
+    /// Every row that was not applied, in file order.
+    pub rejected: Vec<RejectedRow>,
+}
+
+crate::answers_json!(UnitImportReport);
+
+/// Parse and apply a unit CSV in one transaction (#47, spec US 43).
+///
+/// The same contract as [`import`]: valid rows apply together or not at all,
+/// rejected rows are reported and never applied, and a dry run walks the
+/// identical path and rolls back.
+pub async fn import_units(
+    db: &crate::db::Db,
+    bytes: &[u8],
+    options: &ImportOptions,
+    now_ms: i64,
+) -> Result<UnitImportReport, ImportError> {
+    let parsed = parse_units(bytes, options.default_system.as_ref()).map_err(ImportError::Parse)?;
+
+    let txn = db.begin().await?;
+    let report = apply_units(&txn, &parsed, options.dry_run, now_ms).await?;
+    if options.dry_run {
+        txn.rollback().await?;
+    } else {
+        txn.commit().await?;
+    }
+    Ok(report)
+}
+
+/// Apply parsed Unit edits, accumulating the report.
+async fn apply_units<C: ConnectionTrait>(
+    db: &C,
+    parsed: &ParsedUnits,
+    dry_run: bool,
+    now_ms: i64,
+) -> Result<UnitImportReport, DbErr> {
+    let mut report = UnitImportReport {
+        dry_run,
+        rows: (parsed.edits.len() + parsed.rejected.len()) as u64,
+        units_created: 0,
+        units_updated: 0,
+        units_unchanged: 0,
+        systems_created: 0,
+        ranges_added: 0,
+        ranges_removed: 0,
+        rejected: parsed.rejected.clone(),
+    };
+    // The Systems are resolved once each, not once per row — a fleet list names
+    // the same one on every line of it.
+    let mut resolver = Resolver::default();
+
+    for edit in &parsed.edits {
+        let (system_id, created) = resolver.system(db, &edit.system, now_ms).await?;
+        report.systems_created += u64::from(created);
+        let Some(system_id) = system_id else {
+            report.rejected.push(RejectedRow::new(
+                edit.line,
+                "unknown-system",
+                edit.system.to_string(),
+            ));
+            continue;
+        };
+        apply_unit_edit(db, system_id, edit, now_ms, &mut report).await?;
+    }
+
+    report.rejected.sort_by_key(|rejected| rejected.line);
+    Ok(report)
+}
+
+/// Upsert one Unit and the Refs it answers to, classifying the row as created,
+/// updated, or unchanged — exactly one of the three.
+async fn apply_unit_edit<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    edit: &UnitEdit,
+    now_ms: i64,
+    report: &mut UnitImportReport,
+) -> Result<(), DbErr> {
+    // The Unit's **own** Ref, not one it answers to: a row naming a Ref that
+    // some other apparatus owns as a member is curating *this* apparatus, and
+    // resolving through the Range would silently rename its neighbour.
+    let existing = unit::Entity::find()
+        .filter(unit::Column::SystemId.eq(system_id))
+        .filter(unit::Column::Ref.eq(edit.unit_ref))
+        .one(db)
+        .await?;
+
+    let (unit, created, renamed) = match existing {
+        None => (
+            unit::ActiveModel {
+                system_id: Set(system_id),
+                r#ref: Set(edit.unit_ref),
+                label: Set(edit.label.clone()),
+                created_at_ms: Set(now_ms),
+                ..Default::default()
+            }
+            .insert(db)
+            .await?,
+            true,
+            false,
+        ),
+        Some(found) => match &edit.label {
+            // A blank cell leaves the stored alias alone, which is what lets a
+            // `ref,memberRefs` file be imported over curated names.
+            Some(label) if found.label.as_deref() != Some(label.as_str()) => {
+                let mut update = found.clone().into_active_model();
+                update.label = Set(Some(label.clone()));
+                (update.update(db).await?, false, true)
+            }
+            _ => (found, false, false),
+        },
+    };
+
+    let spans_changed = match &edit.member_refs {
+        None => false,
+        Some(wanted) => set_ranges(db, &unit, wanted, edit.line, now_ms, report).await?,
+    };
+
+    if created {
+        report.units_created += 1;
+    } else if renamed || spans_changed {
+        report.units_updated += 1;
+    } else {
+        report.units_unchanged += 1;
+    }
+    Ok(())
+}
+
+/// Make the Unit's owned spans exactly `wanted`, reporting the rows that moved
+/// and the Ranges that could not.
+///
+/// The work is [`repo::set_unit_ranges`]'s — one read of the System's spans, the
+/// overlap guarantee unchanged — and what belongs here is only turning a refusal
+/// into the reported row an operator reads.
+async fn set_ranges<C: ConnectionTrait>(
+    db: &C,
+    unit: &unit::Model,
+    wanted: &[crate::merge::Range],
+    line: u64,
+    now_ms: i64,
+    report: &mut UnitImportReport,
+) -> Result<bool, DbErr> {
+    let set = repo::set_unit_ranges(db, unit, wanted, now_ms).await?;
+    report.ranges_added += set.added;
+    report.ranges_removed += set.removed;
+    for (_, collision) in &set.refused {
+        report.rejected.push(RejectedRow::new(
+            line,
+            "range-overlaps",
+            format!("{}-{}", collision.from(), collision.to()),
+        ));
+    }
+    Ok(!set.is_empty())
+}
+
+// ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------
 
@@ -1133,6 +1517,38 @@ pub async fn import_talkgroups(
             // told which of the three things was wrong with it.
             ImportError::Parse(err) => Reason::BadImport(err).into(),
             ImportError::Db(err) => Failure::broke(Stage::ImportTalkgroups, err),
+        })
+}
+
+/// `POST /api/admin/units/import` — a fleet's numbering scheme in one paste
+/// (#47, spec US 43).
+///
+/// The same shape as [`import_talkgroups`] in every respect an operator can
+/// see: the CSV is the body, `system` and `dryRun` are the query parameters,
+/// `dryRun` reads as a flag, and rejected rows come back with their line
+/// numbers. rdio-scanner has no unit import at all — units are typed one at a
+/// time into an admin table, which is why nobody's units are named.
+pub async fn import_unit_csv(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    body: bytes::Bytes,
+) -> Result<UnitImportReport, Failure> {
+    let options = ImportOptions {
+        default_system: params
+            .get("system")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(SystemSelector::parse),
+        dry_run: params
+            .get("dryRun")
+            .is_some_and(|value| !matches!(value.trim(), "false" | "0" | "no" | "off")),
+    };
+
+    import_units(&state.db, &body, &options, state.clock.now_ms())
+        .await
+        .map_err(|error| match error {
+            ImportError::Parse(err) => Reason::BadImport(err).into(),
+            ImportError::Db(err) => Failure::broke(Stage::ImportUnits, err),
         })
 }
 
@@ -1675,5 +2091,58 @@ mod tests {
             prop_assert_eq!(parsed.edits[0].label.as_deref(), Some(label.trim()));
             prop_assert_eq!(parsed.edits[0].led.as_deref(), Some(led));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // A unit member-Refs entry (#47)
+    // -----------------------------------------------------------------------
+
+    /// A **Range** is the operator's own notation, and the separator is the one
+    /// character a Ref can also start with — so every case here is a way the
+    /// split could be got wrong, and the middle two are why it is not a bare
+    /// `rfind('-')`.
+    #[rstest]
+    #[case::a_lone_ref("4471", Some((4471, 4471)))]
+    #[case::a_block("1201-1299", Some((1201, 1299)))]
+    #[case::reversed("1299-1201", Some((1201, 1299)))]
+    #[case::spaced(" 1201 - 1299 ", Some((1201, 1299)))]
+    #[case::a_negative_ref("-5", Some((-5, -5)))]
+    #[case::between_two_negatives("-9--5", Some((-9, -5)))]
+    #[case::not_a_number("12ab", None)]
+    #[case::half_a_span("1201-", None)]
+    #[case::nonsense("--", None)]
+    fn a_member_refs_entry_is_a_ref_or_a_span(
+        #[case] entry: &str,
+        #[case] expected: Option<(i64, i64)>,
+    ) {
+        assert_eq!(
+            parse_span(entry),
+            expected.map(|(from, to)| crate::merge::Range::new(from, to)),
+            "for {entry:?}"
+        );
+    }
+
+    /// The three sentences a set-valued cell can speak, which both importers
+    /// share so an operator does not have to learn two dialects for one idea.
+    #[test]
+    fn a_set_valued_cell_says_nothing_empties_or_replaces() {
+        let read = |raw: Option<&str>| member_cell(raw, 7, |entry| entry.parse::<i64>().ok());
+
+        assert_eq!(read(None), Ok(None), "a blank cell leaves the set alone");
+        assert_eq!(read(Some("-")), Ok(Some(vec![])), "`-` is the empty set");
+        assert_eq!(
+            read(Some("1;2")),
+            Ok(Some(vec![1, 2])),
+            "anything else replaces it"
+        );
+        assert_eq!(
+            read(Some(";1;;2;")),
+            Ok(Some(vec![1, 2])),
+            "a stray separator is punctuation"
+        );
+        assert_eq!(
+            read(Some("1;nope")).expect_err("a bad entry rejects the row"),
+            RejectedRow::new(7, "member-ref-not-a-number", "nope")
+        );
     }
 }

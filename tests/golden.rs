@@ -171,8 +171,19 @@ async fn golden_sdrtrunk_upload() {
     let call = app.the_call().await;
     assert_eq!(call.call_at_ms, 1763216122000, "dateTime seconds -> ms");
     assert_eq!(call.frequency, Some(851000000));
-    // SDRTrunk's singular `source` is the call's primary source unit.
-    assert_eq!(call.source_ref, Some(1610092));
+    // SDRTrunk's singular `source` is the radio this Call is heard under — a
+    // `call_units` row, since #47, which is where every dialect's units land.
+    assert_eq!(
+        call_unit::Entity::find()
+            .filter(call_unit::Column::CallId.eq(call.id))
+            .all(&app.db)
+            .await
+            .expect("units")
+            .into_iter()
+            .map(|unit| unit.unit_ref)
+            .collect::<Vec<_>>(),
+        vec![1610092]
+    );
 
     let sys = app.system_of(&call).await;
     assert_eq!(sys.r#ref, 11);

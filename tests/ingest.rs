@@ -67,34 +67,45 @@ async fn api_key_is_scoped_to_its_system() {
 #[tokio::test]
 async fn a_steady_state_call_resolves_its_channel_once() {
     let app = TestApp::with_key("k").await;
-    // The first Call creates the System and the Talkgroup; the second is the
-    // one every later Call looks like.
-    app.upload_ok(CallUpload::new().at(1_000)).await;
+    // A radio that named itself, because every real Call carries one and the
+    // reads it costs — the roster's, and the live-feed view's (#47) — belong in
+    // this number rather than outside it.
+    let call = || {
+        CallUpload::new()
+            .set("unit", "4424000")
+            .set("talkerAlias", "MEDIC 7")
+    };
+    // The first Call creates the System, the Talkgroup and the Unit; the second
+    // is the one every later Call looks like.
+    app.upload_ok(call().at(1_000)).await;
     app.settle().await;
 
     let before = app.statements_issued();
-    app.upload_ok(CallUpload::new().at(20_000)).await;
+    app.upload_ok(call().at(20_000)).await;
     app.settle().await;
     let spent = app.statements_issued() - before;
 
     // Postgres inserts with `RETURNING`, so sea-orm gets the stored row back in
-    // the same statement; SQLite needs a `SELECT` after it. One statement of
-    // difference, and it is the dialect's rather than ours (ADR-0003) — which
+    // the same statement; SQLite needs a `SELECT` after each one, and this Call
+    // makes two rows — itself and the radio heard on it. Two statements of
+    // difference, and they are the dialect's rather than ours (ADR-0003) — which
     // is exactly the kind of thing an absolute number has to say out loud
     // rather than hide behind a ceiling.
-    let read_back = match app.db.get_database_backend() {
+    let read_backs = match app.db.get_database_backend() {
         sea_orm::DatabaseBackend::Postgres => 0,
-        _ => 1,
+        _ => 2,
     };
 
     assert_eq!(
         spent,
-        13 + read_back,
+        18 + read_backs,
         "one steady-state Call, end to end: the API key; the System and the \
-         Talkgroup, once each; the dedup window; the insert (+ a read-back on \
-         SQLite); the six the live-feed view is denormalized from; the \
-         emission; and the push sender asking who is subscribed. Two more than \
-         this and the channel is being resolved twice again."
+         Talkgroup, once each; the dedup window; the Call row and its one \
+         `call_units` row (+ a read-back each on SQLite); the Unit the roster \
+         resolves the radio to; the nine the live-feed view is denormalized \
+         from, two of which resolve that radio to its apparatus for the wire; \
+         the emission; and the push sender asking who is subscribed. Two more \
+         than this and something is being resolved twice again."
     );
 }
 
@@ -310,16 +321,34 @@ async fn a_patch_minted_talkgroup_ref_is_not_a_second_call() {
 /// identically is a single `WHERE`. Two Systems, the same Talkgroup Ref, the
 /// same instant: two Calls, because they are two transmissions on two radio
 /// networks that have never heard of each other.
+///
+/// **Both Systems and both Talkgroups are seeded first, and that is the whole
+/// test.** Written without them it passes for the wrong reason: an unknown
+/// System resolves no Talkgroup either, so the arriving Call reaches *no*
+/// channel at all and the channel predicate keeps the two apart no matter which
+/// System's rows the query read. Mutating `Resolved::system_id` to a constant
+/// survived exactly that version of this test — the read went to the wrong
+/// System and nothing noticed, because nothing could match anyway. With the
+/// rows already there, both Calls resolve a real Talkgroup Ref, the two Refs
+/// collide, and the System scope is the only thing left holding them apart.
 #[tokio::test]
 async fn two_systems_numbering_a_talkgroup_alike_do_not_dedup_against_each_other() {
     let app = TestApp::spawn().await;
     app.create_api_key("k").await;
+    app.seed_talkgroup(11, 54241).await;
+    app.seed_talkgroup(22, 54241).await;
 
     app.upload_ok(CallUpload::new().system(11)).await;
     app.upload_ok(CallUpload::new().system(22)).await;
     app.settle().await;
 
-    assert_eq!(app.calls().await.len(), 2);
+    let calls = app.calls().await;
+    assert_eq!(calls.len(), 2, "two Systems, two transmissions, two Calls");
+    assert_ne!(
+        calls[0].system_id, calls[1].system_id,
+        "...and they really are on different Systems, which is what makes the \
+         colliding Talkgroup Ref above the interesting part"
+    );
 }
 
 /// **A better copy takes the stored Call's place, under its own id** — and
@@ -1748,6 +1777,13 @@ async fn the_same_site_ref_resolves_to_one_row() {
 /// broadcast about itself — beside the singular `source`. rdio-scanner drops it
 /// on the floor, so units stay bare numbers in a UI forever. Consuming it means
 /// units name themselves with zero configuration (spec US 12).
+///
+/// It lands in `tag_ota`, **not** `label` (#47). CONTEXT.md's **OTA alias** is
+/// defined as exactly this field and Trunk Recorder's `tag_ota`, and SDRTrunk's
+/// own source confirms it: `getTalkerAlias` reads a `TalkerAliasIdentifier`,
+/// which is a P25 alias the radio transmitted. `label` means the alias an
+/// *operator* configured, and the whole reason the two columns exist separately
+/// is that their disagreement is the information.
 #[tokio::test]
 async fn the_generic_talker_alias_names_the_source_radio() {
     let app = TestApp::with_key("k").await;
@@ -1763,7 +1799,11 @@ async fn the_generic_talker_alias_names_the_source_radio() {
     let units = units_of(&app, stored.id).await;
     assert_eq!(units.len(), 1, "the source radio is a unit heard");
     assert_eq!(units[0].unit_ref, 1610092);
-    assert_eq!(units[0].label.as_deref(), Some("MEDIC 7"));
+    assert_eq!(units[0].tag_ota.as_deref(), Some("MEDIC 7"));
+    assert_eq!(
+        units[0].label, None,
+        "nobody configured this name — the radio said it"
+    );
 
     // ...and, having a name, it joins the roster — which is the whole point.
     let rostered = unit::Entity::find()
@@ -1773,6 +1813,105 @@ async fn the_generic_talker_alias_names_the_source_radio() {
         .expect("the radio is now a Unit");
     assert_eq!(rostered.r#ref, 1610092);
     assert_eq!(rostered.label.as_deref(), Some("MEDIC 7"));
+}
+
+/// Trunk Recorder's own `tag_ota` rosters a radio just as SDRTrunk's
+/// `talkerAlias` does (#47, spec US 12). Before this, a Unit joined the roster
+/// only on the *configured* `tag`, so a TR install with no talkgroup/unit files —
+/// which is the zero-configuration case the roster exists for — never named a
+/// radio at all, however loudly the radio named itself.
+#[tokio::test]
+async fn an_over_the_air_alias_alone_rosters_the_radio() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_tr(CallUpload::tr(
+        r#"{"short_name":"butco","talkgroup":54241,"start_time":1000,
+            "srcList":[{"src":1610092,"pos":0,"tag":"","tag_ota":"MEDIC 7"}]}"#,
+    ))
+    .await;
+
+    let units = units_of(&app, app.the_call().await.id).await;
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].tag_ota.as_deref(), Some("MEDIC 7"));
+
+    let rostered = the_only_unit(&app).await;
+    assert_eq!(rostered.r#ref, 1610092);
+    assert_eq!(rostered.label.as_deref(), Some("MEDIC 7"));
+}
+
+/// The configured alias wins over the one the air said, because that is what the
+/// operator meant — but the Call keeps both, so the disagreement stays visible.
+#[tokio::test]
+async fn a_configured_alias_outranks_the_one_the_radio_broadcast() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_tr(CallUpload::tr(
+        r#"{"short_name":"butco","talkgroup":54241,"start_time":1000,
+            "srcList":[{"src":1610092,"pos":0,"tag":"Medic 7","tag_ota":"M7 PORTABLE"}]}"#,
+    ))
+    .await;
+
+    let units = units_of(&app, app.the_call().await.id).await;
+    assert_eq!(units[0].label.as_deref(), Some("Medic 7"));
+    assert_eq!(units[0].tag_ota.as_deref(), Some("M7 PORTABLE"));
+    assert_eq!(the_only_unit(&app).await.label.as_deref(), Some("Medic 7"));
+}
+
+/// The one Unit these Trunk Recorder cases roster. By row rather than by
+/// `(System Ref, Ref)`: TR's meta names its System by `short_name` and the Ref
+/// is assigned, so a literal one here would be asserting against ingest's own
+/// numbering rather than against the roster.
+async fn the_only_unit(app: &TestApp) -> unit::Model {
+    assert_eq!(app.count::<unit::Entity>().await, 1);
+    unit::Entity::find()
+        .one(&app.db)
+        .await
+        .expect("read units")
+        .expect("a Unit")
+}
+
+/// A Unit that has no name yet takes the first one a Recorder offers; one that
+/// has a name keeps it (#8's auto-populate rule, which is about not *rewriting*
+/// curation).
+///
+/// The nameless case is real from #47 onwards: a unit CSV may create a Unit for
+/// nothing but the **Range** it owns, and without this the apparatus would stay
+/// a bare number forever while every Call under it carried the alias.
+#[tokio::test]
+async fn a_unit_takes_a_name_it_has_not_got_and_keeps_the_one_it_has() {
+    let app = TestApp::with_key("k").await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit(11, 1300, None).await;
+
+    app.upload_ok(
+        CallUpload::new()
+            .set("unit", "1200")
+            .set("talkerAlias", "E1 PORTABLE"),
+    )
+    .await;
+    app.upload_ok(
+        CallUpload::new()
+            .set("unit", "1300")
+            .set("talkerAlias", "LADDER 3")
+            .at(2000),
+    )
+    .await;
+
+    assert_eq!(
+        app.unit_by_ref(11, 1200).await.expect("Engine 1").label,
+        Some("Engine 1".to_string()),
+        "a curated alias is never rewritten by the air"
+    );
+    assert_eq!(
+        app.unit_by_ref(11, 1300).await.expect("named now").label,
+        Some("LADDER 3".to_string()),
+        "a Unit with no name at all takes the one it is given"
+    );
+    assert_eq!(
+        app.count::<unit::Entity>().await,
+        2,
+        "neither Call rosters a Unit of its own"
+    );
 }
 
 /// A `talkerAlias` never overrides the per-source detail a recorder took the

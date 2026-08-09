@@ -420,7 +420,6 @@ pub async fn call_upload(
         talkgroup_tag: clean(upload.talkgroup_tag),
         talkgroup_groups: parse_groups(upload.talkgroup_group, upload.talkgroup_groups),
         frequency: upload.frequency.as_deref().and_then(parse_i64),
-        source_ref: upload.source.as_deref().and_then(parse_i64),
         audio_mime: upload.audio_mime,
         audio_name: upload.audio_name,
         patches: parse_patches(upload.patches.as_deref()),
@@ -1395,7 +1394,6 @@ fn build_tr_call(
         talkgroup_groups: clean(meta.talkgroup_group).into_iter().collect(),
         call_at_ms,
         frequency: meta.freq.map(|f| f as i64),
-        source_ref: None,
         audio_mime,
         audio_name,
         // The recorder counted the samples it wrote, so its figure beats
@@ -1607,7 +1605,13 @@ fn parse_units(
     if let Some(unit_ref) = unit.and_then(parse_i64) {
         return vec![NewCallUnit {
             unit_ref,
-            label: talker_alias,
+            // The **OTA alias**, not the configured one (CONTEXT.md, #47).
+            // SDRTrunk's `getTalkerAlias` reads a `TalkerAliasIdentifier` — a
+            // name the radio put over the air — where `label` means the alias
+            // an operator wrote down. Storing it as the latter would make the
+            // one column that records *who said this name* say the wrong thing,
+            // on every SDRTrunk upload there is.
+            tag_ota: talker_alias,
             ..Default::default()
         }];
     }

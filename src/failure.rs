@@ -125,6 +125,8 @@ stages! {
     LoadFilterOptions => "load-filter-options",
     /// One Call, with everything the recorder said about it.
     LoadCallDetail => "load-call-detail",
+    /// One radio's history — where it talks, and since when (#47).
+    LoadUnitHistory => "load-unit-history",
     /// The Systems and Talkgroups a listener can select.
     LoadCatalog => "load-catalog",
     // -- The admin surface -------------------------------------------------
@@ -132,6 +134,8 @@ stages! {
     SearchLogs => "search-logs",
     /// Applying a Talkgroup CSV (#18).
     ImportTalkgroups => "import-talkgroups",
+    /// Applying a Unit CSV (#47).
+    ImportUnits => "import-units",
     // -- Web Push (#16) ----------------------------------------------------
     /// Storing (or re-storing) a device's subscription.
     StorePushSubscription => "store-push-subscription",
@@ -214,6 +218,10 @@ pub enum Reason {
     // -- Reading the Archive ------------------------------------------------
     /// No Call with that Id.
     CallNotFound,
+    /// A radio nobody has curated and nobody has heard (#47). Distinct from an
+    /// empty history, which a **Unit** an Operator wrote down genuinely has
+    /// until it keys: a typo and a quiet apparatus must not read the same.
+    UnitNotFound,
     /// An **Encrypted Call**: a row with no audio object behind it at all (#42,
     /// spec US 9). The wire already omits `audioUrl` for these, so anything
     /// asking is a hand-built URL or a stale link — and both deserve the truth.
@@ -473,6 +481,12 @@ impl Reason {
                 Level::DEBUG,
                 StatusCode::NOT_FOUND,
                 text("call not found\n"),
+            ),
+            Reason::UnitNotFound => Refusal::new(
+                "unit-not-found",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("unit not found\n"),
             ),
             Reason::CallHasNoAudio => Refusal::new(
                 "call-has-no-audio",

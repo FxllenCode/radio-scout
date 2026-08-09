@@ -970,7 +970,15 @@ async fn a_configuration_file_reaches_the_running_app() {
         .await;
     app.create_api_key("k").await;
 
-    app.upload_ok(CallUpload::new().set("source", 4242)).await;
+    // A radio that *names itself*, so the roster would fire if auto-populate
+    // were on (#47): an anonymous Ref never rosters a Unit either way, which
+    // would make this pass without the setting having reached anything.
+    app.upload_ok(
+        CallUpload::new()
+            .set("source", 4242)
+            .set("talkerAlias", "MEDIC 7"),
+    )
+    .await;
 
     assert_eq!(
         app.count::<radio_scout::db::entities::unit::Entity>().await,

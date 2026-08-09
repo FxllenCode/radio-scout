@@ -27,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0008_recorder_truth::Migration),
             Box::new(m0009_channel_merge::Migration),
             Box::new(m0010_emission_sequence::Migration),
+            Box::new(m0011_units_first_class::Migration),
         ]
     }
 }
@@ -991,6 +992,122 @@ mod m0010_emission_sequence {
                         .to_owned(),
                 )
                 .await
+        }
+    }
+}
+
+/// **Units become something you can search by** (#47, spec US 42–44).
+///
+/// Two index additions and one removal, all about the same shift: `call_units`
+/// stops being a table only ever read one Call at a time and becomes part of
+/// every search page, every live-feed frame, and a per-Unit history view.
+///
+/// - `idx_call_units_call_id` — the denormalizer now reads the radios heard on a
+///   whole page of Calls, and `call_detail` always did. Neither dialect indexes
+///   a foreign key on its own, so both were table scans that grew with the
+///   Archive; on a Pi with a county's traffic that is the search page's whole
+///   cost.
+/// - `idx_call_units_unit_ref` — the unit filter and the per-Unit view are
+///   `WHERE unit_ref BETWEEN …`, which without this reads every row there is.
+///   `call_id` rides along so the subquery those filters are written as never
+///   has to visit the table at all.
+/// - `calls.source_ref` **goes**. It held one radio id that `call_units` already
+///   records, on the one dialect that sends a singular `source`; Trunk
+///   Recorder's native meta sends a `srcList` instead, so the column was `NULL`
+///   on every TR Call. `unitRef` on the wire is now the first row of
+///   `call_units`, which every dialect fills.
+///
+/// Dropping a column is guarded exactly as m0003's *addition* is, and for the
+/// mirror-image reason: `m0001_init` derives its DDL from the live entity, so a
+/// fresh database never had the column and there is nothing here to drop.
+mod m0011_units_first_class {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0011_units_first_class"
+        }
+    }
+
+    /// The dropped column, named as a string because the entity no longer has a
+    /// `Column` variant for it — which is the point: the schema and the entity
+    /// agree again once this has run.
+    const SOURCE_REF: &str = "source_ref";
+
+    async fn add_index(
+        manager: &SchemaManager<'_>,
+        name: &str,
+        columns: &[call_unit::Column],
+    ) -> Result<(), DbErr> {
+        if manager.has_index("call_units", name).await? {
+            return Ok(());
+        }
+        let mut index = Index::create();
+        index.name(name).table(call_unit::Entity);
+        for column in columns {
+            index.col(*column);
+        }
+        manager.create_index(index.to_owned()).await
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            add_index(
+                manager,
+                "idx_call_units_call_id",
+                &[call_unit::Column::CallId],
+            )
+            .await?;
+            add_index(
+                manager,
+                "idx_call_units_unit_ref",
+                &[call_unit::Column::UnitRef, call_unit::Column::CallId],
+            )
+            .await?;
+            if manager.has_column("calls", SOURCE_REF).await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .drop_column(Alias::new(SOURCE_REF))
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // Guarded exactly as `up` is, and for the mirror-image reason: on a
+            // database created *after* this migration the entity's DDL never had
+            // the column, so adding it back would invent one the entity has no
+            // variant for — and on a database where `up` skipped the drop
+            // because the column was already gone, this would add a second.
+            //
+            // The values are not recoverable either way: they were a recorder's
+            // own singular `source`, which nothing has recorded separately since
+            // this ran. A rollback gets the column back, not what was in it.
+            if !manager.has_column("calls", SOURCE_REF).await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(ColumnDef::new(Alias::new(SOURCE_REF)).big_integer().null())
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            for name in ["idx_call_units_unit_ref", "idx_call_units_call_id"] {
+                if manager.has_index("call_units", name).await? {
+                    manager
+                        .drop_index(Index::drop().name(name).table(call_unit::Entity).to_owned())
+                        .await?;
+                }
+            }
+            Ok(())
         }
     }
 }

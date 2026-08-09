@@ -18,7 +18,11 @@ The app has four screens, on the tabs at the bottom: **Live**, **Talkgroups**, *
 
 Calls play automatically as they arrive, filtered to the Talkgroups you selected. The card
 shows what is playing — Talkgroup, System, tag and group, the waveform with playback position,
-frequency, TGID, unit ID and time — with an LED in the Talkgroup's colour.
+frequency, TGID, the radio that keyed, and time — with an LED in the Talkgroup's colour.
+
+The **UNIT** line is a name where anybody has given the radio one, and its id otherwise. Either
+way it is a link: tap it for that radio's history, which is where "who was that, and where else"
+gets answered. **RECENT** carries the same link on every row.
 
 Top right: **Q** is the listening queue, how many Calls are waiting behind this one, and a dot
 showing whether the live feed is connected. Underneath the card is **RECENT**, the handful that
@@ -161,6 +165,13 @@ Two things to know about that column. A dash means nobody measured it: Calls sto
 version of Radio-Scout carry no duration, and neither does audio whose header could not be read.
 And because an unknown duration cannot be compared against a threshold, those Calls do not match
 **MIN DURATION** at any setting — leave it on *Any duration* to see them.
+
+Beside it is a **unit** column: who keyed it, where anybody knows. Radios name themselves over the
+air, so "MEDIC 7" turns up beside a Call without your operator configuring anything — and where
+nobody has named one, its radio id is there instead, which is still enough to tell two radios apart.
+Tap it to open that radio's history: which talkgroups it uses, when it was first and last heard, and
+its calls. **UNIT** filters the search to one radio directly, if you have the number — and a fleet
+whose operator has grouped its radios answers as the whole apparatus, not just the one you typed.
 
 Each result plays in place, or downloads with the arrow. Encrypted Calls have neither button:
 they are metadata-only records, with a 🔒 badge and no audio behind them. **PLAYBACK MODE**, top right, switches

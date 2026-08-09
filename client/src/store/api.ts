@@ -10,6 +10,7 @@ import type {
   LogQuery,
   SearchPage,
   SearchQuery,
+  UnitHistory,
 } from '@/types'
 
 /** The single RTK Query API slice. Everything is same-origin: in dev the Vite
@@ -89,6 +90,15 @@ export const api = createApi({
       invalidatesTags: ['AdminSession', 'Log'],
     }),
 
+    /** One radio's history (#47, spec US 44) — where it talks and since when.
+     *
+     *  Tagged `Call` like the searches beside it: ingesting a Call is what
+     *  moves every number in it, and a unit CSV is what names it. */
+    getUnitHistory: builder.query<UnitHistory, { systemRef: number; ref: number }>({
+      query: ({ systemRef, ref }) => ({ url: `api/unit/${systemRef}/${ref}` }),
+      providesTags: ['Call'],
+    }),
+
     /** The operator log (#30). Newest first, filtered and paged server-side —
      *  a month of logging is far more than a page. */
     getLogs: builder.query<LogPage, LogQuery>({
@@ -107,5 +117,6 @@ export const {
   useGetFilterOptionsQuery,
   useGetHealthQuery,
   useGetLogsQuery,
+  useGetUnitHistoryQuery,
   useSearchCallsQuery,
 } = api

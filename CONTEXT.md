@@ -42,6 +42,8 @@ _Avoid_: label, type.
 
 **Unit**:
 A single radio (identified by a radio ID) heard transmitting within a system. May carry a human alias.
+
+**A Unit names itself.** Either alias a **Call** carries for a radio is enough to roster one — the alias an **Operator**'s recorder had configured, else the **OTA alias** the radio broadcast — and the configured one wins where both are there. A Unit that already has a name keeps it (**Auto-populate** fills unknowns, it never rewrites curation); a Unit with *no* name takes the first one offered, which is what an apparatus created for nothing but the **Range** it owns needs. A **Call** is shown under the first radio heard on it, resolved to the Unit that owns that Ref — so a fleet's portable reads as its apparatus.
 _Avoid_: radio, source, subscriber.
 
 **Site**:

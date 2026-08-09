@@ -39,3 +39,21 @@ export function formatFrequency(hertz: number | undefined): string {
   if (hertz === undefined) return '—'
   return (hertz / 1_000_000).toFixed(6)
 }
+
+/** What a Call's radio reads as on screen (#47, spec US 42): the name somebody
+ *  gave it, else the bare Ref — and `undefined` when no radio was heard at all.
+ *
+ *  A bare Ref rather than a placeholder, because a number is still an identity:
+ *  the same 1610092 on three Calls says they are the same radio, which is the
+ *  whole thing rdio-scanner throws away by never showing units at all. */
+export function unitName(call: Call): string | undefined {
+  if (call.unitRef === undefined) return undefined
+  return call.unitLabel ?? String(call.unitRef)
+}
+
+/** Where that radio's history lives (#47, spec US 44). A Ref is unique only
+ *  within its System, so both are in the path — exactly as the API takes them. */
+export function unitHref(call: Call): string | undefined {
+  if (call.unitRef === undefined) return undefined
+  return `/unit/${call.systemRef}/${call.unitRef}`
+}

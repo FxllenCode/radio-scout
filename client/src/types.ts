@@ -26,7 +26,18 @@ export interface Call {
   /** Talkgroup Refs this Call is patched to (rdio `patches[]`). */
   patches?: number[]
   frequency?: number
-  source?: number
+  /** The Ref of the **first radio heard** on this Call (#47, spec US 42) — the
+   *  canonical one, so a portable inside a fleet's Range reads as the apparatus
+   *  that owns it.
+   *
+   *  This replaced a `source`, which was the rdio dialect's singular field and
+   *  was therefore absent on every Trunk Recorder Call there has ever been (TR
+   *  sends a `srcList` instead). Absent here means nobody was heard at all. */
+  unitRef?: number
+  /** What to call that radio: the **Unit**'s curated alias, else the name this
+   *  Call arrived with. Absent when nobody has named it — which is every radio
+   *  in an uncurated archive, and why the Ref is a separate field. */
+  unitLabel?: string
   timestamp?: number
   /** How long the transmission is, in milliseconds (#42, spec US 8) — from the
    *  recorder's metadata or an audio-header parse at ingest. Absent when
@@ -63,6 +74,10 @@ export interface SearchQuery {
    *  the kerchunk filter. A Call whose duration was never measured never
    *  matches; leaving this unset still shows every Call there is. */
   minDuration?: number
+  /** Only Calls a given radio was heard on (#47, spec US 44). When a **Unit**
+   *  owns that Ref, the search reaches every other Ref the apparatus answers
+   *  to — its Ranges and its lone member Refs. */
+  unit?: number
   /** `oldest` is what playback mode walks: forwards through history. */
   sort?: 'newest' | 'oldest'
   limit?: number
@@ -129,6 +144,43 @@ export interface FilterOptions {
   /** The span the current (non-date) filters can reach, unix ms. */
   dateStartMs?: number
   dateStopMs?: number
+}
+
+/** A span of Refs an entity answers to (CONTEXT.md: **Range**), both ends
+ *  inclusive. A lone member Ref is a span of one. */
+export interface RefSpan {
+  from: number
+  to: number
+}
+
+/** One Talkgroup a radio has been heard on, and how much. */
+export interface UnitTalkgroup {
+  ref: number
+  label?: string
+  calls: number
+  lastHeardMs: number
+}
+
+/** One radio's history, as `GET /api/unit/{systemRef}/{ref}` serves it (#47,
+ *  spec US 44).
+ *
+ *  A *summary*, not a page of Calls: the Calls themselves are an ordinary
+ *  archive search with `unit` set, which already pages and plays. */
+export interface UnitHistory {
+  systemRef: number
+  systemLabel?: string
+  ref: number
+  label?: string
+  /** The Ranges and lone member Refs this apparatus also answers to (#45).
+   *  Absent when it owns none, which is every Unit until somebody merges one. */
+  memberRefs?: RefSpan[]
+  callCount: number
+  /** Absent together when the radio has never keyed — which a curated Unit
+   *  genuinely can be. */
+  firstHeardMs?: number
+  lastHeardMs?: number
+  /** Busiest first: which channel a radio lives on is the question. */
+  talkgroups: UnitTalkgroup[]
 }
 
 /** One stored log event (#30, ADR-0011), as `GET /api/admin/logs` serves it.

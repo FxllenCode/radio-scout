@@ -77,6 +77,38 @@ impl Range {
     }
 }
 
+/// **Every Ref a search for one radio reaches** (#47, spec US 44), and on which
+/// **System** each of them counts.
+///
+/// The System half is the whole reason this is a type rather than a `Vec<Range>`.
+/// A Ref is unique only within its System (CONTEXT.md), so a fleet's block
+/// `1201-1299` on one System says nothing whatever about radio 1210 on another —
+/// and a flat list of spans, applied to a search that named no System, quietly
+/// answers with the other System's radios. That is not a narrower answer, it is
+/// a wrong one, and it is invisible: the Calls come back looking perfectly
+/// ordinary.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnitScope {
+    /// The Ref that was asked about. In scope on **every** System, because that
+    /// radio id is what somebody typed and a Call carrying it is one they meant.
+    pub asked: i64,
+    /// The rest of each apparatus owning that Ref: the **System Id** it belongs
+    /// to, and every Range and lone member Ref it answers to.
+    pub owned: Vec<(i64, Vec<Range>)>,
+}
+
+impl UnitScope {
+    /// The scope of a Ref no Unit owns — which is every radio in an uncurated
+    /// archive, and the honest answer for one that is owned somewhere the
+    /// search did not ask about.
+    pub fn bare(asked: i64) -> Self {
+        UnitScope {
+            asked,
+            owned: Vec::new(),
+        }
+    }
+}
+
 /// The first Range in `existing` that `candidate` collides with, if any.
 ///
 /// Returned rather than a boolean because the caller's whole job is to tell the

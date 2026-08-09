@@ -27,6 +27,11 @@ export interface PushPayload {
   system?: string
   /** The Talkgroup's label, if it has one. */
   talkgroup?: string
+  /** Who keyed it (#47, spec US 42) — the **Unit**'s name, absent when nobody
+   *  has named that radio. The Ref is deliberately not sent: a bare number on a
+   *  lock screen is something nobody can act on, and the Call is one tap away
+   *  either way. */
+  unit?: string
   /** How many Calls this notification stands for, the ones the server's
    *  coalescing window folded in included. */
   count: number
@@ -60,10 +65,17 @@ export function notificationFor(payload: PushPayload | undefined): Notification 
 
   const calls =
     payload.count > 1 ? `${payload.count} new calls` : 'New call'
+  // Who keyed it, where the server knew (#47) — and **only when this stands for
+  // one Call**. A coalesced notification carries the radio from the most recent
+  // of the Calls it folded in, so naming it beside "6 new calls" would claim
+  // that one radio made all six. Last in the line, so a narrow lock screen cuts
+  // the name rather than the count.
+  const named = payload.count === 1 ? payload.unit : undefined
+  const body = [calls, payload.system, named].filter(Boolean).join(' · ')
   return {
     title: payload.talkgroup ?? `Talkgroup ${payload.talkgroupRef}`,
     options: {
-      body: payload.system ? `${calls} · ${payload.system}` : calls,
+      body,
       icon: ICON,
       tag: `rs-${payload.systemRef}-${payload.talkgroupRef}`,
       renotify: true,

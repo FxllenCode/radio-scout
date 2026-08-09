@@ -656,3 +656,25 @@ async fn the_emergency_flag_rides_the_live_frame() {
         "a quiet flag is omitted, keeping the frame small: {frame}"
     );
 }
+
+/// ...and so does the radio that keyed it (#47, spec US 42), named without any
+/// configuration at all: the alias the radio broadcast about itself is enough.
+///
+/// It rides the *frame* rather than being fetched afterwards for the reason
+/// ADR-0004 gives about the rest of a Call: a display that has to ask a second
+/// question before it can say who is talking says nothing for the first second
+/// of every transmission.
+#[tokio::test]
+async fn the_radio_that_keyed_rides_the_live_frame() {
+    let app = feed_app().await;
+    let mut ws = app.connect_ws().await;
+    subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
+
+    let meta = r#"{"short_name":"butco","talkgroup":54241,"start_time":1669740338,
+                   "srcList":[{"src":4424000,"pos":0,"tag_ota":"MEDIC 7"}]}"#;
+    app.upload_tr(CallUpload::tr(meta).key("test-key")).await;
+
+    let frame = received(&mut ws).await.expect("the Call reaches the feed");
+    assert_eq!(frame["call"]["unitRef"], 4424000);
+    assert_eq!(frame["call"]["unitLabel"], "MEDIC 7");
+}

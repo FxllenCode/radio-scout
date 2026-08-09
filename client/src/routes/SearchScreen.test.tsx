@@ -1027,6 +1027,54 @@ describe('SearchScreen — what the recorder knew (#42)', () => {
     expect(within(rows[0]).queryByRole('link', { name: /^Download/ })).toBeNull()
   })
 
+  /** Searching by radio (#47, spec US 44). A typed Ref rather than a dropdown:
+   *  a county has tens of thousands of radios, and offering them as options
+   *  would put an unbounded list in every filter response. */
+  it('searches by the radio that was heard', async () => {
+    renderApp('/search')
+    await filtersLoaded()
+
+    await userEvent.type(screen.getByLabelText('Unit'), '1200')
+
+    await waitFor(() => expect(lastSearch().get('unit')).toBe('1200'))
+  })
+
+  /** Emptying the box means "any radio", never radio **zero** — which would
+   *  search for a Ref no recorder sends and quietly return nothing. Asserted
+   *  over every request the screen made, because clearing back to the search it
+   *  started on is answered from cache and sends none. */
+  it('clears the unit filter rather than searching for radio zero', async () => {
+    renderApp('/search')
+    await filtersLoaded()
+
+    const unit = screen.getByLabelText('Unit')
+    await userEvent.type(unit, '1200')
+    await waitFor(() => expect(lastSearch().get('unit')).toBe('1200'))
+
+    await userEvent.clear(unit)
+
+    expect(unit).toHaveValue(null)
+    expect(
+      searches.filter((query) => new URLSearchParams(query).get('unit') === '0'),
+    ).toEqual([])
+  })
+
+  /** Every row says who keyed it, **in a column of its own** beside the length
+   *  (spec US 36: "duration and unit columns"), and every one of those is
+   *  tappable through to that radio's history — which is the whole of
+   *  "reachable from any rendered unit label" on the screen a listener spends
+   *  the most time on. */
+  it('names the radio on the rows that have one, and leaves the rest alone', async () => {
+    renderApp('/search')
+    const rows = await resultRows()
+
+    // `ARCHIVE`'s oldest Call is the one keyed by a named radio.
+    expect(
+      within(rows[2]).getByRole('link', { name: 'History for unit Engine 1' }),
+    ).toHaveAttribute('href', '/unit/100/1200')
+    expect(within(rows[0]).queryByRole('link', { name: /History for unit/ })).toBeNull()
+  })
+
   it('filters out the kerchunks, in whole seconds', async () => {
     renderApp('/search')
     await filtersLoaded()

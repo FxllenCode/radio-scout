@@ -248,7 +248,6 @@ async fn insert_call_persists_call_with_children() {
         talkgroup_tag: Some("Fire".into()),
         talkgroup_groups: vec!["Emergency".into(), "Public".into()],
         frequency: Some(774_031_250),
-        source_ref: Some(4_424_000),
         audio_mime: Some("audio/x-wav".into()),
         audio_name: Some("audio.wav".into()),
         duration_ms: Some(4_250),

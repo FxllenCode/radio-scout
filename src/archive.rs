@@ -48,6 +48,7 @@ use crate::db::entities::{
     call, call_frequency, call_patch, call_unit, group, site, system, tag, talkgroup,
     talkgroup_group,
 };
+use crate::db::repo::distinct;
 use crate::failure::{Failure, Reason, Stage};
 use crate::query::{Filtered, Page, Params, bad};
 
@@ -99,9 +100,66 @@ pub struct CallSearch {
     /// would make the filter quietly not filter the part of an upgraded archive
     /// that predates the duration column.
     pub min_duration_ms: Option<i64>,
+    /// Only Calls a given radio was heard on (#47, spec US 44) — and, when a
+    /// **Unit** owns that Ref, every other Ref the apparatus answers to.
+    ///
+    /// Deliberately *not* one of the cascading filter dimensions: a county has
+    /// tens of thousands of radios, and offering them as a dropdown would put an
+    /// unbounded list in every filter response. It is reached by tapping a unit
+    /// label or typing a radio id, which is how somebody arrives at the question.
+    pub unit_ref: Option<i64>,
     pub sort: CallSort,
     pub limit: u64,
     pub offset: u64,
+}
+
+/// A [`CallSearch`] with everything the database had to be asked **before** its
+/// query could be built (#47).
+///
+/// One thing needs it today: a unit filter searches for the apparatus rather
+/// than for the number typed, and which Refs that is lives in the `units` and
+/// `unit_refs` tables. Resolving it once per request — rather than once per
+/// query, of which [`options`] issues five — is why this is a value and not a
+/// lookup inside [`CallQuery`].
+///
+/// It is also why it is a *type*. Every query below is built from one of these
+/// and there is one way to make one, so a read that forgot to resolve the scope
+/// and silently searched the bare Ref is not expressible.
+struct Filters {
+    search: CallSearch,
+    /// Which Refs the unit filter reaches, and on which System each counts.
+    /// `None` when there is no unit filter.
+    unit: Option<crate::merge::UnitScope>,
+}
+
+impl Filters {
+    async fn resolve<C: ConnectionTrait>(db: &C, search: &CallSearch) -> Result<Self, DbErr> {
+        let unit = match search.unit_ref {
+            Some(unit_ref) => Some(crate::db::repo::unit_scope(db, unit_ref).await?),
+            None => None,
+        };
+        Ok(Filters {
+            search: search.clone(),
+            unit,
+        })
+    }
+
+    /// The same filters with one dimension cleared — the cascade's semantics
+    /// (see [`options`]).
+    ///
+    /// The resolved scope survives untouched, and can: a [`crate::merge::UnitScope`]
+    /// carries the System each of its Ranges counts on, so it is a fact about
+    /// the Ref rather than about the search that asked. Clearing the System
+    /// filter — which the System facet does — therefore cannot leave behind a
+    /// scope that means something else than it did.
+    fn without(&self, mutate: fn(&mut CallSearch)) -> Filters {
+        let mut search = self.search.clone();
+        mutate(&mut search);
+        Filters {
+            search,
+            unit: self.unit.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +260,8 @@ impl CallQuery {
     /// Narrow by everything `search` asks for, joining whatever that needs —
     /// the single definition of what each filter *means*, shared by the result
     /// page, the total behind it, and every cascading filter option.
-    fn filtered_by(mut self, search: &CallSearch) -> Self {
+    fn filtered_by(mut self, filters: &Filters) -> Self {
+        let search = &filters.search;
         if let Some(after) = search.after_ms {
             self = self.and_where(call::Column::CallAtMs.gte(after));
         }
@@ -236,6 +295,9 @@ impl CallQuery {
             self = self
                 .join_group()
                 .and_where(group::Column::Name.eq(group_name.clone()));
+        }
+        if let Some(scope) = &filters.unit {
+            self = self.and_where(heard_by(scope));
         }
         self
     }
@@ -271,11 +333,65 @@ impl CallQuery {
     fn facets(self) -> Select<call::Entity> {
         self.select.select_only().distinct()
     }
+
+    /// The query as a projection the caller will **group**, which is the other
+    /// way to collapse rows and wants no `DISTINCT` on top of it (#47's per-Unit
+    /// history). Its own method rather than a caller reaching past `rows()` into
+    /// the select: which of the three shapes a query is asked for is exactly the
+    /// bookkeeping [`CallQuery`] exists to hold.
+    fn grouped(self) -> Select<call::Entity> {
+        self.select.select_only()
+    }
+}
+
+/// The Calls a **UnitScope** reaches — the unit filter (#47), as **subqueries**
+/// rather than a join.
+///
+/// `call_units` is the first genuinely to-many table a filter here reaches: a
+/// Recorder lists a radio once per stretch it keys, so Trunk Recorder routinely
+/// sends the same `src` twice on one Call. Joined, that Call would come back
+/// twice and be counted twice — the case [`CallQuery::rows`] says would owe a
+/// `DISTINCT`. A subquery owes nothing: no row is multiplied, the join
+/// bookkeeping is untouched, and the covering index `idx_call_units_unit_ref`
+/// answers it without visiting the table.
+///
+/// **The Ref asked about matches on any System; the rest of the apparatus only
+/// on its own.** A Ref is unique within a System, so one System's fleet block
+/// must never reach another's radios — and the alternative to saying that here
+/// is saying it in every caller, which is the unwritten rule #98 deleted. One
+/// extra subquery per System an apparatus belongs to, which in practice is one.
+fn heard_by(scope: &crate::merge::UnitScope) -> sea_orm::Condition {
+    let mut matching =
+        sea_orm::Condition::any().add(call::Column::Id.in_subquery(calls_heard_by(&[
+            crate::merge::Range::new(scope.asked, scope.asked),
+        ])));
+    for (system_id, spans) in &scope.owned {
+        matching = matching.add(
+            call::Column::SystemId
+                .eq(*system_id)
+                .and(call::Column::Id.in_subquery(calls_heard_by(spans))),
+        );
+    }
+    matching
+}
+
+/// The Call ids any of `spans` was heard on.
+fn calls_heard_by(spans: &[crate::merge::Range]) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::Query as SeaQuery;
+
+    let matching = spans.iter().fold(sea_orm::Condition::any(), |any, span| {
+        any.add(call_unit::Column::UnitRef.between(span.from(), span.to()))
+    });
+    SeaQuery::select()
+        .column(call_unit::Column::CallId)
+        .from(call_unit::Entity)
+        .cond_where(matching)
+        .to_owned()
 }
 
 /// The filtered Call query, without ordering or paging.
-fn filtered(search: &CallSearch) -> Select<call::Entity> {
-    CallQuery::new().filtered_by(search).rows()
+fn filtered(filters: &Filters) -> Select<call::Entity> {
+    CallQuery::new().filtered_by(filters).rows()
 }
 
 // ---------------------------------------------------------------------------
@@ -299,9 +415,10 @@ fn filtered(search: &CallSearch) -> Select<call::Entity> {
 ///    lookups for five hundred Calls as for one, and returns them in the order
 ///    it was given.
 pub async fn page<C: ConnectionTrait>(db: &C, search: &CallSearch) -> Result<SearchPage, DbErr> {
-    let rows = search_rows(db, search).await?;
+    let filters = Filters::resolve(db, search).await?;
+    let rows = search_rows(db, &filters).await?;
     let results = stored_calls(db, &rows).await?;
-    let count = count(db, search).await?;
+    let count = count(db, &filters).await?;
 
     Ok(Page::new(results, count, search.limit, search.offset))
 }
@@ -309,9 +426,10 @@ pub async fn page<C: ConnectionTrait>(db: &C, search: &CallSearch) -> Result<Sea
 /// The rows one window holds: filtered, ordered, and paged.
 async fn search_rows<C: ConnectionTrait>(
     db: &C,
-    search: &CallSearch,
+    filters: &Filters,
 ) -> Result<Vec<call::Model>, DbErr> {
-    let mut query = filtered(search);
+    let search = &filters.search;
+    let mut query = filtered(filters);
 
     // `id` breaks ties in the same direction as the timestamp, so paging is
     // stable even when a recorder stamps two calls at the same millisecond.
@@ -343,8 +461,8 @@ async fn search_rows<C: ConnectionTrait>(
 
 /// How many Calls match `search`, **ignoring its window** — the total a
 /// paginator reports and the client uses to size its page controls.
-async fn count<C: ConnectionTrait>(db: &C, search: &CallSearch) -> Result<u64, DbErr> {
-    filtered(search).count(db).await
+async fn count<C: ConnectionTrait>(db: &C, filters: &Filters) -> Result<u64, DbErr> {
+    filtered(filters).count(db).await
 }
 
 /// The Calls a reconnecting Listener missed — everything emitted after `since`,
@@ -454,13 +572,30 @@ pub async fn call_detail<C: ConnectionTrait>(
             at_ms: f.at_ms,
         })
         .collect();
-    let units = call_unit::Entity::find()
+    let heard = call_unit::Entity::find()
         .filter(call_unit::Column::CallId.eq(id))
         .order_by_asc(call_unit::Column::Id)
         .all(db)
-        .await?
+        .await?;
+    // Every radio on the timeline, resolved to the **Unit** that owns it, so a
+    // name an Operator curated reaches the one endpoint that shows every radio
+    // heard (#47) — and not only the first, which is all `StoredCall` carries.
+    // Batched, so a Call with forty sources costs the same two statements as one
+    // with a single source.
+    let owners = crate::db::repo::units_owning(
+        db,
+        &heard
+            .iter()
+            .map(|unit| (row.system_id, unit.unit_ref))
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    let units = heard
         .into_iter()
         .map(|u| crate::call::CallUnitDetail {
+            unit_label: owners
+                .get(&(row.system_id, u.unit_ref))
+                .and_then(|owner| owner.label.clone()),
             r#ref: u.unit_ref,
             label: u.label,
             tag_ota: u.tag_ota,
@@ -627,11 +762,37 @@ pub async fn stored_calls<C: ConnectionTrait>(
             .push(patch.talkgroup_ref);
     }
 
+    // The radio each Call is shown under (#47, spec US 42): the first one heard,
+    // in the order the recorder listed them — which is the order the ids were
+    // inserted in, and the order `call_detail` reads its timeline out in.
+    let mut heard_first: HashMap<CallId, call_unit::Model> = HashMap::new();
+    for unit in call_unit::Entity::find()
+        .filter(call_unit::Column::CallId.is_in(calls.iter().map(|c| c.id)))
+        .order_by_asc(call_unit::Column::Id)
+        .all(db)
+        .await?
+    {
+        heard_first.entry(unit.call_id).or_insert(unit);
+    }
+    // ...resolved to the **Unit** that owns that radio id, so a Call keyed by one
+    // portable of an apparatus is shown as the apparatus (#45's member Refs and
+    // Ranges). Two statements for the page, none at all when nobody was heard.
+    let owners = crate::db::repo::units_owning(
+        db,
+        &calls
+            .iter()
+            .filter_map(|call| Some((call.system_id, heard_first.get(&call.id)?.unit_ref)))
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+
     Ok(calls
         .iter()
         .map(|call| {
             let system = systems.get(&call.system_id);
             let talkgroup = talkgroups.get(&call.talkgroup_id);
+            let heard = heard_first.get(&call.id);
+            let owner = heard.and_then(|unit| owners.get(&(call.system_id, unit.unit_ref)));
             StoredCall {
                 id: call.id,
                 // A Call always has a System and a Talkgroup (`RESTRICT` foreign
@@ -647,7 +808,19 @@ pub async fn stored_calls<C: ConnectionTrait>(
                 led: talkgroup.and_then(|t| t.led.clone()),
                 patches: patches_of.remove(&call.id).unwrap_or_default(),
                 frequency: call.frequency,
-                source: call.source_ref,
+                // The **canonical** Ref where one is owned, so a fleet's
+                // portable and its mobile read as one apparatus; the arriving
+                // id where no Unit claims it, which is every uncurated archive.
+                unit_ref: owner
+                    .map(|unit| unit.r#ref)
+                    .or_else(|| heard.map(|unit| unit.unit_ref)),
+                unit_label: owner.and_then(|unit| unit.label.clone()).or_else(|| {
+                    heard
+                        .and_then(|unit| {
+                            crate::call::unit_name(unit.label.as_deref(), unit.tag_ota.as_deref())
+                        })
+                        .map(str::to_owned)
+                }),
                 timestamp: Some(call.call_at_ms),
                 audio_mime: call.audio_mime.clone(),
                 duration_ms: call.duration_ms,
@@ -662,14 +835,6 @@ pub async fn stored_calls<C: ConnectionTrait>(
             }
         })
         .collect())
-}
-
-/// The distinct values of an iterator, order-insensitive — the `IN (…)` list for
-/// a batched lookup.
-fn distinct(ids: impl Iterator<Item = i64>) -> Vec<i64> {
-    ids.collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -688,15 +853,12 @@ struct FacetRow {
 }
 
 /// The distinct System/Talkgroup/Tag combinations reachable under `search`.
-async fn facet_rows<C: ConnectionTrait>(
-    db: &C,
-    search: &CallSearch,
-) -> Result<Vec<FacetRow>, DbErr> {
+async fn facet_rows<C: ConnectionTrait>(db: &C, filters: &Filters) -> Result<Vec<FacetRow>, DbErr> {
     CallQuery::new()
         .join_system()
         .join_talkgroup()
         .join_tag()
-        .filtered_by(search)
+        .filtered_by(filters)
         .facets()
         .column_as(system::Column::Ref, "system_ref")
         .column_as(system::Column::Label, "system_label")
@@ -711,13 +873,10 @@ async fn facet_rows<C: ConnectionTrait>(
 }
 
 /// The distinct Group names reachable under `search`.
-async fn group_facets<C: ConnectionTrait>(
-    db: &C,
-    search: &CallSearch,
-) -> Result<Vec<String>, DbErr> {
+async fn group_facets<C: ConnectionTrait>(db: &C, filters: &Filters) -> Result<Vec<String>, DbErr> {
     CallQuery::new()
         .join_group()
-        .filtered_by(search)
+        .filtered_by(filters)
         .facets()
         .column_as(group::Column::Name, "name")
         .order_by_asc(group::Column::Name)
@@ -730,12 +889,12 @@ async fn group_facets<C: ConnectionTrait>(
 /// `(None, None)` when nothing matches.
 async fn call_time_bounds<C: ConnectionTrait>(
     db: &C,
-    search: &CallSearch,
+    filters: &Filters,
 ) -> Result<(Option<i64>, Option<i64>), DbErr> {
     // MIN/MAX stay `BIGINT` on both dialects (unlike SUM, which Postgres widens
     // to `numeric` — see `repo::total_audio_bytes`), so one decode works for
     // both.
-    Ok(filtered(search)
+    Ok(filtered(filters)
         .select_only()
         .column_as(call::Column::CallAtMs.min(), "start")
         .column_as(call::Column::CallAtMs.max(), "stop")
@@ -762,17 +921,13 @@ pub async fn options<C: ConnectionTrait>(
     db: &C,
     search: &CallSearch,
 ) -> Result<FilterOptions, DbErr> {
-    let without = |mutate: fn(&mut CallSearch)| {
-        let mut cleared = search.clone();
-        mutate(&mut cleared);
-        cleared
-    };
+    let filters = Filters::resolve(db, search).await?;
 
     // A facet row is one (System, Talkgroup, Tag) combination, so each dimension
     // is that row set collapsed onto its own key. The rows arrive ordered by
     // (System Ref, Talkgroup Ref), and `dedup_by_key` preserves that order.
     let systems = dedup_by_key(
-        facet_rows(db, &without(|s| s.system_ref = None)).await?,
+        facet_rows(db, &filters.without(|s| s.system_ref = None)).await?,
         |row| row.system_ref,
         |row| SystemOption {
             r#ref: row.system_ref,
@@ -781,7 +936,7 @@ pub async fn options<C: ConnectionTrait>(
     );
 
     let talkgroups = dedup_by_key(
-        facet_rows(db, &without(|s| s.talkgroup_ref = None)).await?,
+        facet_rows(db, &filters.without(|s| s.talkgroup_ref = None)).await?,
         |row| (row.system_ref, row.talkgroup_ref),
         |row| TalkgroupOption {
             system_ref: row.system_ref,
@@ -791,7 +946,7 @@ pub async fn options<C: ConnectionTrait>(
         },
     );
 
-    let mut tags: Vec<String> = facet_rows(db, &without(|s| s.tag_name = None))
+    let mut tags: Vec<String> = facet_rows(db, &filters.without(|s| s.tag_name = None))
         .await?
         .into_iter()
         .filter_map(|row| row.tag_name)
@@ -799,11 +954,11 @@ pub async fn options<C: ConnectionTrait>(
     tags.sort();
     tags.dedup();
 
-    let groups = group_facets(db, &without(|s| s.group_name = None)).await?;
+    let groups = group_facets(db, &filters.without(|s| s.group_name = None)).await?;
 
     let (date_start_ms, date_stop_ms) = call_time_bounds(
         db,
-        &without(|s| {
+        &filters.without(|s| {
             s.after_ms = None;
             s.before_ms = None;
         }),
@@ -818,6 +973,110 @@ pub async fn options<C: ConnectionTrait>(
         date_start_ms,
         date_stop_ms,
     })
+}
+
+// ---------------------------------------------------------------------------
+// One radio's history
+// ---------------------------------------------------------------------------
+
+/// One Talkgroup a radio has been heard on, straight out of the aggregate.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct UnitTalkgroupRow {
+    talkgroup_ref: i64,
+    talkgroup_label: Option<String>,
+    calls: i64,
+    first_heard_ms: i64,
+    last_heard_ms: i64,
+}
+
+/// **What one radio has been up to** (#47, spec US 44) — the read behind
+/// `GET /api/unit/{systemRef}/{ref}`.
+///
+/// `None` when the System is unknown, or when nothing at all is known about the
+/// radio: no **Unit** row and no Call it was ever heard on. A curated Unit that
+/// has never keyed *is* found, with an empty history — an Operator who wrote an
+/// apparatus down should be able to open it and see that it has been quiet,
+/// which is a different fact from a mistyped Ref.
+///
+/// Four statements: the System, the Unit, the Refs the apparatus answers to
+/// ([`crate::db::repo::unit_scope`], which is two or three of its own), and one
+/// aggregate over the Archive. The last is `GROUP BY` rather than a page walked
+/// in Rust because a busy radio has thousands of Calls and this view is a
+/// *summary* — the Calls themselves are an ordinary `?unit=` search, which pages.
+pub async fn unit_history<C: ConnectionTrait>(
+    db: &C,
+    system_ref: i64,
+    unit_ref: i64,
+) -> Result<Option<crate::call::UnitHistory>, DbErr> {
+    use crate::call::{RefSpan, UnitHistory, UnitTalkgroup};
+
+    let Some(system) = system::Entity::find()
+        .filter(system::Column::Ref.eq(system_ref))
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let unit = crate::db::repo::resolve_unit(db, system.id, unit_ref).await?;
+    let scope = crate::db::repo::unit_scope(db, unit_ref).await?;
+
+    let mut rows = CallQuery::new()
+        .join_talkgroup()
+        .and_where(call::Column::SystemId.eq(system.id))
+        .and_where(heard_by(&scope))
+        .grouped()
+        .column_as(talkgroup::Column::Ref, "talkgroup_ref")
+        .column_as(talkgroup::Column::Label, "talkgroup_label")
+        .column_as(call::Column::Id.count(), "calls")
+        .column_as(call::Column::CallAtMs.min(), "first_heard_ms")
+        .column_as(call::Column::CallAtMs.max(), "last_heard_ms")
+        .group_by(talkgroup::Column::Ref)
+        .group_by(talkgroup::Column::Label)
+        .into_model::<UnitTalkgroupRow>()
+        .all(db)
+        .await?;
+    // Busiest first, and the Ref breaking ties so a page does not reshuffle
+    // between two equally busy channels. Ordered here rather than in SQL: the
+    // set is one row per Talkgroup a single radio has touched, which is a
+    // handful, and `ORDER BY COUNT(*)` is one more thing to keep dialect-safe.
+    rows.sort_by_key(|row| (std::cmp::Reverse(row.calls), row.talkgroup_ref));
+
+    if unit.is_none() && rows.is_empty() {
+        return Ok(None);
+    }
+
+    let owned = match &unit {
+        Some(unit) => crate::db::repo::member_spans(db, unit.id).await?,
+        None => Vec::new(),
+    };
+
+    Ok(Some(UnitHistory {
+        system_ref: system.r#ref,
+        system_label: system.label,
+        // The canonical Ref where a Unit owns this radio, so the view a Listener
+        // lands on names the apparatus rather than the portable they tapped.
+        r#ref: unit.as_ref().map_or(unit_ref, |unit| unit.r#ref),
+        label: unit.and_then(|unit| unit.label),
+        member_refs: owned
+            .into_iter()
+            .map(|span| RefSpan {
+                from: span.from(),
+                to: span.to(),
+            })
+            .collect(),
+        call_count: rows.iter().map(|row| row.calls as u64).sum(),
+        first_heard_ms: rows.iter().map(|row| row.first_heard_ms).min(),
+        last_heard_ms: rows.iter().map(|row| row.last_heard_ms).max(),
+        talkgroups: rows
+            .into_iter()
+            .map(|row| UnitTalkgroup {
+                r#ref: row.talkgroup_ref,
+                label: row.talkgroup_label,
+                calls: row.calls as u64,
+                last_heard_ms: row.last_heard_ms,
+            })
+            .collect(),
+    }))
 }
 
 /// Keep the first row for each distinct `key`, in input order, mapped to the
@@ -878,6 +1137,7 @@ fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
             .number("minDuration")?
             .map(seconds_to_ms)
             .transpose()?,
+        unit_ref: params.number("unit")?,
         sort,
         limit: params.limit(DEFAULT_LIMIT, MAX_LIMIT)?,
         offset: params.offset()?,
@@ -939,6 +1199,22 @@ pub async fn detail(
         .await
         .map_err(Stage::LoadCallDetail.failed())?
         .ok_or(Reason::CallNotFound.into())
+}
+
+/// `GET /api/unit/{system}/{ref}` — one radio's history (#47, spec US 44).
+///
+/// A Ref is unique only within its System, so both ride the path. What this
+/// carries is the summary a search cannot give without reading the whole
+/// archive; the Calls themselves are `GET /api/calls?system=…&unit=…`, which
+/// pages and plays like any other search.
+pub async fn unit(
+    State(state): State<AppState>,
+    Path((system_ref, unit_ref)): Path<(i64, i64)>,
+) -> Result<crate::call::UnitHistory, Failure> {
+    unit_history(&state.db, system_ref, unit_ref)
+        .await
+        .map_err(Stage::LoadUnitHistory.failed())?
+        .ok_or(Reason::UnitNotFound.into())
 }
 
 /// `GET /api/call/{id}/download` — the Call's audio as a named file attachment
@@ -1147,12 +1423,13 @@ mod tests {
             ..CallSearch::default()
         };
 
+        let filters = Filters::resolve(&db, &search).await.expect("resolve");
         let rows = CallQuery::new()
             .join_system()
             .join_talkgroup()
             .join_tag()
             .join_group()
-            .filtered_by(&search)
+            .filtered_by(&filters)
             .rows()
             .all(&db)
             .await;
@@ -1160,10 +1437,10 @@ mod tests {
 
         // ...and through the facet query, which is where the pre-join is real.
         assert!(
-            group_facets(&db, &search).await.is_ok(),
+            group_facets(&db, &filters).await.is_ok(),
             "the Group facet query, with a Group filter on it"
         );
-        assert!(facet_rows(&db, &search).await.is_ok());
+        assert!(facet_rows(&db, &filters).await.is_ok());
     }
 
     /// A **Backfill** is ordered by *emission*, never by storage (CONTEXT.md's
@@ -1405,7 +1682,8 @@ mod tests {
             led: None,
             patches: vec![],
             frequency: None,
-            source: None,
+            unit_ref: None,
+            unit_label: None,
             timestamp: Some(1_669_740_338_000),
             audio_mime: Some("audio/mp4".into()),
             duration_ms: None,

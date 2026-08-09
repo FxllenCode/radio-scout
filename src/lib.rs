@@ -173,6 +173,9 @@ pub fn build_app(state: AppState) -> Router {
         // (#42). Declared before the `/audio` and `/download` children only for
         // readability — the router matches on the whole path, not on order.
         .route("/api/call/{id}", get(archive::detail))
+        // One radio's history (#47, spec US 44) — where it talks and since
+        // when. A Ref is unique only within its System, so both ride the path.
+        .route("/api/unit/{system}/{ref}", get(archive::unit))
         .route("/api/call/{id}/audio", get(serve::audio))
         .route("/api/call/{id}/download", get(archive::download))
         // Web Push (#16): the listener-facing half. Unauthenticated like the
@@ -218,6 +221,8 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
             "/api/admin/talkgroups/import",
             post(import::import_talkgroups),
         )
+        // A fleet's numbering scheme in one paste (#47, spec US 43).
+        .route("/api/admin/units/import", post(import::import_unit_csv))
         // `route_layer`, not `layer`: it runs only for paths this router
         // matched, so an unrouted URL still 404s rather than being told to log
         // in first — which would turn the guard into a map of what exists.

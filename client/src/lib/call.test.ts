@@ -6,6 +6,8 @@ import {
   siteName,
   systemName,
   talkgroupName,
+  unitHref,
+  unitName,
 } from './call'
 
 const call = {
@@ -71,5 +73,31 @@ describe('siteName', () => {
     // Most systems have one site and no recorder mentions it. A "Site —" on
     // every row would be clutter bought for nothing.
     expect(siteName(call)).toBeUndefined()
+  })
+})
+
+describe('naming the radio that keyed (#47, spec US 42)', () => {
+  it('prefers the name somebody gave it', () => {
+    expect(unitName({ ...call, unitRef: 1200, unitLabel: 'Engine 1' })).toBe(
+      'Engine 1',
+    )
+  })
+
+  /** A bare Ref rather than a placeholder: the same number on three Calls says
+   *  they are the same radio, which is the whole thing rdio-scanner throws away
+   *  by never showing units at all. */
+  it('falls back to the Ref, which is still an identity', () => {
+    expect(unitName({ ...call, unitRef: 1200 })).toBe('1200')
+  })
+
+  it('is nothing at all when no radio was heard', () => {
+    expect(unitName(call)).toBeUndefined()
+    expect(unitHref(call)).toBeUndefined()
+  })
+
+  /** A Ref is unique only within its System (CONTEXT.md), so both are in the
+   *  path — exactly as `GET /api/unit/{systemRef}/{ref}` takes them. */
+  it('links to that radio within its own System', () => {
+    expect(unitHref({ ...call, unitRef: 1200 })).toBe('/unit/11/1200')
   })
 })

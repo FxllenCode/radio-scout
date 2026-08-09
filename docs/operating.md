@@ -162,7 +162,8 @@ Everything under `/api/admin/` is gated by the admin password. There is **no def
 — first run generates one into `.env`, and if it cannot write it, the admin surface stays shut
 rather than opening with something guessable.
 
-There is no admin web UI yet. Today the surface is login/logout and talkgroup CSV import.
+There is no admin web UI yet. Today the surface is login/logout and CSV import — talkgroups and
+units.
 
 Sessions have both an **idle** window (refreshed by use) and an **absolute** lifetime (never
 refreshed) — the second is the bound on a cookie somebody walked off with. Failed logins are
@@ -234,6 +235,45 @@ ref,label,memberRefs
 
 Every merge leaves a log line saying what moved (`talkgroup member Refs changed`, with the counts),
 so `journalctl -u radio-scout` has the record even if you lost the report.
+
+### Naming the radios
+
+Radios name themselves, with nothing configured. SDRTrunk puts a `talkerAlias` on every upload
+and Trunk Recorder sends a `tag_ota` per source — both are the name the radio broadcast about
+itself — and either one is enough for a radio to become a named **unit**. rdio-scanner reads
+those fields and throws them away, which is why units there are bare numbers forever.
+
+That name shows up wherever a source appears: the scanner display, the recent list, every search
+row, and the call detail. Tapping it opens that radio's history — which talkgroups it uses, when
+it was first and last heard, and its calls.
+
+A fleet's own numbering is a CSV, the same shape as the talkgroup one:
+
+```csv
+ref,label,memberRefs
+1200,Engine 1,1201-1299;4471
+1300,Ladder 3,
+```
+
+```sh
+curl -X POST 'http://localhost:3000/api/admin/units/import?system=411&dryRun=true' \
+     -H 'Content-Type: text/csv' --data-binary @units.csv
+```
+
+- **`memberRefs` takes Ranges as well as single ids** (`1201-1299;4471`), because fleets number
+  their radios in blocks. Everything the block covers is one apparatus: its calls, its history,
+  and the name on every row.
+- The rest behaves exactly like the talkgroup import — `dryRun=true` first, headers matched by
+  name (`ref`/`unit`/`radioid`, `label`/`alias`/`name`, `memberRefs`/`ranges`, `system`), a blank
+  cell means "leave alone", `-` empties the list, re-importing is a no-op, and every rejected row
+  is reported with its line number. Unlike talkgroups there is **no positional layout**: nobody
+  exports unit lists, so a file with no header row is refused rather than guessed at.
+- **A name you write down is never overwritten** by what the air says. A radio with no name yet
+  takes the first one offered — so a row that exists only to own a Range gets named the moment
+  one of its radios keys.
+- **Ranges may not overlap.** A row claiming a span another apparatus already owns is rejected
+  (`range-overlaps`) and the message names the span in the way; a radio inside two blocks would
+  otherwise belong to whichever row the database happened to return first.
 
 ### Hearing each call once
 

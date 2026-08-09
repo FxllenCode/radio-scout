@@ -813,7 +813,16 @@ impl TestApp {
     /// Insert a Unit row under a System, so a test can own a Ref without minting
     /// a Call to roster it. Creates the System if absent, as
     /// [`TestApp::seed_talkgroup`] does.
-    pub async fn seed_unit(&self, system_ref: i64, unit_ref: i64, label: &str) {
+    ///
+    /// `label` takes `None` as well as a name, because a **nameless** Unit is a
+    /// real row from #47 onwards: a unit CSV may create one for nothing but the
+    /// **Range** it owns.
+    pub async fn seed_unit<'a>(
+        &self,
+        system_ref: i64,
+        unit_ref: i64,
+        label: impl Into<Option<&'a str>>,
+    ) {
         let system = repo::resolve_or_create_system(
             &self.db,
             system_ref,
@@ -825,7 +834,7 @@ impl TestApp {
         unit::ActiveModel {
             system_id: Set(system.id),
             r#ref: Set(unit_ref),
-            label: Set(Some(label.to_string())),
+            label: Set(label.into().map(str::to_string)),
             created_at_ms: Set(0),
             ..Default::default()
         }

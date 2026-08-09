@@ -632,6 +632,12 @@ fn payload(call: &StoredCall, talkgroup_ref: i64, count: u32) -> serde_json::Val
         "talkgroupRef": talkgroup_ref,
         "system": call.system_label,
         "talkgroup": call.talkgroup_label,
+        // Who was talking (#47, spec US 42). The one field worth the bytes here:
+        // a lock-screen line reading "Fire Dispatch · MEDIC 7" is the difference
+        // between knowing a channel was busy and knowing who keyed it, and the
+        // Ref is deliberately not sent — an unnamed radio is a number a phone
+        // cannot act on, and the Call is one tap away either way.
+        "unit": call.unit_label,
         "count": count,
     })
 }
@@ -854,7 +860,8 @@ mod tests {
             led: None,
             patches: vec![],
             frequency: None,
-            source: None,
+            unit_ref: None,
+            unit_label: None,
             timestamp: None,
             audio_mime: None,
             duration_ms: None,

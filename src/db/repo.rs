@@ -20,8 +20,8 @@ use std::collections::HashMap;
 
 use sea_orm::sea_query::{Alias, Expr};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, JoinType, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, IntoActiveModel, JoinType,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
 };
 
 use crate::blob::StoredAudio;
@@ -163,11 +163,220 @@ pub async fn resolve_unit<C: ConnectionTrait>(
     unit::Entity::find_by_id(member.unit_id).one(db).await
 }
 
+/// [`resolve_unit`] for a whole page at once (#47): the Unit owning each
+/// `(System Id, radio id)` pair, in **two** statements rather than two per pair.
+///
+/// The batched form exists because the denormalizer behind every search page and
+/// every live-feed frame now names the radio a Call is shown under, and the
+/// per-Ref form there would be an N+1 of exactly the kind #86 deleted — fifty
+/// Calls costing a hundred round-trips on a Pi.
+///
+/// Both statements are bounded by the *page*, never by the archive or by how
+/// many Ranges an Operator has written down: the spans are matched by an `OR` of
+/// the ids actually asked about (the access path
+/// `idx_unit_refs_system_span` exists for), and the Units are then fetched by
+/// primary key and by pair together. Nothing asked, nothing spent.
+pub async fn units_owning<C: ConnectionTrait>(
+    db: &C,
+    pairs: &[(i64, i64)],
+) -> Result<HashMap<(i64, i64), unit::Model>, DbErr> {
+    use sea_orm::Condition;
+
+    let pairs: Vec<(i64, i64)> = distinct(pairs.iter().copied());
+    if pairs.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let system_ids: Vec<i64> = distinct(pairs.iter().map(|(system_id, _)| *system_id));
+    let refs: Vec<i64> = distinct(pairs.iter().map(|(_, ext_ref)| *ext_ref));
+
+    // Which Ranges cover any of the ids asked about. A `Range` of one is how a
+    // lone member Ref is stored (#45), so this finds both.
+    let spans = unit_ref::Entity::find()
+        .filter(unit_ref::Column::SystemId.is_in(system_ids.clone()))
+        .filter(refs.iter().fold(Condition::any(), |any, ext_ref| {
+            any.add(
+                unit_ref::Column::RefFrom
+                    .lte(*ext_ref)
+                    .and(unit_ref::Column::RefTo.gte(*ext_ref)),
+            )
+        }))
+        .all(db)
+        .await?;
+
+    // The primaries and the Range owners in one read. A Unit reached both ways
+    // comes back once; which claim wins is decided below, not by the query.
+    let units: HashMap<i64, unit::Model> = unit::Entity::find()
+        .filter(
+            Condition::any()
+                .add(
+                    unit::Column::SystemId
+                        .is_in(system_ids)
+                        .and(unit::Column::Ref.is_in(refs)),
+                )
+                .add(unit::Column::Id.is_in(spans.iter().map(|span| span.unit_id))),
+        )
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|unit| (unit.id, unit))
+        .collect();
+    // `(system_id, ref)` is unique (`idx_units_system_ref`), so this holds every
+    // primary claim and holds each of them once.
+    let primaries: HashMap<(i64, i64), i64> = units
+        .values()
+        .map(|unit| ((unit.system_id, unit.r#ref), unit.id))
+        .collect();
+
+    let mut owned = HashMap::new();
+    for (system_id, ext_ref) in pairs {
+        // Primary before member, which is [`resolve_unit`]'s rule and the one
+        // that makes a Range covering somebody else's own Ref harmless.
+        let owner = primaries.get(&(system_id, ext_ref)).copied().or_else(|| {
+            spans
+                .iter()
+                .find(|span| {
+                    span.system_id == system_id
+                        && span.ref_from <= ext_ref
+                        && ext_ref <= span.ref_to
+                })
+                .map(|span| span.unit_id)
+        });
+        if let Some(unit) = owner.and_then(|id| units.get(&id)) {
+            owned.insert((system_id, ext_ref), unit.clone());
+        }
+    }
+    Ok(owned)
+}
+
+/// **Every Ref the apparatus owning `unit_ref` answers to** (#45, #47, spec
+/// US 16) — what searching by a radio actually searches for.
+///
+/// Always at least the Ref asked about, so an uncurated archive (where no Unit
+/// owns anything) answers with exactly that radio rather than with nothing. When
+/// a Unit does own it, the whole set comes back: its own Ref, its **Ranges**,
+/// and its lone member Refs. A Listener who taps "Engine 1" wants the
+/// apparatus's night, not whichever portable happened to key.
+///
+/// **The answer is per System, and takes no System as an argument.** A Ref is
+/// unique only within one, so a fleet's block on System 11 says nothing about
+/// radio 1210 on System 200 — and a flat list of spans applied to a search that
+/// named no System quietly answers with the other System's radios. Carrying the
+/// System *in the scope* rather than narrowing the lookup by one makes that
+/// impossible in both directions, and it is why the cascading filter options can
+/// clear the System filter (which is what they do) without the scope going stale:
+/// the scope is a fact about a Ref, never about the search that asked.
+///
+/// Two statements when the Ref is a Unit's own or nobody's, three when a Range
+/// owns it — once per request, never per Call.
+pub async fn unit_scope<C: ConnectionTrait>(
+    db: &C,
+    unit_ref: i64,
+) -> Result<crate::merge::UnitScope, DbErr> {
+    use crate::merge::{Range, UnitScope};
+
+    let owners: Vec<unit::Model> = unit::Entity::find()
+        .filter(unit::Column::Ref.eq(unit_ref))
+        .all(db)
+        .await?;
+
+    // Primary before member, [`resolve_unit`]'s rule: a Range covering somebody
+    // else's own Ref never speaks for it, so the Range is only asked about when
+    // no Unit claims the Ref as its own. Applied per System, because that is the
+    // scope the rule was written for — one System's Unit owning the Ref does not
+    // settle it for a System that has never heard of it.
+    let owned_elsewhere: Vec<unit::Model> = unit_ref::Entity::find()
+        .filter(unit_ref::Column::RefFrom.lte(unit_ref))
+        .filter(unit_ref::Column::RefTo.gte(unit_ref))
+        .filter(unit_ref::Column::SystemId.is_not_in(owners.iter().map(|owner| owner.system_id)))
+        .find_also_related(unit::Entity)
+        .all(db)
+        .await?
+        .into_iter()
+        // The owning Unit rides back with the span, so the Calls a fleet's
+        // *mobile* keyed are the apparatus's too — and it costs no second read
+        // to know which Ref that is.
+        .filter_map(|(_, owner)| owner)
+        .collect();
+
+    let owners: Vec<unit::Model> = owners.into_iter().chain(owned_elsewhere).collect();
+    if owners.is_empty() {
+        return Ok(UnitScope::bare(unit_ref));
+    }
+
+    let mut spans: HashMap<i64, Vec<Range>> = HashMap::new();
+    for owner in &owners {
+        // The Unit's own Ref, which is not a member Ref and so is in no span.
+        spans
+            .entry(owner.system_id)
+            .or_default()
+            .push(Range::new(owner.r#ref, owner.r#ref));
+    }
+    for span in unit_ref::Entity::find()
+        .filter(unit_ref::Column::UnitId.is_in(owners.iter().map(|owner| owner.id)))
+        .all(db)
+        .await?
+    {
+        spans
+            .entry(span.system_id)
+            .or_default()
+            .push(Range::new(span.ref_from, span.ref_to));
+    }
+
+    let mut owned: Vec<(i64, Vec<Range>)> = spans
+        .into_iter()
+        .map(|(system_id, mut ranges)| {
+            ranges.sort();
+            ranges.dedup();
+            (system_id, ranges)
+        })
+        .collect();
+    // Ordered so the condition built from this is the same SQL twice running —
+    // a `HashMap`'s order is not, and a query that changes shape between two
+    // identical requests is one no cache and no test can pin.
+    owned.sort();
+    Ok(UnitScope {
+        asked: unit_ref,
+        owned,
+    })
+}
+
+/// The **Ranges** and lone member Refs a Unit answers to beside its own Ref
+/// (#45), in the order an Operator wrote them.
+pub async fn member_spans<C: ConnectionTrait>(
+    db: &C,
+    unit_id: i64,
+) -> Result<Vec<crate::merge::Range>, DbErr> {
+    Ok(unit_ref::Entity::find()
+        .filter(unit_ref::Column::UnitId.eq(unit_id))
+        .order_by_asc(unit_ref::Column::Position)
+        .order_by_asc(unit_ref::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|span| crate::merge::Range::new(span.ref_from, span.ref_to))
+        .collect())
+}
+
+/// The distinct values of an iterator, order-insensitive — the `IN (…)` list for
+/// a batched lookup, and the pair list one is built from.
+pub(crate) fn distinct<T: Eq + std::hash::Hash>(items: impl Iterator<Item = T>) -> Vec<T> {
+    items
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Find the Unit a radio id belongs to, creating one if no Unit owns it. A Ref
-/// is unique only within its System. `label` (a radio alias) is recorded only on
-/// create — an existing Unit keeps its curated alias (#8 auto-populate), and a
-/// Unit reached through a Range keeps it for the same reason: an apparatus is
-/// named once, not renamed by whichever of its portables keyed last.
+/// is unique only within its System.
+///
+/// A Unit that already has an alias **keeps** it (#8 auto-populate), and a Unit
+/// reached through a Range keeps it for the same reason: an apparatus is named
+/// once, not renamed by whichever of its portables keyed last. A Unit with *no*
+/// alias takes the one offered, which is a different act — filling a blank
+/// rather than rewriting curation — and a real case from #47 onwards, since a
+/// unit CSV may create a Unit for nothing but the **Range** it owns. Without it
+/// that apparatus stays a bare number forever while every Call under it carries
+/// the name.
 pub async fn resolve_or_create_unit<C: ConnectionTrait>(
     db: &C,
     system_id: i64,
@@ -176,7 +385,12 @@ pub async fn resolve_or_create_unit<C: ConnectionTrait>(
     now_ms: i64,
 ) -> Result<unit::Model, DbErr> {
     if let Some(found) = resolve_unit(db, system_id, ext_ref).await? {
-        return Ok(found);
+        let Some(name) = label.filter(|_| found.label.is_none()) else {
+            return Ok(found);
+        };
+        let mut named = found.into_active_model();
+        named.label = Set(Some(name));
+        return named.update(db).await;
     }
     unit::ActiveModel {
         system_id: Set(system_id),
@@ -229,12 +443,20 @@ pub struct NewCallUnit {
     pub label: Option<String>,
     pub offset_ms: Option<i64>,
     /// The alias the radio transmitted, where `label` is the one the recorder
-    /// had configured (#42, TR's `tag_ota`).
+    /// had configured (#42, TR's `tag_ota`; SDRTrunk's `talkerAlias`).
     pub tag_ota: Option<String>,
     pub emergency: bool,
     pub signal_system: Option<String>,
     /// Wall-clock start of this Unit's transmission, unix milliseconds.
     pub at_ms: Option<i64>,
+}
+
+impl NewCallUnit {
+    /// What to call this radio — [`crate::call::unit_name`] over the two names
+    /// this Call carries for it (#47, spec US 12).
+    pub fn name(&self) -> Option<&str> {
+        crate::call::unit_name(self.label.as_deref(), self.tag_ota.as_deref())
+    }
 }
 
 /// A frequency sample within a call (rdio `frequencies[]`).
@@ -275,7 +497,6 @@ pub struct NewCall {
     pub talkgroup_groups: Vec<String>,
     pub call_at_ms: i64,
     pub frequency: Option<i64>,
-    pub source_ref: Option<i64>,
     pub audio_mime: Option<String>,
     pub audio_name: Option<String>,
     /// The recorder's own figure when it sent one; otherwise filled in by
@@ -358,7 +579,6 @@ impl NewCall {
             talkgroup_groups: Vec::new(),
             call_at_ms,
             frequency: None,
-            source_ref: None,
             audio_mime: None,
             audio_name: None,
             duration_ms: None,
@@ -652,7 +872,6 @@ fn describe_transmission(row: &mut call::ActiveModel, new: &NewCall, audio: Opti
     row.priority = Set(new.priority);
     row.audio_type = Set(new.audio_type.clone());
     row.frequency = Set(new.frequency);
-    row.source_ref = Set(new.source_ref);
     // Every Call arrives passthrough, and a replaced one goes back to it: the
     // levelled audio a previous pass produced describes a copy that no longer
     // exists. Set explicitly rather than left to a column default, because a
@@ -729,6 +948,13 @@ async fn write_signal_detail<C: ConnectionTrait>(
 /// gave it an alias — rdio rosters units with a non-empty label
 /// (`controller.go`), not every anonymous Ref. Gated on auto-populate like
 /// rdio; the per-call `call_units` detail is always recorded regardless.
+///
+/// **Either alias names it** ([`NewCallUnit::name`], #47): the configured one,
+/// or the one the radio broadcast about itself. Before #47 only the configured
+/// one counted, so the zero-configuration install this roster exists for — a
+/// Trunk Recorder with no unit file, an SDRTrunk sending `talkerAlias` on every
+/// upload — never named a single radio, however loudly the radios named
+/// themselves.
 async fn roster_units<C: ConnectionTrait>(
     db: &C,
     system_id: i64,
@@ -738,8 +964,9 @@ async fn roster_units<C: ConnectionTrait>(
 ) -> Result<(), DbErr> {
     if auto_populate {
         for u in &new.units {
-            if u.unit_ref > 0 && u.label.is_some() {
-                resolve_or_create_unit(db, system_id, u.unit_ref, u.label.clone(), now_ms).await?;
+            if let Some(name) = u.name().filter(|_| u.unit_ref > 0) {
+                let name = Some(name.to_string());
+                resolve_or_create_unit(db, system_id, u.unit_ref, name, now_ms).await?;
             }
         }
     }
@@ -1335,14 +1562,105 @@ pub async fn add_unit_range<C: ConnectionTrait>(
     position: i32,
     now_ms: i64,
 ) -> Result<RangeAdded, DbErr> {
-    let existing: Vec<crate::merge::Range> = unit_ref::Entity::find()
+    let owned = spans_on_system(db, unit.system_id).await?;
+    insert_range(db, unit, range, &owned, position, now_ms).await
+}
+
+/// **Make the Refs a Unit answers to exactly `wanted`** (#47, spec US 43) — the
+/// whole set at once, which is how a CSV means its member-Refs cell.
+///
+/// One read of the System's spans rather than one per Range, which is the
+/// difference between a 500-row fleet import and a thousand full table reads on
+/// a Pi. The overlap guarantee is unchanged: every insert still goes through
+/// [`insert_range`], against a set kept current as the removals and additions
+/// happen — so a row that narrows a block and widens it in the same cell is not
+/// refused by the version of itself it is replacing.
+///
+/// **Removals happen first**, for exactly that reason.
+pub async fn set_unit_ranges<C: ConnectionTrait>(
+    db: &C,
+    unit: &unit::Model,
+    wanted: &[crate::merge::Range],
+    now_ms: i64,
+) -> Result<RangesSet, DbErr> {
+    let held = unit_ref::Entity::find()
         .filter(unit_ref::Column::SystemId.eq(unit.system_id))
+        .all(db)
+        .await?;
+
+    let mut set = RangesSet::default();
+    let mut owned: Vec<crate::merge::Range> = Vec::new();
+    for row in &held {
+        let span = crate::merge::Range::new(row.ref_from, row.ref_to);
+        if row.unit_id == unit.id && !wanted.contains(&span) {
+            unit_ref::Entity::delete_by_id(row.id).exec(db).await?;
+            set.removed += 1;
+            continue;
+        }
+        owned.push(span);
+    }
+
+    for (position, range) in wanted.iter().enumerate() {
+        if owned.contains(range) {
+            continue;
+        }
+        match insert_range(db, unit, *range, &owned, position as i32, now_ms).await? {
+            RangeAdded::Added(_) => {
+                owned.push(*range);
+                set.added += 1;
+            }
+            RangeAdded::Overlaps(collision) => set.refused.push((*range, collision)),
+        }
+    }
+    Ok(set)
+}
+
+/// What [`set_unit_ranges`] made of the set an operator asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RangesSet {
+    pub added: u64,
+    pub removed: u64,
+    /// The Ranges refused, each with the one already owned that is in the way —
+    /// because "that overlaps something" is not an actionable sentence about a
+    /// fleet with forty of them.
+    pub refused: Vec<(crate::merge::Range, crate::merge::Range)>,
+}
+
+impl RangesSet {
+    /// Did anything move? A re-import of an unchanged file must count as
+    /// unchanged, not as an update.
+    pub fn is_empty(&self) -> bool {
+        self.added == 0 && self.removed == 0
+    }
+}
+
+/// Every span owned on a System, whichever Unit owns it — what an overlap is
+/// checked against.
+async fn spans_on_system<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+) -> Result<Vec<crate::merge::Range>, DbErr> {
+    Ok(unit_ref::Entity::find()
+        .filter(unit_ref::Column::SystemId.eq(system_id))
         .all(db)
         .await?
         .into_iter()
         .map(|owned| crate::merge::Range::new(owned.ref_from, owned.ref_to))
-        .collect();
-    if let Some(collision) = crate::merge::first_overlap(&existing, &range) {
+        .collect())
+}
+
+/// One span, inserted unless it collides with one of `owned` — the single place
+/// the no-overlap guarantee is enforced, whether one Range is being added or a
+/// whole cell is being replaced.
+async fn insert_range<C: ConnectionTrait>(
+    db: &C,
+    unit: &unit::Model,
+    range: crate::merge::Range,
+    owned: &[crate::merge::Range],
+    position: i32,
+    now_ms: i64,
+) -> Result<RangeAdded, DbErr> {
+    if let Some(collision) = crate::merge::first_overlap(owned, &range) {
         return Ok(RangeAdded::Overlaps(collision));
     }
     Ok(RangeAdded::Added(

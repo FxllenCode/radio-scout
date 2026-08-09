@@ -96,11 +96,32 @@ async fn a_search_page_costs_the_same_queries_however_many_calls_it_carries() {
 /// of statements the Instance issued doing it.
 async fn search_statements(calls: i64) -> u64 {
     let app = TestApp::spawn().await;
-    // Distinct Systems, Talkgroups, Tags and Groups, so every batched lookup in
-    // the denormalizer has more than one row to resolve — a per-Call query would
-    // otherwise be hidden behind a page that all resolves to one of everything.
+    // Distinct Systems, Talkgroups, Tags, Groups **and radios**, so every
+    // batched lookup in the denormalizer has more than one row to resolve — a
+    // per-Call query would otherwise be hidden behind a page that all resolves
+    // to one of everything. The radios matter twice over since #47: each is
+    // owned by a **Unit** of its own, and by a **Range** on top of that, so the
+    // page cannot be resolved by one lucky lookup that happens to answer for
+    // every Call.
     for n in 0..calls {
-        seed_searchable_call(&app, 100 + n, "Alpha", n, "Fire", &["Emergency"], 1000 + n).await;
+        app.seed_unit(100 + n, 1200, "Engine 1").await;
+        app.seed_unit_range(100 + n, 1200, 1201, 1299).await;
+        app.seed_call(
+            NewCall {
+                system_label: Some("Alpha".into()),
+                talkgroup_tag: Some("Fire".into()),
+                talkgroup_groups: vec!["Emergency".into()],
+                audio_mime: Some("audio/x-wav".into()),
+                units: vec![radio_scout::db::repo::NewCallUnit {
+                    unit_ref: 1250,
+                    tag_ota: Some("E1 PORTABLE".into()),
+                    ..Default::default()
+                }],
+                ..NewCall::new(100 + n, n, 1000 + n)
+            },
+            common::audio_at(format!("k/{n}.wav")),
+        )
+        .await;
     }
     // Every Worker owes nothing (#93), so what is counted below is the read's
     // own and not a seed still being finished behind it.
@@ -219,6 +240,321 @@ async fn search_filters_by_every_dimension() {
             .await
             .is_empty()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Searching by radio (#47, spec US 44)
+// ---------------------------------------------------------------------------
+
+/// Seed three Calls on System 11: two from radio 1250 and one from radio 9999.
+async fn seed_by_radio(app: &TestApp) -> (i64, i64, i64) {
+    let mut at = 1000;
+    let mut heard = |unit_ref: i64| {
+        at += 1000;
+        app.seed_call(
+            NewCall {
+                units: vec![radio_scout::db::repo::NewCallUnit {
+                    unit_ref,
+                    ..Default::default()
+                }],
+                ..NewCall::new(11, 54241, at)
+            },
+            common::audio_at(format!("k/{unit_ref}-{at}.wav")),
+        )
+    };
+    (heard(1250).await, heard(9999).await, heard(1250).await)
+}
+
+/// "Who said that, and where else" is one query (spec US 44). rdio-scanner
+/// cannot answer it at all: it stores the unit rows and offers no way to search
+/// them.
+#[tokio::test]
+async fn search_filters_by_the_radio_that_was_heard() {
+    let app = TestApp::spawn().await;
+    let (first, other, second) = seed_by_radio(&app).await;
+
+    assert_eq!(search_ids(&app, "?unit=1250").await, vec![second, first]);
+    assert_eq!(search_ids(&app, "?unit=9999").await, vec![other]);
+    assert!(search_ids(&app, "?unit=4242").await.is_empty());
+    // ...and it is a filter like the others: it narrows, and it combines.
+    assert_eq!(
+        search_ids(&app, "?unit=1250&after=3000").await,
+        vec![second]
+    );
+}
+
+/// The filter reaches the **apparatus**, not one radio id (#45, spec US 16): a
+/// Range's owner finds the Calls its portables keyed, and a portable finds the
+/// Calls the mobile keyed. Anything less would make merging Units a curation
+/// that quietly loses history.
+#[tokio::test]
+async fn a_unit_filter_reaches_every_ref_the_apparatus_answers_to() {
+    let app = TestApp::spawn().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    app.seed_unit_range(11, 1200, 4471, 4471).await;
+    let (portable, _, _) = seed_by_radio(&app).await;
+    let spare = app
+        .seed_call(
+            NewCall {
+                units: vec![radio_scout::db::repo::NewCallUnit {
+                    unit_ref: 4471,
+                    ..Default::default()
+                }],
+                ..NewCall::new(11, 54241, 9000)
+            },
+            common::audio_at("k/spare.wav"),
+        )
+        .await;
+
+    // Asked for by its own Ref, by the Range it owns, and by the lone member
+    // Ref beside it — one apparatus, one answer, three spellings.
+    for asked in ["1200", "1250", "4471"] {
+        let found = search_ids(&app, &format!("?unit={asked}")).await;
+        assert!(
+            found.contains(&portable) && found.contains(&spare),
+            "unit={asked} found {found:?}"
+        );
+    }
+}
+
+/// A radio nobody owns is searched for as itself — which is every uncurated
+/// archive, and must not silently return nothing.
+#[tokio::test]
+async fn a_unit_filter_for_an_unowned_ref_finds_exactly_that_ref() {
+    let app = TestApp::spawn().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    let (_, other, _) = seed_by_radio(&app).await;
+
+    assert_eq!(search_ids(&app, "?unit=9999").await, vec![other]);
+}
+
+/// **Ranges are System-scoped, and so is the filter.** Two Systems number their
+/// radios independently, so one System's fleet block must never widen a search
+/// pinned to another's — that would answer with Calls from radios the apparatus
+/// has nothing to do with.
+#[tokio::test]
+async fn one_systems_range_never_widens_a_search_pinned_to_another() {
+    let app = TestApp::spawn().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    let unrelated = app
+        .seed_call(
+            NewCall {
+                units: vec![radio_scout::db::repo::NewCallUnit {
+                    unit_ref: 1210,
+                    ..Default::default()
+                }],
+                ..NewCall::new(200, 1, 1000)
+            },
+            common::audio_at("k/unrelated.wav"),
+        )
+        .await;
+
+    assert!(
+        search_ids(&app, "?system=200&unit=1250").await.is_empty(),
+        "System 200 knows no Range covering 1250"
+    );
+    assert_eq!(
+        search_ids(&app, "?system=200&unit=1210").await,
+        vec![unrelated],
+        "...but the radio itself is still findable there"
+    );
+}
+
+/// ...and **with no System pinned at all**, which is what the Search screen's
+/// unit box sends: a Ref is unique only within its System, so System 11's fleet
+/// block must not reach System 200's radio 1210 just because nobody said whose
+/// fleet was meant.
+///
+/// The Ref *asked about* still matches everywhere, because that number is what
+/// somebody typed and a Call carrying it is one they meant. What must not
+/// happen is the rest of an apparatus leaking across.
+#[tokio::test]
+async fn an_unpinned_unit_search_never_leaks_one_systems_fleet_into_another() {
+    let app = TestApp::spawn().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    let (portable, _, _) = seed_by_radio(&app).await;
+    let heard_elsewhere = |system_ref: i64, unit_ref: i64, at: i64| {
+        app.seed_call(
+            NewCall {
+                units: vec![radio_scout::db::repo::NewCallUnit {
+                    unit_ref,
+                    ..Default::default()
+                }],
+                ..NewCall::new(system_ref, 1, at)
+            },
+            common::audio_at(format!("k/{system_ref}-{unit_ref}.wav")),
+        )
+    };
+    let inside_the_block = heard_elsewhere(200, 1210, 5000).await;
+    let the_same_radio = heard_elsewhere(200, 1250, 6000).await;
+
+    let found = search_ids(&app, "?unit=1250").await;
+
+    assert!(
+        found.contains(&portable) && found.contains(&the_same_radio),
+        "the radio asked about is found on every System: {found:?}"
+    );
+    assert!(
+        !found.contains(&inside_the_block),
+        "System 200's radio 1210 is not in System 11's fleet: {found:?}"
+    );
+}
+
+/// A Call whose Recorder listed the same radio twice — which Trunk Recorder does
+/// on every transmission a radio keys more than once — is **one** Call in the
+/// results and one in the count.
+///
+/// This is the first filter that reaches a genuinely to-many table, which is
+/// exactly the case `CallQuery::rows`'s comment says would owe a `DISTINCT`. It
+/// is written as a subquery instead: nothing is joined, so nothing can multiply.
+#[tokio::test]
+async fn a_unit_filter_cannot_multiply_a_call() {
+    let app = TestApp::with_key("k").await;
+    app.upload_tr(common::CallUpload::tr(
+        r#"{"short_name":"butco","talkgroup":54241,"start_time":1000,
+            "srcList":[{"src":4424000,"pos":0},{"src":4424000,"pos":4}]}"#,
+    ))
+    .await;
+
+    let page = app.get_json("/api/calls?unit=4424000").await;
+
+    assert_eq!(ids_of(&page).len(), 1, "one Call: {page}");
+    assert_eq!(page["count"], 1, "and the total agrees: {page}");
+}
+
+/// The filter options are the *other* dimensions', narrowed by this one — so
+/// picking a radio narrows the Talkgroup list to where that radio was heard.
+#[tokio::test]
+async fn a_unit_filter_narrows_the_filter_options() {
+    let app = TestApp::spawn().await;
+    seed_by_radio(&app).await;
+    app.seed_call(
+        NewCall {
+            units: vec![radio_scout::db::repo::NewCallUnit {
+                unit_ref: 9999,
+                ..Default::default()
+            }],
+            ..NewCall::new(11, 900, 9000)
+        },
+        common::audio_at("k/other-tg.wav"),
+    )
+    .await;
+
+    let options = app.get_json("/api/calls/filters?unit=1250").await;
+
+    let talkgroups: Vec<i64> = options["talkgroups"]
+        .as_array()
+        .expect("talkgroups")
+        .iter()
+        .map(|t| t["ref"].as_i64().expect("ref"))
+        .collect();
+    assert_eq!(talkgroups, vec![54241], "only where 1250 was heard");
+}
+
+// ---------------------------------------------------------------------------
+// One radio's history (#47, spec US 44)
+// ---------------------------------------------------------------------------
+
+/// "Who said that, and where else" — the Talkgroups a radio has been heard on,
+/// when it was first and last heard, and how much of the Archive is its.
+///
+/// rdio-scanner has no equivalent: it stores unit rows and never shows one.
+#[tokio::test]
+async fn a_unit_history_says_where_and_when_the_radio_was_heard() {
+    let app = TestApp::spawn().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    // Two Calls on Fire Dispatch and one on Tac 2, the last of them keyed by a
+    // portable inside the apparatus's Range.
+    for (talkgroup, unit_ref, at) in [(54241, 1200, 1000), (54241, 1200, 2000), (900, 1250, 3000)] {
+        app.seed_call(
+            NewCall {
+                talkgroup_label: Some(format!("TG {talkgroup}")),
+                units: vec![radio_scout::db::repo::NewCallUnit {
+                    unit_ref,
+                    ..Default::default()
+                }],
+                ..NewCall::new(11, talkgroup, at)
+            },
+            common::audio_at(format!("k/{talkgroup}-{at}.wav")),
+        )
+        .await;
+    }
+
+    let unit = app.get_json("/api/unit/11/1200").await;
+
+    assert_eq!(unit["ref"], 1200);
+    assert_eq!(unit["label"], "Engine 1");
+    assert_eq!(unit["systemRef"], 11);
+    assert_eq!(
+        unit["callCount"], 3,
+        "the portable's Call is the apparatus's"
+    );
+    assert_eq!(unit["firstHeardMs"], 1000);
+    assert_eq!(unit["lastHeardMs"], 3000);
+    assert_eq!(
+        unit["memberRefs"],
+        serde_json::json!([{ "from": 1201, "to": 1299 }])
+    );
+    // Busiest first — which channel this radio lives on is the question, and an
+    // alphabetical or Ref order buries the answer under whatever it touched once.
+    assert_eq!(
+        unit["talkgroups"],
+        serde_json::json!([
+            { "ref": 54241, "label": "TG 54241", "calls": 2, "lastHeardMs": 2000 },
+            { "ref": 900, "label": "TG 900", "calls": 1, "lastHeardMs": 3000 },
+        ])
+    );
+}
+
+/// A radio nobody has curated still has a history — which is every radio in an
+/// uncurated archive, and the whole point of reaching this view by tapping a
+/// bare number.
+#[tokio::test]
+async fn an_unnamed_radio_still_has_a_history() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(common::CallUpload::new().set("unit", "4242"))
+        .await;
+
+    let unit = app.get_json("/api/unit/11/4242").await;
+
+    assert_eq!(unit["ref"], 4242);
+    assert!(unit.get("label").is_none(), "{unit}");
+    assert!(unit.get("memberRefs").is_none(), "owns nothing: {unit}");
+    assert_eq!(unit["callCount"], 1);
+}
+
+/// A radio that has neither been heard nor curated is a 404 — not an empty
+/// history, which would make any typo look like a radio that had gone quiet.
+#[tokio::test]
+async fn a_radio_that_was_never_heard_is_not_found() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(common::CallUpload::new().set("unit", "4242"))
+        .await;
+
+    for missing in ["/api/unit/11/9999", "/api/unit/99/4242"] {
+        assert_eq!(app.get(missing).await.status().as_u16(), 404, "{missing}");
+    }
+}
+
+/// ...but a curated **Unit** that has never keyed is a history with nothing in
+/// it, because an Operator who wrote that apparatus down should be able to open
+/// it and see that it has been quiet.
+#[tokio::test]
+async fn a_curated_unit_that_has_never_keyed_is_an_empty_history() {
+    let app = TestApp::spawn().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+
+    let unit = app.get_json("/api/unit/11/1200").await;
+
+    assert_eq!(unit["label"], "Engine 1");
+    assert_eq!(unit["callCount"], 0);
+    assert_eq!(unit["talkgroups"], serde_json::json!([]));
+    assert!(unit.get("firstHeardMs").is_none(), "{unit}");
 }
 
 /// Dates may be unix milliseconds or RFC3339 — the latter so a human or a
@@ -581,6 +917,9 @@ async fn a_call_detail_carries_everything_the_recorder_said() {
         call["units"],
         serde_json::json!([{
             "ref": 4424000, "label": "Engine 1", "tagOta": "E1 OTA",
+            // The **Unit** this radio belongs to (#47) — rostered from the
+            // recorder's own tag a moment ago, since nothing had named it yet.
+            "unitLabel": "Engine 1",
             "offsetMs": 750, "emergency": true, "signalSystem": "P25",
             "atMs": 1669740339000i64
         }])
@@ -606,6 +945,147 @@ async fn a_call_detail_omits_what_was_never_sent() {
     }
     assert_eq!(call["frequencies"], serde_json::json!([]));
     assert_eq!(call["units"], serde_json::json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// The radio a Call is shown under (#47, spec US 42)
+// ---------------------------------------------------------------------------
+
+/// Every row, every frame and every display shows *one* radio — the first one
+/// heard, in the order its Recorder listed them, which is the order a Call's
+/// timeline is read out in.
+///
+/// One rather than the whole `srcList`, for the reason the detail endpoint above
+/// exists: a Call reaches a phone fifty to a page and once per live frame, and
+/// an array of radios on each of those is a payload nobody is reading.
+#[tokio::test]
+async fn a_search_row_names_the_first_radio_heard() {
+    let app = TestApp::with_key("k").await;
+    app.upload_tr(common::CallUpload::tr(
+        r#"{"short_name":"butco","talkgroup":54241,"start_time":1000,
+            "srcList":[{"src":4424000,"pos":0,"tag":"Engine 1"},
+                       {"src":4424009,"pos":2,"tag":"Ladder 3"}]}"#,
+    ))
+    .await;
+
+    let row = &app.get_json("/api/calls").await["results"][0];
+
+    assert_eq!(row["unitRef"], 4424000);
+    assert_eq!(row["unitLabel"], "Engine 1");
+}
+
+/// A radio nobody has named is still a radio: the Ref rides, and the label
+/// simply is not there. This is every uncurated archive, and the reason the
+/// label is a separate key rather than a rendered string.
+#[tokio::test]
+async fn an_unnamed_radio_rides_as_a_ref_with_no_label() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(common::CallUpload::new().set("unit", "4424000"))
+        .await;
+
+    let row = &app.get_json("/api/calls").await["results"][0];
+
+    assert_eq!(row["unitRef"], 4424000);
+    assert!(row.get("unitLabel").is_none(), "{row}");
+}
+
+/// ...and a Call nobody was heard on carries neither key, rather than a null
+/// pair every client would have to check.
+#[tokio::test]
+async fn a_call_with_no_radio_at_all_carries_neither_key() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(common::CallUpload::new()).await;
+
+    let row = &app.get_json("/api/calls").await["results"][0];
+
+    assert!(row.get("unitRef").is_none(), "{row}");
+    assert!(row.get("unitLabel").is_none(), "{row}");
+}
+
+/// A portable inside a fleet's **Range** is shown as the apparatus that owns it
+/// (#45, spec US 16) — the canonical Ref, so the label a Listener taps and the
+/// history it opens are the whole apparatus rather than whichever radio keyed.
+///
+/// The arriving Ref is not lost: `GET /api/call/{id}`'s `units[]` still records
+/// exactly which radio was heard, which is where somebody asking that question
+/// is looking.
+#[tokio::test]
+async fn a_radio_inside_a_range_is_shown_as_the_apparatus_that_owns_it() {
+    let app = TestApp::with_key("k").await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+
+    app.upload_ok(common::CallUpload::new().set("unit", "1250"))
+        .await;
+
+    let row = &app.get_json("/api/calls").await["results"][0];
+    assert_eq!(row["unitRef"], 1200, "the apparatus, not the portable");
+    assert_eq!(row["unitLabel"], "Engine 1");
+
+    let id = app.the_call().await.id;
+    let detail = app.get_json(&format!("/api/call/{id}")).await;
+    assert_eq!(detail["units"][0]["ref"], 1250, "which radio keyed");
+}
+
+/// A **Unit**'s own alias outranks whatever a Call happened to arrive with —
+/// that is what curating one is *for*. Auto-populate never rewrites it (#8), so
+/// without this a name an Operator corrected would go on being wrong in every
+/// row until the Archive aged out.
+#[tokio::test]
+async fn a_curated_unit_alias_outranks_the_name_a_call_arrived_with() {
+    let app = TestApp::with_key("k").await;
+    app.seed_unit(11, 4424000, "MEDIC 7").await;
+
+    app.upload_ok(
+        common::CallUpload::new().set("sources", r#"[{"src":4424000,"pos":0,"tag":"Engine 1"}]"#),
+    )
+    .await;
+
+    let row = &app.get_json("/api/calls").await["results"][0];
+    assert_eq!(row["unitLabel"], "MEDIC 7");
+    let id = app.the_call().await.id;
+    assert_eq!(
+        app.get_json(&format!("/api/call/{id}")).await["units"][0]["label"],
+        "Engine 1",
+        "what the Recorder said is still on the Call"
+    );
+}
+
+/// **Every radio on a Call's timeline carries the curated name**, not only the
+/// first (#47, spec US 42). `StoredCall` shows one radio because a list and a
+/// live frame want one; this endpoint exists to show every radio heard, and a
+/// name an Operator wrote in the unit CSV has to reach all of them or the
+/// curation is invisible exactly where the detail is.
+///
+/// Three names, kept apart on purpose: what the Operator curated, what the
+/// Recorder had configured, and what the radio said about itself.
+#[tokio::test]
+async fn a_call_detail_names_every_radio_it_heard() {
+    let app = TestApp::with_key("k").await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    app.upload_ok(common::CallUpload::new().set(
+        "sources",
+        r#"[{"src":1250,"pos":0,"tag":"E1 Portable"},{"src":9999,"pos":2}]"#,
+    ))
+    .await;
+
+    let id = app.the_call().await.id;
+    let units = &app.get_json(&format!("/api/call/{id}")).await["units"];
+
+    assert_eq!(units[0]["ref"], 1250, "which radio keyed");
+    assert_eq!(
+        units[0]["unitLabel"], "Engine 1",
+        "the apparatus it belongs to"
+    );
+    assert_eq!(
+        units[0]["label"], "E1 Portable",
+        "what the Recorder called it"
+    );
+    assert!(
+        units[1].get("unitLabel").is_none(),
+        "a radio nobody owns has no curated name: {units}"
+    );
 }
 
 /// A Call that isn't there is a 404, not a 500 and not an empty object.

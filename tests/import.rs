@@ -11,7 +11,7 @@ use common::TestApp;
 use radio_scout::db::Db;
 use radio_scout::db::entities::{group, talkgroup, talkgroup_group};
 use radio_scout::db::repo::{self, NewCall};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -823,4 +823,437 @@ async fn a_full_county_list_imports_in_one_pass() {
     assert_eq!(rows[0].label.as_deref(), Some("TG 0"));
     assert_eq!(rows[499].label.as_deref(), Some("TG 499"));
     assert_eq!(rows[499].led.as_deref(), Some("yellow"));
+}
+
+// ---------------------------------------------------------------------------
+// Units (#47, spec US 43): `POST /api/admin/units/import`
+// ---------------------------------------------------------------------------
+
+/// POST a unit CSV, returning the status and parsed JSON.
+async fn import_units(app: &TestApp, query: &str, csv: &str) -> (u16, Value) {
+    let (status, body) = app
+        .post_admin_bytes(
+            &format!("/api/admin/units/import{query}"),
+            "text/csv",
+            csv.as_bytes().to_vec(),
+        )
+        .await;
+    (
+        status,
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("json body ({e}): {body:?}")),
+    )
+}
+
+async fn import_units_ok(app: &TestApp, query: &str, csv: &str) -> Value {
+    let (status, body) = import_units(app, query, csv).await;
+    assert_eq!(status, 200, "unit import failed: {body}");
+    body
+}
+
+/// A fleet's numbering scheme in one paste (spec US 43): the apparatus, its
+/// name, and the block of portables that answer to it.
+///
+/// rdio-scanner has no unit import at all — units are typed one at a time into
+/// an admin table, which is why nobody's units are named.
+#[tokio::test]
+async fn a_unit_csv_creates_units_and_their_ranges() {
+    let app = admin_app().await;
+
+    let report = import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n\
+         1200,Engine 1,1201-1299;4471\n\
+         1300,Ladder 3,\n",
+    )
+    .await;
+
+    assert_eq!(report["rows"], 2);
+    assert_eq!(report["unitsCreated"], 2);
+    assert_eq!(report["rangesAdded"], 2);
+    assert_eq!(report["rejected"], serde_json::json!([]));
+
+    let engine = app.unit_by_ref(11, 1200).await.expect("Engine 1");
+    assert_eq!(engine.label.as_deref(), Some("Engine 1"));
+    // The whole block reads back through the view a Listener reaches.
+    let unit = app.get_json("/api/unit/11/1200").await;
+    assert_eq!(
+        unit["memberRefs"],
+        serde_json::json!([{ "from": 1201, "to": 1299 }, { "from": 4471, "to": 4471 }])
+    );
+}
+
+/// The names an operator writes reach the wire (spec US 42): a Call already in
+/// the Archive, keyed by a portable inside the block, reads as the apparatus the
+/// moment the CSV lands.
+#[tokio::test]
+async fn an_imported_unit_names_the_calls_already_archived() {
+    let app = admin_app().await;
+    app.seed_call(
+        NewCall {
+            units: vec![repo::NewCallUnit {
+                unit_ref: 1250,
+                ..Default::default()
+            }],
+            ..NewCall::new(11, 54241, 1000)
+        },
+        common::audio_at("k/1.wav"),
+    )
+    .await;
+
+    import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n1200,Engine 1,1201-1299\n",
+    )
+    .await;
+
+    let row = &app.get_json("/api/calls").await["results"][0];
+    assert_eq!(row["unitRef"], 1200);
+    assert_eq!(row["unitLabel"], "Engine 1");
+}
+
+/// Re-importing the same file is a no-op — the property that makes "fix the
+/// rejected lines and import again" safe.
+#[tokio::test]
+async fn re_importing_a_unit_csv_changes_nothing() {
+    let app = admin_app().await;
+    let csv = "ref,label,memberRefs\n1200,Engine 1,1201-1299;4471\n";
+
+    import_units_ok(&app, "?system=11", csv).await;
+    let again = import_units_ok(&app, "?system=11", csv).await;
+
+    assert_eq!(again["unitsCreated"], 0);
+    assert_eq!(again["unitsUpdated"], 0);
+    assert_eq!(again["unitsUnchanged"], 1);
+    assert_eq!(again["rangesAdded"], 0);
+    assert_eq!(again["rangesRemoved"], 0);
+}
+
+/// A non-empty member-Refs cell **is** the set, so dropping a span from the
+/// file is how an operator takes it back; `-` is the empty set, and a blank
+/// cell says nothing at all. The same three sentences the Talkgroup importer
+/// speaks (#45), because an operator should not have to learn two dialects.
+#[tokio::test]
+async fn the_member_refs_cell_is_the_whole_truth_for_the_row() {
+    let app = admin_app().await;
+    import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n1200,Engine 1,1201-1299;4471\n",
+    )
+    .await;
+
+    // A blank cell leaves the Ranges alone...
+    import_units_ok(&app, "?system=11", "ref,label\n1200,Engine One\n").await;
+    assert_eq!(
+        app.get_json("/api/unit/11/1200").await["memberRefs"],
+        serde_json::json!([{ "from": 1201, "to": 1299 }, { "from": 4471, "to": 4471 }])
+    );
+
+    // ...a narrower cell drops what it no longer names...
+    let narrowed = import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n1200,Engine One,1201-1299\n",
+    )
+    .await;
+    assert_eq!(narrowed["rangesRemoved"], 1);
+    assert_eq!(
+        app.get_json("/api/unit/11/1200").await["memberRefs"],
+        serde_json::json!([{ "from": 1201, "to": 1299 }])
+    );
+
+    // ...and `-` takes them all back.
+    let emptied = import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n1200,Engine One,-\n",
+    )
+    .await;
+    assert_eq!(emptied["rangesRemoved"], 1);
+    assert!(
+        app.get_json("/api/unit/11/1200")
+            .await
+            .get("memberRefs")
+            .is_none()
+    );
+}
+
+/// A Range that collides with one already owned is **refused, naming the Range
+/// in the way** (#45) — because "that overlaps something" is not actionable on a
+/// fleet with forty of them, and because a Ref inside two Ranges would attribute
+/// one radio's Calls to two apparatus depending on the day.
+#[tokio::test]
+async fn a_range_overlapping_another_units_is_a_reported_row() {
+    let app = admin_app().await;
+
+    let report = import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n\
+         1200,Engine 1,1201-1299\n\
+         1400,Ladder 3,1250-1350\n",
+    )
+    .await;
+
+    assert_eq!(report["unitsCreated"], 2, "the Unit itself is fine");
+    assert_eq!(
+        report["rejected"],
+        serde_json::json!([{ "line": 3, "reason": "range-overlaps", "detail": "1201-1299" }])
+    );
+    assert!(
+        app.get_json("/api/unit/11/1400")
+            .await
+            .get("memberRefs")
+            .is_none(),
+        "no half-applied Range"
+    );
+}
+
+/// Rows that cannot be read are reported one by one, with the line number an
+/// operator can open — never silently dropped, which is what rdio does.
+#[tokio::test]
+async fn unreadable_unit_rows_are_reported_per_row() {
+    let app = admin_app().await;
+
+    let report = import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n\
+         notanumber,Engine 1,\n\
+         1300,Ladder 3,12ab-1300\n\
+         1400,Rescue 4,\n",
+    )
+    .await;
+
+    assert_eq!(report["rows"], 3);
+    assert_eq!(report["unitsCreated"], 1, "the good row still landed");
+    assert_eq!(
+        report["rejected"],
+        serde_json::json!([
+            { "line": 2, "reason": "ref-not-a-number", "detail": "notanumber" },
+            { "line": 3, "reason": "member-ref-not-a-number", "detail": "12ab-1300" },
+        ])
+    );
+}
+
+/// A dry run walks the identical path and rolls it back, so the report is a
+/// promise about the real run rather than a separate estimate of it.
+#[tokio::test]
+async fn a_unit_dry_run_reports_the_real_run_and_writes_nothing() {
+    let app = admin_app().await;
+    let csv = "ref,label,memberRefs\n1200,Engine 1,1201-1299\n";
+
+    let dry = import_units_ok(&app, "?system=11&dryRun=true", csv).await;
+    assert_eq!(dry["dryRun"], true);
+    assert_eq!(dry["unitsCreated"], 1);
+    assert_eq!(dry["rangesAdded"], 1);
+    assert!(app.unit_by_ref(11, 1200).await.is_none(), "nothing written");
+
+    let real = import_units_ok(&app, "?system=11", csv).await;
+    assert_eq!(real["dryRun"], false);
+    assert_eq!(real["unitsCreated"], dry["unitsCreated"]);
+    assert_eq!(real["rangesAdded"], dry["rangesAdded"]);
+    assert!(app.unit_by_ref(11, 1200).await.is_some());
+}
+
+/// A file with no `ref` column is a whole-file 400 naming what was missing —
+/// there is no positional fallback here, because no third party exports unit
+/// lists and guessing at columns would silently rename a fleet.
+#[tokio::test]
+async fn a_unit_csv_with_no_ref_column_is_a_named_400() {
+    let app = admin_app().await;
+
+    let (status, body) = import_units(&app, "?system=11", "1200,Engine 1\n").await;
+
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "no-unit-ref-column");
+    assert!(
+        body["detail"].as_str().expect("detail").contains("header"),
+        "{body}"
+    );
+}
+
+/// Rows naming no System are rejected rather than scattered into one invented
+/// for them — a unit Ref means nothing without the System it is unique within.
+#[tokio::test]
+async fn unit_rows_with_no_system_are_rejected() {
+    let app = admin_app().await;
+
+    let report = import_units_ok(&app, "", "ref,label\n1200,Engine 1\n").await;
+
+    assert_eq!(report["unitsCreated"], 0);
+    assert_eq!(report["rejected"][0]["reason"], "no-system");
+}
+
+/// The importer is admin-gated like every other route under the prefix (#19).
+#[tokio::test]
+async fn the_unit_importer_is_behind_the_admin_session() {
+    let app = TestApp::spawn().await;
+
+    let (status, _) = app
+        .post_bytes(
+            "/api/admin/units/import",
+            "text/csv",
+            b"ref\n1200\n".to_vec(),
+        )
+        .await;
+
+    assert_eq!(status, 401);
+}
+
+/// A file with a header and nothing under it, and a file with nothing at all,
+/// are both "no data rows" — not a silent success reporting zero.
+#[tokio::test]
+async fn a_unit_csv_with_no_data_rows_is_a_named_400() {
+    let app = admin_app().await;
+
+    for empty in ["", "ref,label\n"] {
+        let (status, body) = import_units(&app, "?system=11", empty).await;
+        assert_eq!(status, 400, "{empty:?} -> {body}");
+        assert_eq!(body["error"], "empty-csv", "{empty:?}");
+    }
+}
+
+/// The row-level readings a unit CSV can refuse, one at a time — each reported
+/// with the line an operator opens rather than dropped.
+#[tokio::test]
+async fn every_unreadable_unit_cell_is_its_own_reported_row() {
+    let app = admin_app().await;
+
+    let report = import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n\
+         ,Engine 1,\n\
+         1300,Ladder 3,1301-13ab\n",
+    )
+    .await;
+
+    assert_eq!(
+        report["rejected"],
+        serde_json::json!([
+            { "line": 2, "reason": "missing-ref" },
+            { "line": 3, "reason": "member-ref-not-a-number", "detail": "1301-13ab" },
+        ])
+    );
+}
+
+/// A per-row `system` column, so one file can carry a whole instance's fleets —
+/// and a mistyped System *label* rejects its rows rather than inventing a
+/// System nothing will ever ingest into (the Talkgroup importer's rule, #18).
+#[tokio::test]
+async fn a_unit_row_may_name_its_own_system_and_a_bad_name_rejects_it() {
+    let app = admin_app().await;
+    app.seed_unit(11, 1, "placeholder").await; // brings System 11 into being
+
+    let report = import_units_ok(
+        &app,
+        "",
+        "system,ref,label\n\
+         11,1200,Engine 1\n\
+         nosuchcounty,1300,Ladder 3\n",
+    )
+    .await;
+
+    assert_eq!(report["unitsCreated"], 1);
+    assert_eq!(
+        report["rejected"],
+        serde_json::json!([
+            { "line": 3, "reason": "unknown-system", "detail": "nosuchcounty" }
+        ])
+    );
+    assert_eq!(
+        app.unit_by_ref(11, 1200).await.expect("Engine 1").label,
+        Some("Engine 1".to_string())
+    );
+}
+
+/// A stray separator in the member-Refs cell is punctuation, not a Range of
+/// nothing — the same reading the Talkgroup importer gives its own cell.
+#[tokio::test]
+async fn empty_entries_in_a_unit_cell_are_punctuation_not_ranges() {
+    let app = admin_app().await;
+
+    let report = import_units_ok(
+        &app,
+        "?system=11",
+        "ref,label,memberRefs\n1200,Engine 1,;1201-1299;;\n",
+    )
+    .await;
+
+    assert_eq!(report["rangesAdded"], 1);
+    assert_eq!(report["rejected"], serde_json::json!([]));
+}
+
+/// A unit import that cannot reach the database is a 500 naming its own stage,
+/// never a report claiming rows landed (ADR-0011 rule 4).
+#[tokio::test]
+async fn a_broken_database_is_a_server_error_not_a_false_unit_report() {
+    let capture = common::logs::LogCapture::start();
+    let app = admin_app().await;
+    app.db.clone().close().await.expect("close the pool");
+
+    let (status, body) = app
+        .post_admin_bytes(
+            "/api/admin/units/import?system=11",
+            "text/csv",
+            b"ref,label\n1200,Engine 1\n".to_vec(),
+        )
+        .await;
+
+    assert_eq!(status, 500);
+    assert!(body.starts_with("internal error (request id: "), "{body:?}");
+    let line = capture.only_line_containing("stage=import-units");
+    assert!(
+        line.contains(" ERROR "),
+        "a 500 should say what failed: {line}"
+    );
+}
+
+/// **Setting a Unit's Ranges reads the System's spans once, not once per span.**
+///
+/// The overlap guarantee (#45) is a comparison against every Range the System
+/// already owns, and the obvious way to write it — ask, insert, ask again — is a
+/// full read of `unit_refs` per row of a fleet CSV. Correct, and quadratic: a
+/// county list of five hundred apparatus would spend a thousand table reads on a
+/// Pi to write five hundred rows.
+///
+/// Asserted as a *slope* rather than a total: seven more Ranges must cost seven
+/// more statements — the seven inserts and nothing else. A pinned total would
+/// break every time something unrelated changed.
+#[tokio::test]
+async fn a_units_ranges_cost_one_statement_each_to_write() {
+    async fn spent(app: &TestApp, spans: usize) -> u64 {
+        let cell = (0..spans)
+            .map(|n| format!("{}-{}", 1000 + n * 10, 1005 + n * 10))
+            .collect::<Vec<_>>()
+            .join(";");
+        app.settle().await;
+        let before = app.statements_issued();
+        let report =
+            import_units_ok(app, "?system=11", &format!("ref,memberRefs\n500,{cell}\n")).await;
+        assert_eq!(report["rangesAdded"], spans as u64, "{report}");
+        app.statements_issued() - before
+    }
+
+    // Two apps, because a Unit that already owns spans is a different write.
+    let app = admin_app().await;
+    // Postgres inserts with `RETURNING`, so sea-orm gets the stored row back in
+    // the same statement; SQLite needs a `SELECT` after it (ADR-0003, and the
+    // same dialect difference `tests/ingest.rs` spells out).
+    let read_back = match app.db.get_database_backend() {
+        sea_orm::DatabaseBackend::Postgres => 0,
+        _ => 1,
+    };
+    let one = spent(&app, 1).await;
+    let eight = spent(&admin_app().await, 8).await;
+
+    assert_eq!(
+        eight - one,
+        7 * (1 + read_back),
+        "seven more Ranges, seven more inserts — and no second read of the \
+         System's spans ({one} for one, {eight} for eight)"
+    );
 }

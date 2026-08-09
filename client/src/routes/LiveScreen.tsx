@@ -12,9 +12,10 @@ import type { ReactNode } from 'react'
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
+import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
 import { Waveform } from '@/components/Waveform'
-import { callCategory, formatFrequency, systemName, talkgroupName } from '@/lib/call'
+import { callCategory, formatFrequency, systemName, talkgroupName, unitName } from '@/lib/call'
 import { formatCallTime } from '@/lib/archive'
 import { feedReadout, type FeedBadge, type FeedEmpty } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
@@ -309,8 +310,11 @@ function Display({
         <Stat name="TGID" testId="stat-talkgroup">
           {call.talkgroupRef}
         </Stat>
-        <Stat name="Unit ID" testId="stat-unit">
-          {call.source ?? '—'}
+        {/* The radio that keyed, named where anybody has named it (#47, spec
+            US 42), and a link to its history (US 44). rdio-scanner shows the
+            bare number and nothing behind it. */}
+        <Stat name="Unit" testId="stat-unit">
+          {unitName(call) === undefined ? '—' : <UnitLink call={call} />}
         </Stat>
         <Stat name="Time" testId="stat-time">
           {formatCallTime(call.timestamp)}
@@ -454,12 +458,16 @@ function History({
         className="divide-y divide-border rounded-xl border border-border bg-card"
       >
         {calls.map((call) => (
-          <li key={`${call.id}`}>
+          // The row is a list item holding a button, not a button holding
+          // everything: the unit is a *link* (#47) and an anchor inside a button
+          // is neither valid HTML nor reachable by a screen reader. Replaying is
+          // still the whole row's width minus the two things beside it.
+          <li key={`${call.id}`} className="flex items-center gap-3 px-3 py-2.5">
             <button
               type="button"
               disabled={disabled}
               onClick={() => onReplay(call.id)}
-              className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 disabled:opacity-40"
+              className="flex min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:bg-muted/40 disabled:opacity-40"
             >
               <StatusLed
                 color={ledForCall(call)}
@@ -472,10 +480,17 @@ function History({
                     the whole of what says the channel was busy. */}
                 <CallFlags call={call} />
               </span>
-              <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-                {formatCallTime(call.timestamp)}
-              </span>
             </button>
+            {/* Who keyed it, tappable straight through to that radio's history
+                (#47, spec US 44) — "who was that ten minutes ago" answered from
+                the list it happened in. */}
+            <UnitLink
+              call={call}
+              className="max-w-24 shrink-0 font-mono text-[11px] text-muted-foreground"
+            />
+            <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
+              {formatCallTime(call.timestamp)}
+            </time>
           </li>
         ))}
       </ul>
