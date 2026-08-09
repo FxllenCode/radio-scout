@@ -235,6 +235,38 @@ ref,label,memberRefs
 Every merge leaves a log line saying what moved (`talkgroup member Refs changed`, with the counts),
 so `journalctl -u radio-scout` has the record even if you lost the report.
 
+### Hearing each call once
+
+A console patch makes your recorder upload the same transmission once for every talkgroup in the
+patch, and a multi-site system can hand you the same call off two towers. rdio-scanner plays each
+of those, because the only thing it compares is the talkgroup and the timestamp. Radio-Scout treats
+them as one call: same system, within the dedup window, and reaching a talkgroup in common — its
+own, or one either copy says it is patched to. You get one call, and no button appears for a
+talkgroup id the patch invented.
+
+When the same transmission does arrive twice, **the better copy is the one you keep** — fewer
+decode errors first, then longer audio. A better copy arriving a moment later takes the stored
+call's place without changing its id, so a call already in your queue or on screen simply improves;
+nothing jumps, nothing plays twice, and the link to it keeps working. Copies that arrive after the
+window has passed are still recognised as duplicates — they just do not upgrade what is stored.
+
+Nothing here needs configuring, and the defaults are the recommendation. Two knobs exist for
+systems whose patch data cannot be trusted:
+
+```toml
+[ingest]
+dedup_window_ms = 500       # how far apart two uploads can be and still be one transmission
+dedup_scope = "patched"     # or "talkgroup": ignore patch membership, match the channel only
+dedup_keep = "best"         # or "first": keep whichever copy arrived first, like rdio-scanner
+```
+
+Raise `dedup_window_ms` if your recorders upload the same call more than half a second apart — it
+widens both meanings at once, which is what you want: how far apart two copies may be, and how long
+a stored call stays open to a better one.
+
+Every rejected copy leaves a line saying `reason=duplicate` and naming the call that beat it, so
+"why is this call not in the archive?" has an answer.
+
 ## Logging
 
 Everything goes to **stdout** — journald, Docker or your terminal owns persistence and

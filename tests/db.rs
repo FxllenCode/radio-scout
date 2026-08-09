@@ -947,7 +947,7 @@ async fn disposition_of(
     talkgroup_ref: i64,
     global_auto_populate: bool,
 ) -> Disposition {
-    let channel = repo::resolve_refs(db, system_ref, talkgroup_ref)
+    let channel = repo::resolve_refs(db, system_ref, talkgroup_ref, &[])
         .await
         .expect("resolve the channel");
     repo::disposition(&channel, talkgroup_ref, global_auto_populate)
@@ -1020,7 +1020,7 @@ async fn disposition_per_system_flag_populates_when_global_off() {
     // ...and the channel it resolved to is carried, so dedup and the insert do
     // not have to ask again (#96, #45).
     assert_eq!(
-        repo::resolve_refs(&db, 22, 5)
+        repo::resolve_refs(&db, 22, 5, &[])
             .await
             .expect("resolve")
             .talkgroup_id(),
@@ -1346,7 +1346,7 @@ async fn auto_populate_migration_converges_on_databases_that_predate_the_columns
 
     // Ingest works again: reading the policy is what blew up (it selects the
     // whole System row), and a Call for an unknown System lands instead.
-    let channel = repo::resolve_refs(&db, 11, 54241)
+    let channel = repo::resolve_refs(&db, 11, 54241, &[])
         .await
         .expect("read the System the policy is decided over");
     assert!(matches!(

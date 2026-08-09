@@ -186,12 +186,20 @@ Accepting a **Call** from a **Recorder** into Radio-Scout (via the HTTP upload A
 _Avoid_: upload, import (except in user-facing recorder docs).
 
 **Admission**:
-What **Ingest** decided about one **Call** — stored, duplicate, dropped for a named reason, or refused for an unauthorized **API key**. A *value*, not a response: **Ingest** resolves what the database knows, decides purely, then performs. The HTTP endpoints render an Admission into the rdio wire strings; **Dirwatch** logs one with no HTTP in reach. Its reason is a single closed vocabulary — the machine-readable slug and the recorder-facing detail derive from the same value, never two strings that can drift.
+What **Ingest** decided about one **Call** — stored, **replaced** by a better **Copy** of the same transmission, duplicate, dropped for a named reason, or refused for an unauthorized **API key**. A *value*, not a response: **Ingest** resolves what the database knows, decides purely, then performs. The HTTP endpoints render an Admission into the rdio wire strings; **Dirwatch** logs one with no HTTP in reach. Its reason is a single closed vocabulary — the machine-readable slug and the recorder-facing detail derive from the same value, never two strings that can drift.
 _Avoid_: disposition (the narrower auto-populate/blacklist decision *inside* an Admission), verdict, result, outcome.
 
 **Candidate**:
-A **Call** already stored on a **Talkgroup**, near enough in time that an arriving one has to be compared against it before an **Admission** can be decided. Rows rather than a count, because the decision has to name *which* Call a duplicate was of — and because keeping the better of two copies means comparing them.
+A **Call** already stored on the same **System**, near enough in time that an arriving one has to be compared against it before an **Admission** can be decided. Rows rather than a count, because the decision has to name *which* Call a duplicate was of — and because keeping the better of two copies means comparing them. Scoped to the System rather than to one **Talkgroup**, since a **Patch** puts one transmission on channels that are genuinely different.
 _Avoid_: match, neighbour, dupe.
+
+**Copy**:
+One **Recorder**'s upload of a transmission that Radio-Scout may already have. A Patch re-broadcast and a multi-site duplicate are two copies of one transmission, not two **Calls** — and which of them a **Listener** ends up hearing is decided by comparing them: fewer decode errors, then longer **Duration**. Deliberately a word for the *upload*, where **Call** is the row it becomes: N copies arrive and one Call exists.
+_Avoid_: version, variant, instance (an **Instance** is a running Radio-Scout), dupe.
+
+**Replacement**:
+A later-arriving **Copy** that turns out to be better taking the stored **Call**'s place — its audio and everything the Recorder said about the transmission — **under the same Call id**. Not a new Call and not an edit to one: the id, the **Talkgroup**, the instant and the position in the **Archive** are what a **listening queue**, a **Run** and an open page are all keyed on, so they stay. Nothing is published to the **live feed** for one, because the Listener already has that Call and a second frame would play it twice. Bounded: a Call stops being replaceable once its dedup window has closed, which is what lets its audio URL be promised immutable.
+_Avoid_: update, overwrite, upgrade, swap (the mechanism, shared with **Enhancement**).
 
 **Auto-populate**:
 Automatically creating an unknown system/talkgroup/unit the first time a call for it is ingested, so the archive is usable with zero manual configuration.

@@ -10,6 +10,7 @@ use radio_scout::db::repo;
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 
 mod common;
+use common::logs::LogCapture;
 use common::{CallUpload, TestApp};
 
 #[tokio::test]
@@ -155,6 +156,459 @@ async fn a_call_arriving_out_of_order_is_not_a_duplicate_of_a_much_later_one() {
         "an earlier Call is not a duplicate of a later one: {body:?}"
     );
     assert_eq!(app.calls().await.len(), 2, "both Calls stored");
+}
+
+// -- Keep-best dedup (#46, spec US 10) ---------------------------------------
+//
+// The predicate and the compare policy are decided purely and are exhaustively
+// covered in `src/ingest.rs`'s own tests, where a near miss is a value rather
+// than two multipart bodies. What is proved *here* is what only a running
+// Instance can say: that the widened test survives the round trip through real
+// rows, that a replacement really does leave one Call with the winner's audio
+// under the same id, and that the System scope — which lives in the query
+// rather than in the decision — actually holds.
+
+/// **The widened dedup read does not cost a query per candidate** (#86's
+/// argument, applied to #46's read).
+///
+/// The window used to be one channel's Calls and is now the whole System's,
+/// with each candidate's patch membership and signal health beside it. Read
+/// naively that is three statements per neighbour, on the hot path, on a Pi —
+/// and it is invisible from outside, because the answer the endpoint gives is
+/// correct either way and only the round-trips behind it differ.
+///
+/// Two window sizes rather than a pinned number, for the reason `tests/live.rs`
+/// gives about the Backfill: what has to be true is that the cost does not grow
+/// with the number of neighbours, and a constant would break every time
+/// something unrelated changed.
+#[tokio::test]
+async fn a_busy_window_costs_no_more_statements_than_a_quiet_one() {
+    let app = TestApp::with_key("k").await;
+    // Every Talkgroup exists up front, so the numbers below are the dedup
+    // read's and never auto-populate's. The neighbours are patched to channels
+    // of their own — distinct, so none of them is the same transmission as any
+    // other, while each still carries the patch and frequency rows a per-Call
+    // read would have to go and fetch.
+    for tg in [1, 2, 3, 4, 5, 900, 901, 902, 903, 904, 998, 999] {
+        app.seed_talkgroup(11, tg).await;
+    }
+
+    // The window holds one neighbour...
+    app.upload_ok(copy(1, "[900]", 0, b"neighbour")).await;
+    app.settle().await;
+    let before = app.statements_issued();
+    app.upload_ok(copy(998, "[]", 0, b"measured")).await;
+    app.settle().await;
+    let with_one = app.statements_issued() - before;
+
+    // ...and now several.
+    for (tg, patch) in [(2, "[901]"), (3, "[902]"), (4, "[903]"), (5, "[904]")] {
+        app.upload_ok(copy(tg, patch, 0, b"neighbour")).await;
+    }
+    app.settle().await;
+    let before = app.statements_issued();
+    app.upload_ok(copy(999, "[]", 0, b"measured")).await;
+    app.settle().await;
+    let with_several = app.statements_issued() - before;
+
+    assert_eq!(
+        with_several, with_one,
+        "the dedup read must cost the same whether the window holds one \
+         neighbour or six — anything else is a query per Call on the ingest path"
+    );
+}
+
+/// A copy of one transmission, as a recorder that saw it on `talkgroup` would
+/// upload it: patched to `patches`, `errors` decode errors in its signal
+/// detail, and `audio` bytes of it.
+fn copy(talkgroup: i64, patches: &str, errors: i64, audio: &[u8]) -> CallUpload {
+    CallUpload::new()
+        .talkgroup(talkgroup)
+        .set("patches", patches)
+        .set(
+            "frequencies",
+            format!(r#"[{{"freq":774031250,"pos":0,"len":1.5,"errorCount":{errors}}}]"#),
+        )
+        .audio(audio)
+}
+
+/// **One transmission, three uploads, one Call** — the acceptance criterion
+/// this ticket exists for (spec US 10).
+///
+/// A console patches three Talkgroups together and the recorder uploads the
+/// same audio once per member, each naming a different `talkgroup` and the same
+/// patch array. rdio-scanner's duplicate key is (System, Talkgroup, ±window),
+/// which cannot see that these are one transmission, so its listener hears the
+/// call three times. Here the second and third are recognised against the
+/// first's patch membership and refused.
+#[tokio::test]
+async fn one_patched_transmission_uploaded_per_member_becomes_one_call() {
+    let app = TestApp::with_key("k").await;
+    for member in [54241, 54242, 54243] {
+        app.seed_talkgroup(11, member).await;
+    }
+    let patch = "[54241, 54242, 54243]";
+
+    app.upload_ok(copy(54241, patch, 0, b"the-same-transmission"))
+        .await;
+    for member in [54242, 54243] {
+        let (status, body) = app
+            .upload(copy(member, patch, 0, b"the-same-transmission"))
+            .await;
+        assert_eq!(
+            status, 200,
+            "a recorder must never be given a reason to retry"
+        );
+        assert!(
+            body.contains("duplicate call rejected"),
+            "the copy on {member} is the same transmission: {body:?}"
+        );
+    }
+    app.settle().await;
+
+    assert_eq!(
+        app.calls().await.len(),
+        1,
+        "three copies of one transmission are one Call"
+    );
+}
+
+/// ...and the same holds when the patch mints a **brand-new TGID** nothing owns
+/// yet — rdio's issue #466, which our own auto-populate inherited.
+///
+/// The second copy arrives on a Ref the System has never seen. There is no
+/// Talkgroup to look it up in, so no query keyed on a channel could ever find
+/// the first copy; the match is carried entirely by the patch array. Left
+/// unhandled this is the case that floods the Talkgroups panel with a fresh
+/// button per patch event *and* plays every call twice.
+#[tokio::test]
+async fn a_patch_minted_talkgroup_ref_is_not_a_second_call() {
+    let app = TestApp::with_key("k").await;
+    app.seed_talkgroup(11, 54241).await;
+
+    app.upload_ok(copy(54241, "[54241]", 0, b"the-same-transmission"))
+        .await;
+    let (status, body) = app
+        .upload(copy(9_900_001, "[54241]", 0, b"the-same-transmission"))
+        .await;
+    app.settle().await;
+
+    assert_eq!(status, 200);
+    assert!(body.contains("duplicate call rejected"), "{body:?}");
+    assert_eq!(app.calls().await.len(), 1);
+    assert_eq!(
+        app.count::<talkgroup::Entity>().await,
+        1,
+        "and no Talkgroup was auto-populated for the minted Ref"
+    );
+}
+
+/// **The System scope is real**, and it is the read that enforces it.
+///
+/// Since the candidate query widened from one Talkgroup to the whole System,
+/// the one thing standing between two Systems that happen to number a Talkgroup
+/// identically is a single `WHERE`. Two Systems, the same Talkgroup Ref, the
+/// same instant: two Calls, because they are two transmissions on two radio
+/// networks that have never heard of each other.
+#[tokio::test]
+async fn two_systems_numbering_a_talkgroup_alike_do_not_dedup_against_each_other() {
+    let app = TestApp::spawn().await;
+    app.create_api_key("k").await;
+
+    app.upload_ok(CallUpload::new().system(11)).await;
+    app.upload_ok(CallUpload::new().system(22)).await;
+    app.settle().await;
+
+    assert_eq!(app.calls().await.len(), 2);
+}
+
+/// **A better copy takes the stored Call's place, under its own id** — and
+/// a Listener holding that Call notices nothing (spec US 10).
+///
+/// The identity is the whole point: the id, the channel and the instant are
+/// what a queue, an open Run and an Archive page are all keyed on, so the row
+/// has to stay itself while its audio and its signal detail become the winner's.
+#[tokio::test]
+async fn a_better_copy_replaces_the_stored_one_under_the_same_id() {
+    let app = TestApp::with_key("k").await;
+    app.seed_talkgroup(11, 54241).await;
+    app.seed_talkgroup(11, 54242).await;
+    let patch = "[54241, 54242]";
+
+    // The first copy in: nine decode errors, and short.
+    app.upload_ok(copy(54241, patch, 9, b"the-copy-with-errors"))
+        .await;
+    let first = app.the_call().await;
+
+    // ...and a cleaner one from the other member of the patch.
+    let (status, body) = app
+        .upload(copy(54242, patch, 0, b"the-clean-copy-and-it-is-longer"))
+        .await;
+    app.settle().await;
+    let after = app.the_call().await;
+
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Call imported successfully."),
+        "the copy was taken, so the recorder is told so: {body:?}"
+    );
+    assert_eq!(after.id, first.id, "the Call keeps its identity");
+    assert_eq!(
+        after.talkgroup_id, first.talkgroup_id,
+        "...including the channel a Listener is holding it under"
+    );
+    assert_eq!(
+        after.call_at_ms, first.call_at_ms,
+        "...and its place in time"
+    );
+    assert_eq!(
+        app.object_bytes(&after.object_key).await.as_deref(),
+        Some(&b"the-clean-copy-and-it-is-longer"[..]),
+        "but the audio behind it is the better copy's"
+    );
+    assert_ne!(
+        after.object_key, first.object_key,
+        "written under a new key: an object is immutable once written (ADR-0002), \
+         so a Listener mid-download keeps reading a file that still exists"
+    );
+    assert!(
+        app.stored(&first.object_key).await,
+        "...and the old object is left for orphan-GC rather than deleted"
+    );
+}
+
+/// A replacement swaps the **signal detail** with the audio it describes, and
+/// **unions** the patch membership.
+///
+/// The two children are treated differently on purpose. Decode errors and
+/// per-Unit offsets describe the bytes, so leaving the losing copy's behind
+/// would make the Archive describe audio nobody holds. Patch membership
+/// describes what the *transmission* reached, and the surviving Call stands for
+/// every copy of it — so a Listener subscribed to any member still gets it,
+/// whichever copy happened to win.
+#[tokio::test]
+async fn a_replacement_takes_the_winners_signal_detail_and_both_copies_patches() {
+    let app = TestApp::with_key("k").await;
+    for member in [54241, 54242, 54243] {
+        app.seed_talkgroup(11, member).await;
+    }
+
+    app.upload_ok(copy(54241, "[54242]", 9, b"the-copy-with-errors"))
+        .await;
+    app.upload_ok(copy(54241, "[54243]", 0, b"the-clean-copy"))
+        .await;
+    app.settle().await;
+    let call = app.the_call().await;
+
+    let errors: Vec<Option<i32>> = call_frequency::Entity::find()
+        .filter(call_frequency::Column::CallId.eq(call.id))
+        .all(&app.db)
+        .await
+        .expect("read frequencies")
+        .into_iter()
+        .map(|f| f.error_count)
+        .collect();
+    assert_eq!(
+        errors,
+        vec![Some(0)],
+        "the winner's signal detail, and only it"
+    );
+
+    let mut patched: Vec<i64> = call_patch::Entity::find()
+        .filter(call_patch::Column::CallId.eq(call.id))
+        .all(&app.db)
+        .await
+        .expect("read patches")
+        .into_iter()
+        .map(|p| p.talkgroup_ref)
+        .collect();
+    patched.sort();
+    assert_eq!(
+        patched,
+        vec![54242, 54243],
+        "every channel either copy said the transmission reached"
+    );
+}
+
+/// A replacement takes the winner's **Site**, and only when it named one.
+///
+/// This is the multi-site case the ticket exists for: one transmission heard on
+/// two towers, uploaded twice. The copy that won is the audio a Listener now
+/// gets, so the tower it came off is the honest answer — but a copy that named
+/// no tower knows nothing about towers, and must not erase what the other one
+/// knew.
+#[tokio::test]
+async fn a_replacement_takes_the_winners_site_but_never_erases_one() {
+    let app = TestApp::with_key("k").await;
+
+    // Heard on tower 1, badly; then on tower 2, better.
+    app.upload_ok(copy(54241, "[]", 9, b"tower-one").set("site", 1))
+        .await;
+    app.upload_ok(copy(54241, "[]", 5, b"tower-two").set("site", 2))
+        .await;
+    app.settle().await;
+    let site_id = app.the_call().await.site_id.expect("a Site");
+    let site = site::Entity::find_by_id(site_id)
+        .one(&app.db)
+        .await
+        .expect("read site")
+        .expect("the Site row");
+    assert_eq!(site.r#ref, 2, "the winning copy's tower");
+
+    // ...and a third, cleaner still, that says nothing about towers.
+    app.upload_ok(copy(54241, "[]", 0, b"tower-unknown")).await;
+    app.settle().await;
+    assert_eq!(
+        app.the_call().await.site_id,
+        Some(site_id),
+        "a copy that named no tower must not erase the one we knew"
+    );
+}
+
+/// **A worse copy is refused, and the line names the Call that beat it**
+/// (ADR-0011 rule 3).
+///
+/// The recorder is told `duplicate call rejected` and never retries, so this
+/// line is the only record the upload happened at all — and `of=` is what turns
+/// "something was dropped" into "this was dropped because Call 1 is the same
+/// transmission, and better".
+#[tokio::test]
+async fn a_worse_copy_is_refused_and_says_which_call_won() {
+    let app = TestApp::with_key("k").await;
+    let logs = LogCapture::start();
+
+    app.upload_ok(copy(54241, "[]", 0, b"the-clean-copy")).await;
+    let winner = app.the_call().await.id;
+    let (status, body) = app
+        .upload(copy(54241, "[]", 400, b"the-copy-with-errors"))
+        .await;
+    app.settle().await;
+
+    assert_eq!(status, 200);
+    assert!(body.contains("duplicate call rejected"), "{body:?}");
+    let logged = logs.text();
+    assert!(logged.contains("reason=duplicate"), "{logged}");
+    assert!(
+        logged.contains(&format!("of={winner}")),
+        "the winning Call's id: {logged}"
+    );
+    assert_eq!(
+        app.object_bytes(&app.the_call().await.object_key)
+            .await
+            .as_deref(),
+        Some(&b"the-clean-copy"[..]),
+        "and the worse copy's audio never displaced it"
+    );
+}
+
+/// **`dedup_keep = "first"` is rdio's behaviour, and it is one line of
+/// configuration** — the copy that happened to arrive first is the copy the
+/// Listener keeps, however much better the next one is.
+#[tokio::test]
+async fn keeping_the_first_copy_is_configurable() {
+    let app = TestApp::builder()
+        .ingest(IngestConfig {
+            dedup_keep: radio_scout::ingest::Keep::First,
+            ..IngestConfig::default()
+        })
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+
+    app.upload_ok(copy(54241, "[]", 400, b"the-copy-with-errors"))
+        .await;
+    let (_, body) = app.upload(copy(54241, "[]", 0, b"the-clean-copy")).await;
+    app.settle().await;
+
+    assert!(
+        body.contains("duplicate call rejected"),
+        "under first-wins even a better copy is only ever a duplicate: {body:?}"
+    );
+    assert_eq!(
+        app.object_bytes(&app.the_call().await.object_key)
+            .await
+            .as_deref(),
+        Some(&b"the-copy-with-errors"[..]),
+        "first-wins keeps the first copy, errors and all"
+    );
+}
+
+/// ...and `dedup_scope = "talkgroup"` narrows the test back to one channel, for
+/// an Operator whose System mints patches that lie.
+#[tokio::test]
+async fn narrowing_the_scope_to_one_talkgroup_is_configurable() {
+    let app = TestApp::builder()
+        .ingest(IngestConfig {
+            dedup_scope: radio_scout::ingest::Scope::Talkgroup,
+            ..IngestConfig::default()
+        })
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+    app.seed_talkgroup(11, 54241).await;
+    app.seed_talkgroup(11, 54242).await;
+    let patch = "[54241, 54242]";
+
+    app.upload_ok(copy(54241, patch, 0, b"one")).await;
+    app.upload_ok(copy(54242, patch, 0, b"two")).await;
+    app.settle().await;
+
+    assert_eq!(
+        app.calls().await.len(),
+        2,
+        "under the narrow scope a patch overlap is not the same transmission"
+    );
+}
+
+/// **A better copy that arrives late is still deduplicated — it just does not
+/// replace** (#46).
+///
+/// The bound exists so `serve` can promise a Listener that a Call's audio is
+/// `immutable` once its window has closed. What it costs is exactly this: the
+/// upgrade is missed. What it does not cost is the thing the ticket is for —
+/// nothing plays twice.
+#[tokio::test]
+async fn a_better_copy_arriving_after_the_window_is_refused_rather_than_swapped() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(copy(54241, "[]", 400, b"the-copy-with-errors"))
+        .await;
+    let first = app.the_call().await;
+    // The stored Call is now older than its dedup window, without waiting.
+    app.age_call(first.id, 60_000).await;
+
+    let (status, body) = app.upload(copy(54241, "[]", 0, b"the-clean-copy")).await;
+    app.settle().await;
+
+    assert_eq!(status, 200);
+    assert!(body.contains("duplicate call rejected"), "{body:?}");
+    assert_eq!(app.the_call().await.object_key, first.object_key);
+}
+
+/// A Call still inside its dedup window is **not** served as `immutable`,
+/// because a better copy may yet take its place (#46) — the same promise
+/// enhancement withholds, for the second reason there is.
+#[tokio::test]
+async fn a_replaceable_calls_audio_is_not_promised_immutable() {
+    let app = TestApp::builder()
+        .ingest(IngestConfig {
+            dedup_window_ms: 60_000,
+            ..IngestConfig::default()
+        })
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+    app.upload_ok(CallUpload::new()).await;
+    let id = app.the_call().await.id;
+
+    let response = app.get(&format!("/api/call/{id}/audio")).await;
+    let cache_control = common::header_of(&response, "cache-control").expect("a cache-control");
+
+    assert!(
+        !cache_control.contains("immutable"),
+        "promised immutability for audio keep-best may still swap: {cache_control}"
+    );
+    assert_eq!(response.status(), 200, "it must still play meanwhile");
 }
 
 #[tokio::test]
@@ -938,6 +1392,55 @@ const TR_ENCRYPTED_META: &str = r#"{
   "start_time":1669740338,"call_length_ms":4000,
   "emergency":0,"encrypted":1
 }"#;
+
+/// **An encrypted copy never takes playable audio away from a Listener** (#46).
+///
+/// It can genuinely win keep-best's comparison — its Duration is Trunk
+/// Recorder's own figure and its error count its `freqList`'s, so it can be
+/// both longer and cleaner than a copy somebody actually recorded — and an
+/// encrypted Call stores no audio at all. Winning would leave a metadata-only
+/// row where a Listener had something to play, which is not "the better copy"
+/// by any reading a Listener would recognise. It stays a duplicate.
+#[tokio::test]
+async fn an_encrypted_copy_never_displaces_a_call_that_plays() {
+    let app = TestApp::with_key("k").await;
+    repo::resolve_or_create_system(&app.db, 1, Some("butco".into()), 0)
+        .await
+        .expect("seed the short_name's system");
+
+    // A recorder that decoded it, badly, on the same instant TR's meta names.
+    app.upload_ok(
+        CallUpload::new()
+            .system(1)
+            .at(1_669_740_338_000)
+            .set(
+                "frequencies",
+                r#"[{"freq":774031250,"pos":0,"len":1.5,"errorCount":400}]"#,
+            )
+            .audio(b"noisy-but-audible"),
+    )
+    .await;
+    let playable = app.the_call().await;
+
+    // ...and TR insisting the same transmission was encrypted — cleaner (no
+    // signal detail at all beats nothing) and four seconds long.
+    let (status, body) = app.upload_tr(CallUpload::tr(TR_ENCRYPTED_META)).await;
+    app.settle().await;
+
+    assert_eq!(status, 200);
+    assert!(body.contains("duplicate call rejected"), "{body:?}");
+    let after = app.the_call().await;
+    assert_eq!(after.id, playable.id);
+    assert!(
+        !after.encrypted,
+        "the Call a Listener can play stays that way"
+    );
+    assert_eq!(
+        app.object_bytes(&after.object_key).await.as_deref(),
+        Some(&b"noisy-but-audible"[..]),
+        "and its audio is untouched"
+    );
+}
 
 /// An encrypted talkgroup's activity is worth seeing; its audio is not worth
 /// storing, because there is nothing in it to hear. The recorder is told the

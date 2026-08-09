@@ -100,6 +100,9 @@ stages! {
     StoreAudio => "store-audio",
     /// Inserting the Call row and its children, in one transaction.
     StoreCall => "store-call",
+    /// Pointing an already-stored Call at a better copy of its transmission
+    /// (#46), row and children, in one transaction.
+    ReplaceCall => "replace-call",
     /// Reading the stored Call back as the view the live feed carries.
     BuildCallView => "build-call-view",
     /// Resolving Trunk Recorder's `short_name` to a System Ref.

@@ -30,13 +30,15 @@ use crate::failure::{Failure, Reason, Stage};
 /// a session, without pinning audio that retention has since pruned.
 pub(crate) const AUDIO_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
 
-/// ...and how long it may keep audio that is **queued for enhancement** (#20).
+/// ...and how long it may keep audio whose object can **still be swapped** —
+/// queued for enhancement (#20), or young enough that keep-best may replace it
+/// with a better copy of the same transmission (#46).
 ///
-/// `immutable` is a promise the bytes behind this URL will never change, and for
-/// a pending Call that promise is exactly false: the worker is about to point
-/// the row at a different object. A client that cached it in the window would
-/// keep the un-levelled version for a week and never learn otherwise, so the
-/// promise is withheld until there is nothing left to replace. Short rather than
+/// `immutable` is a promise the bytes behind this URL will never change, and in
+/// either case that promise is exactly false: something is about to point the
+/// row at a different object. A client that cached it in the window would keep
+/// the superseded version for a week and never learn otherwise, so the promise
+/// is withheld until there is nothing left to replace. Short rather than
 /// `no-store`, because the Call still has to play now — and a range request
 /// mid-playback should not re-fetch the whole object.
 const PENDING_AUDIO_CACHE_CONTROL: &str = "private, max-age=30";
@@ -45,30 +47,66 @@ const PENDING_AUDIO_CACHE_CONTROL: &str = "private, max-age=30";
 /// this and what its signature has left (#31).
 const PENDING_AUDIO_MAX_AGE_SECS: u64 = 30;
 
-/// How long a *redirect* to this Call's audio may be cached: the signature's
-/// budget, but never past the point the object key itself may change (#31).
+/// Whether a **better copy** of this Call's transmission could still arrive and
+/// take its place (#46).
 ///
-/// The two limits are unrelated and both bind. `signature_budget` is how long
-/// the presigned URL stays usable — exceed it and the listener gets a 403. The
-/// enhancement state is about the row: a pending Call is one the worker is about
-/// to point at a *different object*, so a redirect cached for the signature's
-/// full life would keep sending the listener to the un-levelled audio long after
-/// the levelled version existed. A settled Call has no second limit, because the
-/// key behind it never changes again.
-fn redirect_max_age(enhancement: &str, signature_budget: u64) -> u64 {
-    match is_pending(enhancement) {
+/// A Call is replaceable for exactly as long as its dedup window is open: keep-
+/// best only ever compares an arriving copy against Calls inside that window, so
+/// once it has closed nothing can change these bytes again. On the shipped
+/// default that is half a second — a Listener gives up a week of caching on a
+/// Call for the moment it takes to be sure, and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DedupWindow {
+    /// Still inside it: a better copy could arrive.
+    Open,
+    /// Past it, or dedup is off. These bytes are final.
+    Closed,
+}
+
+/// Whether a Call stored at `created_at_ms` is still inside its dedup window.
+///
+/// **The arithmetic is [`crate::ingest::still_replaceable`]'s, not a second copy
+/// of it** — the same discipline `ingest::dedup_window` already applies to the
+/// window's other meaning. This header is a promise that keep-best has to keep,
+/// so the two cannot be allowed to disagree about an edge: written twice, a
+/// mutation of either would move one and not the other, and what a Listener
+/// would get is a week-long cache of audio that was replaced a moment later.
+fn dedup_window_of(created_at_ms: i64, now_ms: i64, window_ms: i64) -> DedupWindow {
+    match crate::ingest::still_replaceable(created_at_ms, now_ms, window_ms) {
+        true => DedupWindow::Open,
+        false => DedupWindow::Closed,
+    }
+}
+
+/// How long a *redirect* to this Call's audio may be cached: the signature's
+/// budget, but never past the point the object key itself may change (#31, #46).
+///
+/// The limits are unrelated and all bind. `signature_budget` is how long the
+/// presigned URL stays usable — exceed it and the listener gets a 403. The other
+/// two are about the row: a pending Call is one the worker is about to point at
+/// a *different object*, and a replaceable one is a Call a better copy may yet
+/// displace, so a redirect cached for the signature's full life would keep
+/// sending the listener to audio that has been superseded. A Call that is
+/// neither has no second limit, because the key behind it never changes again.
+fn redirect_max_age(enhancement: &str, window: DedupWindow, signature_budget: u64) -> u64 {
+    match may_still_change(enhancement, window) {
         true => signature_budget.min(PENDING_AUDIO_MAX_AGE_SECS),
         false => signature_budget,
     }
 }
 
-/// The `Cache-Control` a Call's audio is served with, given its enhancement
-/// state.
-fn audio_cache_control(enhancement: &str) -> &'static str {
-    match is_pending(enhancement) {
+/// The `Cache-Control` a Call's audio is served with.
+fn audio_cache_control(enhancement: &str, window: DedupWindow) -> &'static str {
+    match may_still_change(enhancement, window) {
         true => PENDING_AUDIO_CACHE_CONTROL,
         false => AUDIO_CACHE_CONTROL,
     }
+}
+
+/// Whether the object behind this Call's URL can still be swapped — the one
+/// question both cache limits are asking, for two independent reasons.
+fn may_still_change(enhancement: &str, window: DedupWindow) -> bool {
+    is_pending(enhancement) || window == DedupWindow::Open
 }
 
 fn is_pending(enhancement: &str) -> bool {
@@ -162,6 +200,10 @@ pub struct Facts<'a> {
     /// The Call's enhancement state, which decides how long the answer may be
     /// cached (#20, #31).
     pub enhancement: &'a str,
+    /// ...and whether keep-best may still swap the object for a better copy of
+    /// the same transmission, which decides the same thing for its own reason
+    /// (#46).
+    pub window: DedupWindow,
     pub mime: Option<&'a str>,
     /// `Some` when the store signs its own URLs *and* signed this one. The store
     /// is never asked for a `size` in that case, so `size` is `None` alongside
@@ -193,14 +235,14 @@ pub fn plan(facts: Facts<'_>) -> Result<Serve, Reason> {
     }
     if let Some(signed) = facts.signed {
         return Ok(Serve::Redirect {
-            max_age: redirect_max_age(facts.enhancement, signed.max_age_secs),
+            max_age: redirect_max_age(facts.enhancement, facts.window, signed.max_age_secs),
             url: signed.url,
         });
     }
 
     let size = facts.size.ok_or(Reason::AudioNotFound)?;
     let mime = facts.mime.unwrap_or("application/octet-stream").to_string();
-    let cache_control = audio_cache_control(facts.enhancement);
+    let cache_control = audio_cache_control(facts.enhancement, facts.window);
 
     match parse_range_header(facts.range, size) {
         RangeOutcome::None => Ok(Serve::Whole {
@@ -276,6 +318,11 @@ pub async fn audio(
     let serve = plan(Facts {
         object_key: &call.object_key,
         enhancement: &call.enhancement,
+        window: dedup_window_of(
+            call.created_at_ms,
+            state.clock.now_ms(),
+            state.ingest.dedup_window_ms,
+        ),
         mime: call.mime.as_deref(),
         signed,
         size,
@@ -402,29 +449,110 @@ mod tests {
         #[case] enhancement: &str,
         #[case] expected: &str,
     ) {
-        assert_eq!(audio_cache_control(enhancement), expected);
+        assert_eq!(
+            audio_cache_control(enhancement, DedupWindow::Closed),
+            expected
+        );
         assert!(
             expected.contains("immutable") == (enhancement != EnhancementState::PENDING),
             "a Call about to be re-levelled must not be `immutable`"
         );
     }
 
+    /// **...and neither is a Call keep-best may still swap** (#46).
+    ///
+    /// `immutable` is a promise the bytes behind this URL will never change, and
+    /// for a Call still inside its dedup window that promise is exactly as false
+    /// as it is for a pending one: a better copy of the same transmission may
+    /// arrive at any moment and take its place. The two reasons are unrelated
+    /// and either one is enough, which is why they are asserted independently
+    /// rather than as one table of four rows that could pass by agreeing on the
+    /// wrong pair.
+    #[rstest]
+    #[case::past_the_window(EnhancementState::DONE, DedupWindow::Closed, AUDIO_CACHE_CONTROL)]
+    #[case::still_replaceable(
+        EnhancementState::DONE,
+        DedupWindow::Open,
+        PENDING_AUDIO_CACHE_CONTROL
+    )]
+    #[case::pending_but_past_the_window(
+        EnhancementState::PENDING,
+        DedupWindow::Closed,
+        PENDING_AUDIO_CACHE_CONTROL
+    )]
+    #[case::both(
+        EnhancementState::PENDING,
+        DedupWindow::Open,
+        PENDING_AUDIO_CACHE_CONTROL
+    )]
+    fn a_call_that_may_still_be_replaced_is_not_immutable_either(
+        #[case] enhancement: &str,
+        #[case] window: DedupWindow,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(audio_cache_control(enhancement, window), expected);
+    }
+
     /// The redirect obeys **both** limits: the signature's own budget, and — for
-    /// a Call still queued — the point at which the key it names may change.
+    /// a Call still queued, or still replaceable — the point at which the key it
+    /// names may change.
     #[rstest]
     // Settled: only the signature binds, however long it is.
-    #[case(EnhancementState::DONE, 900, 900)]
-    #[case(EnhancementState::DONE, 5, 5)]
+    #[case(EnhancementState::DONE, DedupWindow::Closed, 900, 900)]
+    #[case(EnhancementState::DONE, DedupWindow::Closed, 5, 5)]
     // Pending: capped, but never *extended* past what the signature can honour —
     // a redirect cached past its signature is a 403 the listener cannot explain.
-    #[case(EnhancementState::PENDING, 900, PENDING_AUDIO_MAX_AGE_SECS)]
-    #[case(EnhancementState::PENDING, 5, 5)]
-    fn a_redirect_is_capped_by_the_sooner_of_its_two_limits(
+    #[case(
+        EnhancementState::PENDING,
+        DedupWindow::Closed,
+        900,
+        PENDING_AUDIO_MAX_AGE_SECS
+    )]
+    #[case(EnhancementState::PENDING, DedupWindow::Closed, 5, 5)]
+    // ...and replaceable caps it for the same reason, on a Call enhancement has
+    // nothing to say about (#46).
+    #[case(
+        EnhancementState::DONE,
+        DedupWindow::Open,
+        900,
+        PENDING_AUDIO_MAX_AGE_SECS
+    )]
+    #[case(EnhancementState::DONE, DedupWindow::Open, 5, 5)]
+    fn a_redirect_is_capped_by_the_sooner_of_its_limits(
         #[case] enhancement: &str,
+        #[case] window: DedupWindow,
         #[case] budget: u64,
         #[case] expected: u64,
     ) {
-        assert_eq!(redirect_max_age(enhancement, budget), expected);
+        assert_eq!(redirect_max_age(enhancement, window, budget), expected);
+    }
+
+    /// A Call is replaceable exactly while it is **younger than the dedup
+    /// window** — which is the whole of when a better copy of its transmission
+    /// could still arrive (#46).
+    ///
+    /// Both edges, because the arithmetic is a comparison and a mutation of it
+    /// changes only a header nobody asserts by hand. The last row is the
+    /// shipped-off case: with dedup disabled nothing is ever replaced, so no
+    /// Call ever gives up its week of caching.
+    #[rstest]
+    #[case::the_instant_it_arrived(1_000_000, 500, DedupWindow::Open)]
+    #[case::inside_the_window(1_000_499, 500, DedupWindow::Open)]
+    #[case::on_the_edge(1_000_500, 500, DedupWindow::Open)]
+    #[case::one_past_it(1_000_501, 500, DedupWindow::Closed)]
+    #[case::long_after(9_000_000, 500, DedupWindow::Closed)]
+    // A zero window still admits a copy at the very same instant (see
+    // `ingest::tests::a_zero_window_admits_only_the_same_instant`), so the Call
+    // is replaceable for exactly the instant it was stored and no longer. The
+    // header is that fact rather than a rounding of it.
+    #[case::a_zero_window_at_the_same_instant(1_000_000, 0, DedupWindow::Open)]
+    #[case::a_zero_window_a_millisecond_later(1_000_001, 0, DedupWindow::Closed)]
+    fn a_call_stops_being_replaceable_when_its_window_closes(
+        #[case] now_ms: i64,
+        #[case] window_ms: i64,
+        #[case] expected: DedupWindow,
+    ) {
+        assert_eq!(dedup_window_of(1_000_000, now_ms, window_ms), expected);
     }
 
     /// The facts of an ordinary settled Call whose object the store has, with
@@ -434,6 +562,7 @@ mod tests {
         Facts {
             object_key,
             enhancement: EnhancementState::DONE,
+            window: DedupWindow::Closed,
             mime: Some("audio/mp4"),
             signed: None,
             size: Some(10),

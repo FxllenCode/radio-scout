@@ -16,18 +16,108 @@ use serde::Serialize;
 /// Radio-Scout's internal primary key for a stored Call (matches the DB `i64`).
 pub type CallId = i64;
 
-/// A Call already stored on some Talkgroup, near enough in time that an
-/// arriving Call has to be compared against it (ADR-0001's duplicate detection).
+/// A Call already stored on this **System**, near enough in time that an
+/// arriving Call has to be compared against it (ADR-0001's duplicate detection,
+/// widened by #46).
 ///
 /// A *row*, not a count (#96). The database can answer "is there one?" in a
 /// single `COUNT`, and that is what ingest asked before — but a count cannot be
 /// property-tested at the boundaries, cannot say *which* Call the duplicate was
-/// of, and cannot be widened into #46's keep-best, which has to compare the
-/// candidate copies to decide which one to keep. The rows cost the same query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// of, and cannot be compared against, which keep-best has to do. The rows cost
+/// the same query.
+///
+/// Scoped to the System by the read rather than by a field here (#46). Every
+/// candidate is on the arriving Call's System by construction, so a `system_id`
+/// to re-check would be a branch no production input can make false — and the
+/// scope is what `tests/ingest.rs` proves over real rows, on both dialects,
+/// where a field could
+/// only ever be proved against itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub id: CallId,
     pub call_at_ms: i64,
+    /// When this Call was **stored**, which is a different clock from
+    /// `call_at_ms` and answers a different question (#46): whether a better
+    /// copy may still take its place.
+    ///
+    /// It has to be bounded, and this is the bound. Two copies of one
+    /// transmission carry the same `call_at_ms` forever, so a rule written only
+    /// over that would make every Call in the Archive replaceable for all time —
+    /// and `crate::serve` could then never promise a Listener that the bytes
+    /// behind a Call's URL are `immutable`, which is a week of caching given up
+    /// on every Call to cover a case that does not happen.
+    pub stored_ms: i64,
+    /// The **canonical** Talkgroup Ref this Call is on — `talkgroups.ref`, the
+    /// channel it resolved to, never the `calls.talkgroup_ref` column, which
+    /// records the Ref the recorder happened to say (#45).
+    pub talkgroup: i64,
+    /// The canonical Talkgroup Refs it is patched to, as `call_patches` stores
+    /// them — already resolved to their owning channel by `patch_members`.
+    pub patches: Vec<i64>,
+    /// How good a copy of its transmission this one is (#46).
+    pub quality: Quality,
+}
+
+impl Candidate {
+    /// Every Talkgroup this Call reaches: its own, then the ones it is patched
+    /// to — the same reading [`StoredCall::talkgroups`] gives the live feed,
+    /// and what #46's widened duplicate test is asked over.
+    pub fn talkgroups(&self) -> impl Iterator<Item = i64> + '_ {
+        std::iter::once(self.talkgroup).chain(self.patches.iter().copied())
+    }
+}
+
+/// How good one copy of a transmission is — what **keep-best** compares (#46,
+/// spec US 10).
+///
+/// Both fields are optional and mean the same thing when absent: *the recorder
+/// did not say*. Decode errors exist only where a recorder sent per-frequency
+/// signal detail (Trunk Recorder's native meta does; a bare rdio upload need
+/// not), and a duration is missing only where neither the recorder nor the
+/// audio's own container header could give one (#42).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Quality {
+    /// Decode errors summed across every frequency the Call was heard on —
+    /// Trunk Recorder's `error_count`, which counts the P25 frames that failed
+    /// to decode. Deliberately *not* `spike_count`, which counts a different
+    /// signal artifact and would make one criterion mean two things.
+    pub decode_errors: Option<i64>,
+    /// How long the transmission is, in milliseconds.
+    pub duration_ms: Option<i64>,
+}
+
+impl Quality {
+    /// Whether this copy is better than one already stored: **fewer decode
+    /// errors, then longer duration** (#46).
+    ///
+    /// Errors outrank length because the extra seconds of a badly-decoded copy
+    /// are usually squelch tail rather than speech — a copy that decoded
+    /// cleanly is the one a Listener wants, even when it is shorter.
+    ///
+    /// **Strictly better**, and a criterion neither copy can answer abstains
+    /// rather than guessing. Two consequences, both deliberate: a tie keeps
+    /// what is stored, so identical copies of one transmission never cost a
+    /// write; and a copy that says nothing never displaces one that did, so the
+    /// least informative upload cannot win by being quiet.
+    pub fn better_than(&self, stored: &Quality) -> bool {
+        // Written as a fold over the criteria in order rather than a chain of
+        // `if`s, so adding one is a row and cannot accidentally be placed after
+        // the decision has already been made.
+        [
+            // Fewer errors is better, so the comparison is reversed.
+            (stored.decode_errors, self.decode_errors),
+            (self.duration_ms, stored.duration_ms),
+        ]
+        .into_iter()
+        .find_map(|(mine, theirs)| match (mine, theirs) {
+            (Some(mine), Some(theirs)) if mine != theirs => Some(mine > theirs),
+            // Either side could not answer, or both answered the same: this
+            // criterion decides nothing and the next one is asked.
+            _ => None,
+        })
+        // Nothing decided: what is stored stays.
+        .unwrap_or(false)
+    }
 }
 
 /// A Call's place in the **emission** sequence — the order Calls went out on the
@@ -279,6 +369,117 @@ pub struct FilterOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    /// A copy that reported `errors` decode errors and ran `duration_ms`.
+    fn copy(errors: Option<i64>, duration_ms: Option<i64>) -> Quality {
+        Quality {
+            decode_errors: errors,
+            duration_ms,
+        }
+    }
+
+    /// **Fewer decode errors, then longer duration, then keep what is stored**
+    /// — the whole of #46's compare policy, and the order matters: a copy that
+    /// decoded cleanly is worth more than a copy that ran longer, because the
+    /// extra length of a badly-decoded copy is usually the squelch tail.
+    ///
+    /// The last case is the one that keeps a Pi's disk quiet: two identical
+    /// copies of one transmission decide nothing, so nothing is written.
+    #[rstest]
+    #[case::fewer_errors_wins(copy(Some(0), Some(4_000)), copy(Some(9), Some(4_000)), true)]
+    #[case::more_errors_loses(copy(Some(9), Some(4_000)), copy(Some(0), Some(4_000)), false)]
+    #[case::errors_beat_a_longer_copy(copy(Some(0), Some(1_000)), copy(Some(9), Some(9_000)), true)]
+    #[case::longer_wins_on_equal_errors(
+        copy(Some(2), Some(9_000)),
+        copy(Some(2), Some(4_000)),
+        true
+    )]
+    #[case::shorter_loses_on_equal_errors(
+        copy(Some(2), Some(4_000)),
+        copy(Some(2), Some(9_000)),
+        false
+    )]
+    #[case::an_identical_copy_changes_nothing(
+        copy(Some(2), Some(4_000)),
+        copy(Some(2), Some(4_000)),
+        false
+    )]
+    fn the_better_copy_is_the_cleaner_one_then_the_longer_one(
+        #[case] arriving: Quality,
+        #[case] stored: Quality,
+        #[case] better: bool,
+    ) {
+        assert_eq!(arriving.better_than(&stored), better);
+    }
+
+    /// **A criterion abstains unless both copies can answer it.**
+    ///
+    /// Decode errors only exist when a recorder sent per-frequency signal
+    /// detail — Trunk Recorder's native meta does, a bare rdio upload need not —
+    /// so "fewer errors" is a comparison one copy is often unable to enter. An
+    /// absent count is silence, not a claim of a clean decode: reading it as
+    /// zero would let the *least* informative upload win outright over a copy
+    /// that honestly reported two errors.
+    ///
+    /// So an unanswerable criterion falls through to the next one, and a copy
+    /// that can answer none of them never displaces what is already stored.
+    #[rstest]
+    #[case::unknown_errors_fall_through_to_duration(
+        copy(None, Some(9_000)),
+        copy(Some(0), Some(4_000)),
+        true
+    )]
+    #[case::and_do_not_win_by_being_quiet(
+        copy(None, Some(4_000)),
+        copy(Some(400), Some(4_000)),
+        false
+    )]
+    #[case::an_unknown_stored_count_abstains_too(
+        copy(Some(0), Some(4_000)),
+        copy(None, Some(4_000)),
+        false
+    )]
+    #[case::unknown_duration_abstains(copy(Some(2), None), copy(Some(2), Some(4_000)), false)]
+    #[case::against_an_unknown_stored_duration_too(
+        copy(Some(2), Some(9_000)),
+        copy(Some(2), None),
+        false
+    )]
+    #[case::a_copy_that_knows_nothing_never_wins(copy(None, None), copy(None, None), false)]
+    fn a_copy_never_wins_a_criterion_by_saying_nothing(
+        #[case] arriving: Quality,
+        #[case] stored: Quality,
+        #[case] better: bool,
+    ) {
+        assert_eq!(arriving.better_than(&stored), better);
+    }
+
+    /// Whatever the two copies say, **at most one of them is better** — so a
+    /// pair can never each displace the other, which is what would let two
+    /// recorders uploading the same transmission swap it back and forth.
+    ///
+    /// Written as the property rather than a case table because it is the
+    /// invariant the compare policy has to keep no matter how many criteria it
+    /// grows.
+    #[test]
+    fn two_copies_can_never_each_be_better_than_the_other() {
+        let values = [None, Some(0), Some(2), Some(400)];
+        for a_errors in values {
+            for a_duration in values {
+                for b_errors in values {
+                    for b_duration in values {
+                        let a = copy(a_errors, a_duration);
+                        let b = copy(b_errors, b_duration);
+                        assert!(
+                            !(a.better_than(&b) && b.better_than(&a)),
+                            "{a:?} and {b:?} are each better than the other"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn full() -> StoredCall {
         StoredCall {

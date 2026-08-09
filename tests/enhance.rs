@@ -233,6 +233,9 @@ async fn a_settled_call_is_still_cached_immutably() {
     app.upload_ok(call()).await;
     let id = app.the_call().await.id;
     app.await_enhancement(id).await;
+    // ...and past its dedup window, which is the *other* reason a Call's object
+    // may still change (#46). "Nothing is going to touch this" means both.
+    app.age_call(id, 60_000).await;
 
     let response = app.get(&format!("/api/call/{id}/audio")).await;
 

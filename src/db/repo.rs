@@ -16,6 +16,8 @@
 //! (`GROUP_CONCAT`/`STRING_AGG` diverge by dialect, ADR-0003) — a call's groups
 //! are loaded separately and assembled in Rust.
 
+use std::collections::HashMap;
+
 use sea_orm::sea_query::{Alias, Expr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, JoinType, PaginatorTrait,
@@ -23,7 +25,7 @@ use sea_orm::{
 };
 
 use crate::blob::StoredAudio;
-use crate::call::{CallId, Candidate, Emission};
+use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
     site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
@@ -324,6 +326,24 @@ impl NewCall {
         }
     }
 
+    /// How good a copy of its transmission this one is — what keep-best
+    /// compares against the Calls already stored (#46).
+    ///
+    /// Decode errors are summed across the frequencies the recorder reported,
+    /// counting only the entries that gave a number: a `freqList` where none
+    /// did is a recorder that does not report signal health at all, which is
+    /// silence rather than a clean decode ([`Quality::better_than`]).
+    pub fn quality(&self) -> Quality {
+        let mut decode_errors = None;
+        for reported in self.frequencies.iter().filter_map(|f| f.error_count) {
+            *decode_errors.get_or_insert(0) += i64::from(reported);
+        }
+        Quality {
+            decode_errors,
+            duration_ms: self.duration_ms,
+        }
+    }
+
     /// The three facts every upload carries — which System, which Talkgroup,
     /// and when — with everything a Recorder may or may not have said left
     /// empty. Fill the rest in with `..NewCall::new(system, talkgroup, at_ms)`.
@@ -475,38 +495,189 @@ pub async fn insert_call<C: ConnectionTrait>(
     // One query for the whole array rather than one per ref: this runs inside
     // the transaction that already holds the audio write (ADR-0001), and on a
     // Postgres backend every extra statement is a round-trip a Pi pays for.
-    let patched = patch_members(db, sys.id, &new.patches).await?;
-    if patched.dropped > 0 || patched.collapsed > 0 {
-        // Expected on every SDRTrunk patch — the radio tail is always dropped —
-        // so DEBUG, not the WARN of rule 7: this is protocol detail, not
-        // something an operator must act on. It is per-Call, which rule 8
-        // allows, and it is what answers "why is my patch not fanning out?"
-        // and, since #45, "why is my patch one chip and not three?".
-        // Bound here rather than inside the macro: `tracing` evaluates a field
-        // expression lazily, and a method call in that position is a coverage
-        // region the instrumentation cannot see taken even when the line it
-        // produces is asserted on.
-        let kept = patched.members.len();
-        tracing::debug!(
-            dropped = patched.dropped,
-            collapsed = patched.collapsed,
-            kept,
-            %new.system_ref,
-            "patch refs resolved to this System's channels"
-        );
+    //
+    // Already resolved when ingest asked (#46 needs the answer to decide the
+    // Call's Admission at all); resolved here for a caller that seeds rows
+    // directly, exactly as the System and the Talkgroup above are.
+    let patched = match resolved.patches.clone() {
+        Some(known) => known,
+        None => resolve_patches(db, &sys, &new.patches, new.talkgroup_ref).await?,
+    };
+    write_patches(db, stored.id, &patched).await?;
+    write_signal_detail(db, stored.id, new).await?;
+    roster_units(db, sys.id, new, auto_populate, now_ms).await?;
+
+    Ok(stored)
+}
+
+/// What storing a better copy of an already-stored transmission did (#46).
+///
+/// Two arms because the Call being replaced can be gone by the time this runs
+/// and the difference matters to everything downstream: a replacement is
+/// deliberately silent on the live feed (the Listener already has this Call),
+/// where a Call stored for the first time has to be published or nobody hears
+/// it at all.
+#[derive(Debug, Clone)]
+pub enum Replacement {
+    /// The stored Call now carries this copy — same id, same channel, same
+    /// place in the Archive.
+    Replaced(call::Model),
+    /// The Call this was a better copy *of* is gone, so the copy became a Call
+    /// of its own.
+    Stored(call::Model),
+}
+
+/// Point an already-stored Call at a better copy of its transmission, **under
+/// its own id** (#46, spec US 10) — the enhancement pipeline's swap precedent
+/// ([`store_enhanced_audio`]) applied to a copy that arrived from a Recorder
+/// rather than one this Instance produced.
+///
+/// **What changes is the transmission; what stays is the identity.** The audio
+/// object, everything the Recorder said about the signal, and the per-frequency
+/// and per-Unit detail are this copy's. The id, the System, the Talkgroup, the
+/// instant and the created-at are the stored Call's, because a Listener may
+/// already hold this Call in a queue, a Run or an open Archive page, and a Call
+/// that changed channel or moved in time under them would be a worse bug than
+/// the duplicate this exists to prevent.
+///
+/// **Patches are unioned, never replaced.** Each copy names the channels its own
+/// recorder saw the patch reach, and the surviving row stands for all of them —
+/// so a Listener subscribed to any member still receives it, whichever copy
+/// happened to win.
+///
+/// **Enhancement is reset.** The levelled audio a previous pass produced
+/// describes a copy that no longer exists, so the Call goes back to `none` and
+/// ingest offers it again.
+///
+/// Returns [`Replacement::Stored`] when the Call is no longer there. Retention
+/// is entitled to prune one between the moment the decision read it and the
+/// moment this writes — the size cap prunes oldest-first regardless of age, and
+/// a Recorder backfilling old Calls puts candidates right at that edge — and
+/// the honest answer then is that the transmission is not in the Archive, so
+/// this copy becomes it.
+///
+/// Not internally transactional: the caller wraps this with the audio write,
+/// exactly as it does [`insert_call`].
+pub async fn store_replacement<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+    new: &NewCall,
+    audio: Option<StoredAudio>,
+    resolved: &Resolved,
+    auto_populate: bool,
+    now_ms: i64,
+) -> Result<Replacement, DbErr> {
+    let Some(stored) = call::Entity::find_by_id(call_id).one(db).await? else {
+        return Ok(Replacement::Stored(
+            insert_call(db, new, audio, resolved, auto_populate, now_ms).await?,
+        ));
+    };
+
+    let system_id = stored.system_id;
+    let mut row: call::ActiveModel = stored.into();
+    // The audio, and the columns that describe it.
+    row.object_key = Set(audio
+        .as_ref()
+        .map(|a| a.key().to_owned())
+        .unwrap_or_default());
+    row.audio_size = Set(audio.as_ref().map(StoredAudio::bytes));
+    row.audio_mime = Set(new.audio_mime.clone());
+    row.audio_name = Set(new.audio_name.clone());
+    // ...and what this copy's Recorder said about the transmission.
+    row.duration_ms = Set(new.duration_ms);
+    row.stop_at_ms = Set(new.stop_at_ms);
+    row.emergency = Set(new.emergency);
+    row.encrypted = Set(new.encrypted);
+    row.priority = Set(new.priority);
+    row.audio_type = Set(new.audio_type.clone());
+    row.frequency = Set(new.frequency);
+    row.source_ref = Set(new.source_ref);
+    // A Site only when this copy named one: a multi-site System hears one
+    // transmission on several towers, and the copy that won says which tower
+    // the audio a Listener now gets came off. A copy that named none knows
+    // nothing about towers and must not erase what the other copy knew.
+    if let Some(site_ref) = new.site_ref {
+        row.site_id = Set(Some(
+            resolve_or_create_site(db, system_id, site_ref, now_ms)
+                .await?
+                .id,
+        ));
     }
-    for patch in patched.members {
+    row.enhancement = Set(call::EnhancementState::NONE.to_string());
+    let replaced = row.update(db).await?;
+
+    // The signal detail belongs to the audio, so it is this copy's outright.
+    call_frequency::Entity::delete_many()
+        .filter(call_frequency::Column::CallId.eq(call_id))
+        .exec(db)
+        .await?;
+    call_unit::Entity::delete_many()
+        .filter(call_unit::Column::CallId.eq(call_id))
+        .exec(db)
+        .await?;
+    write_signal_detail(db, call_id, new).await?;
+
+    // The patch membership does not: it is what the transmission *reached*,
+    // and the surviving Call stands for every copy of it.
+    let already: Vec<i64> = call_patch::Entity::find()
+        .filter(call_patch::Column::CallId.eq(call_id))
+        .select_only()
+        .column(call_patch::Column::TalkgroupRef)
+        .into_tuple()
+        .all(db)
+        .await?;
+    // Iterated rather than matched on: ingest resolves these *before* deciding
+    // anything (the widened duplicate test is asked over them) and ingest is the
+    // only thing that replaces a Call, so the unresolved case is a caller that
+    // named no patches and the union simply adds nothing. An arm for it would be
+    // one no production input can reach.
+    let added: Vec<i64> = resolved
+        .patches
+        .iter()
+        .flatten()
+        .filter(|patch| !already.contains(patch))
+        .copied()
+        .collect();
+    write_patches(db, call_id, &added).await?;
+
+    roster_units(db, system_id, new, auto_populate, now_ms).await?;
+
+    Ok(Replacement::Replaced(replaced))
+}
+
+/// The patch rows for a Call, given the canonical Refs [`resolve_patches`]
+/// settled on.
+async fn write_patches<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+    patched: &[i64],
+) -> Result<(), DbErr> {
+    for patch in patched {
         call_patch::ActiveModel {
-            call_id: Set(stored.id),
-            talkgroup_ref: Set(patch),
+            call_id: Set(call_id),
+            talkgroup_ref: Set(*patch),
             ..Default::default()
         }
         .insert(db)
         .await?;
     }
+    Ok(())
+}
+
+/// The per-Unit and per-frequency detail a Recorder sent about a Call.
+///
+/// Shared by [`insert_call`] and [`store_replacement`] because a better copy of
+/// a transmission brings its own signal detail with it, and the two must write
+/// it identically — a replacement whose `error_count` rows came from the losing
+/// copy would leave the Archive describing audio nobody holds any more (#46).
+async fn write_signal_detail<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+    new: &NewCall,
+) -> Result<(), DbErr> {
     for u in &new.units {
         call_unit::ActiveModel {
-            call_id: Set(stored.id),
+            call_id: Set(call_id),
             unit_ref: Set(u.unit_ref),
             label: Set(u.label.clone()),
             offset_ms: Set(u.offset_ms),
@@ -521,7 +692,7 @@ pub async fn insert_call<C: ConnectionTrait>(
     }
     for f in &new.frequencies {
         call_frequency::ActiveModel {
-            call_id: Set(stored.id),
+            call_id: Set(call_id),
             freq: Set(f.freq),
             pos_ms: Set(f.pos_ms),
             len_ms: Set(f.len_ms),
@@ -534,20 +705,28 @@ pub async fn insert_call<C: ConnectionTrait>(
         .insert(db)
         .await?;
     }
+    Ok(())
+}
 
-    // Unit roster (#8): a heard radio becomes a Unit entity only when the recorder
-    // gave it an alias — rdio rosters units with a non-empty label (`controller.go`),
-    // not every anonymous Ref. Gated on auto-populate like rdio; the per-call
-    // `call_units` detail above is always recorded regardless.
+/// Unit roster (#8): a heard radio becomes a Unit entity only when the recorder
+/// gave it an alias — rdio rosters units with a non-empty label
+/// (`controller.go`), not every anonymous Ref. Gated on auto-populate like
+/// rdio; the per-call `call_units` detail is always recorded regardless.
+async fn roster_units<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    new: &NewCall,
+    auto_populate: bool,
+    now_ms: i64,
+) -> Result<(), DbErr> {
     if auto_populate {
         for u in &new.units {
             if u.unit_ref > 0 && u.label.is_some() {
-                resolve_or_create_unit(db, sys.id, u.unit_ref, u.label.clone(), now_ms).await?;
+                resolve_or_create_unit(db, system_id, u.unit_ref, u.label.clone(), now_ms).await?;
             }
         }
     }
-
-    Ok(stored)
+    Ok(())
 }
 
 /// Which of `refs` are Talkgroups this System has — the patch members (#81) —
@@ -571,6 +750,16 @@ pub async fn insert_call<C: ConnectionTrait>(
 /// array names the channels a Call also reaches, and reaching one twice is not a
 /// fact about anything.
 ///
+/// **The Call's own `talkgroup_ref` is a member whether or not a row exists for
+/// it yet** (#46). The discriminator above exists to tell a Talkgroup Ref from a
+/// radio ID in a flat array, and for this one number there is independent
+/// evidence: the recorder named it in the `talkgroup` field, which is a
+/// Talkgroup by definition. It matters because this is the Ref auto-populate is
+/// *about to create* — resolving the array before the Talkgroup exists (which is
+/// what #46 moved it to, so the duplicate decision can see it) would otherwise
+/// drop a channel's own Ref from the first Call on it and keep it on every Call
+/// after, which is the kind of difference nobody finds for months.
+///
 /// Three statements at worst and one at best: the primaries, then — only when
 /// some ref was not one — the member rows and their owners, each in a single
 /// query. An instance with no merges pays exactly what it did before, and the
@@ -579,13 +768,14 @@ async fn patch_members<C: ConnectionTrait>(
     db: &C,
     system_id: i64,
     refs: &[i64],
+    talkgroup_ref: i64,
 ) -> Result<PatchMembers, DbErr> {
     if refs.is_empty() {
         return Ok(PatchMembers::default());
     }
     // Arriving Ref -> the primary Ref of the channel that owns it. A primary Ref
     // owns itself, which is why the first pass maps each hit to itself.
-    let mut canonical: std::collections::HashMap<i64, i64> = talkgroup::Entity::find()
+    let mut canonical: HashMap<i64, i64> = talkgroup::Entity::find()
         .filter(talkgroup::Column::SystemId.eq(system_id))
         .filter(talkgroup::Column::Ref.is_in(refs.iter().copied()))
         .select_only()
@@ -636,6 +826,13 @@ async fn patch_members<C: ConnectionTrait>(
             }
         }
     }
+
+    // The Call's own Ref, as a **last resort** — after both queries have had
+    // their say, so that a Ref which already resolves (to itself, or to the
+    // channel that owns it as a member Ref) keeps the answer they gave. What
+    // this adds is only the case where nothing owns it *yet*, which is the
+    // Talkgroup auto-populate is about to create for this very Call.
+    canonical.entry(talkgroup_ref).or_insert(talkgroup_ref);
 
     Ok(patch_members_of(refs, &canonical))
 }
@@ -1349,41 +1546,109 @@ pub fn authorizes(key: Option<&api_key::Model>, system_ref: i64) -> bool {
     }
 }
 
-/// The Calls already stored on this Talkgroup inside `window`, as the rows a
-/// duplicate decision is made over (ADR-0001, reshaped by #96).
+/// The Calls already stored on this **System** inside `window`, as the rows a
+/// duplicate decision is made over (ADR-0001, reshaped by #96, widened by #46).
 ///
-/// Keyed on the **canonical** Talkgroup's Id rather than the Ref a recorder
-/// sent (#45), which is what makes a merge collapse the traffic and not merely
-/// the panel: a multi-site System uploading one transmission twice, once under
-/// each of its Refs, is the plainest reason to merge two channels, and a merge
-/// that left the Call playing twice would have fixed nothing a listener hears.
-/// Recognising the same transmission across *different* channels, and keeping
-/// the better copy of it, is #46's widening of this predicate — which is why
-/// this hands back rows rather than the `COUNT` it used to.
+/// Scoped to the System rather than to one channel, and that is the widening.
+/// Keyed on the canonical Talkgroup, a merge already collapsed the traffic a
+/// multi-site System uploads once per Ref (#45) — but a **patch** puts the same
+/// transmission on channels that are genuinely different, and a console minting
+/// a fresh TGID per patch event puts it on a Ref no Talkgroup owns at all.
+/// Neither is reachable from a query keyed on the channel the arriving Call
+/// resolved to. Which of these rows is the same transmission is a decision, and
+/// it is [`crate::ingest::admit`]'s, made purely over what this returns.
 ///
-/// `None` means no Talkgroup owns that Ref yet, which is not a state a duplicate
-/// can exist in: a Call is a row referencing a Talkgroup row, so no Talkgroup
-/// means no Calls to be a duplicate of. It also costs no query.
+/// **The System scope lives here**, which is why `tests/ingest.rs` proves it on
+/// both dialects rather than a pure test proving it against itself: two Systems
+/// that happen to number a Talkgroup the same way must not see each other's
+/// Calls, and after this widening they are one `WHERE` clause apart.
+///
+/// `None` means no System owns that Ref yet, which is not a state a duplicate
+/// can exist in: a Call is a row referencing a System row, so no System means
+/// no Calls to be a duplicate of. It also costs no query.
+///
+/// Three statements at worst and one at best. The patch rows and the signal
+/// health behind them are only asked for when the window turned something up —
+/// so a Pi taking a Call every few seconds, where the window is empty every
+/// time, pays exactly the one statement it paid before.
 pub async fn calls_within<C: ConnectionTrait>(
     db: &C,
-    talkgroup_id: Option<i64>,
+    system_id: Option<i64>,
     window: std::ops::RangeInclusive<i64>,
 ) -> Result<Vec<Candidate>, DbErr> {
-    let Some(talkgroup_id) = talkgroup_id else {
+    let Some(system_id) = system_id else {
         return Ok(Vec::new());
     };
-    Ok(call::Entity::find()
-        .filter(call::Column::TalkgroupId.eq(talkgroup_id))
+    // The canonical Talkgroup **Ref**, not the `calls.talkgroup_ref` column —
+    // that one records what the recorder said, which for a Call that arrived
+    // under a member Ref is precisely not the channel it is on (#45).
+    let found: Vec<(CallId, i64, i64, i64, Option<i64>)> = call::Entity::find()
+        .filter(call::Column::SystemId.eq(system_id))
         .filter(call::Column::CallAtMs.gte(*window.start()))
         .filter(call::Column::CallAtMs.lte(*window.end()))
+        .inner_join(talkgroup::Entity)
         .select_only()
         .column(call::Column::Id)
         .column(call::Column::CallAtMs)
+        .column(call::Column::CreatedAtMs)
+        .column_as(talkgroup::Column::Ref, "talkgroup_ref")
+        .column(call::Column::DurationMs)
+        .into_tuple()
+        .all(db)
+        .await?;
+    if found.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids: Vec<CallId> = found.iter().map(|(id, ..)| *id).collect();
+    let mut patches: HashMap<CallId, Vec<i64>> = HashMap::new();
+    for (call_id, talkgroup_ref) in call_patch::Entity::find()
+        .filter(call_patch::Column::CallId.is_in(ids.clone()))
+        .select_only()
+        .column(call_patch::Column::CallId)
+        .column(call_patch::Column::TalkgroupRef)
         .into_tuple::<(CallId, i64)>()
         .all(db)
         .await?
+    {
+        patches.entry(call_id).or_default().push(talkgroup_ref);
+    }
+
+    // Decode errors, summed per Call. Summed in Rust rather than by a `GROUP
+    // BY` so the fold is the same one [`NewCall::quality`] applies to the
+    // arriving copy — one rule for what "how many errors did this copy have"
+    // means, rather than one in SQL and one in Rust that can disagree about a
+    // `NULL`.
+    let mut errors: HashMap<CallId, Option<i64>> = HashMap::new();
+    for (call_id, error_count) in call_frequency::Entity::find()
+        .filter(call_frequency::Column::CallId.is_in(ids))
+        .filter(call_frequency::Column::ErrorCount.is_not_null())
+        .select_only()
+        .column(call_frequency::Column::CallId)
+        .column(call_frequency::Column::ErrorCount)
+        .into_tuple::<(CallId, Option<i32>)>()
+        .all(db)
+        .await?
+    {
+        let total = errors.entry(call_id).or_default();
+        *total.get_or_insert(0) += i64::from(error_count.unwrap_or_default());
+    }
+
+    Ok(found
         .into_iter()
-        .map(|(id, call_at_ms)| Candidate { id, call_at_ms })
+        .map(
+            |(id, call_at_ms, stored_ms, talkgroup, duration_ms)| Candidate {
+                id,
+                call_at_ms,
+                stored_ms,
+                talkgroup,
+                patches: patches.remove(&id).unwrap_or_default(),
+                quality: Quality {
+                    decode_errors: errors.remove(&id).flatten(),
+                    duration_ms,
+                },
+            },
+        )
         .collect())
 }
 
@@ -1430,6 +1695,15 @@ pub enum Disposition {
 pub struct Resolved {
     pub system: Option<system::Model>,
     pub talkgroup: Option<talkgroup::Model>,
+    /// The canonical Talkgroup Refs the Call's `patches` array named on this
+    /// System (#81's rule, #45's canonicalization), or `None` when nobody has
+    /// asked yet — in which case [`insert_call`] resolves them for itself,
+    /// exactly as it does the System and the Talkgroup.
+    ///
+    /// Ingest fills this in during [`resolve_refs`] because the widened
+    /// duplicate test (#46) is asked over these Refs, and resolving them again
+    /// inside the insert would be the second lookup #96 removed.
+    pub patches: Option<Vec<i64>>,
 }
 
 impl Resolved {
@@ -1441,10 +1715,27 @@ impl Resolved {
         Resolved::default()
     }
 
-    /// The canonical Talkgroup's Id, which is what a Call is stored against and
-    /// what its duplicates are looked for on.
+    /// The System's Id — what the dedup window is read across (#46), and
+    /// `None` when no System owns the Ref yet, which is not a state a duplicate
+    /// can exist in and costs no query.
+    pub fn system_id(&self) -> Option<i64> {
+        self.system.as_ref().map(|sys| sys.id)
+    }
+
+    /// The canonical Talkgroup's Id, which is what a Call is stored against.
     pub fn talkgroup_id(&self) -> Option<i64> {
         self.talkgroup.as_ref().map(|tg| tg.id)
+    }
+
+    /// The canonical Talkgroup's **primary Ref** — the channel a Call reaches,
+    /// in the vocabulary the duplicate test is asked in (#46).
+    ///
+    /// Refs rather than Ids there because the other half of that test is a
+    /// Call's `call_patches` rows, which store canonical Refs; comparing one
+    /// against the other in Ids would mean resolving every patch row back to a
+    /// Talkgroup for a question already answerable.
+    pub fn talkgroup_ref(&self) -> Option<i64> {
+        self.talkgroup.as_ref().map(|tg| tg.r#ref)
     }
 }
 
@@ -1469,21 +1760,63 @@ pub async fn resolve_refs<C: ConnectionTrait>(
     db: &C,
     system_ref: i64,
     talkgroup_ref: i64,
+    patches: &[i64],
 ) -> Result<Resolved, DbErr> {
     let Some(system) = system::Entity::find()
         .filter(system::Column::Ref.eq(system_ref))
         .one(db)
         .await?
     else {
-        // No System means no Talkgroup: a Ref is unique only within its System,
-        // so there is nothing to look one up in and no query to spend.
+        // No System means no Talkgroup and no patch members: a Ref is unique
+        // only within its System, so there is nothing to look any of them up in
+        // and no query to spend.
         return Ok(Resolved::unresolved());
     };
     let talkgroup = resolve_talkgroup(db, system.id, talkgroup_ref).await?;
+    // Free on the overwhelming majority of Calls: an empty `patches` array
+    // costs no statement at all.
+    let patches = resolve_patches(db, &system, patches, talkgroup_ref).await?;
     Ok(Resolved {
         system: Some(system),
         talkgroup,
+        patches: Some(patches),
     })
+}
+
+/// The canonical Talkgroup Refs a recorder's `patches` array names on this
+/// System — [`patch_members`] plus the line that says what it made of them.
+///
+/// Its own function since #46, because the answer is now needed *before* the
+/// insert (the widened duplicate test is asked over it) as well as inside one,
+/// and resolving it twice would cost a Pi the round-trips #96 removed.
+pub async fn resolve_patches<C: ConnectionTrait>(
+    db: &C,
+    system: &system::Model,
+    refs: &[i64],
+    talkgroup_ref: i64,
+) -> Result<Vec<i64>, DbErr> {
+    let patched = patch_members(db, system.id, refs, talkgroup_ref).await?;
+    if patched.dropped > 0 || patched.collapsed > 0 {
+        // Expected on every SDRTrunk patch — the radio tail is always dropped —
+        // so DEBUG, not the WARN of rule 7: this is protocol detail, not
+        // something an operator must act on. It is per-Call, which rule 8
+        // allows, and it is what answers "why is my patch not fanning out?"
+        // and, since #45, "why is my patch one chip and not three?".
+        // Bound here rather than inside the macro: `tracing` evaluates a field
+        // expression lazily, and a method call in that position is a coverage
+        // region the instrumentation cannot see taken even when the line it
+        // produces is asserted on.
+        let kept = patched.members.len();
+        let system_ref = system.r#ref;
+        tracing::debug!(
+            dropped = patched.dropped,
+            collapsed = patched.collapsed,
+            kept,
+            system_ref,
+            "patch refs resolved to this System's channels"
+        );
+    }
+    Ok(patched.members)
 }
 
 /// Decide what to do with an incoming Call before any audio is written (#8) —
@@ -1704,6 +2037,7 @@ pub async fn get_call_audio<C: ConnectionTrait>(
             object_key: c.object_key,
             mime: c.audio_mime,
             enhancement: c.enhancement,
+            created_at_ms: c.created_at_ms,
         }))
 }
 
@@ -1717,6 +2051,10 @@ pub struct CallAudio {
     /// all: audio that is queued for enhancement must not be cached as
     /// immutable, because the object behind this id is going to change.
     pub enhancement: String,
+    /// When the row was stored — the other reason its object may still change
+    /// (#46): a Call inside its dedup window can be replaced by a better copy
+    /// of the same transmission, and is cached exactly as a pending one is.
+    pub created_at_ms: i64,
 }
 
 /// The System's and Talkgroup's enhancement flags for a Call, in that order.
@@ -2199,7 +2537,11 @@ mod tests {
         #[case] global_auto_populate: bool,
         #[case] expected: Disposition,
     ) {
-        let resolved = Resolved { system, talkgroup };
+        let resolved = Resolved {
+            system,
+            talkgroup,
+            ..Resolved::unresolved()
+        };
 
         assert_eq!(
             disposition(&resolved, 54241, global_auto_populate),

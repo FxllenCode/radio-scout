@@ -553,6 +553,25 @@ impl TestApp {
         calls.into_iter().next().expect("one call")
     }
 
+    /// Move a stored Call's **arrival** back by `by_ms`, so it is past its
+    /// dedup window without anybody waiting for one (#46).
+    ///
+    /// Keep-best only replaces a Call while it is young — that bound is what
+    /// lets `serve` promise a Listener the audio is `immutable` — so "this Call
+    /// is old enough to be final" is a fact a test has to be able to arrange.
+    /// A frozen `Clock` cannot: it stops time rather than passing it, and both
+    /// the row and the request would read the same instant.
+    pub async fn age_call(&self, id: i64, by_ms: i64) {
+        let call = call::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .expect("read call")
+            .expect("a Call to age");
+        let mut row: call::ActiveModel = call.into();
+        row.created_at_ms = sea_orm::Set(radio_scout::now_ms() - by_ms);
+        row.update(&self.db).await.expect("age call");
+    }
+
     /// Wait for a Call to leave the `pending` enhancement state, and hand back
     /// the row as it ended up.
     ///

@@ -293,8 +293,8 @@ understands them unchanged:
 
 | Response | Status | Meaning |
 | --- | --- | --- |
-| `Call imported successfully.` | 200 | Stored |
-| `duplicate call rejected` | 200 | An identical Call arrived inside the dedup window — expected on a re-send |
+| `Call imported successfully.` | 200 | Stored — or kept as a better copy of a Call already stored |
+| `duplicate call rejected` | 200 | The same transmission arrived again inside the dedup window — expected on a re-send, and on every patched or multi-site upload |
 | `Incomplete call data: no talkgroup` | 417 | The upload carried no talkgroup |
 | `Incomplete call data: no audio` | 417 | The upload carried no audio part |
 | `Incomplete call data: malformed multipart body` | 417 | The body was not parseable as multipart |
@@ -303,6 +303,12 @@ understands them unchanged:
 A rejection is answered `200` in two cases on purpose — a duplicate, and a Call dropped by
 policy — because a recorder that gets an error will retry forever, and neither of those will
 ever succeed.
+
+`duplicate call rejected` is **normal and expected** on a patched or multi-site system: your
+recorder uploads one transmission once per patched talkgroup, and Radio-Scout keeps the best copy
+as a single Call rather than playing it N times. See
+[Hearing each call once](operating.md#hearing-each-call-once) if you want the narrower,
+rdio-scanner-style behaviour back.
 
 From the instance's side:
 

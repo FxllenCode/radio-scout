@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Level, Span, field, info, span, warn};
 
 use crate::archive;
-use crate::call::{CallId, Candidate};
+use crate::call::{CallId, Candidate, Quality};
 use crate::db::entities::call;
 use crate::db::repo::{self, NewCall, NewCallFrequency, NewCallUnit};
 use crate::failure::{Failure, Incomplete, Reason, Stage};
@@ -61,6 +61,10 @@ use crate::{AppState, now_ms};
 pub struct IngestConfig {
     /// Duplicate-detection window in milliseconds (rdio's default is ~500ms).
     pub dedup_window_ms: i64,
+    /// What counts as the same transmission arriving twice (#46).
+    pub dedup_scope: Scope,
+    /// Which copy of it is kept (#46).
+    pub dedup_keep: Keep,
     /// Global auto-populate toggle (#8). On by default, matching rdio-scanner.
     /// When off, unknown Systems are dropped and only Systems whose own
     /// per-system flag is set still auto-create Talkgroups/Units.
@@ -71,8 +75,104 @@ impl Default for IngestConfig {
     fn default() -> Self {
         IngestConfig {
             dedup_window_ms: 500,
+            dedup_scope: Scope::Patched,
+            dedup_keep: Keep::Best,
             auto_populate: true,
         }
+    }
+}
+
+/// How wide the duplicate test reaches (#46, spec US 10).
+///
+/// The default is the improvement; the other value is the way back to rdio's
+/// behaviour for an Operator whose System mints patches that lie — because a
+/// patch array is the radio network's claim, and a claim can be wrong in a way
+/// that silently costs a Listener real traffic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// The same canonical Talkgroup only — one channel, one window. What rdio
+    /// does, and what Radio-Scout did until #46.
+    Talkgroup,
+    /// ...or an overlapping **patch** membership, so one transmission uploaded
+    /// once per member of a console patch is one Call.
+    #[default]
+    Patched,
+}
+
+/// Which copy of one transmission is kept when it arrives more than once (#46).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Keep {
+    /// The one already stored — rdio's first-wins, where the copy that happened
+    /// to be uploaded first is the copy a Listener is stuck with.
+    First,
+    /// The better one: fewer decode errors, then longer duration
+    /// ([`Quality::better_than`]). A later-arriving winner replaces the stored
+    /// copy under the same Call id.
+    #[default]
+    Best,
+}
+
+impl Scope {
+    /// The spelling used in the file and the environment.
+    fn as_str(self) -> &'static str {
+        match self {
+            Scope::Talkgroup => "talkgroup",
+            Scope::Patched => "patched",
+        }
+    }
+
+    /// Every spelling, for an error message that lists what was expected.
+    pub(crate) const ALL: [Scope; 2] = [Scope::Talkgroup, Scope::Patched];
+}
+
+impl std::fmt::Display for Scope {
+    /// Unquoted in a log line, so `dedup_scope=patched` greps (rule 6).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Scope {
+    type Err = ();
+
+    /// One spelling per value, shared by the file and the environment, so
+    /// `RADIO_SCOUT_INGEST_DEDUP_SCOPE=patched` and `dedup_scope = "patched"`
+    /// cannot drift apart.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Scope::ALL
+            .into_iter()
+            .find(|scope| scope.as_str() == text)
+            .ok_or(())
+    }
+}
+
+impl Keep {
+    fn as_str(self) -> &'static str {
+        match self {
+            Keep::First => "first",
+            Keep::Best => "best",
+        }
+    }
+
+    pub(crate) const ALL: [Keep; 2] = [Keep::First, Keep::Best];
+}
+
+impl std::fmt::Display for Keep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Keep {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Keep::ALL
+            .into_iter()
+            .find(|keep| keep.as_str() == text)
+            .ok_or(())
     }
 }
 
@@ -88,27 +188,101 @@ pub(crate) fn dedup_window(call_at_ms: i64, window_ms: i64) -> std::ops::RangeIn
     call_at_ms.saturating_sub(window_ms)..=call_at_ms.saturating_add(window_ms)
 }
 
-/// The stored Call this one is a duplicate of, if any — the **nearest** of the
-/// candidates inside the window (ADR-0001's duplicate detection).
+/// The Call now arriving, as the duplicate decision sees it (#46) — which
+/// Talkgroups it reaches, when it happened, and how good a copy it is.
 ///
-/// Nearest rather than first: a recorder uploading one transmission once per
-/// member Ref can put two candidates in the window, and "duplicate of call 41"
-/// is only useful to an operator if 41 is the Call a listener would call the
-/// same transmission. It is also the copy #46 will compare against.
+/// Its own type rather than three arguments because the channel half of the
+/// test is symmetric: the arriving copy and a stored [`Candidate`] are compared
+/// as two sets of Talkgroups, and a pair of loose `&[i64]`s in that position is
+/// exactly the shape that gets passed the wrong way round.
+struct Arriving<'a> {
+    /// The **canonical** Talkgroup Ref this Call's own Ref resolved to, or
+    /// `None` when no Talkgroup owns it yet.
+    ///
+    /// `None` is not the dead end it looks like. A console minting a fresh TGID
+    /// per patch event (rdio's issue #466) sends exactly this: a Ref nothing
+    /// has ever heard of, patched to channels the System knows perfectly well —
+    /// so the match is carried by `patches` alone, and refusing to look would
+    /// store the churn as a Call per patch event.
+    talkgroup: Option<i64>,
+    /// The canonical Talkgroup Refs it is patched to, already resolved to their
+    /// owning channels the same way [`Candidate::patches`] was.
+    patches: &'a [i64],
+    call_at_ms: i64,
+    quality: Quality,
+    /// This copy is on an encrypted Talkgroup, so it will store **no audio at
+    /// all** (spec US 9) — which is what stops it from ever displacing a Call a
+    /// Listener can play. See [`replaces`].
+    encrypted: bool,
+}
+
+impl Arriving<'_> {
+    /// Every Talkgroup this copy reaches — its own, then the ones it is patched
+    /// to. The same reading [`Candidate::talkgroups`] gives a stored copy.
+    fn talkgroups(&self) -> impl Iterator<Item = i64> + '_ {
+        self.talkgroup
+            .into_iter()
+            .chain(self.patches.iter().copied())
+    }
+
+    /// Whether a stored Call is **the same transmission** as this one, so far
+    /// as channel goes — the time half is the window in [`duplicate_of`], and
+    /// the System half is the read (a candidate is on this System already).
+    fn reaches(&self, candidate: &Candidate, scope: Scope) -> bool {
+        match scope {
+            // rdio's test, and ours until #46: one channel, the canonical one.
+            Scope::Talkgroup => self.talkgroup == Some(candidate.talkgroup),
+            // Widened to every channel either copy reaches, so a transmission a
+            // console patched and a recorder uploaded once per member collapses
+            // into the one Call a Listener heard (spec US 10).
+            //
+            // Scanned rather than collected into a set: both sides are a
+            // Talkgroup plus a patch array that is empty on almost every Call
+            // and a handful long on the rest, so allocating to compare them
+            // would cost a Pi more than the comparison does.
+            Scope::Patched => self
+                .talkgroups()
+                .any(|mine| candidate.talkgroups().any(|theirs| theirs == mine)),
+        }
+    }
+}
+
+/// The stored Call this one is a copy of, if any — the **nearest** of the
+/// candidates that are inside the window *and* reach a channel in common
+/// (ADR-0001's duplicate detection, widened by #46).
+///
+/// Nearest rather than first: since the read widened to the whole System, the
+/// window routinely holds Calls this one has nothing to do with, and among the
+/// ones it does match, "duplicate of call 41" is only useful to an operator if
+/// 41 is the Call a Listener would call the same transmission. It is also the
+/// copy keep-best compares against.
+///
+/// **Matched before nearest**, and the order is load-bearing: choosing the
+/// nearest Call first and testing its channel afterwards would refuse an upload
+/// as a duplicate of an unrelated Call that merely happened to be closer.
 ///
 /// Pure, which is the point: every near miss is a value a test can construct,
 /// where a `COUNT` over a window could only be approached through a socket, a
 /// multipart body and two uploads.
-fn duplicate_of(candidates: &[Candidate], call_at_ms: i64, window_ms: i64) -> Option<CallId> {
-    let window = dedup_window(call_at_ms, window_ms);
+fn duplicate_of<'a>(
+    candidates: &'a [Candidate],
+    arriving: &Arriving,
+    config: &IngestConfig,
+) -> Option<&'a Candidate> {
+    let window = dedup_window(arriving.call_at_ms, config.dedup_window_ms);
     candidates
         .iter()
         .filter(|candidate| window.contains(&candidate.call_at_ms))
+        .filter(|candidate| arriving.reaches(candidate, config.dedup_scope))
         // `abs_diff` rather than a subtraction: two Calls at opposite ends of
         // the epoch are a difference no `i64` holds, and this decision must not
         // be the place that discovers it.
-        .min_by_key(|candidate| (candidate.call_at_ms.abs_diff(call_at_ms), candidate.id))
-        .map(|candidate| candidate.id)
+        .min_by_key(|candidate| {
+            (
+                candidate.call_at_ms.abs_diff(arriving.call_at_ms),
+                candidate.id,
+            )
+        })
 }
 
 /// Raw multipart fields, collected before validation. Arrays stay as raw JSON
@@ -305,14 +479,39 @@ pub async fn ingest_call(
 async fn run_pipeline(
     state: &AppState,
     key: &str,
-    new_call: NewCall,
+    mut new_call: NewCall,
     audio: Vec<u8>,
 ) -> Result<Recorded, Failure> {
+    // The *playing* length, so a one-second kerchunk and a forty-second
+    // dispatch are distinguishable everywhere (#42, spec US 8). The recorder's
+    // own figure wins when it sent one — only Trunk Recorder's native meta
+    // does, and it knows the call it recorded better than its own encoder's
+    // header does. Everything else is read here, from the container header
+    // alone: no decode, no sample touched, microseconds on a Pi. Audio whose
+    // header says nothing leaves the column `NULL`, which is the honest answer
+    // and never a failed ingest.
+    //
+    // Read **before the decision** since #46, not inside `perform`: keep-best
+    // compares durations, so how long this copy runs is one of the facts the
+    // Admission depends on rather than something discovered while storing it.
+    // It stays on this side of the encrypted check for the same reason it
+    // always did — the bytes are in hand either way, and an encrypted Call that
+    // never stores them still gets a length.
+    if new_call.duration_ms.is_none() {
+        new_call.duration_ms = crate::audio_meta::duration_ms(&audio);
+    }
+
     let facts = resolve(state, key, &new_call).await?;
 
-    let admission = match admit(&facts, &new_call, &state.ingest) {
+    let admission = match admit(&facts, &new_call, &state.ingest, state.clock.now_ms()) {
         Decision::Admit { auto_populate } => {
             perform(state, new_call, audio, &facts.resolved, auto_populate).await?
+        }
+        // The same transmission, arrived better (#46). The stored Call keeps
+        // its id and every routing fact a Listener may already be holding; what
+        // it gains is this copy's audio and what the recorder said about it.
+        Decision::Replace { of, auto_populate } => {
+            replace(state, of, new_call, audio, &facts.resolved, auto_populate).await?
         }
         // Nothing is performed for a Call that is not stored, so a refusal is
         // already the whole Admission.
@@ -344,8 +543,12 @@ struct Facts {
     /// When it does not, nothing below was read at all — refusing costs one
     /// statement, not four.
     authorized: bool,
+    /// The System, the Talkgroup its Ref resolved to, and the channels its
+    /// `patches` array named — the last of which is new to [`repo::Resolved`]
+    /// with #46, because the widened duplicate test is asked over them and the
+    /// insert would otherwise resolve the same array a second time.
     resolved: repo::Resolved,
-    /// The Calls already stored on that Talkgroup inside the dedup window.
+    /// The Calls already stored on this **System** inside the dedup window.
     candidates: Vec<Candidate>,
 }
 
@@ -362,16 +565,26 @@ async fn resolve(state: &AppState, key: &str, new_call: &NewCall) -> Result<Fact
         return Ok(Facts::default());
     }
 
-    let resolved = repo::resolve_refs(&state.db, new_call.system_ref, new_call.talkgroup_ref)
-        .await
-        .map_err(Stage::ResolveRefs.failed())?;
+    // The System, the Talkgroup, and — since #46 — the channels this Call's
+    // `patches` array names, because the widened duplicate test is asked over
+    // them. Free on almost every Call: an empty array costs no statement.
+    let resolved = repo::resolve_refs(
+        &state.db,
+        new_call.system_ref,
+        new_call.talkgroup_ref,
+        &new_call.patches,
+    )
+    .await
+    .map_err(Stage::ResolveRefs.failed())?;
 
-    // Dedup (ADR-0001) looks on the same *channel* the Ref resolved to, not the
-    // Ref itself (#45), so a transmission uploaded once per member Ref is
-    // stored once.
+    // Dedup (ADR-0001) looks across the whole **System** inside the window, not
+    // one channel: since #46 a copy of the same transmission may arrive on a
+    // patched Talkgroup, or on a patch-minted Ref no Talkgroup owns yet, and
+    // neither is reachable from a query keyed on the channel this one resolved
+    // to. Which of them is the same transmission is [`admit`]'s decision.
     let candidates = repo::calls_within(
         &state.db,
-        resolved.talkgroup_id(),
+        resolved.system_id(),
         dedup_window(new_call.call_at_ms, state.ingest.dedup_window_ms),
     )
     .await
@@ -391,7 +604,7 @@ async fn resolve(state: &AppState, key: &str, new_call: &NewCall) -> Result<Fact
 /// edges and what #46's near-miss cases need. It was previously spread across
 /// three `await`s that each read something and then decided about it, so the
 /// only way to reach an arm was to arrange the whole world first.
-fn admit(facts: &Facts, call: &NewCall, config: &IngestConfig) -> Decision {
+fn admit(facts: &Facts, call: &NewCall, config: &IngestConfig, now_ms: i64) -> Decision {
     if !facts.authorized {
         return Decision::Refused(Admission::Unauthorized {
             system_ref: call.system_ref,
@@ -410,22 +623,208 @@ fn admit(facts: &Facts, call: &NewCall, config: &IngestConfig) -> Decision {
             }
         };
 
-    match duplicate_of(&facts.candidates, call.call_at_ms, config.dedup_window_ms) {
-        Some(of) => Decision::Refused(Admission::Duplicate { of }),
+    let arriving = Arriving {
+        talkgroup: facts.resolved.talkgroup_ref(),
+        // Empty until `resolve` has run, which is exactly the unauthorized case
+        // the arm above already returned for.
+        patches: facts.resolved.patches.as_deref().unwrap_or_default(),
+        call_at_ms: call.call_at_ms,
+        quality: call.quality(),
+        encrypted: call.encrypted,
+    };
+
+    match duplicate_of(&facts.candidates, &arriving, config) {
+        // Keep-best (#46): the same transmission, arrived twice. Whichever copy
+        // is better is the one a Listener ends up with — and when it is the one
+        // arriving, it takes the stored Call's place rather than its own row,
+        // so the Call a Listener already has in hand quietly improves.
+        Some(stored) => match replaces(&arriving, stored, config, now_ms) {
+            true => Decision::Replace {
+                of: stored.id,
+                auto_populate,
+            },
+            false => Decision::Refused(Admission::Duplicate { of: stored.id }),
+        },
         None => Decision::Admit { auto_populate },
     }
 }
 
-/// What [`admit`] decided: either something to perform, or an [`Admission`]
-/// that is already complete.
+/// Whether an arriving copy **takes the stored Call's place**, or is merely a
+/// duplicate of it (#46).
+///
+/// Being better is not enough, and the two extra conditions are both easy to
+/// miss.
+///
+/// **The stored Call must still be young.** Replaceability is measured from when
+/// it was *stored*, not from when its transmission happened: two copies of one
+/// transmission share a `call_at_ms` however far apart they arrive, so without
+/// that bound a Call would be replaceable forever and [`crate::serve`] could
+/// never tell a Listener that its audio is `immutable`, because it would not be.
+/// So the dedup window means two things, deliberately and in the same units —
+/// how far apart two transmissions may be to be one, and how long a stored copy
+/// stays open to a better one — and an Operator whose recorders upload minutes
+/// apart raises it and gets both. What that gives up is small and degrades in
+/// the right direction: a better copy arriving after the window is still
+/// recognised as a duplicate, so nothing plays twice; only the upgrade is
+/// missed.
+///
+/// **And the arriving copy must have audio to give.** An **Encrypted Call**
+/// stores none at all (spec US 9), yet an encrypted copy can genuinely *win* the
+/// comparison: its Duration is Trunk Recorder's own figure and its error count
+/// its `freqList`'s, so it can be both longer and cleaner than a copy somebody
+/// actually recorded. Letting it win would take playable audio away from a
+/// Listener and leave a metadata-only row, which is not "the better copy" by any
+/// reading a Listener would recognise. It stays a duplicate — the activity is
+/// recorded once, as it should be — it just cannot displace what plays.
+fn replaces(arriving: &Arriving, stored: &Candidate, config: &IngestConfig, now_ms: i64) -> bool {
+    config.dedup_keep == Keep::Best
+        && !arriving.encrypted
+        && still_replaceable(stored.stored_ms, now_ms, config.dedup_window_ms)
+        && arriving.quality.better_than(&stored.quality)
+}
+
+/// How long a stored Call stays open to a better copy of its transmission —
+/// **the only place that arithmetic is written** (#46).
+///
+/// [`crate::serve`] asks the same question to decide whether it may promise a
+/// Listener that a Call's audio is `immutable`, and asks it *here* rather than
+/// spelling it again: the header is a promise this rule keeps, so a mutation of
+/// either bound has to move both or a test sees it. The same discipline
+/// [`dedup_window`] applies to the window's other meaning.
+///
+/// Saturating for the same reason as [`dedup_window`]: a Recorder is entitled to
+/// send an absurd timestamp, and no arithmetic on the ingest path may be the
+/// thing that panics because of it.
+pub(crate) fn still_replaceable(stored_ms: i64, now_ms: i64, window_ms: i64) -> bool {
+    now_ms.saturating_sub(stored_ms) <= window_ms
+}
+
+/// What [`admit`] decided: something to perform, or an [`Admission`] that is
+/// already complete.
 #[derive(Debug, PartialEq, Eq)]
 enum Decision {
     /// Admitted. `auto_populate` is the effective flag the insert needs, and
     /// this becomes [`Admission::Stored`] once there is a row.
     Admit { auto_populate: bool },
+    /// The same transmission as Call `of`, and a better copy of it (#46). The
+    /// stored Call keeps its id and gains this copy's audio and metadata; this
+    /// becomes [`Admission::Replaced`].
+    Replace { of: CallId, auto_populate: bool },
     /// Not admitted — and there is nothing to perform, so this *is* the
     /// Admission ingest answers with.
     Refused(Admission),
+}
+
+/// Write a Call's audio object, or decide there is none to write.
+///
+/// An encrypted Call is a row and nothing else (spec US 9): the activity is
+/// worth seeing, the audio is worth nothing — it is the vocoder's noise, not
+/// speech, and storing it would spend a Pi's disk on something no listener can
+/// use. `object_key` stays empty, which is what the serve path and the wire both
+/// read as "there is nothing here", and `audio_size` stays `NULL`, so
+/// retention's cap counts what actually exists.
+///
+/// The bytes are still *required* on the wire: this endpoint's dialect asks for
+/// an audio part and refusing one for some Calls and not others would make a
+/// recorder's success depend on a flag it also sent.
+///
+/// Written before any row (ADR-0001); a failed write afterward leaves an orphan
+/// the GC sweep reclaims (#10). Neither the insert nor the replacement below can
+/// name an object without the value this produces, which is that ordering
+/// expressed rather than commented (#96).
+async fn store_audio(
+    state: &AppState,
+    new_call: &NewCall,
+    audio: Vec<u8>,
+) -> Result<Option<crate::blob::StoredAudio>, Failure> {
+    if new_call.encrypted {
+        return Ok(None);
+    }
+    let key = crate::blob::new_object_key(&audio_extension(&new_call.audio_name));
+    let bytes = audio.len();
+    state
+        .audio
+        .put(&key, bytes::Bytes::from(audio))
+        .await
+        .map_err(Stage::StoreAudio.failed())?;
+    Ok(Some(crate::blob::StoredAudio::written(key, bytes)))
+}
+
+/// Point an already-stored Call at this better copy of its transmission (#46,
+/// spec US 10) — everything a replacement costs, and nothing that decides
+/// anything.
+///
+/// **The live feed is deliberately not told.** A Listener already has this Call:
+/// it is in their queue, or played, or on an Archive page in front of them. A
+/// second frame carrying the same id is exactly the double-play keep-best exists
+/// to prevent, and the audio URL is stable, so a Listener who has not fetched
+/// yet simply gets the better copy. That is the whole of "listeners notice
+/// nothing".
+///
+/// The object the Call used to point at is left where it is rather than deleted.
+/// ADR-0002's ordering rests on objects being immutable once written, so a
+/// Listener mid-download keeps reading a file that still exists until #10's
+/// orphan-GC reclaims it — the same reasoning as [`crate::enhance::step`], which
+/// swaps an object under a Call for the same reason and never deletes one
+/// either.
+async fn replace(
+    state: &AppState,
+    of: CallId,
+    new_call: NewCall,
+    audio: Vec<u8>,
+    resolved: &repo::Resolved,
+    auto_populate: bool,
+) -> Result<Admission, Failure> {
+    // There is always an object here in practice — [`replaces`] refuses to let a
+    // copy with no audio displace one that plays — but the shape is shared with
+    // [`perform`], where an **Encrypted Call** legitimately writes none.
+    let stored = store_audio(state, &new_call, audio).await?;
+    let audio_bytes = stored.as_ref().map(|a| a.bytes()).unwrap_or_default();
+
+    let txn = state
+        .db
+        .begin()
+        .await
+        .map_err(Stage::ReplaceCall.failed())?;
+    let replacement = repo::store_replacement(
+        &txn,
+        of,
+        &new_call,
+        stored,
+        resolved,
+        auto_populate,
+        state.clock.now_ms(),
+    )
+    .await
+    .map_err(Stage::ReplaceCall.failed())?;
+    txn.commit().await.map_err(Stage::ReplaceCall.failed())?;
+
+    let call = match replacement {
+        repo::Replacement::Replaced(call) => call,
+        // The Call this was a better copy of is gone — retention is entitled to
+        // prune one between the decision and this write. So the copy became a
+        // Call of its own, and unlike a replacement it *has* to be published:
+        // nobody has heard this transmission at all.
+        repo::Replacement::Stored(call) => {
+            Span::current().record("call_id", call.id);
+            publish(state, &call).await?;
+            offer_for_enhancement(state, &call).await;
+            return Ok(Admission::Stored {
+                call_id: call.id,
+                audio_bytes,
+            });
+        }
+    };
+    Span::current().record("call_id", call.id);
+
+    // The levelled audio a previous pass produced describes a copy nobody holds
+    // any more, so the row went back to `none` and the Call is offered again.
+    offer_for_enhancement(state, &call).await;
+
+    Ok(Admission::Replaced {
+        call_id: call.id,
+        audio_bytes,
+    })
 }
 
 /// Write the audio object, insert the row, publish it, offer it for
@@ -433,53 +832,12 @@ enum Decision {
 /// anything.
 async fn perform(
     state: &AppState,
-    mut new_call: NewCall,
+    new_call: NewCall,
     audio: Vec<u8>,
     resolved: &repo::Resolved,
     auto_populate: bool,
 ) -> Result<Admission, Failure> {
-    // The *playing* length, so a one-second kerchunk and a forty-second
-    // dispatch are distinguishable everywhere (#42, spec US 8). The recorder's
-    // own figure wins when it sent one — only Trunk Recorder's native meta
-    // does, and it knows the call it recorded better than its own encoder's
-    // header does. Everything else is read here, from the container header
-    // alone: no decode, no sample touched, microseconds on a Pi. Audio whose
-    // header says nothing leaves the column `NULL`, which is the honest answer
-    // and never a failed ingest.
-    //
-    // Read *before* the encrypted check, because the bytes are in hand either
-    // way and an encrypted Call that never stores them still gets a length.
-    if new_call.duration_ms.is_none() {
-        new_call.duration_ms = crate::audio_meta::duration_ms(&audio);
-    }
-
-    // An encrypted Call is a row and nothing else (spec US 9): the activity is
-    // worth seeing, the audio is worth nothing — it is the vocoder's noise, not
-    // speech, and storing it would spend a Pi's disk on something no listener
-    // can use. `object_key` stays empty, which is what the serve path and the
-    // wire both read as "there is nothing here", and `audio_size` stays `NULL`,
-    // so retention's cap counts what actually exists.
-    //
-    // The bytes are still *required* on the wire: this endpoint's dialect asks
-    // for an audio part and refusing one for some Calls and not others would
-    // make a recorder's success depend on a flag it also sent.
-    let stored = match new_call.encrypted {
-        true => None,
-        false => {
-            let key = crate::blob::new_object_key(&audio_extension(&new_call.audio_name));
-            let bytes = audio.len();
-            // Write the audio object first (ADR-0001); a failed DB insert
-            // afterward leaves an orphan the GC sweep reclaims (#10). The row
-            // below cannot be inserted without the value this produces, which
-            // is that ordering expressed rather than commented (#96).
-            state
-                .audio
-                .put(&key, bytes::Bytes::from(audio))
-                .await
-                .map_err(Stage::StoreAudio.failed())?;
-            Some(crate::blob::StoredAudio::written(key, bytes))
-        }
-    };
+    let stored = store_audio(state, &new_call, audio).await?;
     let audio_bytes = stored.as_ref().map(|a| a.bytes()).unwrap_or_default();
 
     // Insert the row (+ children) atomically, into the channel already resolved
@@ -497,44 +855,55 @@ async fn perform(
     // Everything this upload says from here on names the row it became.
     Span::current().record("call_id", call.id);
 
-    // Emit to the live feed, denormalizing the row already in hand rather than
-    // re-fetching it by id (#86). Iterated rather than unwrapped: one row in
-    // gives one view out, so an `if let Some` here would be a branch whose empty
-    // arm no test can reach — the same case `archive::detail` resolves with a
-    // `.map` for the same reason.
-    for view in archive::stored_calls(&state.db, std::slice::from_ref(&call))
-        .await
-        .map_err(Stage::BuildCallView.failed())?
-    {
-        state.publish(Arc::new(view)).await;
-    }
-
-    // Enhancement (#20) starts *here* — after the recorder has its answer and
-    // after the live feed already has the Call. Scope is resolved now rather
-    // than before the insert because auto-populate may have created the System
-    // or the Talkgroup a moment ago, and a row that has just been created says
-    // `NULL`, which is the value that inherits.
-    //
-    // An encrypted Call has no object to enhance (#42), and offering one is not
-    // harmless: the worker would mark it `pending`, ask the store for the
-    // object named by the empty string, fail, and settle it `skipped` with a
-    // WARN — once per Call, forever, on a System whose traffic is mostly
-    // encrypted. Asked here rather than inside the worker so the three queries
-    // the scope lookup costs are never spent either.
-    // Deliberately not part of the Admission, and not on its line: the Call is
-    // stored, answered and already on the live feed, so what the queue makes of
-    // it costs a listener nothing either way — and an `enhancement=not-enhancing`
-    // field on every Call would be a per-Call field about a feature nobody
-    // turned on. The outcome exists so the arms are assertable (#96) and for
-    // #70's status surface to read.
-    if call.has_audio() {
-        let _queued = queue_for_enhancement(state, call.id).await;
-    }
+    publish(state, &call).await?;
+    offer_for_enhancement(state, &call).await;
 
     Ok(Admission::Stored {
         call_id: call.id,
         audio_bytes,
     })
+}
+
+/// Emit a newly stored Call to the live feed, denormalizing the row already in
+/// hand rather than re-fetching it by id (#86).
+///
+/// Iterated rather than unwrapped: one row in gives one view out, so an `if let
+/// Some` here would be a branch whose empty arm no test can reach — the same
+/// case `archive::detail` resolves with a `.map` for the same reason.
+async fn publish(state: &AppState, call: &call::Model) -> Result<(), Failure> {
+    for view in archive::stored_calls(&state.db, std::slice::from_ref(call))
+        .await
+        .map_err(Stage::BuildCallView.failed())?
+    {
+        state.publish(Arc::new(view)).await;
+    }
+    Ok(())
+}
+
+/// Offer a stored Call to the enhancement queue (#20).
+///
+/// Starts *here* — after the recorder has its answer and after the live feed
+/// already has the Call. Scope is resolved now rather than before the insert
+/// because auto-populate may have created the System or the Talkgroup a moment
+/// ago, and a row that has just been created says `NULL`, which is the value
+/// that inherits.
+///
+/// An encrypted Call has no object to enhance (#42), and offering one is not
+/// harmless: the worker would mark it `pending`, ask the store for the object
+/// named by the empty string, fail, and settle it `skipped` with a WARN — once
+/// per Call, forever, on a System whose traffic is mostly encrypted. Asked here
+/// so the three queries the scope lookup costs are never spent either.
+///
+/// Deliberately not part of the Admission, and not on its line: the Call is
+/// stored, answered and already on the live feed, so what the queue makes of it
+/// costs a listener nothing either way — and an `enhancement=not-enhancing`
+/// field on every Call would be a per-Call field about a feature nobody turned
+/// on. The outcome exists so the arms are assertable (#96) and for #70's status
+/// surface to read.
+async fn offer_for_enhancement(state: &AppState, call: &call::Model) {
+    if call.has_audio() {
+        let _queued = queue_for_enhancement(state, call.id).await;
+    }
 }
 
 /// **What Ingest decided about one Call** (CONTEXT.md's *Admission*).
@@ -558,7 +927,15 @@ pub enum Admission {
         /// which is a row and nothing else (#42).
         audio_bytes: i64,
     },
-    /// The same transmission, already stored inside the dedup window (ADR-0001).
+    /// The same transmission as a Call already stored, and a **better copy** of
+    /// it (#46): that Call now carries this audio, under its own id.
+    ///
+    /// Not a refusal — the copy was taken, so the recorder is told it was
+    /// imported, which is true. It is its own arm rather than a `Stored` because
+    /// no new Call exists and the live feed was deliberately not told.
+    Replaced { call_id: CallId, audio_bytes: i64 },
+    /// The same transmission, already stored inside the dedup window (ADR-0001),
+    /// and this copy was no better than the one there.
     Duplicate { of: CallId },
     /// The auto-populate/blacklist policy said no (#8).
     Dropped(repo::DropReason),
@@ -571,7 +948,12 @@ impl Admission {
     /// Call that was stored, which is the only arm that is not a refusal.
     fn reason(&self) -> Option<Reason> {
         match self {
-            Admission::Stored { .. } => None,
+            // The two arms that took the copy. A replacement answers the
+            // recorder exactly as a store does: its audio *was* imported, and
+            // where it landed is Radio-Scout's business rather than something a
+            // recorder has a branch for (ADR-0001 pins the strings SDRTrunk
+            // reads, and "imported successfully" is the true one here).
+            Admission::Stored { .. } | Admission::Replaced { .. } => None,
             Admission::Duplicate { of } => Some(Reason::Duplicate { of: *of }),
             Admission::Dropped(repo::DropReason::Blacklisted) => Some(Reason::Blacklisted),
             Admission::Dropped(repo::DropReason::NotPopulated) => Some(Reason::NotPopulated),
@@ -598,6 +980,13 @@ impl Admission {
             // "nothing is arriving" is answerable without waiting for something
             // to go wrong. Per-Call, never per-anything-smaller (rule 8).
             Admission::Stored { audio_bytes, .. } => info!(audio_bytes, "call stored"),
+            // Its own line, and INFO for the same reason: a Call quietly
+            // improving under a Listener is a notable normal event, and it is
+            // the *only* record that this upload happened at all — the recorder
+            // was told "imported successfully" and no new row exists to find.
+            Admission::Replaced { audio_bytes, .. } => {
+                info!(audio_bytes, "call replaced with a better copy")
+            }
             // Iterated rather than unwrapped: the arm above is the only one
             // with no reason, so an `if let Some` here would be a branch whose
             // empty half no test can reach.
@@ -1194,14 +1583,62 @@ mod tests {
     use rstest::rstest;
     use sea_orm::ConnectionTrait;
 
-    // -- The dedup window, decided over candidate Calls (#96) ---------------
+    // -- The dedup window, decided over candidate Calls (#96, widened by #46) -
 
-    /// One stored Call, `offset` milliseconds from the arriving one.
-    fn stored_at(offset: i64) -> Vec<Candidate> {
-        vec![Candidate {
+    /// The Talkgroup the arriving Call in these tests is on, and one it is not.
+    const OURS: i64 = 54241;
+    const ANOTHER: i64 = 54999;
+
+    /// The instant these tests call "now" — and, unless a case says otherwise,
+    /// the instant every stored Call was stored, so a Call is always young
+    /// enough to be replaced and the decisions below turn on nothing else.
+    const NOW: i64 = 5_000_000;
+
+    /// A stored Call on Talkgroup `talkgroup`, `offset` milliseconds from the
+    /// arriving one, patched to `patches`, and a perfectly ordinary copy.
+    fn stored(offset: i64, talkgroup: i64, patches: &[i64]) -> Candidate {
+        Candidate {
             id: 7,
             call_at_ms: 1_000_000 + offset,
-        }]
+            stored_ms: NOW,
+            talkgroup,
+            patches: patches.to_vec(),
+            quality: Quality::default(),
+        }
+    }
+
+    /// One stored Call on the arriving Call's own Talkgroup, `offset`
+    /// milliseconds away — the plain same-channel case the window tests want.
+    fn stored_at(offset: i64) -> Vec<Candidate> {
+        vec![stored(offset, OURS, &[])]
+    }
+
+    /// The arriving Call: on [`OURS`], patched to `patches`, at 1_000_000.
+    fn arriving(patches: &[i64]) -> Arriving<'_> {
+        Arriving {
+            talkgroup: Some(OURS),
+            patches,
+            call_at_ms: 1_000_000,
+            quality: Quality::default(),
+            encrypted: false,
+        }
+    }
+
+    /// The id of the Call an arriving one duplicates, under a given window.
+    fn duplicate_id(candidates: &[Candidate], call_at_ms: i64, window_ms: i64) -> Option<CallId> {
+        let arriving = Arriving {
+            call_at_ms,
+            ..arriving(&[])
+        };
+        duplicate_of(
+            candidates,
+            &arriving,
+            &IngestConfig {
+                dedup_window_ms: window_ms,
+                ..IngestConfig::default()
+            },
+        )
+        .map(|candidate| candidate.id)
     }
 
     /// **Adjacency is the whole of this decision**, so both edges are named and
@@ -1226,7 +1663,7 @@ mod tests {
         #[case] duplicate: bool,
     ) {
         assert_eq!(
-            duplicate_of(&stored_at(offset), 1_000_000, 500).is_some(),
+            duplicate_id(&stored_at(offset), 1_000_000, 500).is_some(),
             duplicate,
             "a Call stored {offset}ms away, window 500ms"
         );
@@ -1240,7 +1677,7 @@ mod tests {
     #[case::one_millisecond_earlier(-1, false)]
     fn a_zero_window_admits_only_the_same_instant(#[case] offset: i64, #[case] duplicate: bool) {
         assert_eq!(
-            duplicate_of(&stored_at(offset), 1_000_000, 0).is_some(),
+            duplicate_id(&stored_at(offset), 1_000_000, 0).is_some(),
             duplicate
         );
     }
@@ -1258,16 +1695,18 @@ mod tests {
     #[case::before_the_beginning(i64::MIN, false)]
     fn an_absurd_call_time_decides_rather_than_overflows(#[case] at: i64, #[case] duplicate: bool) {
         assert_eq!(
-            duplicate_of(&stored_at(0), at, i64::MAX).is_some(),
+            duplicate_id(&stored_at(0), at, i64::MAX).is_some(),
             duplicate
         );
         // ...and a Call at that same absurd instant is a duplicate of itself
-        // however far apart the two ends of the epoch are.
+        // however far apart the two ends of the epoch are. Written as an
+        // absolute time rather than an offset, because the offset from the
+        // helper's own epoch is itself a subtraction that overflows here.
         assert_eq!(
-            duplicate_of(
+            duplicate_id(
                 &[Candidate {
-                    id: 7,
-                    call_at_ms: at
+                    call_at_ms: at,
+                    ..stored(0, OURS, &[])
                 }],
                 at,
                 i64::MAX
@@ -1276,24 +1715,185 @@ mod tests {
         );
     }
 
+    /// **An arriving copy replaces a stored one only if it is better, the
+    /// stored one is still young, and keep-best is on** — every condition
+    /// named, each one alone, so none of them can be dropped silently.
+    ///
+    /// The last pair is the one worth reading twice. An **Encrypted Call**
+    /// stores no audio at all (spec US 9), and an encrypted copy can genuinely
+    /// win the comparison — its Duration comes from Trunk Recorder's own meta
+    /// and its error count from its `freqList`, so it can be both longer and
+    /// cleaner than a copy somebody actually recorded. Letting it win would
+    /// take away audio a Listener could play and leave a metadata-only row
+    /// behind, which is not "the better copy" by any reading a Listener would
+    /// recognise. It is still recognised as the same transmission and still
+    /// refused as a duplicate — it simply cannot displace what plays.
+    #[rstest]
+    #[case::a_better_copy_replaces(false, false, Keep::Best, 0, true)]
+    #[case::a_worse_one_does_not(true, false, Keep::Best, 0, false)]
+    #[case::not_after_the_window_has_closed(false, false, Keep::Best, 501, false)]
+    #[case::not_with_keep_best_off(false, false, Keep::First, 0, false)]
+    #[case::and_never_a_copy_with_no_audio_to_give(false, true, Keep::Best, 0, false)]
+    fn a_copy_replaces_only_when_every_condition_holds(
+        #[case] worse: bool,
+        #[case] encrypted: bool,
+        #[case] dedup_keep: Keep,
+        #[case] aged_by_ms: i64,
+        #[case] replaces_it: bool,
+    ) {
+        let stored = Candidate {
+            quality: Quality {
+                decode_errors: Some(9),
+                duration_ms: Some(4_000),
+            },
+            stored_ms: NOW - aged_by_ms,
+            ..stored(0, OURS, &[])
+        };
+        let arriving = Arriving {
+            quality: Quality {
+                // Cleaner than the stored copy, unless this case wants worse.
+                decode_errors: Some(if worse { 400 } else { 0 }),
+                duration_ms: Some(4_000),
+            },
+            encrypted,
+            ..arriving(&[])
+        };
+        let config = IngestConfig {
+            dedup_keep,
+            ..IngestConfig::default()
+        };
+
+        assert_eq!(replaces(&arriving, &stored, &config, NOW), replaces_it);
+        // ...and whichever way that went, the two are the same transmission, so
+        // the copy is never stored a second time.
+        assert!(duplicate_of(std::slice::from_ref(&stored), &arriving, &config).is_some());
+    }
+
     /// The Call it names is the *nearest* stored one, which is what an operator
-    /// reading "duplicate of call 41" wants and what #46's keep-best will
-    /// compare against — never merely the first row the query happened to hand
-    /// back.
+    /// reading "duplicate of call 41" wants and what keep-best compares
+    /// against — never merely the first row the query happened to hand back.
     #[test]
     fn the_duplicate_it_names_is_the_nearest_stored_call() {
         let candidates = vec![
             Candidate {
                 id: 41,
-                call_at_ms: 1_000_400,
+                ..stored(400, OURS, &[])
             },
             Candidate {
                 id: 42,
-                call_at_ms: 1_000_100,
+                ..stored(100, OURS, &[])
             },
         ];
 
-        assert_eq!(duplicate_of(&candidates, 1_000_000, 500), Some(42));
+        assert_eq!(duplicate_id(&candidates, 1_000_000, 500), Some(42));
+    }
+
+    // -- The channel half of the test: same Talkgroup, or overlapping patch
+    //    membership (#46, spec US 10) --------------------------------------
+
+    /// **One transmission, N uploads, one Call.** A console patch makes a
+    /// recorder upload the same audio once per member Talkgroup, and rdio's
+    /// duplicate key — one channel, one window — cannot see that they are one
+    /// transmission, so the Listener hears it three times.
+    ///
+    /// The widened test is: the two copies **reach a channel in common**. Every
+    /// way that can happen is a row here, and so is every way it can fail to,
+    /// because a predicate that matches too much silently eats real traffic —
+    /// which is the failure a Listener cannot detect and an Operator cannot
+    /// debug.
+    ///
+    /// The last three rows are the near misses the acceptance criteria name.
+    /// `adjacent_real_calls` is the one that matters most: two Talkgroups that
+    /// happen to be busy at the same instant, patched to nothing and to nobody,
+    /// stay two Calls.
+    #[rstest]
+    // The plain case, and the one that has always worked: the same channel.
+    #[case::the_same_talkgroup(Some(OURS), &[], OURS, &[], true)]
+    // A patch re-broadcast: the copy arrives on a member, naming ours.
+    #[case::arriving_is_patched_to_the_stored_ones_channel(Some(ANOTHER), &[OURS], OURS, &[], true)]
+    // ...and the mirror, because a recorder's upload order is not ours to pick.
+    #[case::the_stored_one_is_patched_to_ours(Some(OURS), &[], ANOTHER, &[OURS], true)]
+    // Both copies name the union, neither is on the other's own channel.
+    #[case::both_name_a_common_member(Some(OURS), &[70_000], ANOTHER, &[70_000], true)]
+    // **A patch-minted TGID nothing owns yet** (rdio's issue #466): the
+    // arriving Ref resolves to no Talkgroup at all, and the match is carried
+    // entirely by the patch array. Storing this as a second Call is exactly the
+    // duplicate-button flood the spec set out to end.
+    #[case::a_brand_new_patch_tgid_still_matches(None, &[OURS], OURS, &[], true)]
+    // ...and the near misses.
+    #[case::adjacent_real_calls(Some(OURS), &[], ANOTHER, &[], false)]
+    #[case::patched_to_different_channels(Some(OURS), &[70_000], ANOTHER, &[70_001], false)]
+    #[case::an_unresolved_ref_patched_to_nothing_reaches_nobody(None, &[], OURS, &[], false)]
+    fn two_copies_are_one_transmission_when_they_reach_a_channel_in_common(
+        #[case] talkgroup: Option<i64>,
+        #[case] patches: &[i64],
+        #[case] stored_talkgroup: i64,
+        #[case] stored_patches: &[i64],
+        #[case] duplicate: bool,
+    ) {
+        let candidates = [stored(0, stored_talkgroup, stored_patches)];
+        let arriving = Arriving {
+            talkgroup,
+            patches,
+            ..arriving(&[])
+        };
+
+        assert_eq!(
+            duplicate_of(&candidates, &arriving, &IngestConfig::default()).is_some(),
+            duplicate
+        );
+    }
+
+    /// **`dedup_scope = "talkgroup"` is the way back to rdio's narrower test**
+    /// — the same channel and nothing else — for an operator whose System mints
+    /// patches that lie.
+    ///
+    /// The same two inputs under both scopes, so what the setting *changes* is
+    /// what is asserted rather than what one of its values happens to do.
+    #[rstest]
+    #[case::patched(Scope::Patched, true)]
+    #[case::talkgroup_only(Scope::Talkgroup, false)]
+    fn the_scope_decides_whether_a_patch_overlap_counts(
+        #[case] dedup_scope: Scope,
+        #[case] duplicate: bool,
+    ) {
+        let candidates = [stored(0, ANOTHER, &[OURS])];
+
+        assert_eq!(
+            duplicate_of(
+                &candidates,
+                &arriving(&[]),
+                &IngestConfig {
+                    dedup_scope,
+                    ..IngestConfig::default()
+                }
+            )
+            .is_some(),
+            duplicate
+        );
+    }
+
+    /// The nearest candidate is chosen from the ones that **match**, not from
+    /// every Call the window happened to contain.
+    ///
+    /// The widened read hands back every Call on the System inside the window,
+    /// so an unrelated Talkgroup's Call is now routinely nearer than the real
+    /// duplicate. Filtering after choosing would name it — or, worse, refuse the
+    /// upload as a duplicate of a Call it has nothing to do with.
+    #[test]
+    fn a_nearer_call_on_another_channel_is_not_the_one_it_names() {
+        let candidates = vec![
+            Candidate {
+                id: 41,
+                ..stored(10, ANOTHER, &[])
+            },
+            Candidate {
+                id: 42,
+                ..stored(300, OURS, &[])
+            },
+        ];
+
+        assert_eq!(duplicate_id(&candidates, 1_000_000, 500), Some(42));
     }
 
     proptest! {
@@ -1313,12 +1913,12 @@ mod tests {
             let candidates: Vec<Candidate> = offsets
                 .iter()
                 .enumerate()
-                .map(|(i, offset)| Candidate { id: i as i64 + 1, call_at_ms: at + offset })
+                .map(|(i, offset)| Candidate { id: i as i64 + 1, ..stored(at + offset - 1_000_000, OURS, &[]) })
                 .collect();
 
             let expected = offsets.iter().any(|offset| offset.abs() <= window);
 
-            prop_assert_eq!(duplicate_of(&candidates, at, window).is_some(), expected);
+            prop_assert_eq!(duplicate_id(&candidates, at, window).is_some(), expected);
         }
 
         /// ...and the one it names is inside the window and no further away
@@ -1332,10 +1932,10 @@ mod tests {
             let candidates: Vec<Candidate> = offsets
                 .iter()
                 .enumerate()
-                .map(|(i, offset)| Candidate { id: i as i64 + 1, call_at_ms: at + offset })
+                .map(|(i, offset)| Candidate { id: i as i64 + 1, ..stored(at + offset - 1_000_000, OURS, &[]) })
                 .collect();
 
-            if let Some(named) = duplicate_of(&candidates, at, window) {
+            if let Some(named) = duplicate_id(&candidates, at, window) {
                 let named = candidates.iter().find(|c| c.id == named).expect("a candidate");
                 let distance = (named.call_at_ms - at).abs();
                 prop_assert!(distance <= window);
@@ -1343,6 +1943,40 @@ mod tests {
                     prop_assert!(distance <= (other.call_at_ms - at).abs());
                 }
             }
+        }
+
+        /// **The widened test is exactly an intersection**, and the near misses
+        /// are the overwhelming majority of these cases (#46).
+        ///
+        /// Refs are drawn from a deliberately tiny pool so that overlaps happen
+        /// often enough to be interesting — over a realistic Ref space almost
+        /// every generated pair would be disjoint and the property would prove
+        /// only that unrelated Calls stay distinct, which is half the rule.
+        ///
+        /// The expectation is computed as set intersection over `HashSet`s,
+        /// which is a different spelling from the iterator scan the predicate
+        /// runs, so the two cannot agree by construction.
+        #[test]
+        fn one_transmission_is_two_copies_reaching_a_channel_in_common(
+            talkgroup in proptest::option::of(1i64..5),
+            patches in proptest::collection::vec(1i64..5, 0..4),
+            stored_talkgroup in 1i64..5,
+            stored_patches in proptest::collection::vec(1i64..5, 0..4),
+        ) {
+            use std::collections::HashSet;
+
+            let candidates = [stored(0, stored_talkgroup, &stored_patches)];
+            let arriving = Arriving { talkgroup, patches: &patches, ..arriving(&[]) };
+
+            let mine: HashSet<i64> = talkgroup.into_iter().chain(patches.iter().copied()).collect();
+            let theirs: HashSet<i64> =
+                std::iter::once(stored_talkgroup).chain(stored_patches.iter().copied()).collect();
+            let expected = !mine.is_disjoint(&theirs);
+
+            prop_assert_eq!(
+                duplicate_of(&candidates, &arriving, &IngestConfig::default()).is_some(),
+                expected
+            );
         }
     }
 
@@ -1538,13 +2172,27 @@ mod tests {
     ) -> Facts {
         Facts {
             authorized,
-            resolved: repo::Resolved { system, talkgroup },
+            resolved: repo::Resolved {
+                system,
+                talkgroup,
+                patches: Some(Vec::new()),
+            },
             candidates,
         }
     }
 
+    /// A stored Call on the arriving one's own Talkgroup, at `call_at_ms`, of
+    /// exactly the quality the arriving copy has — so the decision below turns
+    /// on the *window*, and never on which copy is better.
     fn a_stored_call_at(call_at_ms: i64) -> Vec<Candidate> {
-        vec![Candidate { id: 41, call_at_ms }]
+        vec![Candidate {
+            id: 41,
+            call_at_ms,
+            stored_ms: NOW,
+            talkgroup: 54241,
+            patches: Vec::new(),
+            quality: Quality::default(),
+        }]
     }
 
     /// The configuration an operator who changed nothing is running.
@@ -1614,7 +2262,7 @@ mod tests {
     ) {
         let call = NewCall::new(11, 54241, 1_000_000);
 
-        assert_eq!(admit(&facts, &call, &config), expected);
+        assert_eq!(admit(&facts, &call, &config, NOW), expected);
     }
 
     /// **An Admission is written down where it is decided, and rendering it
@@ -1631,6 +2279,13 @@ mod tests {
     /// of the types rather than the order of two statements.
     #[rstest]
     #[case::stored(Admission::Stored { call_id: 1, audio_bytes: 44 }, "call stored", " INFO ")]
+    // A replacement is the *only* record that its upload happened: no new row
+    // exists to find, and the recorder was told "imported successfully".
+    #[case::replaced(
+        Admission::Replaced { call_id: 1, audio_bytes: 44 },
+        "call replaced with a better copy",
+        " INFO "
+    )]
     #[case::duplicate(Admission::Duplicate { of: 41 }, "reason=duplicate", " WARN ")]
     #[case::blacklisted(
         Admission::Dropped(repo::DropReason::Blacklisted),
@@ -1682,6 +2337,10 @@ mod tests {
         let mut rendered = String::new();
         for admission in [
             Admission::Stored {
+                call_id: 1,
+                audio_bytes: 44,
+            },
+            Admission::Replaced {
                 call_id: 1,
                 audio_bytes: 44,
             },
@@ -1740,6 +2399,56 @@ mod tests {
             ..Default::default()
         });
         (state, call.id, tmp)
+    }
+
+    // -- The replacement whose Call is gone (#46) ---------------------------
+    //
+    // Tested here rather than over ingest's HTTP boundary because the arm lives
+    // in the window between the decision reading a candidate and the write
+    // pointing it at better audio, and nothing outside can open that window: it
+    // holds no I/O to park in, and the row has to *vanish* rather than fail, so
+    // the statement seam cannot reach it either. What is asserted is what a
+    // caller would see — the Admission, and a Call in the Archive afterwards.
+
+    /// Retention is entitled to prune a Call between the moment keep-best
+    /// decided this copy was a better one and the moment it writes.
+    ///
+    /// Rare but real: the size cap prunes oldest-first regardless of age, and a
+    /// Recorder backfilling old Calls puts candidates right at that edge. The
+    /// transmission is then not in the Archive at all, so the honest answer is
+    /// that this copy becomes it — a **stored** Call, published like any other,
+    /// rather than a replacement of something that is gone or a duplicate of it.
+    #[tokio::test]
+    async fn a_better_copy_whose_call_was_pruned_becomes_a_call_of_its_own() {
+        let (state, call_id, _tmp) = one_stored_call().await;
+        repo::delete_calls(&state.db, &[call_id])
+            .await
+            .expect("prune the Call out from under the replacement");
+
+        let admission = replace(
+            &state,
+            call_id,
+            NewCall::new(11, 54241, 1_000),
+            b"the-better-copy".to_vec(),
+            &repo::Resolved::unresolved(),
+            true,
+        )
+        .await
+        .expect("a replacement whose Call is gone still stores the copy");
+
+        assert!(
+            matches!(admission, Admission::Stored { .. }),
+            "the copy became a Call of its own: {admission:?}"
+        );
+        use sea_orm::{EntityTrait, PaginatorTrait};
+        assert_eq!(
+            call::Entity::find()
+                .count(&state.db)
+                .await
+                .expect("count Calls"),
+            1,
+            "...and it is really in the Archive"
+        );
     }
 
     /// This instance does not enhance at all — the shipped default — and finding

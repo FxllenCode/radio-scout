@@ -834,6 +834,26 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "ingest.dedup_scope",
+        var: "RADIO_SCOUT_INGEST_DEDUP_SCOPE",
+        expected: EXPECTED_DEDUP_SCOPE,
+        example: "talkgroup",
+        set: |setting, config, value| {
+            config.ingest.dedup_scope = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "ingest.dedup_keep",
+        var: "RADIO_SCOUT_INGEST_DEDUP_KEEP",
+        expected: EXPECTED_DEDUP_KEEP,
+        example: "first",
+        set: |setting, config, value| {
+            config.ingest.dedup_keep = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
         key: "ingest.auto_populate",
         var: "RADIO_SCOUT_INGEST_AUTO_POPULATE",
         expected: "true or false",
@@ -1082,6 +1102,11 @@ const EXPECTED_SUBJECT: &str =
 /// would not fit it. That makes drift possible, so a test holds this to
 /// naming every mode the enum has.
 const EXPECTED_MODE: &str = "\"off\", \"normalize\" or \"denoise\"";
+
+/// ...and the same for `[ingest]`'s two dedup policies (#46). Held to their
+/// enums by the same test, for the same reason.
+const EXPECTED_DEDUP_SCOPE: &str = "\"talkgroup\" or \"patched\"";
+const EXPECTED_DEDUP_KEEP: &str = "\"first\" or \"best\"";
 
 /// ...and the same for `[enhancement] output`. Both spellings parse; whether
 /// one is *built* is [`Config::validate`]'s business, so an operator who wrote
@@ -1335,8 +1360,21 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 
 [ingest]
 # Duplicate-detection window: a Call arriving within this many milliseconds of
-# an identical one is dropped. 0 disables it.
+# an identical one is the same transmission arriving twice. 0 disables it.
 # dedup_window_ms = 500
+
+# What counts as "the same transmission". "patched" also recognises a copy
+# whose patch membership overlaps this one's, so a console patch that makes
+# your recorder upload one transmission once per member Talkgroup becomes one
+# Call instead of three. "talkgroup" is the narrower test — the same channel and
+# nothing else — for a system whose patch data you do not trust.
+# dedup_scope = "patched"
+
+# Which copy is kept when the same transmission arrives more than once. "best"
+# keeps the better one — fewer decode errors, then longer audio — and a better
+# copy arriving second replaces the stored one without changing its id, so
+# nothing a listener is holding breaks. "first" keeps whichever arrived first.
+# dedup_keep = "best"
 
 # Create Systems, Talkgroups and Units the first time a recorder mentions them.
 # With this off, only Systems you have already defined are accepted.
@@ -2554,6 +2592,71 @@ mod tests {
         assert_eq!(retention.orphan_grace, default.orphan_grace);
     }
 
+    /// Both dedup policies refuse a spelling they do not have, and the refusal
+    /// **names every one they do** (#46).
+    ///
+    /// Spelled out as `&'static str` constants for [`ConfigError::Invalid`], so
+    /// nothing but this keeps them honest as the enums change — the same
+    /// arrangement, and the same test, that `logsink::EXPECTED_LEVEL` has.
+    #[test]
+    fn the_refused_dedup_policies_name_every_value_that_works() {
+        for scope in crate::ingest::Scope::ALL {
+            assert!(
+                EXPECTED_DEDUP_SCOPE.contains(&scope.to_string()),
+                "{scope} missing from {EXPECTED_DEDUP_SCOPE:?}"
+            );
+        }
+        for keep in crate::ingest::Keep::ALL {
+            assert!(
+                EXPECTED_DEDUP_KEEP.contains(&keep.to_string()),
+                "{keep} missing from {EXPECTED_DEDUP_KEEP:?}"
+            );
+        }
+    }
+
+    /// ...and an unknown one refuses to boot rather than quietly running the
+    /// default, which is the whole of ADR-0012's strict validation: an operator
+    /// who wrote `dedup_keep = "newest"` meant something, and silently ignoring
+    /// it leaves them debugging correct-looking configuration.
+    ///
+    /// **Both layers**, because they refuse in different words and an operator
+    /// may have written either: the file's refusal comes from serde and carries
+    /// a line and column, while the environment's carries the variable's name.
+    /// What they owe in common is the value they could not read and the
+    /// spellings they would have accepted.
+    #[rstest]
+    #[case::scope(
+        "[ingest]\ndedup_scope = \"everything\"\n",
+        "RADIO_SCOUT_INGEST_DEDUP_SCOPE",
+        "everything",
+        "patched"
+    )]
+    #[case::keep(
+        "[ingest]\ndedup_keep = \"newest\"\n",
+        "RADIO_SCOUT_INGEST_DEDUP_KEEP",
+        "newest",
+        "best"
+    )]
+    fn an_unknown_dedup_policy_refuses_to_boot(
+        #[case] toml: &str,
+        #[case] var: &str,
+        #[case] written: &str,
+        #[case] accepted: &str,
+    ) {
+        let from_file = resolve(&cli(&[]), no_env, Some(&file(toml)))
+            .expect_err("an unknown dedup policy in the file")
+            .to_string();
+        assert!(from_file.contains(written), "{from_file}");
+        assert!(from_file.contains(accepted), "{from_file}");
+
+        let from_env = resolve(&cli(&[]), env(&[(var, written)]), None)
+            .expect_err("an unknown dedup policy in the environment")
+            .to_string();
+        assert!(from_env.contains(var), "{from_env}");
+        assert!(from_env.contains(written), "{from_env}");
+        assert!(from_env.contains(accepted), "{from_env}");
+    }
+
     /// A negative dedup window would make every Call a duplicate of nothing;
     /// it is a typo, not a policy.
     #[test]
@@ -2962,6 +3065,8 @@ mod tests {
             days in 0u32..4000,
             gb in proptest::option::of(1u64..1 << 50),
             dedup in 0i64..10_000,
+            dedup_scope in "(talkgroup|patched)",
+            dedup_keep in "(first|best)",
             auto_populate in proptest::bool::ANY,
             directives in "(info|debug|warn|trace)",
             log_days in 0u32..4000,
@@ -2975,7 +3080,12 @@ mod tests {
                     log_days,
                     ..Default::default()
                 },
-                ingest: IngestConfig { dedup_window_ms: dedup, auto_populate },
+                ingest: IngestConfig {
+                    dedup_window_ms: dedup,
+                    dedup_scope: dedup_scope.parse().expect("a dedup scope"),
+                    dedup_keep: dedup_keep.parse().expect("a dedup keep policy"),
+                    auto_populate,
+                },
                 log: LogConfig {
                     directives,
                     database_level: database_level.parse().expect("a storable level"),

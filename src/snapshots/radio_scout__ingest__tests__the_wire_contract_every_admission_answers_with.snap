@@ -4,6 +4,8 @@ expression: rendered
 ---
 Stored { call_id: 1, audio_bytes: 44 }
   200 "Call imported successfully.\n"
+Replaced { call_id: 1, audio_bytes: 44 }
+  200 "Call imported successfully.\n"
 Duplicate { of: 41 }
   200 "duplicate call rejected\n"
 Dropped(Blacklisted)
