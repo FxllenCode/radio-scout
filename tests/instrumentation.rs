@@ -372,6 +372,36 @@ async fn dropped_patch_refs_leave_one_line_saying_how_many() {
     assert!(line.contains("system_ref=11"), "{line}");
 }
 
+/// ...and **a patch array that resolves cleanly says nothing at all**.
+///
+/// The line exists to answer "why is my patch not fanning out?", so it is
+/// guarded on something having actually gone unrecognised. Without that guard
+/// every patched Call on a healthy System writes a DEBUG line reporting that
+/// nothing happened — per Call, forever, on a Pi (ADR-0011 rules 7 and 8: DEBUG
+/// is protocol detail, and detail nobody can act on is noise).
+///
+/// The guard is two comparisons against zero on unsigned counts, so relaxing
+/// either one to `>=` makes it constantly true — and the test above cannot see
+/// that, because it only ever asks what happens when something *was* dropped.
+/// Both mutations survived the whole suite until this existed.
+#[tokio::test]
+async fn a_patch_array_that_resolves_cleanly_leaves_no_line() {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+    app.seed_talkgroup(11, 300).await;
+
+    // Every ref is a Talkgroup this System has — the Call's own and the seeded
+    // one — so nothing is dropped and nothing collapses.
+    assert_eq!(
+        app.upload(form(RECORDER_KEY, 11, 54241, 1000).set("patches", "[54241,300]"))
+            .await
+            .0,
+        200
+    );
+
+    capture.assert_never_logged("patch refs resolved");
+}
+
 /// The same line's other half, since #45: two patch refs that name **one**
 /// channel are reported as collapsed rather than dropped.
 ///
