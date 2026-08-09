@@ -2620,16 +2620,22 @@ mod tests {
     /// arrangement, and the same test, that `logsink::EXPECTED_LEVEL` has.
     #[test]
     fn the_refused_dedup_policies_name_every_value_that_works() {
+        // The **quoted** form, which is how these constants spell a value —
+        // and the only form that makes this assertion mean anything, since
+        // `"…".contains("")` is true of every string and would pass an empty
+        // rendering (a surviving mutant found exactly that).
         for scope in crate::ingest::Scope::ALL {
+            let quoted = format!("{:?}", scope.as_str());
             assert!(
-                EXPECTED_DEDUP_SCOPE.contains(&scope.to_string()),
-                "{scope} missing from {EXPECTED_DEDUP_SCOPE:?}"
+                EXPECTED_DEDUP_SCOPE.contains(&quoted),
+                "{quoted} missing from {EXPECTED_DEDUP_SCOPE:?}"
             );
         }
         for keep in crate::ingest::Keep::ALL {
+            let quoted = format!("{:?}", keep.as_str());
             assert!(
-                EXPECTED_DEDUP_KEEP.contains(&keep.to_string()),
-                "{keep} missing from {EXPECTED_DEDUP_KEEP:?}"
+                EXPECTED_DEDUP_KEEP.contains(&quoted),
+                "{quoted} missing from {EXPECTED_DEDUP_KEEP:?}"
             );
         }
     }

@@ -136,7 +136,7 @@ pub enum Keep {
 
 impl Scope {
     /// The spelling used in the file and the environment.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Scope::Talkgroup => "talkgroup",
             Scope::Patched => "patched",
@@ -147,13 +147,11 @@ impl Scope {
     pub(crate) const ALL: [Scope; 2] = [Scope::Talkgroup, Scope::Patched];
 }
 
-impl std::fmt::Display for Scope {
-    /// Unquoted in a log line, so `dedup_scope=patched` greps (rule 6).
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
+/// Deliberately **no `Display`**: nothing logs a dedup policy, and an impl
+/// whose only caller is the test that checks it is an impl no test can really
+/// check — a no-op body passed, because `"…".contains("")` is true of every
+/// string. [`Scope::as_str`] is the one spelling, and the test below asserts
+/// the *quoted* form the error message actually carries.
 impl std::str::FromStr for Scope {
     type Err = ();
 
@@ -169,7 +167,8 @@ impl std::str::FromStr for Scope {
 }
 
 impl Keep {
-    fn as_str(self) -> &'static str {
+    /// The spelling used in the file and the environment.
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Keep::First => "first",
             Keep::Best => "best",
@@ -177,12 +176,6 @@ impl Keep {
     }
 
     pub(crate) const ALL: [Keep; 2] = [Keep::First, Keep::Best];
-}
-
-impl std::fmt::Display for Keep {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 impl std::str::FromStr for Keep {
