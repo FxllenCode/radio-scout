@@ -26,7 +26,9 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Sharded **eight** ways, not four.
+  # Sharded **sixteen** ways. This number has now been wrong twice, in the same
+  # way, and the failure is worth writing down because it is invisible from the
+  # run status.
   #
   # At four it stopped finishing: 1289 mutants over four shards is ~320 each, and
   # at the ~50 s of wall clock a mutant costs here (a build plus the whole suite,
@@ -36,21 +38,33 @@ jobs:
   # reported nothing *quietly*: the run failed either way, because a surviving
   # mutant is also a non-zero exit, so the timeout looked like the signal working.
   #
-  # Eight puts a shard at ~160 mutants, a bit over two hours, which leaves room
-  # for the sweep to keep growing with the codebase before this needs revisiting.
-  # The number to watch is the per-shard wall clock in the run summary; when it
-  # approaches three hours, double the shards again.
+  # At eight it did it again, and the quiet is the point. Every shard reported
+  # `161 mutants tested in 3h` against a 210-minute limit, so the slow ones were
+  # killed just past it: on 2026-08-05 through 08-09, **three of eight shards
+  # were cancelled most nights** (7 every night; 3 and 5 usually; once 0 and 4)
+  # — roughly 480 mutants, 37% of the surface, swept by nobody. A red run means
+  # "gaps found", a cancelled shard also means red, and the two are
+  # indistinguishable without opening the job list. The mutant count barely grew;
+  # the *suite* did (1603 tests), taking a mutant from ~50 s to ~67 s.
+  #
+  # Sixteen puts a shard at ~80 mutants, about 1.5 h. The number to watch is the
+  # per-shard wall clock in the run summary; when it approaches three hours,
+  # double again — and check the job list for cancellations rather than trusting
+  # the run's overall colour, because that is what hid this for five nights.
   mutants:
-    name: Mutants ${{ matrix.shard }}/8
+    name: Mutants ${{ matrix.shard }}/16
     runs-on: ubuntu-latest
-    # Tighter than the 5 h ceiling on purpose. A shard should take ~2 h, so this
-    # is generous headroom — and a shard that is going to be killed anyway should
-    # be killed early rather than holding a runner for five hours to tell us so.
+    # Tighter than the 5 h ceiling on purpose. A shard should take ~1.5 h, so
+    # this is generous headroom — and a shard that is going to be killed anyway
+    # should be killed early rather than holding a runner for five hours to tell
+    # us so. Deliberately *not* raised to paper over the timeouts above: a
+    # longer limit would buy a slower sweep, not a complete one, and the next
+    # growth in the suite would silently eat it again.
     timeout-minutes: 210
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       # The working branch, explicitly — NOT the ref that triggered this.
       #
@@ -84,7 +98,7 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
       - name: Mutate
-        run: cargo mutants --shard ${{ matrix.shard }}/8 --test-tool nextest -j 2 -- --locked
+        run: cargo mutants --shard ${{ matrix.shard }}/16 --test-tool nextest -j 2 -- --locked
       - uses: actions/upload-artifact@v7
         if: always()
         with:
