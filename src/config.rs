@@ -25,7 +25,11 @@
 //! - **No environment support**, which is how a container is configured.
 //!
 //! Two rules shape the types rather than the code. Secrets never reach a log
-//! line (ADR-0011 rule 2): [`crate::blob::S3Config`]'s `Debug` redacts the key,
+//! line (ADR-0011 rule 2), and the types are what enforce it rather than a rule
+//! every future callsite has to remember: the two *sections* that hold a
+//! credential write their own `Debug` — [`crate::blob::S3Config`] redacts the
+//! key, [`Database`] the URL — which is why the two entries in `SECRET_KEYS` are
+//! also the two configuration types with a hand-written impl.
 //! [`Loaded::log_summary`] names the database *dialect* rather than its URL, and
 //! `ConfigError::parse` drops the source snippet `toml` would otherwise quote.
 //! And an unusable value is rejected by **the type that owns it** — [`ProxyNet`]
@@ -1026,12 +1030,43 @@ pub mod secs {
 const DEFAULT_DB_FILE: &str = "radio-scout.db";
 
 /// `[database]` — SQLite by default, Postgres by URL (US 40, ADR-0003).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written, not derived — see the impl below.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Database {
     /// A full SeaORM connection URL. Unset means SQLite under `base_dir`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+/// Debug, minus the URL (ADR-0011 rule 2), as [`crate::blob::S3Config`] already
+/// does for the other value `SECRET_KEYS` calls a credential.
+///
+/// A Postgres URL routinely carries a password — `postgres://rs:hunter2@host/db`
+/// — and [`Config`] derives `Debug` over this, so one `?config` typed while
+/// chasing a connection failure would put it in a line. That is exactly when
+/// somebody reaches for it. Nothing prints it today; the point is that the type
+/// stops permitting it (#101).
+///
+/// **The whole value goes, unlike `access_key_id` next door.** That parallel is
+/// not exact: an access key id is a field *beside* the secret, whereas a
+/// password is a substring of this field's own value, so keeping the host and
+/// database name would mean parsing a URL — and the password has more than one
+/// supported spelling to find (sqlx reads it from the userinfo *and* from a
+/// `password=` query parameter, and a `@` inside it is legal). A redactor that
+/// misses one is wrong in the leaking direction, and what it buys is already in
+/// the log: [`Loaded::log_summary`] names the dialect, and the operator has the
+/// file they wrote the host in.
+///
+/// Set-vs-unset survives, because that distinction is the setting's whole
+/// meaning: no URL is what selects zero-config SQLite under `base_dir`.
+impl std::fmt::Debug for Database {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database")
+            .field("url", &self.url.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// What an unusable `[push] subject` is told it should have been. RFC 8292
@@ -1581,6 +1616,13 @@ pub fn resolve(
 /// Keys whose *value* is a credential (ADR-0011 rule 2). `access_key_id` is
 /// deliberately absent: it identifies a credential without being one, and
 /// naming it is how an operator tells which is loaded.
+///
+/// The same two keys are the two configuration sections that hand-write `Debug`
+/// ([`crate::blob::S3Config`] and [`Database`]), for the same reason and by
+/// intention — a value this list will not echo out of a parse error is one no
+/// `{:?}` should hand out either. Other types redact under their own hand-written
+/// impls (`instance::Credentials`, `startup::Vapid`); they hold secrets nobody
+/// writes into a file, so they are not this list's business.
 const SECRET_KEYS: &[&str] = &["secret_access_key", "url"];
 
 /// Whether a line of TOML assigns one of [`SECRET_KEYS`].
@@ -1975,6 +2017,65 @@ mod tests {
         // The access key id is an identifier, not a secret, and naming it is how
         // an operator tells which credential is loaded.
         assert!(debugged.contains("GK1234"), "{debugged}");
+    }
+
+    /// The other value [`SECRET_KEYS`] calls a credential, and the one a debug
+    /// line is likeliest to be reaching for — `?config` is what someone types
+    /// while chasing a connection failure, and a Postgres URL routinely carries
+    /// a password (#101).
+    ///
+    /// Asserted through the resolved [`Config`] rather than [`Database`],
+    /// because that is the type something would actually print, so the derived
+    /// delegation is proven rather than assumed.
+    #[test]
+    fn debug_output_never_carries_the_database_url() {
+        let config = resolve(
+            &cli(&[]),
+            env(&[(
+                "RADIO_SCOUT_DATABASE_URL",
+                "postgres://rs:hunter2@db.internal:5432/scanner_calls",
+            )]),
+            None,
+        )
+        .expect("resolve");
+
+        let debugged = format!("{config:?}");
+
+        // The whole value goes, not just the userinfo. A password is a
+        // *substring* of this field rather than a field beside it, so keeping
+        // any of it means parsing it — and sqlx accepts the password in the
+        // query string as well (`postgres:///?password=…`), so a userinfo-only
+        // redaction is a parser that can be wrong in the leaking direction.
+        for part in ["hunter2", "db.internal", "scanner_calls"] {
+            assert!(!debugged.contains(part), "`{part}` survived: {debugged}");
+        }
+        // ...but the field is still there and still says it is set, so a `fmt`
+        // gutted to `Ok(())` dies here rather than passing a secret-is-absent
+        // check by saying nothing at all.
+        assert!(
+            debugged.contains(r#"url: Some("<redacted>")"#),
+            "{debugged}"
+        );
+    }
+
+    /// Unset is not a redacted value, it is the state that selects zero-config
+    /// SQLite under `base_dir` — so the impl has to keep saying which one it is.
+    #[test]
+    fn debug_output_says_when_there_is_no_database_url() {
+        let debugged = format!("{:?}", resolve(&cli(&[]), no_env, None).expect("resolve"));
+
+        assert!(debugged.contains("url: None"), "{debugged}");
+    }
+
+    /// The gate a hand-written `Debug` needs and a derived one gets for free
+    /// (#101). The literal below is exhaustive, so a field added to [`Database`]
+    /// stops this compiling; once populated, the helper refuses to let it vanish
+    /// from the impl — which for a credential would be the opposite of vanishing.
+    #[test]
+    fn every_database_field_is_named_in_its_debug_output() {
+        crate::testing::assert_debug_names_every_field(&Database {
+            url: Some("postgres://rs:hunter2@db.internal:5432/scanner_calls".to_string()),
+        });
     }
 
     /// Retention (US 41, #10) reaches the sweeper through the same three

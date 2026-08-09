@@ -1055,6 +1055,22 @@ mod tests {
         assert!(shown.contains("<signature redacted>"), "{shown}");
     }
 
+    /// A fully-populated [`S3Config`], which is what both `Debug` tests below
+    /// need: an exhaustive struct literal with nothing left at a default, so a
+    /// field added later stops this compiling and
+    /// [`every_s3_field_is_named_in_its_debug_output`] then refuses to let it
+    /// vanish from the hand-written impl (#101).
+    fn debuggable_s3_config() -> S3Config {
+        S3Config {
+            bucket: "radio-scout".into(),
+            region: "us-east-1".into(),
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            access_key_id: "GK1234".into(),
+            secret_access_key: "s3cr3t-do-not-print".into(),
+            allow_http: true,
+        }
+    }
+
     /// The other credential this module holds, and the one an incident would
     /// reach for: the S3 secret access key (#85). Asserted through
     /// [`StorageConfig`] rather than [`S3Config`] because that is the type a
@@ -1063,14 +1079,7 @@ mod tests {
     /// whole reason the containing type is left derived.
     #[test]
     fn debug_never_carries_the_s3_secret() {
-        let config = StorageConfig::S3(S3Config {
-            bucket: "radio-scout".into(),
-            region: "us-east-1".into(),
-            endpoint: Some("http://127.0.0.1:9000".into()),
-            access_key_id: "GK1234".into(),
-            secret_access_key: "s3cr3t-do-not-print".into(),
-            allow_http: true,
-        });
+        let config = StorageConfig::S3(debuggable_s3_config());
 
         let shown = format!("{config:?}");
 
@@ -1088,6 +1097,16 @@ mod tests {
         // it does not blind the type.
         assert!(shown.contains("radio-scout"), "{shown}");
         assert!(shown.contains("127.0.0.1:9000"), "{shown}");
+    }
+
+    /// The half of the gate the test above cannot be: it names the fields it
+    /// cares about, so a *seventh* field added to [`S3Config`] and forgotten by
+    /// the hand-written impl would leave it green. This is the sibling of
+    /// `config::tests::every_database_field_is_named_in_its_debug_output`, and
+    /// the same mechanism (#101).
+    #[test]
+    fn every_s3_field_is_named_in_its_debug_output() {
+        crate::testing::assert_debug_names_every_field(&debuggable_s3_config());
     }
 
     /// A URL with nothing to redact is passed through rather than mangled.

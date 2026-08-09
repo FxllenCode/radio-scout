@@ -33,6 +33,51 @@ pub(crate) fn sqlite_url(dir: &tempfile::TempDir) -> String {
     format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display())
 }
 
+/// Every field a type serializes must be named in its `Debug` output.
+///
+/// The gate a hand-written `Debug` needs and a derived one gets for free: a
+/// field added later vanishes from the impl silently, and if it is a credential
+/// it does the opposite — printing where redacting was the impl's entire
+/// purpose (#101).
+///
+/// **This covers two types, and it is worth knowing which two it cannot.** The
+/// crate hand-writes `Debug` nine times and most of those redact something —
+/// `instance::Credentials` holds three plaintext secrets, and
+/// `startup::AdminPassword`, `startup::Vapid`, `webpush::VapidKey`,
+/// `webpush::Recipient` and `blob::PresignedUrl` each hold one. The two this
+/// gates are [`crate::config::Database`] and [`crate::blob::S3Config`], and what
+/// makes them reachable is that they *are* their TOML section (#87), so they
+/// derive `Serialize` — which is the reflection Rust does not otherwise have,
+/// and the reason this needs no macro of its own. The other seven are runtime
+/// types with nothing to reflect over; extending the gate to them means giving
+/// them a field list by some other means, and no ticket has asked for that yet.
+///
+/// **This is half a gate, and the other half is at the call site.** The sample
+/// must be an exhaustive struct literal with every field populated: the literal
+/// is what stops compiling when a field is added, and a `None` behind a
+/// `skip_serializing_if` serializes to nothing and would be waved through here.
+pub(crate) fn assert_debug_names_every_field(value: &(impl serde::Serialize + std::fmt::Debug)) {
+    let shown = format!("{value:?}");
+    let serialized = serde_json::to_value(value).expect("the type serializes");
+    let fields = serialized.as_object().expect("a struct, so it has fields");
+
+    // A sample that serialized to nothing would pass the loop below without
+    // asserting anything at all — which is precisely the drift this exists to
+    // catch, arriving one level up.
+    assert!(!fields.is_empty(), "nothing to gate: {shown}");
+    for field in fields.keys() {
+        // `name: ` rather than `name`, so a field is proven to be in *field*
+        // position: a bare `contains` also matches a field name that happens to
+        // appear inside some other field's value, which would let the very
+        // omission this exists to catch slip past. Non-alternate `{:?}` is what
+        // `debug_struct` renders that way, which is why `shown` is built with it.
+        assert!(
+            shown.contains(&format!("{field}: ")),
+            "`{field}` is not named in the Debug output: {shown}"
+        );
+    }
+}
+
 /// A global subscriber that records nothing and is interested in everything, so
 /// that no callsite is ever cached as uninteresting.
 struct AskEveryTime;
