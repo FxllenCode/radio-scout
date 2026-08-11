@@ -598,6 +598,7 @@ async fn assemble(
     state.admin = AdminAuth::provisioned(&admin, config.admin.clone());
     state.push = push;
     state.enhancer = Enhancer::from_config(config.enhancement.clone());
+    state.mining = config.mining.clone();
     state.clock = parts.clock;
     // Notifications ride the live-feed fanout (#16), so an ingest never waits
     // on a push service. An Instance with no identity spawns nothing.
@@ -607,6 +608,11 @@ async fn assemble(
     // and the first thing it does when it is on is pick up whatever a previous
     // process was part-way through.
     running.extend(crate::enhance::spawn(state.clone()).map(|worker| workers.adopt(worker)));
+    // **Mining** the Archive that was already there (#48). On by default and
+    // rate-bounded, because it reads every stored object exactly once and then
+    // has nothing left to do — the first sweep runs immediately, so an Instance
+    // that restarts often still makes progress.
+    running.extend(crate::mining::sweep::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     let app = build_app(state.clone());
 
     let bind = parts

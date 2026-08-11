@@ -23,5 +23,6 @@ expression: full()
   "durationMs": 8250,
   "emergency": true,
   "siteRef": 3,
+  "siteLabel": "Downtown",
   "audioUrl": "/api/call/42/audio"
 }

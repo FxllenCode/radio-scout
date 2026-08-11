@@ -80,6 +80,34 @@ impl CallUpload {
         }
     }
 
+    /// An upload shaped the way **SDRTrunk** sends one (#48).
+    ///
+    /// The field set is `RdioScannerBroadcaster`'s, in its order, and the audio
+    /// part is what `RdioScannerBuilder.formatFilePart` writes: a filename and
+    /// **no `Content-Type` header at all**, which is why the MIME a Call ends up
+    /// with comes from the name. `mp3` is the whole point — SDRTrunk buries an
+    /// ID3 tag in it, which is the only thing that carries a configured radio
+    /// alias or a tower's name to this instance.
+    pub fn sdrtrunk(mp3: &super::audio::SdrTrunkMp3) -> Self {
+        CallUpload {
+            fields: vec![
+                ("key".into(), Self::DEFAULT_KEY.into()),
+                ("system".into(), "11".into()),
+                ("dateTime".into(), "1000".into()),
+                ("talkgroup".into(), "54241".into()),
+                ("source".into(), "1234567".into()),
+                ("frequency".into(), "851012500".into()),
+                ("systemLabel".into(), "Fulton".into()),
+            ],
+            audio: Some(AudioPart {
+                bytes: mp3.bytes(),
+                file_name: Some("20260811_090000Fulton__TO_54241.mp3".into()),
+                mime: None,
+            }),
+            audio_first: false,
+        }
+    }
+
     /// A Trunk-Recorder-native upload (#6): the whole call description as one
     /// JSON `meta` part, plus the key and an M4A audio part.
     pub fn tr(meta_json: &str) -> Self {

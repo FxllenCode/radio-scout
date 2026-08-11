@@ -66,7 +66,11 @@ base64 = "0.22"
 # 0.13 — no OpenSSL, so the aarch64 and Windows cross-builds stay a plain
 # `cargo build`.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-symphonia = { version = "0.6.0", default-features = false, features = ["wav", "pcm", "mp3", "aac", "isomp4"] }
+# `id3v2` is the metadata reader #48 mines SDRTrunk's uploads with. It is a
+# feature of a crate already in the tree, not a new dependency — but it is not
+# implied by `mp3`, and with `default-features = false` the tag ahead of every
+# SDRTrunk MPEG frame was being skipped over and discarded.
+symphonia = { version = "0.6.0", default-features = false, features = ["wav", "pcm", "mp3", "aac", "isomp4", "id3v2"] }
 rubato = "4.0.0"
 ebur128 = "0.1.10"
 biquad = "0.6.0"

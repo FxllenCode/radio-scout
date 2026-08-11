@@ -43,7 +43,7 @@ use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use tracing::{Instrument, Level, Span, field, info, span, warn};
+use tracing::{Instrument, Level, Span, debug, field, info, span, warn};
 
 use crate::archive;
 use crate::call::{CallId, Candidate, Quality};
@@ -517,8 +517,20 @@ async fn run_pipeline(
     // having had nothing read for it and nothing parsed of it. The encrypted
     // check is deliberately still below this — the bytes are in hand either way,
     // and an **Encrypted Call** that stores none of them still gets a length.
-    if facts.authorized && new_call.duration_ms.is_none() {
-        new_call.duration_ms = crate::audio_meta::duration_ms(&audio);
+    //
+    // **The same pass is where a Call is mined** (#48). SDRTrunk writes an
+    // ID3 tag ahead of the MPEG frames it uploads, carrying a configured radio
+    // alias and a tower's name that no wire field of its carries at all — and
+    // this probe was already walking those bytes for the duration. Mining runs
+    // *here*, on the ingest path, rather than in the off-path worker its ticket
+    // asked for, for three reasons: the live-feed frame is published at ingest
+    // and nothing republishes one (#46), so a name arriving later never reaches
+    // the Listener who heard the Call; Enhancement rewrites the audio object
+    // and destroys the tag, which a worker would race and lose; and what it
+    // costs is a header read, where "never on the ingest path" was written
+    // about enhancement's decode-and-encode.
+    if facts.authorized {
+        enrich(&mut new_call, &audio, state.clock.now_ms());
     }
 
     let admission = match admit(&facts, &new_call, &state.ingest, state.clock.now_ms()) {
@@ -542,6 +554,44 @@ async fn run_pipeline(
     // wrote down, not about what a recorder was told. What comes back is the
     // receipt, which is the only thing that can be rendered.
     Ok(admission.record())
+}
+
+/// What this Call's own audio can add to what its Recorder said — read in one
+/// pass, and only where there is something to read (#42, #48).
+///
+/// Two gates, and between them a Trunk Recorder Call pays exactly what it paid
+/// before this existed:
+///
+/// - **A duration is read only where the recorder gave none.** TR's native meta
+///   counts the samples it wrote, which beats any header.
+/// - **A container is probed for metadata only where it opens with an ID3 tag.**
+///   Three bytes decide it. SDRTrunk writes its tag *before* the first MPEG
+///   frame (`AudioSegmentRecorder.recordMP3`), so this is exact for the one
+///   recorder that embeds anything — and it keeps a full isomp4 probe off every
+///   TR upload, which is the Pi's whole reason for a gate here.
+fn enrich(new_call: &mut NewCall, audio: &[u8], now_ms: i64) {
+    // Stamped whatever is found, including nothing at all: the column records
+    // that this Call's audio has been *read*, so the sweep never comes back
+    // to a Call ingest already looked inside.
+    new_call.mined_at_ms = Some(now_ms);
+    let wants_duration = new_call.duration_ms.is_none();
+    let wants_mining = audio.starts_with(crate::audio_meta::ID3);
+    if !wants_duration && !wants_mining {
+        return;
+    }
+    let facts = crate::audio_meta::read(audio);
+    if wants_duration {
+        new_call.duration_ms = facts.duration_ms;
+    }
+    let Some(mined) = wants_mining.then(|| crate::mining::mine(&facts)).flatten() else {
+        return;
+    };
+    if crate::mining::apply(new_call, &mined) {
+        // DEBUG: routine, once per Call, and an Operator does not act on it —
+        // but "why is my SDRTrunk alias not showing?" has no other answer
+        // (ADR-0011 rule 7).
+        debug!(?mined, "mined the Call's own audio");
+    }
 }
 
 /// Everything the database knows about an arriving Call, read **once** (#96).
@@ -1411,6 +1461,11 @@ fn build_tr_call(
         priority: meta.priority.map(|p| p as i32),
         audio_type: clean(meta.audio_type),
         site_ref: meta.site.filter(|s| *s > 0),
+        // Trunk Recorder names no tower, and **Mining** (#48) fills this on the
+        // one dialect that does — inside the audio, after the parse. `enrich`
+        // stamps `mined_at_ms` for the same reason, in the same place.
+        site_label: None,
+        mined_at_ms: None,
         patches,
         units,
         frequencies,
@@ -2199,6 +2254,60 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(tr_call_time(&meta), Some(1669740999000));
+    }
+
+    // -- What a Call's own audio adds to it (#42, #48) -----------------------
+
+    /// **`enrich`'s two gates, all four ways.**
+    ///
+    /// Both exist to keep a Trunk Recorder Call paying what it paid before #48,
+    /// and the interesting corner is the one no upload in the suite reaches: a
+    /// recorder that sent its own duration *and* embedded a tag. Skipping the
+    /// probe there because the duration was already known would throw away
+    /// every name in the file — so the gates are an `or`, not an `and`, and
+    /// each is asserted on its own.
+    #[rstest]
+    // A plain WAV: nothing embedded, so the probe runs for the length alone.
+    #[case::a_length_to_read_and_nothing_embedded(None, false, Some(1000), None)]
+    // SDRTrunk: both, which is the ordinary case.
+    #[case::a_length_to_read_and_a_tag(None, true, Some(1044), Some("Engine 1"))]
+    // The corner: the recorder counted its own samples, and still wrote a tag.
+    #[case::a_length_already_known_and_a_tag(Some(8_250), true, Some(8_250), Some("Engine 1"))]
+    // A Trunk Recorder Call: nothing to read, nothing to mine, no probe.
+    #[case::nothing_to_do_at_all(Some(8_250), false, Some(8_250), None)]
+    fn enrich_probes_exactly_when_there_is_something_to_read(
+        #[case] duration_from_recorder: Option<i64>,
+        #[case] embedded: bool,
+        #[case] expected_duration: Option<i64>,
+        #[case] expected_label: Option<&str>,
+    ) {
+        let audio = match embedded {
+            true => crate::testing::id3::tagged_mp3(vec![
+                crate::testing::id3::text(b"TCOM", "sdrtrunk v0.6.1"),
+                crate::testing::id3::text(b"TPE1", "1234567 Engine 1"),
+            ]),
+            // A one-second 8 kHz WAV — a real container with no tag in it.
+            false => crate::testing::id3::wav(8_000, 8_000),
+        };
+        let mut call = NewCall {
+            duration_ms: duration_from_recorder,
+            units: vec![NewCallUnit {
+                unit_ref: 1234567,
+                ..Default::default()
+            }],
+            ..NewCall::new(11, 54241, 1_000)
+        };
+
+        enrich(&mut call, &audio, 7_000);
+
+        assert_eq!(call.duration_ms, expected_duration);
+        assert_eq!(call.units[0].label.as_deref(), expected_label);
+        assert_eq!(
+            call.mined_at_ms,
+            Some(7_000),
+            "stamped whatever was found, including nothing — the sweep must \
+             never come back to a Call ingest already looked inside"
+        );
     }
 
     // -- `queue_for_enhancement`'s own failure arms (#37) --------------------

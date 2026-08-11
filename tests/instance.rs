@@ -385,9 +385,11 @@ async fn the_sweeper_goes_on_sweeping_after_the_boot_sweep() {
 async fn stopping_an_instance_stops_and_joins_every_worker() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut config = config_in(&tmp).await;
-    // Something to stop *while it is working*: a sweeper on a tight interval,
-    // and an enhancement worker, which the shipped default does not run.
+    // Something to stop *while it is working*: two sweepers on a tight
+    // interval, and an enhancement worker, which the shipped default does not
+    // run.
     config.retention.interval = std::time::Duration::from_millis(20);
+    config.mining.interval = std::time::Duration::from_millis(20);
     config.enhancement.mode = radio_scout::enhance::Mode::Normalize;
     // ...and the log writer, which is the fourth and the odd one out: it
     // belongs to the process rather than to a run, so only a full `stop` — not
@@ -403,7 +405,7 @@ async fn stopping_an_instance_stops_and_joins_every_worker() {
         .iter()
         .map(|reading| reading.name)
         .collect();
-    assert_eq!(names.len(), 4, "all four Workers are running: {names:?}");
+    assert_eq!(names.len(), 5, "all five Workers are running: {names:?}");
 
     instance.stop().await;
 

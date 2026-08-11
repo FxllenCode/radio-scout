@@ -874,8 +874,8 @@ async fn a_restart_leaves_the_operator_log_still_being_written() {
 
 /// **Every Worker is named on the registry**, because a status surface (#70)
 /// reads it through `AppState` and can never see the `Instance` that owns the
-/// handles. An Instance with enhancement off runs three; turning it on is what
-/// adds the fourth — a surface must show what is running, not a row of zeroes
+/// handles. An Instance with enhancement off runs four; turning it on is what
+/// adds the fifth — a surface must show what is running, not a row of zeroes
 /// for what is not.
 #[tokio::test]
 async fn the_registry_names_the_workers_this_instance_is_running() {
@@ -894,8 +894,12 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::logsink::WORKER,
             radio_scout::retention::WORKER,
             radio_scout::push::WORKER,
+            // On by default, unlike enhancement (#48): it reads each stored
+            // Call once and then has nothing left to do, so an Operator
+            // upgrading gets their archive's names without finding a setting.
+            radio_scout::mining::sweep::WORKER,
         ],
-        "the shipped default runs three: enhancement is off"
+        "the shipped default runs four: enhancement is off, the backfill is on"
     );
 
     let mut app = app;
@@ -913,6 +917,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::retention::WORKER,
             radio_scout::push::WORKER,
             radio_scout::enhance::WORKER,
+            radio_scout::mining::sweep::WORKER,
         ],
     );
 }

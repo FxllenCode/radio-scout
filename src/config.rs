@@ -62,6 +62,7 @@ use crate::blob::{Backend, Storage, StorageConfig};
 use crate::enhance::{EnhancementConfig, Output};
 use crate::ingest::IngestConfig;
 use crate::logsink;
+use crate::mining::MiningConfig;
 use crate::observability::{self, LogConfig};
 use crate::push::PushConfig;
 use crate::retention::{self, RetentionConfig};
@@ -401,6 +402,7 @@ pub struct Config {
     pub admin: AdminConfig,
     pub push: PushConfig,
     pub enhancement: EnhancementConfig,
+    pub mining: MiningConfig,
     pub log: LogConfig,
 }
 
@@ -474,6 +476,17 @@ impl Config {
         if self.retention.batch_size == 0 {
             return Err(ConfigError::invalid_key(
                 "retention.batch_size",
+                "0",
+                "a positive number of Calls per batch",
+            ));
+        }
+        // ...and the same for the **Mining** sweep (#48), for the mirror-image
+        // reason: a batch of zero reads zero Calls per tick, forever, and looks
+        // exactly like an Archive that has already been mined. An Operator who
+        // wants it off has `enabled`, which says so out loud.
+        if self.mining.sweep && self.mining.batch_size == 0 {
+            return Err(ConfigError::invalid_key(
+                "mining.batch_size",
                 "0",
                 "a positive number of Calls per batch",
             ));
@@ -988,6 +1001,36 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "mining.sweep",
+        var: "RADIO_SCOUT_MINING_SWEEP",
+        expected: "true or false",
+        example: "false",
+        set: |setting, config, value| {
+            config.mining.sweep = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "mining.interval_secs",
+        var: "RADIO_SCOUT_MINING_INTERVAL_SECS",
+        expected: "a number of seconds",
+        example: "300",
+        set: |setting, config, value| {
+            config.mining.interval = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "mining.batch_size",
+        var: "RADIO_SCOUT_MINING_BATCH_SIZE",
+        expected: "a number of Calls",
+        example: "25",
+        set: |setting, config, value| {
+            config.mining.batch_size = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
         key: "log.directives",
         // Not a `RADIO_SCOUT_`-prefixed name: it is the variable every Rust
         // operator already reaches for, and ADR-0011 documents it as the
@@ -1485,6 +1528,26 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # published at ingest, not after enhancement, so a backlog never delays a
 # listener — it only decides how long a burst can outrun the worker.
 # queue_depth = 512
+
+[mining]
+# Mining (#48): SDRTrunk writes an ID3 tag into every MP3 it uploads, carrying
+# the radio aliases you configured in SDRTrunk and the name of the tower each
+# channel is tuned to — none of which its upload API has a field for. New Calls
+# are mined as they arrive; this sweep is for the archive you already had, and
+# it reads each stored Call exactly once and then has nothing left to do.
+#
+# It never touches audio, never runs on the ingest path, and picks up where it
+# left off after a restart. Turn it off if your audio is on metered object
+# storage and you would rather not pay for one read per stored Call. New Calls
+# are mined either way — that is not a setting.
+# sweep = true
+
+# How long between sweeps, and how many Calls each sweep reads. The defaults
+# work through about 12 000 Calls an hour — a hundred thousand overnight —
+# slowly enough that a Pi taking a call a second never notices. Lower the batch
+# or raise the interval to make it gentler.
+# interval_secs = 30
+# batch_size = 100
 
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a
@@ -2188,11 +2251,30 @@ mod tests {
     #[case("[retention]\nmax_size_gb = 0\n", "retention.max_size_gb")]
     #[case("[retention]\nmax_size_gb = -5\n", "retention.max_size_gb")]
     #[case("[retention]\nbatch_size = 0\n", "retention.batch_size")]
+    // A **Mining** sweep (#48) that reads zero Calls a tick runs forever and
+    // looks exactly like an Archive already mined. An Operator who wants it off
+    // has `enabled`, which says so.
+    #[case("[mining]\nbatch_size = 0\n", "mining.batch_size")]
     fn an_impossible_retention_policy_refuses_to_boot(#[case] text: &str, #[case] key: &str) {
         let error =
             resolve(&cli(&[]), no_env, Some(&file(text))).expect_err("an impossible policy");
 
         assert!(error.to_string().contains(key), "{error}");
+    }
+
+    /// ...but a batch size is only impossible for a sweep that is going to run.
+    /// An Operator who turned the sweep off has said what they mean, and
+    /// refusing to boot over a number nothing reads would be a gate on nothing.
+    #[test]
+    fn a_mining_sweep_that_is_off_may_have_any_batch_size() {
+        let config = resolve(
+            &cli(&[]),
+            no_env,
+            Some(&file("[mining]\nsweep = false\nbatch_size = 0\n")),
+        )
+        .expect("a disabled sweep needs no batch");
+
+        assert!(!config.mining.sweep);
     }
 
     /// **A value the file cannot run is not rescued by a louder layer.**

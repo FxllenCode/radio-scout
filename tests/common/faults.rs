@@ -308,6 +308,15 @@ impl Faults {
         self.set_reads(Reads::Hidden);
     }
 
+    /// Answer reads normally again — the store that came back.
+    ///
+    /// The half of a transient failure that proves it *was* transient: an arm
+    /// that retries can only be told apart from one that gives up by letting
+    /// the retry succeed.
+    pub fn allow_reads(&self) {
+        self.set_reads(Reads::Working);
+    }
+
     fn set_reads(&self, reads: Reads) {
         *self.0.reads.lock().expect("the read mode") = reads;
     }

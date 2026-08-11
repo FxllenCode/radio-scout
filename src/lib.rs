@@ -23,6 +23,7 @@ pub mod live;
 pub mod logsink;
 pub mod logview;
 pub mod merge;
+pub mod mining;
 pub mod observability;
 pub mod push;
 pub mod query;
@@ -75,6 +76,8 @@ pub struct AppState {
     /// The enhancement queue, or nothing at all when `[enhancement] mode` is
     /// `off` — which is what ships (#20).
     pub enhancer: Enhancer,
+    /// How the **Mining** sweep walks the Archive that was already there (#48).
+    pub mining: crate::mining::MiningConfig,
     /// What time it is, for everything a handler stamps or expires (#90).
     pub clock: Clock,
     /// What every background Worker owes right now (#93) — the reading half, so
@@ -97,6 +100,7 @@ impl AppState {
             admin: AdminAuth::locked(),
             push: Push::disabled(),
             enhancer: Enhancer::disabled(),
+            mining: crate::mining::MiningConfig::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
         }

@@ -403,18 +403,25 @@ pub async fn resolve_or_create_unit<C: ConnectionTrait>(
     .await
 }
 
-/// Find a Site by (System, Ref), creating it if absent (#42, spec US 11).
+/// Find a Site by (System, Ref), creating it if absent (#42, spec US 11), and
+/// name it if it has no name and one was offered (#48).
 ///
 /// Unlike a Unit this is never gated on the auto-populate flag. A Site Ref is a
 /// fact about the System's own infrastructure, not a radio somebody keyed — an
 /// operator who turned auto-populate off did so to stop unknown Talkgroups
 /// filling their panel, and unnamed towers are what makes simulcast coverage
-/// legible rather than clutter. It is created without a label: #48 fills those
-/// in from SDRTrunk's ID3 tags, where a site *is* a name.
+/// legible rather than clutter.
+///
+/// **A Ref identifies and a name names**, which is why `label` is a separate
+/// argument rather than an alternative to `ext_ref`: the two answer different
+/// questions and a recorder may know either, both or neither. A Site that
+/// already has a name keeps it — the auto-populate rule (#8), so **Mining**
+/// cannot overwrite what an Operator curated.
 pub async fn resolve_or_create_site<C: ConnectionTrait>(
     db: &C,
     system_id: i64,
     ext_ref: i64,
+    label: Option<&str>,
     now_ms: i64,
 ) -> Result<site::Model, DbErr> {
     if let Some(found) = site::Entity::find()
@@ -423,17 +430,121 @@ pub async fn resolve_or_create_site<C: ConnectionTrait>(
         .one(db)
         .await?
     {
-        return Ok(found);
+        return name_site(db, found, label).await;
     }
     site::ActiveModel {
         system_id: Set(system_id),
         r#ref: Set(ext_ref),
-        label: Set(None),
+        label: Set(label.map(str::to_string)),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
     .insert(db)
     .await
+}
+
+/// Find a Site by (System, name), creating it if absent — the only way an
+/// SDRTrunk Call ever gets one (#48, spec US 13).
+///
+/// SDRTrunk's rdio broadcaster sends no `site` field at all (its `FormField`
+/// enum has none), so every SDRTrunk Call has arrived with `site_id` null since
+/// the beginning. What its ID3 carries is a *name* — the tower an Operator
+/// configured the channel for — and there is no Ref anywhere to pair it with.
+///
+/// So one is **minted**, exactly as [`lowest_free_system_ref`] mints one for a
+/// System that Trunk Recorder identified by name alone (#8): the lowest
+/// positive Ref this System is not already using. The Ref is ours rather than
+/// the radio network's, which is the honest reading — nobody outside this
+/// Instance ever assigned this tower a number, and the name is what identifies
+/// it here and everywhere it is shown.
+pub async fn resolve_or_create_site_named<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    label: &str,
+    now_ms: i64,
+) -> Result<site::Model, DbErr> {
+    if let Some(found) = site::Entity::find()
+        .filter(site::Column::SystemId.eq(system_id))
+        .filter(site::Column::Label.eq(label))
+        .one(db)
+        .await?
+    {
+        return Ok(found);
+    }
+    site::ActiveModel {
+        system_id: Set(system_id),
+        r#ref: Set(lowest_free_site_ref(db, system_id).await?),
+        label: Set(Some(label.to_string())),
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+}
+
+/// Give a Site a name if it hasn't got one. A named Site keeps its name.
+async fn name_site<C: ConnectionTrait>(
+    db: &C,
+    site: site::Model,
+    label: Option<&str>,
+) -> Result<site::Model, DbErr> {
+    let Some(label) = label.filter(|_| site.label.is_none()) else {
+        return Ok(site);
+    };
+    let mut named = site.into_active_model();
+    named.label = Set(Some(label.to_string()));
+    named.update(db).await
+}
+
+/// The lowest positive Ref not yet used by any Site of this System.
+///
+/// Scoped to one System, where [`lowest_free_system_ref`] is global, because
+/// that is what `idx_sites_system_ref` makes unique — tower 1 of two Systems is
+/// two towers.
+async fn lowest_free_site_ref<C: ConnectionTrait>(db: &C, system_id: i64) -> Result<i64, DbErr> {
+    let taken: std::collections::HashSet<i64> = site::Entity::find()
+        .select_only()
+        .column(site::Column::Ref)
+        .filter(site::Column::SystemId.eq(system_id))
+        .into_tuple()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect();
+    let mut next = 1;
+    while taken.contains(&next) {
+        next += 1;
+    }
+    Ok(next)
+}
+
+/// The Site a Call was heard on, as this Recorder identified it — resolved to
+/// (or created as) a `sites` row.
+///
+/// One function because there are two ways in and both writers need the same
+/// answer: a Ref (the rdio dialect's `site`), a name (**Mining**, #48), or
+/// both, in which case the Ref decides *which* tower and the name decides what
+/// it is called.
+async fn site_of<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    new: &NewCall,
+    now_ms: i64,
+) -> Result<Option<i64>, DbErr> {
+    let label = new.site_label.as_deref();
+    match (new.site_ref, label) {
+        (Some(site_ref), _) => Ok(Some(
+            resolve_or_create_site(db, system_id, site_ref, label, now_ms)
+                .await?
+                .id,
+        )),
+        (None, Some(label)) => Ok(Some(
+            resolve_or_create_site_named(db, system_id, label, now_ms)
+                .await?
+                .id,
+        )),
+        (None, None) => Ok(None),
+    }
 }
 
 /// A unit heard within a call (rdio `sources[]`/`units[]`).
@@ -514,6 +625,19 @@ pub struct NewCall {
     /// multi-site System discovers its towers the same way it discovers its
     /// Talkgroups.
     pub site_ref: Option<i64>,
+    /// What the recorder *called* that Site. **Mining** (#48) is the only
+    /// source: SDRTrunk's ID3 names the tower a channel was configured for,
+    /// and its rdio broadcaster sends no `site` field to pair it with — so on
+    /// an SDRTrunk Call this arrives alone and a Ref is minted for it.
+    pub site_label: Option<String>,
+    /// When this Call's audio was looked inside — set by ingest's own mining
+    /// pass, and `None` for a caller that stored a Call without one.
+    ///
+    /// Here rather than stamped by the writers because the column records that
+    /// **Mining** happened, and mining is what fills it: a Call seeded straight
+    /// into the Archive genuinely has not been read, which is the same thing as
+    /// every Call stored before #48 and is what the sweep goes looking for.
+    pub mined_at_ms: Option<i64>,
     pub patches: Vec<i64>,
     pub units: Vec<NewCallUnit>,
     pub frequencies: Vec<NewCallFrequency>,
@@ -588,6 +712,8 @@ impl NewCall {
             priority: None,
             audio_type: None,
             site_ref: None,
+            site_label: None,
+            mined_at_ms: None,
             patches: Vec::new(),
             units: Vec::new(),
             frequencies: Vec::new(),
@@ -651,14 +777,7 @@ pub async fn insert_call<C: ConnectionTrait>(
     // A Site is discovered the way a Talkgroup is (#8): a multi-site System
     // learns its towers from the traffic, because a file naming them goes stale
     // the moment the operator adds one.
-    let site_id = match new.site_ref {
-        Some(site_ref) => Some(
-            resolve_or_create_site(db, sys.id, site_ref, now_ms)
-                .await?
-                .id,
-        ),
-        None => None,
-    };
+    let site_id = site_of(db, sys.id, new, now_ms).await?;
 
     let mut row = call::ActiveModel {
         system_id: Set(sys.id),
@@ -782,12 +901,8 @@ pub async fn store_replacement<C: ConnectionTrait>(
     // outside `describe_transmission` because it is the one such column that
     // costs a query, and because that function must stay pure enough for the
     // insert to call it before the row exists.
-    if let Some(site_ref) = new.site_ref {
-        row.site_id = Set(Some(
-            resolve_or_create_site(db, system_id, site_ref, now_ms)
-                .await?
-                .id,
-        ));
+    if let Some(site_id) = site_of(db, system_id, new, now_ms).await? {
+        row.site_id = Set(Some(site_id));
     }
     // **`talkgroup_ref` is deliberately not touched.** It records the Ref the
     // recorder sent, and its one consumer is unmerge (#45): "which of this
@@ -872,6 +987,11 @@ fn describe_transmission(row: &mut call::ActiveModel, new: &NewCall, audio: Opti
     row.priority = Set(new.priority);
     row.audio_type = Set(new.audio_type.clone());
     row.frequency = Set(new.frequency);
+    // Whether this copy's audio has been looked inside (#48). A **Replacement**
+    // brings a different Recorder's file with its own tag, and ingest mined it
+    // in the same pass it read its duration — so the stamp travels with every
+    // other fact the winner's audio carries.
+    row.mined_at_ms = Set(new.mined_at_ms);
     // Every Call arrives passthrough, and a replaced one goes back to it: the
     // levelled audio a previous pass produced describes a copy that no longer
     // exists. Set explicitly rather than left to a column default, because a
@@ -2747,6 +2867,184 @@ pub struct NewLogEvent {
     pub request_id: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Mining a Call already in the Archive (#48, spec US 13).
+// ---------------------------------------------------------------------------
+
+/// Fold what was mined out of a stored Call's audio into the Call. `true` if
+/// anything was added.
+///
+/// **Does not stamp the Call looked-at.** That is the sweep's, in one statement
+/// for the whole batch — so there is exactly one place a Call is marked read,
+/// and no arm here can be the one that forgot. A crash between this and the
+/// stamp leaves an enriched-but-unstamped Call, which the next sweep re-reads
+/// and finds nothing left to fill: idempotent, and the safe direction.
+///
+/// The counterpart of [`crate::mining::apply`], which does the same job to a
+/// Call an ingest has not written yet. Two writers because there are two
+/// genuinely different situations — a value being assembled, and a row that has
+/// existed for a year — and `tests/mining.rs` holds them to landing the
+/// identical Call, the way #44 holds the upload script and the plugin together.
+///
+/// Every rule they share is the same rule: **fill and never overwrite**, and a
+/// name goes only on a radio this Call actually heard.
+pub async fn apply_mined<C: ConnectionTrait>(
+    db: &C,
+    call: &call::Model,
+    mined: &crate::mining::Mined,
+    global_auto_populate: bool,
+    now_ms: i64,
+) -> Result<bool, DbErr> {
+    let mut row: call::ActiveModel = call.clone().into();
+    let mut applied = false;
+    let mut frequency = call.frequency;
+    let mut audio_type = call.audio_type.clone();
+    if crate::mining::fill(&mut frequency, mined.frequency) {
+        row.frequency = Set(frequency);
+        applied = true;
+    }
+    if crate::mining::fill(&mut audio_type, mined.decoder.clone()) {
+        row.audio_type = Set(audio_type);
+        applied = true;
+    }
+    // **A Ref identifies and a name names**, exactly as it does at ingest
+    // ([`site_of`]): a Call that already points at a tower was told *which* by
+    // its Recorder and keeps that tower, but the tower still gains the name if
+    // it has none. A Call pointing at no tower gets one minted for the name.
+    //
+    // The `Some` arm is why this is written out rather than left as "only when
+    // the Call has no Site": without it the two writers disagree, and the
+    // equality test cannot see it — SDRTrunk sends no `site`, so no Call that
+    // goes down both paths ever has one.
+    if let Some(label) = mined.site.as_deref() {
+        match call.site_id {
+            Some(site_id) => {
+                if let Some(site) = site::Entity::find_by_id(site_id).one(db).await?
+                    && site.label.is_none()
+                {
+                    name_site(db, site, Some(label)).await?;
+                    applied = true;
+                }
+            }
+            None => {
+                let site = resolve_or_create_site_named(db, call.system_id, label, now_ms).await?;
+                row.site_id = Set(Some(site.id));
+                applied = true;
+            }
+        }
+    }
+    // Only where there is something to write: the steady state of a sweep is a
+    // Call that gives up nothing, and an `UPDATE` setting every column to what
+    // it already held would be a write per Call bought for no change at all.
+    if applied {
+        row.update(db).await?;
+    }
+
+    Ok(applied | name_heard_unit(db, call, mined, global_auto_populate, now_ms).await?)
+}
+
+/// Give the radio this Call heard the name its audio carried — on the Call's
+/// own `call_units` row, and on the **Unit** the roster keeps.
+///
+/// Both, because they answer different questions: the row records what *this*
+/// Call's Recorder called the radio, and the Unit is what an apparatus is named
+/// across the Archive ([`crate::call::unit_name`], #47). Filling only one would
+/// make a Listener reading a Call and searching for that radio disagree.
+async fn name_heard_unit<C: ConnectionTrait>(
+    db: &C,
+    call: &call::Model,
+    mined: &crate::mining::Mined,
+    global_auto_populate: bool,
+    now_ms: i64,
+) -> Result<bool, DbErr> {
+    let Some(named) = &mined.unit else {
+        return Ok(false);
+    };
+    // Only a radio the Call lists. The tag names one radio at one moment, and
+    // hanging that name on whichever Unit the Call happens to carry would put
+    // an apparatus's name on a different apparatus.
+    let Some(heard) = call_unit::Entity::find()
+        .filter(call_unit::Column::CallId.eq(call.id))
+        .filter(call_unit::Column::UnitRef.eq(named.unit_ref))
+        .one(db)
+        .await?
+    else {
+        return Ok(false);
+    };
+    if heard.label.is_some() {
+        return Ok(false);
+    }
+    let mut row: call_unit::ActiveModel = heard.into();
+    row.label = Set(Some(named.label.clone()));
+    row.update(db).await?;
+
+    // The roster is gated on auto-populate exactly as it is at ingest (#8): an
+    // Operator who turned it off did so to stop unknown entities appearing, and
+    // a sweep is not an exception to that. **The same effective flag**,
+    // instance-wide OR the System's own — [`disposition`]'s rule, and reading
+    // only the column here would silently roster nothing on the shipped
+    // default, where the instance says yes and every System row says nothing.
+    let effective = global_auto_populate
+        || system::Entity::find_by_id(call.system_id)
+            .one(db)
+            .await?
+            .is_some_and(|system| system.auto_populate);
+    if effective {
+        resolve_or_create_unit(
+            db,
+            call.system_id,
+            named.unit_ref,
+            Some(named.label.clone()),
+            now_ms,
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
+/// A page of Calls nothing has looked inside yet, newest first (#48).
+///
+/// Newest first because that is the half of an Archive somebody is most likely
+/// to be listening to, so the enrichment shows up where it is noticed rather
+/// than a week later.
+pub async fn unmined_calls<C: ConnectionTrait>(
+    db: &C,
+    limit: u64,
+) -> Result<Vec<call::Model>, DbErr> {
+    call::Entity::find()
+        .filter(call::Column::MinedAtMs.is_null())
+        .order_by_desc(call::Column::Id)
+        .limit(limit)
+        .all(db)
+        .await
+}
+
+/// Stamp these Calls looked-at.
+///
+/// One statement for a whole page, not one per Call: the steady state of a
+/// sweep over a Trunk Recorder archive is a batch in which *nothing* is
+/// mined, and paying a round-trip per Call for that would make the sweep's cost
+/// the thing an Operator notices about it.
+///
+/// It is also the **only** place a Call is stamped by the sweep, whatever the
+/// sweep found in it — so "looked at" cannot be set on one path and forgotten
+/// on another.
+pub async fn mark_mined<C: ConnectionTrait>(
+    db: &C,
+    call_ids: &[CallId],
+    now_ms: i64,
+) -> Result<(), DbErr> {
+    if call_ids.is_empty() {
+        return Ok(());
+    }
+    call::Entity::update_many()
+        .col_expr(call::Column::MinedAtMs, Expr::value(now_ms))
+        .filter(call::Column::Id.is_in(call_ids.iter().copied()))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2772,6 +3070,70 @@ mod tests {
                 .expect("count log events"),
             0
         );
+    }
+
+    // -- Mining a Call already in the Archive (#48) --------------------------
+
+    /// **Either half alone is an application.** [`apply_mined`] folds in two
+    /// independent things — what a Call knows about itself, and what its radio
+    /// is called — and the answer it hands back decides whether the sweep
+    /// reports the Call as `mined` or as `nothing-new`.
+    ///
+    /// So each half is asserted *on its own*: with both folded together, an
+    /// `&` in place of the `|` would still report `true` whenever both fired,
+    /// and every test that mines a complete tag would pass while a Call that
+    /// only gained a tower was reported as having gained nothing.
+    #[rstest]
+    #[case::only_a_tower(Some("Downtown"), None, true)]
+    #[case::only_a_radios_name(None, Some("Engine 1"), true)]
+    #[case::both(Some("Downtown"), Some("Engine 1"), true)]
+    #[case::neither(None, None, false)]
+    #[tokio::test]
+    async fn either_half_of_a_mining_is_an_application(
+        #[case] site: Option<&str>,
+        #[case] radio: Option<&str>,
+        #[case] expected: bool,
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
+        let stored = insert_call(
+            &db,
+            &NewCall {
+                units: vec![NewCallUnit {
+                    unit_ref: 1234567,
+                    ..Default::default()
+                }],
+                ..NewCall::new(11, 54241, 1_000)
+            },
+            crate::blob::StoredAudio::written("a/b.mp3".into(), 1).into(),
+            &Resolved::unresolved(),
+            true,
+            0,
+        )
+        .await
+        .expect("the stored Call");
+
+        let applied = apply_mined(
+            &db,
+            &stored,
+            &crate::mining::Mined {
+                unit: radio.map(|label| crate::mining::MinedUnit {
+                    unit_ref: 1234567,
+                    label: label.to_string(),
+                }),
+                site: site.map(str::to_string),
+                decoder: None,
+                frequency: None,
+            },
+            true,
+            2_000,
+        )
+        .await
+        .expect("apply what was mined");
+
+        assert_eq!(applied, expected);
     }
 
     // -- The decisions ingest makes, as values (#96) -------------------------

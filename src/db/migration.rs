@@ -28,6 +28,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0009_channel_merge::Migration),
             Box::new(m0010_emission_sequence::Migration),
             Box::new(m0011_units_first_class::Migration),
+            Box::new(m0012_mining_leaves_a_mark::Migration),
         ]
     }
 }
@@ -546,7 +547,7 @@ mod m0007_logs {
 /// `site_id` points at the `sites` table m0001 has created and nothing has ever
 /// written to — a plain column rather than a declared foreign key, for the
 /// reason spelled out on `call::Model::site_id`. rdio's generic `site` field is
-/// a bare number, but #48 backfills the same column from SDRTrunk's ID3 tags
+/// a bare number, but #48 fills the same column from SDRTrunk's ID3 tags
 /// where a site is a *name*, and a row is the only shape that holds both.
 ///
 /// Guarded column by column, for the reason m0003 wrote down: m0001 generates
@@ -1108,6 +1109,100 @@ mod m0011_units_first_class {
                 }
             }
             Ok(())
+        }
+    }
+}
+
+/// **Mining leaves a mark** (#48, spec US 13).
+///
+/// `calls.mined_at_ms` records that a Call's audio has been looked inside for
+/// the metadata its Recorder embedded there. It exists for one reason: the
+/// **Mining** sweep walks an Archive stored before any of this, and needs to
+/// know where it got to — across a restart, and across a Call it read and found
+/// nothing in.
+///
+/// **`NULL` is "never looked", and nothing else.** A Call whose audio held no
+/// tag, or a tag no SDRTrunk wrote, is stamped exactly like one that gave up a
+/// radio's name — otherwise every barren Call in the Archive is re-read on
+/// every sweep, forever, which on an S3 store is a bill rather than a delay.
+///
+/// **Existing rows keep `NULL`**, unlike m0010's, which stamped every row with
+/// its own id. There is no honest value to fill in here: nothing has read
+/// those objects, and claiming otherwise would skip the entire Archive this
+/// feature exists to enrich. The index is what makes finding them cheap.
+///
+/// Guarded like m0003's and m0010's, for the reason m0003 wrote down:
+/// `m0001_init` generates its DDL from the *live* entity, so a fresh database
+/// already has the column by the time this runs.
+mod m0012_mining_leaves_a_mark {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0012_mining_leaves_a_mark"
+        }
+    }
+
+    const INDEX: &str = "idx_calls_mined_at_ms";
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("calls", "mined_at_ms").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(
+                                ColumnDef::new(call::Column::MinedAtMs).big_integer().null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // The sweep asks "which Calls has nothing read yet, newest
+            // first?" on every tick, forever — and the answer is empty for the
+            // whole life of the Instance after the first pass finishes. Without
+            // this that is a scan of the entire Archive, on the Pi, to learn
+            // there is nothing to do.
+            //
+            // `id` rides along because the query orders by it. On the *first*
+            // sweep of a large Archive every row matches the `IS NULL`, so an
+            // index on the column alone would find half a million rows and then
+            // sort them to take a hundred — a sort bought once per tick for the
+            // whole of the sweep's life.
+            if !manager.has_index("calls", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(call::Entity)
+                            .col(call::Column::MinedAtMs)
+                            .col(call::Column::Id)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // The index first: SQLite refuses to drop a column an index still
+            // names, where Postgres drops the index along with it — m0010's
+            // note, and the reason it is written down there.
+            manager
+                .drop_index(Index::drop().name(INDEX).table(call::Entity).to_owned())
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call::Entity)
+                        .drop_column(call::Column::MinedAtMs)
+                        .to_owned(),
+                )
+                .await
         }
     }
 }

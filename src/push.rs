@@ -868,6 +868,7 @@ mod tests {
             emergency: false,
             encrypted: false,
             site_ref: None,
+            site_label: None,
             object_key: String::new(),
             audio_url: Some(String::new()),
         })

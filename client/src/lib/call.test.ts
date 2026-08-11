@@ -74,6 +74,20 @@ describe('siteName', () => {
     // every row would be clutter bought for nothing.
     expect(siteName(call)).toBeUndefined()
   })
+
+  it('prefers the tower’s real name once mining has found one (#48)', () => {
+    // "Site 1" tells a listener two towers apart; "Downtown" tells them which
+    // half of the county is talking. SDRTrunk buries the name in the ID3 of
+    // every MP3 it uploads, and mining is what digs it out.
+    expect(siteName({ ...call, siteRef: 1, siteLabel: 'Downtown' })).toBe('Downtown')
+  })
+
+  it('names a tower whose Ref this instance minted itself', () => {
+    // A mined Site has no Ref from the radio network — SDRTrunk sends none —
+    // so the server assigns the lowest free one purely to have an identity. It
+    // is not a number worth showing anybody, and the name is the whole point.
+    expect(siteName({ ...call, siteLabel: 'North Ridge' })).toBe('North Ridge')
+  })
 })
 
 describe('naming the radio that keyed (#47, spec US 42)', () => {

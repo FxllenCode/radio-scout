@@ -107,6 +107,23 @@ pub struct Model {
     /// Call whose emission could not be recorded. Nothing backfills one, which
     /// is the right reading either way: it has not gone out yet.
     pub emitted_seq: Option<i64>,
+    /// When this Call's audio was looked inside for the metadata its Recorder
+    /// embedded there — **Mining** (#48, CONTEXT.md).
+    ///
+    /// `NULL` means *never looked*, and that is the only thing it means. A Call
+    /// whose audio held nothing, or held something no SDRTrunk wrote, is
+    /// stamped exactly like one that gave up a radio's name: the question is
+    /// "has this been read?", not "did it say anything?". Anything else and the
+    /// sweep would re-read every barren Call in the Archive forever.
+    ///
+    /// Every Call stored since #48 is born stamped, because ingest mines in the
+    /// same pass it reads a duration in. `NULL` is therefore exactly the
+    /// Archive that existed before this — which is precisely the set the
+    /// **Mining** sweep has to walk.
+    ///
+    /// A transient failure — an object store that would not answer — leaves it
+    /// `NULL` on purpose, so the next sweep tries again.
+    pub mined_at_ms: Option<i64>,
     pub created_at_ms: i64,
 }
 

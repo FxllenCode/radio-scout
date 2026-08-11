@@ -670,6 +670,17 @@ async fn one_view<C: ConnectionTrait>(
 // Denormalizing
 // ---------------------------------------------------------------------------
 
+/// A **Site** as a Call is shown under it — the Ref a recorder would recognise,
+/// and the name a Listener reads.
+///
+/// A named pair rather than a tuple because both halves are optional-ish and
+/// only one of them is a number: read positionally, a swap is silent and every
+/// test still passes.
+struct Tower {
+    site_ref: i64,
+    label: Option<String>,
+}
+
 /// Denormalize a whole page of Calls in a fixed number of queries — six, no
 /// matter how many Calls — rather than six *per Call*.
 ///
@@ -738,13 +749,24 @@ pub async fn stored_calls<C: ConnectionTrait>(
     }
 
     // Sites (#42, spec US 11). The wire carries the recorder-facing **Ref**,
-    // like every other id a client sees; the column is an internal Id.
-    let site_refs: HashMap<i64, i64> = site::Entity::find()
+    // like every other id a client sees; the column is an internal Id. Since
+    // #48 it carries the tower's *name* too, which is the only thing a
+    // Listener can read — a Ref alone distinguishes towers without describing
+    // one, and on an SDRTrunk Call the Ref is this Instance's own numbering.
+    let sites: HashMap<i64, Tower> = site::Entity::find()
         .filter(site::Column::Id.is_in(distinct(calls.iter().filter_map(|c| c.site_id))))
         .all(db)
         .await?
         .into_iter()
-        .map(|s| (s.id, s.r#ref))
+        .map(|s| {
+            (
+                s.id,
+                Tower {
+                    site_ref: s.r#ref,
+                    label: s.label,
+                },
+            )
+        })
         .collect();
 
     // Patched Talkgroup Refs (rdio `patches[]`): carried on the wire and used for
@@ -826,7 +848,14 @@ pub async fn stored_calls<C: ConnectionTrait>(
                 duration_ms: call.duration_ms,
                 emergency: call.emergency,
                 encrypted: call.encrypted,
-                site_ref: call.site_id.and_then(|id| site_refs.get(&id).copied()),
+                site_ref: call
+                    .site_id
+                    .and_then(|id| sites.get(&id))
+                    .map(|tower| tower.site_ref),
+                site_label: call
+                    .site_id
+                    .and_then(|id| sites.get(&id))
+                    .and_then(|tower| tower.label.clone()),
                 object_key: call.object_key.clone(),
                 // An empty key means no object was ever written — an encrypted
                 // Call (#42). Offering a URL for it would be offering a 404.
@@ -1690,6 +1719,7 @@ mod tests {
             emergency: false,
             encrypted: false,
             site_ref: None,
+            site_label: None,
             object_key: "ab/opaque-key.m4a".into(),
             audio_url: Some("/api/call/42/audio".into()),
         }

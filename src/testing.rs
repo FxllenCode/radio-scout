@@ -218,3 +218,123 @@ impl LogCapture {
         );
     }
 }
+
+/// Hand-rolled ID3v2.4, for the tests of everything that reads one (#48).
+///
+/// Here rather than in one module's `mod tests` because three of them need it —
+/// the probe that decodes a frame, the dialect that interprets it, and the
+/// sweep that reads one out of a store — and a fixture reached across modules
+/// through a `pub(crate) mod tests` is a shared helper pretending not to be.
+///
+/// Hand-rolled on purpose: a test sharing its writer with the code under test
+/// cannot tell a wrong header from a consistently wrong one. `tests/common`
+/// carries its own, deliberately — that one is about what *SDRTrunk* writes,
+/// where this is about what the format allows.
+#[cfg(test)]
+pub mod id3 {
+    /// ID3v2's 28-bit size: four bytes, seven bits each, so a length can never
+    /// contain a byte that looks like an MPEG sync word.
+    pub fn synchsafe(n: u32) -> [u8; 4] {
+        [
+            ((n >> 21) & 0x7f) as u8,
+            ((n >> 14) & 0x7f) as u8,
+            ((n >> 7) & 0x7f) as u8,
+            (n & 0x7f) as u8,
+        ]
+    }
+
+    /// One ID3v2.4 frame: id, synchsafe payload length, two flag bytes, body.
+    pub fn frame(id: &[u8; 4], body: Vec<u8>) -> Vec<u8> {
+        let mut out = id.to_vec();
+        out.extend(synchsafe(body.len() as u32));
+        out.extend([0u8, 0u8]);
+        out.extend(body);
+        out
+    }
+
+    /// A text frame's body: an encoding byte, then the text. `0x03` is UTF-8.
+    pub fn text(id: &[u8; 4], value: &str) -> Vec<u8> {
+        let mut body = vec![0x03];
+        body.extend(value.as_bytes());
+        frame(id, body)
+    }
+
+    /// A text frame under a named ID3v2 text encoding, for the one thing the
+    /// fixtures above cannot decide for themselves — see
+    /// [`every_text_encoding_id3_allows_comes_back_as_the_same_string`].
+    pub fn text_encoded(id: &[u8; 4], encoding: u8, value: &str) -> Vec<u8> {
+        let mut body = vec![encoding];
+        match encoding {
+            // ISO-8859-1: one byte per code point, for the Latin-1 subset.
+            0x00 => body.extend(value.chars().map(|c| c as u8)),
+            // UTF-16 with a BOM, then UTF-16BE without one.
+            0x01 => {
+                body.extend([0xFF, 0xFE]);
+                body.extend(value.encode_utf16().flat_map(u16::to_le_bytes));
+            }
+            0x02 => body.extend(value.encode_utf16().flat_map(u16::to_be_bytes)),
+            _ => body.extend(value.as_bytes()),
+        }
+        frame(id, body)
+    }
+
+    /// A `COMM` body: encoding, a three-byte language, a null-terminated short
+    /// description, then the comment itself.
+    pub fn comment(value: &str) -> Vec<u8> {
+        let mut body = vec![0x03];
+        body.extend(b"eng");
+        body.push(0); // an empty description, which is what mp3agic writes
+        body.extend(value.as_bytes());
+        frame(b"COMM", body)
+    }
+
+    /// An MP3 carrying `frames` of ID3v2.4 ahead of two seconds of audio —
+    /// the shape SDRTrunk uploads, whose tag is written *before* the first
+    /// MPEG frame by `AudioSegmentRecorder.recordMP3`.
+    pub fn tagged_mp3(frames: Vec<Vec<u8>>) -> Vec<u8> {
+        let body: Vec<u8> = frames.concat();
+        let mut out = b"ID3".to_vec();
+        out.extend([0x04, 0x00, 0x00]); // v2.4, revision 0, no flags
+        out.extend(synchsafe(body.len() as u32));
+        out.extend(body);
+        out.extend(mpeg(40));
+        out
+    }
+
+    /// A constant-bitrate MPEG-1 Layer III stream of `frames` frames — mono,
+    /// 44.1 kHz, 128 kbps, no CRC, no padding, and deliberately **no Xing
+    /// header**, which is the shape a recorder writing a live stream produces.
+    ///
+    /// Frame size is `144 * 128000 / 44100 = 417` bytes; the four header bytes
+    /// are followed by silence, because nothing here decodes a sample.
+    pub fn mpeg(frames: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..frames {
+            out.extend([0xFF, 0xFB, 0x90, 0xC0]);
+            out.extend(std::iter::repeat_n(0u8, 417 - 4));
+        }
+        out
+    }
+
+    /// A mono 16-bit PCM WAV of exactly `samples` frames at `rate`, built by
+    /// hand — a probe that shared its writer with the code under test could not
+    /// tell a wrong header from a consistently wrong one.
+    pub fn wav(samples: usize, rate: u32) -> Vec<u8> {
+        let data = vec![0u8; samples * 2];
+        let mut out = Vec::new();
+        out.extend(b"RIFF");
+        out.extend(((36 + data.len()) as u32).to_le_bytes());
+        out.extend(b"WAVEfmt ");
+        out.extend(16u32.to_le_bytes()); // PCM fmt chunk size
+        out.extend(1u16.to_le_bytes()); // PCM
+        out.extend(1u16.to_le_bytes()); // mono
+        out.extend(rate.to_le_bytes());
+        out.extend((rate * 2).to_le_bytes()); // byte rate
+        out.extend(2u16.to_le_bytes()); // block align
+        out.extend(16u16.to_le_bytes()); // bits
+        out.extend(b"data");
+        out.extend((data.len() as u32).to_le_bytes());
+        out.extend(data);
+        out
+    }
+}

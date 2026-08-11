@@ -18,7 +18,10 @@ Point your recorder at it and calls start arriving. Radio-Scout speaks rdio-scan
 API exactly — same endpoint, same fields, same response strings — so **Trunk Recorder and
 SDRTrunk need no plugin and no patch**, just a different URL. Trunk Recorder can send more
 than that dialect carries, with one shipped script and one line of config; both paths are in
-[the recorder guide](docs/recorders.md). Everything downstream of that upload is rebuilt.
+[the recorder guide](docs/recorders.md). And SDRTrunk sends more than it knows: the radio
+aliases and site names you set up in it ride inside every MP3 it uploads, and Radio-Scout
+reads them — from new calls as they arrive, and from the archive you already had. Everything
+downstream of that upload is rebuilt.
 
 It is one file. The web app is compiled into the binary, the first run creates its own
 database and audio store, and there is nothing else to install — no runtime, no ffmpeg, no

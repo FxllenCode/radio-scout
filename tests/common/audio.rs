@@ -1,14 +1,18 @@
 //! Real audio for the tests that need a Call to *be* something.
 //!
 //! Most of the suite uploads [`CallUpload::DEFAULT_AUDIO`] — eleven bytes that
-//! are deliberately not audio, because ingest neither decodes nor cares. Two
-//! things do care: the enhancement pipeline (#20), which decodes, and the
-//! duration probe (#42), which reads a header. Both need a file that is really
-//! a file.
+//! are deliberately not audio, because ingest neither decodes nor cares. Three
+//! things do care: the enhancement pipeline (#20), which decodes, the duration
+//! probe (#42), which reads a header, and **Mining** (#48), which reads the
+//! metadata a Recorder wrote *into* the file. All three need a file that is
+//! really a file.
 //!
-//! [`wav`] is hand-rolled rather than written with the crate the enhancement
-//! pipeline encodes with — a test sharing its writer with the code under test
-//! cannot tell a wrong header from a consistently wrong one.
+//! [`wav`] and [`SdrTrunkMp3`] are hand-rolled rather than written with a
+//! library — a test sharing its writer with the code under test cannot tell a
+//! wrong header from a consistently wrong one. `src/audio_meta.rs`'s own unit
+//! tests hand-roll an ID3 tag too, and the duplication is deliberate: that one
+//! is about whether a frame *decodes*, this one is about what SDRTrunk *writes*,
+//! and a shared fixture would let a change to either quietly satisfy both.
 
 /// A mono 16-bit PCM WAV of `samples` at `rate`.
 pub fn wav(samples: &[f32], rate: u32) -> Vec<u8> {
@@ -39,4 +43,133 @@ pub fn silence_ms(millis: i64) -> Vec<u8> {
     const RATE: u32 = 8_000;
     let samples = (millis as usize * RATE as usize) / 1000;
     wav(&vec![0.0; samples], RATE)
+}
+
+/// An MP3 shaped the way SDRTrunk uploads one (#48).
+///
+/// `AudioSegmentRecorder.recordMP3` writes an ID3v2.4 tag and *then* the MPEG
+/// frames, and `RdioScannerBroadcaster` posts that file's bytes verbatim — so
+/// this is what actually arrives on the ingest path from an SDRTrunk instance.
+///
+/// The default carries SDRTrunk's own [`Self::COMPOSER`] and nothing else, so a
+/// test says only the frame it is about.
+#[derive(Debug, Clone)]
+pub struct SdrTrunkMp3 {
+    frames: Vec<(String, String)>,
+    mpeg_frames: usize,
+}
+
+impl SdrTrunkMp3 {
+    /// How SDRTrunk stamps its own name into `TCOM`
+    /// (`SystemProperties.getApplicationName()`), which is the only thing that
+    /// tells its uploads from every other MP3 in an Archive.
+    pub const COMPOSER: &'static str = "sdrtrunk v0.6.1";
+    /// The length of the default stream: 40 Layer III frames at 44.1 kHz.
+    pub const DURATION_MS: i64 = 1044;
+
+    /// An SDRTrunk MP3 that says who wrote it and nothing more — the
+    /// zero-configuration install, where no radio and no tower has a name.
+    pub fn new() -> Self {
+        SdrTrunkMp3 {
+            frames: vec![("TCOM".into(), Self::COMPOSER.into())],
+            mpeg_frames: 40,
+        }
+    }
+
+    /// `TPE1`: the FROM radio, then each alias SDRTrunk had configured for it,
+    /// space-separated — `1234567 Engine 1`.
+    pub fn radio(self, artist: impl Into<String>) -> Self {
+        self.frame("TPE1", artist)
+    }
+
+    /// `COMM`: SDRTrunk's `Key:Value;` run, holding the tower, the decoder and
+    /// the frequency among others.
+    pub fn comment(self, comment: impl Into<String>) -> Self {
+        self.frame("COMM", comment)
+    }
+
+    /// Any frame, including ones SDRTrunk would never write — how a test says
+    /// "this MP3 came from something else".
+    pub fn frame(mut self, id: &str, value: impl Into<String>) -> Self {
+        self.frames.retain(|(name, _)| name != id);
+        self.frames.push((id.to_string(), value.into()));
+        self
+    }
+
+    /// Drop the frame that names SDRTrunk, leaving an MP3 with a tag that is
+    /// nobody's dialect.
+    pub fn anonymous(mut self) -> Self {
+        self.frames.retain(|(name, _)| name != "TCOM");
+        self
+    }
+
+    /// How many MPEG frames follow the tag — 1152 samples at 44.1 kHz each, so
+    /// this is how a test gives two copies of a transmission different lengths.
+    pub fn mpeg_frames(mut self, frames: usize) -> Self {
+        self.mpeg_frames = frames;
+        self
+    }
+
+    /// The file.
+    pub fn bytes(&self) -> Vec<u8> {
+        let body: Vec<u8> = self
+            .frames
+            .iter()
+            .map(|(id, value)| id3_frame(id, value))
+            .collect::<Vec<_>>()
+            .concat();
+        let mut out = b"ID3".to_vec();
+        out.extend([0x04, 0x00, 0x00]); // v2.4, revision 0, no flags
+        out.extend(synchsafe(body.len() as u32));
+        out.extend(body);
+        out.extend(mpeg(self.mpeg_frames));
+        out
+    }
+}
+
+impl Default for SdrTrunkMp3 {
+    fn default() -> Self {
+        SdrTrunkMp3::new()
+    }
+}
+
+/// ID3v2's 28-bit size: four bytes of seven bits, so a length can never contain
+/// a byte that looks like an MPEG sync word.
+fn synchsafe(n: u32) -> [u8; 4] {
+    [
+        ((n >> 21) & 0x7f) as u8,
+        ((n >> 14) & 0x7f) as u8,
+        ((n >> 7) & 0x7f) as u8,
+        (n & 0x7f) as u8,
+    ]
+}
+
+/// One ID3v2.4 frame. `COMM` carries a language and a short description ahead
+/// of its text where a text frame carries only an encoding byte, which is the
+/// one structural difference mp3agic writes and this has to match.
+fn id3_frame(id: &str, value: &str) -> Vec<u8> {
+    let mut body = vec![0x03]; // UTF-8
+    if id == "COMM" {
+        body.extend(b"eng");
+        body.push(0); // an empty description
+    }
+    body.extend(value.as_bytes());
+
+    let mut out = id.as_bytes().to_vec();
+    out.extend(synchsafe(body.len() as u32));
+    out.extend([0u8, 0u8]);
+    out.extend(body);
+    out
+}
+
+/// A constant-bitrate MPEG-1 Layer III stream — mono, 44.1 kHz, 128 kbps, and
+/// deliberately no Xing header, which is the shape a recorder writing a live
+/// stream produces. Frame size is `144 * 128000 / 44100 = 417` bytes.
+fn mpeg(frames: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for _ in 0..frames {
+        out.extend([0xFF, 0xFB, 0x90, 0xC0]);
+        out.extend(std::iter::repeat_n(0u8, 417 - 4));
+    }
+    out
 }

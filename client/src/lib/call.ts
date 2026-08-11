@@ -27,9 +27,13 @@ export function callCategory(call: Call): string {
  *  the line simply doesn't carry the field.
  *
  *  A bare number is all a recorder sends (rdio's `site` is an integer), and it
- *  is enough: telling tower 3 from tower 7 is the whole of what makes simulcast
- *  coverage legible. #48 backfills real site names from SDRTrunk's ID3 tags. */
+ *  is enough on its own: telling tower 3 from tower 7 is the whole of what
+ *  makes simulcast coverage legible. A real name is better, and mining #48
+ *  SDRTrunk's ID3 is where one comes from — so the name wins wherever there is
+ *  one, and on a mined Site the Ref behind it is this instance's own numbering
+ *  rather than anything the radio network assigned. */
 export function siteName(call: Call): string | undefined {
+  if (call.siteLabel !== undefined) return call.siteLabel
   return call.siteRef === undefined ? undefined : `Site ${call.siteRef}`
 }
 

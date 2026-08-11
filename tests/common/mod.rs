@@ -72,7 +72,7 @@ mod ws;
 // allow is scoped to the re-exports alone — the module's own `use` statements
 // below stay checked.
 #[allow(unused_imports)]
-pub use audio::{silence_ms, wav};
+pub use audio::{SdrTrunkMp3, silence_ms, wav};
 #[allow(unused_imports)]
 pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faults_over_store, faulty_store};
 #[allow(unused_imports)]
@@ -94,7 +94,9 @@ use radio_scout::admin::CSRF_HEADER;
 use radio_scout::blob::{AudioStore, StoredAudio};
 use radio_scout::config::{Cli, Config};
 use radio_scout::db::Db;
-use radio_scout::db::entities::{call, call_patch, system, tag, talkgroup, talkgroup_ref, unit};
+use radio_scout::db::entities::{
+    call, call_patch, site, system, tag, talkgroup, talkgroup_ref, unit,
+};
 use radio_scout::db::repo::{self, NewCall, NewLogEvent};
 use radio_scout::enhance::EnhancementConfig;
 use radio_scout::instance::{self, Credentials, Instance, Wiring};
@@ -841,6 +843,60 @@ impl TestApp {
         .insert(&self.db)
         .await
         .expect("seed unit");
+    }
+
+    /// When this Call's audio was looked inside for embedded metadata (#48).
+    ///
+    /// `None` is "never looked", which is the whole state the backfill Worker
+    /// navigates by — so a test about resuming, retrying or terminating asks
+    /// this rather than inferring it from what the Call ended up holding.
+    pub async fn mined_at(&self, call_id: i64) -> Option<i64> {
+        call::Entity::find_by_id(call_id)
+            .one(&self.db)
+            .await
+            .expect("look the Call up")
+            .expect("the Call is still there")
+            .mined_at_ms
+    }
+
+    /// Every Site this System knows, as `(Ref, name)`, lowest Ref first.
+    ///
+    /// The Refs matter and are not decoration: a **Mining**-discovered tower
+    /// has no Ref from the radio network, so this Instance mints the lowest
+    /// free one (#48) — and "lowest free" is only distinguishable from "always
+    /// 1" once a System owns two.
+    pub async fn site_refs(&self, system_ref: i64) -> Vec<(i64, String)> {
+        let system = repo::resolve_or_create_system(&self.db, system_ref, None, 0)
+            .await
+            .expect("the system whose towers are listed");
+        let mut sites: Vec<(i64, String)> = site::Entity::find()
+            .filter(site::Column::SystemId.eq(system.id))
+            .all(&self.db)
+            .await
+            .expect("list sites")
+            .into_iter()
+            .map(|s| (s.r#ref, s.label.unwrap_or_default()))
+            .collect();
+        sites.sort();
+        sites
+    }
+
+    /// Name a Site that already exists — the curation #49's admin surface will
+    /// do, and what **Mining** (#48) must never overwrite.
+    pub async fn name_site(&self, system_ref: i64, site_ref: i64, label: &str) {
+        let system = repo::resolve_or_create_system(&self.db, system_ref, None, 0)
+            .await
+            .expect("the named Site's system");
+        let site = site::Entity::find()
+            .filter(site::Column::SystemId.eq(system.id))
+            .filter(site::Column::Ref.eq(site_ref))
+            .one(&self.db)
+            .await
+            .expect("look the Site up")
+            .expect("the Site being named exists");
+        let mut named: site::ActiveModel = site.into();
+        named.label = Set(Some(label.to_string()));
+        named.update(&self.db).await.expect("name the Site");
     }
 
     /// Give an existing Unit a Range of Refs to answer to — a fleet's numbered

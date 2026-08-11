@@ -1,11 +1,11 @@
 //! One lifecycle envelope for every background worker (#93).
 //!
 //! A **Worker** (CONTEXT.md) is a background task an Instance owns. There are
-//! four — the retention sweeper, the Web Push sender, the enhancement worker
-//! and the operator log writer — and before this module each had invented its
-//! own answers to the same four questions: how it is started, how it is
-//! stopped, how much work it has in hand, and how anything else knows it has
-//! settled.
+//! five — the retention sweeper, the Web Push sender, the enhancement worker,
+//! the **Mining** sweep (#48) and the operator log writer — and before this
+//! module each had invented its own answers to the same four questions: how it
+//! is started, how it is stopped, how much work it has in hand, and how
+//! anything else knows it has settled.
 //!
 //! The loop bodies stay hand-written. A ticker, a bounded queue, a broadcast
 //! subscription and a batching drain genuinely differ, and shapes that merely
@@ -19,7 +19,7 @@ use tokio::sync::watch;
 
 /// How much work a Worker has in hand, as an Operator reads it.
 ///
-/// One shape for all four, because a status surface (#70) shows them in one
+/// One shape for all of them, because a status surface (#70) shows them in one
 /// table. A worker with no queue still has a depth: the retention sweeper's is
 /// `1` while a sweep is running and `0` while it waits for the next tick, which
 /// is exactly its health reading — a depth stuck at `1` is a sweep that never

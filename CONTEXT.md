@@ -49,6 +49,8 @@ _Avoid_: radio, source, subscriber.
 **Site**:
 A physical tower/receiver site within a system that a call was heard on. Discovered from traffic the way a **Talkgroup** is — never gated on **Auto-populate**, because a tower is the System's own infrastructure rather than a channel that could clutter a panel.
 
+**A Ref identifies a Site and a name names it, and a Recorder may know either.** The rdio dialect's `site` is a number with no name behind it; **Mining** finds a name with no number beside it, because SDRTrunk sends no `site` field at all. Where only a name arrives, a Ref is **minted** — the lowest free one in that System, the same answer #8 gives a System that Trunk Recorder identified by name alone — and it is this Instance's own numbering rather than anything the radio network assigned. Which is why a Listener is shown the name wherever there is one.
+
 **Duration**:
 How long a **Call**'s transmission lasted. From the **Recorder**'s own metadata when it sent any, otherwise read from the audio's container header at **Ingest** — never by decoding. Every Call carries one except where neither could say, and "unknown" is distinct from "zero": an unmeasured Call matches no length filter.
 _Avoid_: length (the recorder's word — TR's `call_length` — reserve it for the wire field), runtime, playtime.
@@ -209,6 +211,14 @@ _Avoid_: update, overwrite, upgrade. (*Swap* is fine for the **mechanism** — i
 Automatically creating an unknown system/talkgroup/unit the first time a call for it is ingested, so the archive is usable with zero manual configuration.
 _Avoid_: auto-create, discovery.
 
+**Mining**:
+Reading what a **Recorder** wrote *inside* a **Call**'s audio, and folding it into the **Archive**. SDRTrunk buries an ID3 tag in every MP3 it uploads carrying the radio alias and the tower name an **Operator** configured — none of which its upload dialect has a field for, and it has no plugin mechanism to teach. So the facts arrive already; nothing had ever looked.
+
+Mining **fills and never overwrites**: the wire is the Recorder speaking now and the container is a snapshot it wrote earlier, so where both answer the live one is believed, and a curated name survives (the **Auto-populate** rule, one layer up). A name is applied only to a radio the Call actually heard — the tag names one radio at one moment, and hanging it on whichever **Unit** the Call happens to list would put an apparatus's name on a different apparatus.
+
+It happens twice: at **Ingest**, in the same pass that reads a Call's **Duration**, because the live-feed frame goes out there and nothing republishes one; and as a **Sweep** over the Archive that was already there. It is always a **read** — mining never rewrites an audio object, which is what keeps a stored Call's bytes immutable.
+_Avoid_: tag mining (**Tag** is a Talkgroup's service label), scraping, extraction, transcription (which is banned outright, [ADR-0013](docs/adr/0013-no-transcription.md), and is about *speech* — this is about a file header).
+
 **Downstream**:
 Another instance this **Instance** forwards matching **Calls** to, speaking the rdio upload dialect, scoped per System/Talkgroup. Forwarding only — *receiving* a peer's downstream is just **Ingest** with an API key.
 _Avoid_: relay, mirror, federation, upstream.
@@ -265,7 +275,7 @@ One running Radio-Scout: a process, its **Archive**, its configuration and its *
 _Avoid_: scanner, server, deployment, node, site (Site is a tower).
 
 **Worker**:
-A background task an **Instance** owns and can account for. There are four — the **Retention** sweeper, the **Web Push** sender, the **enhancement** worker, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
+A background task an **Instance** owns and can account for. There are five — the **Retention** sweeper, the **Web Push** sender, the **enhancement** worker, the **Mining** backfill, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
 _Avoid_: job, task, background thread, daemon (a **Service** is the operating system's).
 
 **Service**:
@@ -299,8 +309,10 @@ A named, curated collection of **Calls** — an incident assembled by hand — f
 _Avoid_: incident (the real-world happening, not the collection), playlist, compilation.
 
 **Sweep**:
-One pass of the retention policy over the archive — age out, then enforce the size cap, then reclaim orphans. Runs at startup and on an interval.
-_Avoid_: job, cron, scheduler run.
+One pass of a periodic policy over the **Archive**, run at startup and on an interval. There are two: **Retention**'s — age out, then enforce the size cap, then reclaim orphans — and **Mining**'s, which reads the Calls nothing has looked inside yet. Both are bounded per pass and resume where they stopped, because an Instance that restarts more often than its interval must still make progress.
+
+Deliberately not a **Backfill**: that is the Listener's missed Calls, replayed on reconnect, and the two have nothing in common but the direction of travel.
+_Avoid_: job, cron, scheduler run, backfill.
 
 **Prune**:
 Removing a call from the archive because retention says so: its metadata row first, then its audio object.

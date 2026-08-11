@@ -283,6 +283,12 @@ and typing the path in yourself is harmless because the editor strips it first.
 > this before uploading them. If Radio-Scout is down for longer than that window, those Calls
 > are gone — they are not queued and retried. Set it deliberately.
 
+There is nothing else to set up. In particular, **the radio aliases and site names you have
+configured in SDRTrunk reach Radio-Scout on their own**, even though its upload API has no field
+for either: SDRTrunk writes them into the ID3 tag of every MP3 it uploads, and Radio-Scout reads
+them as each Call arrives. It also goes back over Calls you uploaded before. See
+[Names SDRTrunk was already sending you](operating.md#names-sdrtrunk-was-already-sending-you).
+
 ---
 
 ## Checking it works

@@ -51,6 +51,10 @@ export interface Call {
   encrypted?: boolean
   /** The Site (tower) this was heard on, for multi-site systems (spec US 11). */
   siteRef?: number
+  /** What that tower is called (#48, spec US 13). Independent of `siteRef`:
+   *  a recorder sends a Ref and no name, and mining SDRTrunk's ID3 finds a
+   *  name with no Ref beside it. */
+  siteLabel?: string
   /** Where to fetch the audio (audio never rides the live-feed socket).
    *
    *  **Absent when there is nothing to fetch** — an encrypted Call. That is

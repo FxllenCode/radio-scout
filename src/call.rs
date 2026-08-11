@@ -256,6 +256,17 @@ pub struct StoredCall {
     /// US 11). Absent unless a recorder named one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub site_ref: Option<i64>,
+    /// What that tower is called, where anybody knows (#48, spec US 13).
+    ///
+    /// A Ref alone renders as "Site 3", which distinguishes towers without
+    /// saying anything about them. **Mining** SDRTrunk's ID3 is the one source
+    /// of a real name today — its rdio broadcaster sends no `site` field, so a
+    /// name arrives with no Ref beside it and one is minted. Which means the
+    /// two halves are independent on the wire: a Call may carry a Ref with no
+    /// name (every rdio-dialect Call there has ever been) or a name whose Ref
+    /// is this Instance's own numbering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_label: Option<String>,
     /// Where the audio lives in the object store. Internal; not serialized.
     #[serde(skip)]
     pub object_key: String,
@@ -629,6 +640,7 @@ mod tests {
             emergency: true,
             encrypted: false,
             site_ref: Some(3),
+            site_label: Some("Downtown".into()),
             object_key: "ab/secret-internal-key.m4a".into(),
             audio_url: Some("/api/call/42/audio".into()),
         }
@@ -685,6 +697,7 @@ mod tests {
             emergency: false,
             encrypted: false,
             site_ref: None,
+            site_label: None,
             object_key: "internal".into(),
             audio_url: Some("/api/call/1/audio".into()),
         };

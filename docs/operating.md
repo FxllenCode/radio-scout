@@ -275,6 +275,35 @@ curl -X POST 'http://localhost:3000/api/admin/units/import?system=411&dryRun=tru
   (`range-overlaps`) and the message names the span in the way; a radio inside two blocks would
   otherwise belong to whichever row the database happened to return first.
 
+### Names SDRTrunk was already sending you
+
+If you run SDRTrunk, the radio aliases and site names you set up in it are **already in your
+archive** — they have been all along, and nothing has been reading them.
+
+SDRTrunk's upload API has no field for either. But every MP3 it uploads carries an ID3 tag it
+wrote on the way past, holding the alias list you configured for the radio that keyed, the name
+of the tower that channel is tuned to, and what it was being demodulated as. Radio-Scout reads
+that tag as each call arrives, and a background sweep goes back over the calls you already had.
+
+Nothing to configure, and nothing to change on the recorder. What you get:
+
+- radios named the way you named them in SDRTrunk, not just the `talkerAlias` they broadcast;
+- **real site names** — "Downtown" instead of "Site 1" — which is the only way an SDRTrunk call
+  gets a site at all, since its uploads carry no site field;
+- the decoder (`P25 Phase 1`, `DMR`) on each call.
+
+A name you have written down here always wins: this fills in blanks and never overwrites a unit
+or site you have named, and never overwrites anything the recorder itself sent on the upload.
+
+The sweep over your existing archive is bounded and picks up where it left off after a restart —
+about 12 000 calls an hour by default, so a hundred thousand are done overnight. It reads each
+stored call exactly once and then has nothing left to do, and it never rewrites audio.
+
+The one decision worth making is whether to run it at all. If your audio lives on metered object
+storage, `[mining] sweep = false` skips the one read per stored call it would otherwise cost —
+and new calls are still mined as they arrive, because that happens on the way in and is not a
+setting. Its pace is `[mining] interval_secs` and `batch_size`; `--write-config` describes both.
+
 ### Hearing each call once
 
 A console patch makes your recorder upload the same transmission once for every talkgroup in the
