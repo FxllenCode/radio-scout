@@ -162,9 +162,6 @@ Everything under `/api/admin/` is gated by the admin password. There is **no def
 — first run generates one into `.env`, and if it cannot write it, the admin surface stays shut
 rather than opening with something guessable.
 
-There is no admin web UI yet. Today the surface is login/logout and CSV import — talkgroups and
-units.
-
 Sessions have both an **idle** window (refreshed by use) and an **absolute** lifetime (never
 refreshed) — the second is the bound on a cookie somebody walked off with. Failed logins are
 rate-limited per source address; the cooldown runs from the *last* attempt, so hammering keeps
@@ -174,6 +171,37 @@ it locked and walking away clears it.
 > is marked `Secure` only when a *trusted* proxy reports `X-Forwarded-Proto: https`. With the
 > list empty — what ships — that header is never believed, and an HTTPS deployment still hands
 > out a cookie a browser will replay over plain `http://` to the same host.
+
+### Running the instance from a browser
+
+**Settings → Admin.** Everything an instance is made of is editable there, so running one never
+needs SSH:
+
+| Screen | What it owns |
+| --- | --- |
+| **Talkgroups** | labels, names, tags, groups, LED colours, blacklists — filtered and paged, with **multi-select bulk assignment** so categorising a county is one action rather than an afternoon |
+| **Systems** | label, ref, the per-system auto-populate toggle, the enhancement scope, and the raw blacklist |
+| **Units** | naming the radios, filtered to *the ones nobody has named yet* |
+| **Groups** / **Tags** | the two category vocabularies, with a count of what is behind each |
+| **API keys** | issue (shown once), label, scope to a System, disable, revoke |
+
+Four things are worth knowing before you start:
+
+- **A delete that would take Calls with it is refused**, and says how many. Removing Calls is
+  [Retention's](#retention) job — it deletes the row, the audio object and reclaims the orphans
+  behind it. If you mean it, the refusal itself offers the button that goes through with it.
+- **Blacklisting is a toggle on the talkgroup row.** It writes the Ref onto its System's list,
+  which is the same field the System form shows — use that one to refuse a Ref *before* its
+  channel exists, which is how you stop a patch-minted TGID from ever cluttering the panel.
+- **An API key is shown exactly once.** They are stored hashed, so nothing can show one again;
+  copy it when you issue it. **Disable** is the reversible off and **Revoke** deletes the row —
+  both stick, including across a restart with `RADIO_SCOUT_API_KEY` still set.
+- **Nothing is silently ignored.** A name already taken, a Ref another channel answers to, an
+  LED outside the palette, a blank required field — each is refused, named, and shown beside the
+  input that caused it. Ports, storage and retention are still `radio-scout.toml`'s: this screen
+  owns the entities Calls are addressed to, not the machine.
+
+Bulk CSV import is still there and still the fastest way to name a county at once — see below.
 
 ### Tidying up talkgroup names
 

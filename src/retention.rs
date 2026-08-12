@@ -495,6 +495,38 @@ async fn prune_batch(
     batch: &[PrunableCall],
     report: &mut SweepReport,
 ) -> Result<(), SweepError> {
+    let pruned = prune(db, store, batch).await?;
+    report.bytes_freed += pruned.bytes_freed;
+    report.object_errors += pruned.object_errors;
+    Ok(())
+}
+
+/// What one [`prune`] reclaimed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pruned {
+    pub bytes_freed: u64,
+    /// Objects whose delete failed. The row is already gone, so orphan-GC picks
+    /// them up on a later sweep.
+    pub object_errors: u64,
+}
+
+/// Delete one batch of Calls: **rows first, then their audio objects.**
+///
+/// The order is ADR-0002's, inverted from the write: an object with no row is an
+/// **Orphan** the GC pass reclaims, where a row with no object is a Call that
+/// plays as a 404 for as long as it survives retention. A failed object delete is
+/// therefore counted, never fatal — one unhappy object must not wedge a sweep
+/// forever.
+///
+/// `pub(crate)` because curation's force-delete (#49) removes Calls too, and a
+/// second copy of this is how audio gets stranded in a bucket. One pass, two
+/// callers — the rule #46 applies to a Call's columns, applied to its removal.
+pub(crate) async fn prune(
+    db: &Db,
+    store: &dyn AudioStore,
+    batch: &[PrunableCall],
+) -> Result<Pruned, SweepError> {
+    let mut pruned = Pruned::default();
     let ids: Vec<CallId> = batch.iter().map(|call| call.id).collect();
     let txn = db.begin().await?;
     repo::delete_calls(&txn, &ids).await?;
@@ -509,7 +541,7 @@ async fn prune_batch(
             continue;
         }
         match store.delete(&call.object_key).await {
-            Ok(()) => report.bytes_freed += call.audio_size as u64,
+            Ok(()) => pruned.bytes_freed += call.audio_size as u64,
             Err(error) => {
                 // Say *why*, or the operator gets a count and no lead. The row is
                 // already gone, so the object is an orphan the GC pass retries.
@@ -518,11 +550,11 @@ async fn prune_batch(
                     %error,
                     "could not delete pruned audio object"
                 );
-                report.object_errors += 1;
+                pruned.object_errors += 1;
             }
         }
     }
-    Ok(())
+    Ok(pruned)
 }
 
 #[cfg(test)]

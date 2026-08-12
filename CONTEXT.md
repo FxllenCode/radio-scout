@@ -207,6 +207,12 @@ _Avoid_: version, variant, instance (an **Instance** is a running Radio-Scout), 
 A later-arriving **Copy** that turns out to be better taking the stored **Call**'s place — its audio and everything the Recorder said about the transmission — **under the same Call id**. Not a new Call and not an edit to one: the id, the **Talkgroup**, the instant and the position in the **Archive** are what a **listening queue**, a **Run** and an open page are all keyed on, so they stay. Nothing is published to the **live feed** for one, because the Listener already has that Call and a second frame would play it twice. Bounded: a Call stops being replaceable once its dedup window has closed, which is what lets its audio URL be promised immutable.
 _Avoid_: update, overwrite, upgrade. (*Swap* is fine for the **mechanism** — it is what **Enhancement** does to an object too — but a Replacement is the whole act, not the write.)
 
+**Curation**:
+What an **Operator** edits about the entities themselves — a **Talkgroup**'s label, LED and blacklisting, a **Unit**'s name, which **Group**s a channel belongs to, which **API key** a **Recorder** holds. Distinct from **Configuration**, which is the machine: ports, storage, retention and the credentials live in `radio-scout.toml` and the environment, and nothing curated is ever written there.
+
+**Curation always wins over discovery.** **Auto-populate** fills blanks and **Mining** fills blanks; a name an Operator wrote down is never overwritten by either. And curation is per row: one entity, one request, so two browsers editing different channels cannot undo each other.
+_Avoid_: admin (the *surface* curation happens on), configuration (the machine's), editing, management.
+
 **Auto-populate**:
 Automatically creating an unknown system/talkgroup/unit the first time a call for it is ingested, so the archive is usable with zero manual configuration.
 _Avoid_: auto-create, discovery.

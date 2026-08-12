@@ -12,6 +12,7 @@ pub mod blob;
 pub mod call;
 pub mod catalog;
 pub mod config;
+pub mod curate;
 pub mod db;
 pub mod enhance;
 pub mod failure;
@@ -227,6 +228,12 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
         )
         // A fleet's numbering scheme in one paste (#47, spec US 43).
         .route("/api/admin/units/import", post(import::import_unit_csv))
+        // Running the Instance from a browser (#49, spec US 45–46): Systems,
+        // Talkgroups, Groups, Tags, Units and API keys. Merged rather than
+        // written out here, so the whole surface is gated by the one
+        // `route_layer` below — which is the property a route added to
+        // `curate::routes` inherits without knowing it exists.
+        .merge(curate::routes())
         // `route_layer`, not `layer`: it runs only for paths this router
         // matched, so an unrouted URL still 404s rather than being told to log
         // in first — which would turn the guard into a map of what exists.

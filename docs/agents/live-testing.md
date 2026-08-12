@@ -26,7 +26,7 @@ cp .env.example .env          # set RADIO_SCOUT_API_KEY; `openssl rand -hex 16`
 #    time — skip this and you get the fallback page, not the app).
 cd client && npm run build && cd ..
 
-# 2. Start a hermetic instance. It registers the key from .env on every boot.
+# 2. Start a hermetic instance. An empty archive seeds its key from .env.
 rm -rf ./radio-scout-live-test
 RADIO_SCOUT_BASE_DIR=./radio-scout-live-test cargo run
 
@@ -37,11 +37,12 @@ cargo run --example feed -- --interval 4s
 ```
 
 `.env` is the environment layer of the configuration (ADR-0012) and the ingest key's home; it is gitignored,
-`.env.example` is the committed template. `RADIO_SCOUT_API_KEY` is registered on
-every boot rather than only on first run, which is what makes a wiped
-`./radio-scout-live-test` cost nothing: the key the recorder (or the feeder) is
-configured with keeps working. A key an operator *disabled* stays disabled —
-re-registering never undoes a revocation (ADR-0008). With no key configured,
+`.env.example` is the committed template. `RADIO_SCOUT_API_KEY` **seeds a roster that
+is empty** — which a wiped `./radio-scout-live-test` always is, so a scripted run
+costs nothing: the key the recorder (or the feeder) is configured with keeps
+working. Once there are keys it stands aside (#49), so one revoked in
+Settings → Admin does not return on the next boot; a key an operator *disabled*
+likewise stays disabled (ADR-0008). With no key configured,
 first run generates one and **writes it into `.env`** — it is never printed or
 logged (ADR-0011 rule 2), so read it back with `cat .env` and point the feeder
 or the recorder at it.

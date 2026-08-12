@@ -1928,14 +1928,26 @@ pub async fn count_api_keys<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
     api_key::Entity::find().count(db).await
 }
 
+/// Whether `raw_key` is already in the roster, whatever state it is in.
+///
+/// Split out from [`ensure_api_key`] because boot has two questions rather than
+/// one (#49): "is this key known?" decides whether there is anything to do at
+/// all, and "does the roster already hold keys?" decides whether the environment
+/// is still allowed to seed one. Asking them separately is what lets a leftover
+/// variable be reported as leftover instead of as a key that failed to register.
+pub async fn api_key_exists<C: ConnectionTrait>(db: &C, raw_key: &str) -> Result<bool, DbErr> {
+    Ok(find_api_key(db, raw_key).await?.is_some())
+}
+
 /// Register `raw_key` unless it is already known. Returns whether it was added.
 ///
 /// This is how a key configured out-of-band — `RADIO_SCOUT_API_KEY`, typically
-/// from `.env` (ADR-0012 keeps it there, since first run *writes* it) —
-/// survives restarts: the recorder's
-/// configured secret keeps working across boots without stacking up a row per
-/// boot. A key an operator **disabled** counts as known and stays disabled;
-/// re-registering must never quietly undo a revocation (ADR-0008).
+/// from `.env` (ADR-0012 keeps it there, since first run *writes* it) — seeds an
+/// Instance whose roster is empty, and keeps working across restarts without
+/// stacking up a row per boot. A key an operator **disabled** counts as known
+/// and stays disabled; re-registering must never quietly undo a revocation
+/// (ADR-0008). Since #49 the *caller* decides whether the environment may seed
+/// at all — see [`crate::startup::provision_ingest_key`].
 pub async fn ensure_api_key<C: ConnectionTrait>(
     db: &C,
     raw_key: &str,

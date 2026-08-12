@@ -425,11 +425,76 @@ impl TestApp {
     /// choosing — a forged one, or none at all. For the tests *about* the CSRF
     /// check; everything else uses [`TestApp::post_admin_bytes`].
     pub fn admin_request(&self, path: &str, csrf: Option<&str>) -> reqwest::RequestBuilder {
-        let request = self.client.post(self.url(path));
+        self.admin_verb(reqwest::Method::POST, path, csrf)
+    }
+
+    /// The same, with the method of the caller's choosing — the curation surface
+    /// (#49) speaks `PATCH` and `DELETE` as well, and the CSRF check covers every
+    /// method that is not safe, including those.
+    pub fn admin_verb(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        csrf: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let request = self.client.request(method, self.url(path));
         match csrf {
             Some(csrf) => request.header(CSRF_HEADER, csrf),
             None => request,
         }
+    }
+
+    /// Drive one authenticated admin request and read the answer.
+    ///
+    /// The body comes back **parsed where it is JSON and as a string where it is
+    /// not**, because the curation surface answers success and validation
+    /// refusals in JSON while the guard's own refusals are the plain-text wire
+    /// forms every other surface uses (#92). A helper that insisted on JSON would
+    /// panic on exactly the refusals a test most wants to read.
+    pub async fn admin(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (u16, serde_json::Value) {
+        let request = self.admin_verb(method, path, Some(&self.csrf()));
+        let request = match body {
+            Some(body) => request.json(&body),
+            None => request,
+        };
+        let response = request.send().await.expect("admin request");
+        let status = response.status().as_u16();
+        let text = response.text().await.expect("an admin body");
+        let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        (status, body)
+    }
+
+    /// `GET` one admin document.
+    pub async fn admin_get(&self, path: &str) -> (u16, serde_json::Value) {
+        self.admin(reqwest::Method::GET, path, None).await
+    }
+
+    /// `POST` a JSON body to the admin surface — a create.
+    pub async fn admin_post(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        self.admin(reqwest::Method::POST, path, Some(body)).await
+    }
+
+    /// `PATCH` a JSON body — an edit, where an absent field means "leave alone".
+    pub async fn admin_patch(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        self.admin(reqwest::Method::PATCH, path, Some(body)).await
+    }
+
+    /// `DELETE` one row.
+    pub async fn admin_delete(&self, path: &str) -> (u16, serde_json::Value) {
+        self.admin(reqwest::Method::DELETE, path, None).await
     }
 
     /// POST a raw body with a `Content-Type` of the caller's choosing — a

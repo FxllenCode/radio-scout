@@ -3,9 +3,20 @@ import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
 import { loginFailure, statusOf } from '@/lib/adminError'
 import { searchParams } from '@/lib/archive'
 import type {
+  AdminApiKey,
+  AdminAssignment,
+  AdminLabel,
   AdminSession,
+  AdminSystem,
+  AdminTalkgroup,
+  AdminTalkgroupQuery,
+  AdminUnit,
+  AdminUnitQuery,
   Catalog,
+  CuratedPage,
   FilterOptions,
+  IssuedApiKey,
+  Listing,
   LogPage,
   LogQuery,
   SearchPage,
@@ -23,8 +34,34 @@ export const api = createApi({
   baseQuery: fetchBaseQuery({
     baseUrl: '/',
     fetchFn: (...args) => fetch(...args),
+    /** **The CSRF token, attached once.**
+     *
+     *  Every state-changing admin request must echo its session's token (#19),
+     *  and the curation surface (#49) is two dozen of them. Reading it from the
+     *  session already in the cache means a mutation added later is protected
+     *  by construction — the client-side counterpart to the server mounting its
+     *  guard as a prefix layer rather than as a check each handler remembers.
+     *
+     *  Only on mutations: a safe method needs no token, and it is same-origin
+     *  either way. */
+    prepareHeaders: (headers, { type, getState }) => {
+      if (type !== 'mutation') return headers
+      const session = api.endpoints.getAdminSession.select()(getState() as never)
+      if (session.data) headers.set('x-csrf-token', session.data.csrf_token)
+      return headers
+    },
   }),
-  tagTypes: ['Call', 'AdminSession', 'Log'],
+  tagTypes: [
+    'Call',
+    'AdminSession',
+    'Log',
+    'System',
+    'Talkgroup',
+    'Group',
+    'Tag',
+    'Unit',
+    'ApiKey',
+  ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
     getHealth: builder.query<string, void>({
@@ -48,10 +85,11 @@ export const api = createApi({
      *  filter options above this is the *configured* world, not the archived
      *  one — a Talkgroup whose Calls have aged out is still selectable. It is
      *  tagged `Call` because ingesting a Call for an unknown Talkgroup is what
-     *  auto-populate (#8) grows the catalog by. */
+     *  auto-populate (#8) grows the catalog by — and `Talkgroup` because
+     *  curation (#49) is the other way it changes. */
     getCatalog: builder.query<Catalog, void>({
       query: () => ({ url: 'api/catalog' }),
-      providesTags: ['Call'],
+      providesTags: ['Call', 'Talkgroup'],
     }),
     /** Whether this browser holds a live admin session (#19), and the CSRF
      *  token bound to it. A page that has been reloaded still has the httpOnly
@@ -81,22 +119,19 @@ export const api = createApi({
     /** ...and close it, server-side — ADR-0008 chose session state over a JWT
      *  precisely so revocation is real, and clearing the cookie alone would
      *  leave the session live. */
-    adminLogout: builder.mutation<void, string>({
-      query: (csrfToken) => ({
-        url: 'api/admin/logout',
-        method: 'POST',
-        headers: { 'x-csrf-token': csrfToken },
-      }),
+    adminLogout: builder.mutation<void, void>({
+      query: () => ({ url: 'api/admin/logout', method: 'POST' }),
       invalidatesTags: ['AdminSession', 'Log'],
     }),
 
     /** One radio's history (#47, spec US 44) — where it talks and since when.
      *
      *  Tagged `Call` like the searches beside it: ingesting a Call is what
-     *  moves every number in it, and a unit CSV is what names it. */
+     *  moves every number in it, and a unit CSV — or #49's roster — is what
+     *  names it. */
     getUnitHistory: builder.query<UnitHistory, { systemRef: number; ref: number }>({
       query: ({ systemRef, ref }) => ({ url: `api/unit/${systemRef}/${ref}` }),
-      providesTags: ['Call'],
+      providesTags: ['Call', 'Unit'],
     }),
 
     /** The operator log (#30). Newest first, filtered and paged server-side —
@@ -105,6 +140,159 @@ export const api = createApi({
       query: (filters) => ({ url: `api/admin/logs?${searchParams(filters)}` }),
       providesTags: ['Log'],
     }),
+
+    // -- Curation (#49, spec US 45–46) ------------------------------------
+    //
+    // One row, one request — where rdio-scanner has a single `PUT` of the whole
+    // configuration document in which a row's *absence* means deletion. The
+    // tags are what make an edit reach the other screens showing the same fact:
+    // renaming a Group moves every Talkgroup row carrying its name, and
+    // blacklisting a channel moves the System row whose list holds the Ref.
+
+    getSystems: builder.query<Listing<AdminSystem>, void>({
+      query: () => ({ url: 'api/admin/systems' }),
+      providesTags: ['System'],
+    }),
+    createSystem: builder.mutation<AdminSystem, Partial<AdminSystem>>({
+      query: (body) => ({ url: 'api/admin/systems', method: 'POST', body }),
+      invalidatesTags: ['System', 'Talkgroup', 'Call'],
+    }),
+    updateSystem: builder.mutation<AdminSystem, { id: number; patch: Partial<AdminSystem> }>({
+      query: ({ id, patch }) => ({
+        url: `api/admin/systems/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['System', 'Talkgroup', 'Call'],
+    }),
+    deleteSystem: builder.mutation<void, { id: number; force?: boolean }>({
+      query: ({ id, force }) => ({
+        url: `api/admin/systems/${id}${force ? '?force=true' : ''}`,
+        method: 'DELETE',
+      }),
+      invalidatesTags: ['System', 'Talkgroup', 'Unit', 'Call'],
+    }),
+
+    getAdminTalkgroups: builder.query<CuratedPage<AdminTalkgroup>, AdminTalkgroupQuery>({
+      query: (filters) => ({ url: `api/admin/talkgroups?${searchParams(filters)}` }),
+      providesTags: ['Talkgroup'],
+    }),
+    createTalkgroup: builder.mutation<AdminTalkgroup, Partial<AdminTalkgroup>>({
+      query: (body) => ({ url: 'api/admin/talkgroups', method: 'POST', body }),
+      invalidatesTags: ['Talkgroup', 'System', 'Group', 'Tag', 'Call'],
+    }),
+    updateTalkgroup: builder.mutation<
+      AdminTalkgroup,
+      { id: number; patch: Partial<AdminTalkgroup> }
+    >({
+      query: ({ id, patch }) => ({
+        url: `api/admin/talkgroups/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['Talkgroup', 'System', 'Group', 'Tag', 'Call'],
+    }),
+    deleteTalkgroup: builder.mutation<void, { id: number; force?: boolean }>({
+      query: ({ id, force }) => ({
+        url: `api/admin/talkgroups/${id}${force ? '?force=true' : ''}`,
+        method: 'DELETE',
+      }),
+      invalidatesTags: ['Talkgroup', 'System', 'Group', 'Tag', 'Call'],
+    }),
+    /** Spec US 46 — one action over every selected row, in one transaction. */
+    assignTalkgroups: builder.mutation<{ changed: number }, AdminAssignment>({
+      query: (body) => ({ url: 'api/admin/talkgroups/assign', method: 'POST', body }),
+      invalidatesTags: ['Talkgroup', 'Group', 'Tag', 'Call'],
+    }),
+
+    getGroups: builder.query<Listing<AdminLabel>, void>({
+      query: () => ({ url: 'api/admin/groups' }),
+      providesTags: ['Group'],
+    }),
+    createGroup: builder.mutation<AdminLabel, string>({
+      query: (name) => ({ url: 'api/admin/groups', method: 'POST', body: { name } }),
+      invalidatesTags: ['Group', 'Talkgroup', 'Call'],
+    }),
+    updateGroup: builder.mutation<AdminLabel, { id: number; name: string }>({
+      query: ({ id, name }) => ({
+        url: `api/admin/groups/${id}`,
+        method: 'PATCH',
+        body: { name },
+      }),
+      invalidatesTags: ['Group', 'Talkgroup', 'Call'],
+    }),
+    deleteGroup: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/groups/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Group', 'Talkgroup', 'Call'],
+    }),
+
+    getTags: builder.query<Listing<AdminLabel>, void>({
+      query: () => ({ url: 'api/admin/tags' }),
+      providesTags: ['Tag'],
+    }),
+    createTag: builder.mutation<AdminLabel, string>({
+      query: (name) => ({ url: 'api/admin/tags', method: 'POST', body: { name } }),
+      invalidatesTags: ['Tag', 'Talkgroup', 'Call'],
+    }),
+    updateTag: builder.mutation<AdminLabel, { id: number; name: string }>({
+      query: ({ id, name }) => ({
+        url: `api/admin/tags/${id}`,
+        method: 'PATCH',
+        body: { name },
+      }),
+      invalidatesTags: ['Tag', 'Talkgroup', 'Call'],
+    }),
+    deleteTag: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/tags/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Tag', 'Talkgroup', 'Call'],
+    }),
+
+    getAdminUnits: builder.query<CuratedPage<AdminUnit>, AdminUnitQuery>({
+      query: (filters) => ({ url: `api/admin/units?${searchParams(filters)}` }),
+      providesTags: ['Unit'],
+    }),
+    createUnit: builder.mutation<AdminUnit, Partial<AdminUnit>>({
+      query: (body) => ({ url: 'api/admin/units', method: 'POST', body }),
+      invalidatesTags: ['Unit', 'Call'],
+    }),
+    updateUnit: builder.mutation<AdminUnit, { id: number; patch: Partial<AdminUnit> }>({
+      query: ({ id, patch }) => ({
+        url: `api/admin/units/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['Unit', 'Call'],
+    }),
+    deleteUnit: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/units/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Unit', 'Call'],
+    }),
+
+    getApiKeys: builder.query<Listing<AdminApiKey>, void>({
+      query: () => ({ url: 'api/admin/api-keys' }),
+      providesTags: ['ApiKey'],
+    }),
+    /** Issue one. The response is **the only sight of the secret there will
+     *  ever be** — it is stored hashed, so nothing can show it again. */
+    createApiKey: builder.mutation<
+      IssuedApiKey,
+      { label?: string | null; systemRef?: number | null }
+    >({
+      query: (body) => ({ url: 'api/admin/api-keys', method: 'POST', body }),
+      invalidatesTags: ['ApiKey'],
+    }),
+    updateApiKey: builder.mutation<AdminApiKey, { id: number; patch: Partial<AdminApiKey> }>({
+      query: ({ id, patch }) => ({
+        url: `api/admin/api-keys/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['ApiKey'],
+    }),
+    deleteApiKey: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/api-keys/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['ApiKey'],
+    }),
     // Live-feed hydration etc. are added by later tickets.
   }),
 })
@@ -112,11 +300,36 @@ export const api = createApi({
 export const {
   useAdminLoginMutation,
   useAdminLogoutMutation,
+  useAssignTalkgroupsMutation,
+  useCreateApiKeyMutation,
+  useCreateGroupMutation,
+  useCreateSystemMutation,
+  useCreateTagMutation,
+  useCreateTalkgroupMutation,
+  useCreateUnitMutation,
+  useDeleteApiKeyMutation,
+  useDeleteGroupMutation,
+  useDeleteSystemMutation,
+  useDeleteTagMutation,
+  useDeleteTalkgroupMutation,
+  useDeleteUnitMutation,
   useGetAdminSessionQuery,
+  useGetAdminTalkgroupsQuery,
+  useGetAdminUnitsQuery,
+  useGetApiKeysQuery,
   useGetCatalogQuery,
   useGetFilterOptionsQuery,
+  useGetGroupsQuery,
   useGetHealthQuery,
   useGetLogsQuery,
+  useGetSystemsQuery,
+  useGetTagsQuery,
   useGetUnitHistoryQuery,
   useSearchCallsQuery,
+  useUpdateApiKeyMutation,
+  useUpdateGroupMutation,
+  useUpdateSystemMutation,
+  useUpdateTagMutation,
+  useUpdateTalkgroupMutation,
+  useUpdateUnitMutation,
 } = api

@@ -61,6 +61,16 @@ pub enum IngestKey {
     /// A configured key that an earlier boot already registered. Re-registering
     /// never revives a key an operator disabled (ADR-0008).
     AlreadyKnown,
+    /// A configured key that is **not** registered, because the roster already
+    /// holds keys and is curated in the browser (#49).
+    ///
+    /// This is what makes revoking a key stick. Before #49 the variable was
+    /// re-registered on every boot, so a key an Operator deleted in admin came
+    /// back — enabled — the next time the process restarted, which is a
+    /// revocation that silently is not one. The environment is now the
+    /// **bootstrap**: it seeds an empty roster (a first run, or a wiped
+    /// database) and then stands aside.
+    RosterIsCurated { keys: u64 },
     /// First run with nothing configured: a key was generated and written to
     /// `env_file`.
     Generated { env_file: PathBuf },
@@ -77,20 +87,36 @@ pub enum IngestKey {
 ///
 /// `configured` is the raw `RADIO_SCOUT_API_KEY` value (blank counts as unset);
 /// `env_file` is where a generated key would be written.
+///
+/// **The environment bootstraps the roster; it does not own it (#49).** A
+/// configured key is registered when the roster is *empty* — a first run, or a
+/// database that was wiped — and left alone once there is one, because the
+/// browser is where keys are managed now and a variable that re-asserted itself
+/// every boot would undo an Operator's revocation without saying so. A key that
+/// is already in the table keeps whatever state it has, disabled included, which
+/// is the rule ADR-0008 has always asked for.
 pub async fn provision_ingest_key<C: ConnectionTrait>(
     db: &C,
     configured: Option<&str>,
     env_file: &Path,
     now_ms: i64,
 ) -> Result<IngestKey, DbErr> {
+    let keys = repo::count_api_keys(db).await?;
     if let Some(key) = configured.map(str::trim).filter(|key| !key.is_empty()) {
-        return Ok(match repo::ensure_api_key(db, key, None, now_ms).await? {
-            true => IngestKey::Registered,
-            false => IngestKey::AlreadyKnown,
-        });
+        // Asked *before* the count is judged: a boot whose variable is already
+        // the key in the table has nothing to do either way, and reporting it
+        // as "the roster is curated" would send an Operator looking for a
+        // problem they do not have.
+        if repo::api_key_exists(db, key).await? {
+            return Ok(IngestKey::AlreadyKnown);
+        }
+        if keys > 0 {
+            return Ok(IngestKey::RosterIsCurated { keys });
+        }
+        repo::ensure_api_key(db, key, None, now_ms).await?;
+        return Ok(IngestKey::Registered);
     }
 
-    let keys = repo::count_api_keys(db).await?;
     if keys > 0 {
         return Ok(IngestKey::AlreadyProvisioned { keys });
     }
@@ -115,6 +141,18 @@ pub fn log_ingest_key(outcome: &IngestKey) {
         IngestKey::Registered => info!(source = INGEST_KEY_VAR, "ingest key registered"),
         IngestKey::AlreadyKnown => {
             info!(source = INGEST_KEY_VAR, "ingest key already registered");
+        }
+        // The one outcome an Operator might be surprised by, so it says what to
+        // do about it rather than only what happened. Not a WARN: on an Instance
+        // whose keys are managed in admin this is the *normal* state of a
+        // leftover variable, and a warning on every boot is one nobody reads.
+        IngestKey::RosterIsCurated { keys } => {
+            info!(
+                keys,
+                source = INGEST_KEY_VAR,
+                "configured ingest key not registered: the key roster is managed in admin — \
+                 add it there, or empty the roster to seed from the environment again"
+            );
         }
         IngestKey::Generated { env_file } => {
             let env_file = env_file.display();
@@ -592,6 +630,82 @@ mod tests {
         assert!(!env_file.exists(), "no env file should have been written");
         capture.assert_never_logged(SECRET);
         assert!(capture.text().contains("keys=1"), "{}", capture.text());
+    }
+
+    /// **A key revoked in admin stays revoked (#49).** The environment seeds an
+    /// empty roster and then stands aside, so a variable somebody left in `.env`
+    /// cannot re-register — enabled — the key an Operator just deleted.
+    ///
+    /// This is the whole reason the browser can be called the place API keys
+    /// live: before it, "revoke" meant "until the next restart", which is a
+    /// revocation that silently is not one.
+    #[tokio::test]
+    async fn a_configured_key_does_not_return_once_the_roster_is_curated() {
+        let (db, tmp) = empty_db().await;
+        let env_file = tmp.path().join(".env");
+        let capture = LogCapture::start();
+        // An Operator issued their own key in admin, and revoked the one the
+        // environment had seeded.
+        repo::create_api_key(&db, "issued-in-admin", None, None, NOW)
+            .await
+            .expect("seed");
+
+        let outcome = provision_ingest_key(&db, Some(SECRET), &env_file, NOW)
+            .await
+            .expect("provision");
+        log_ingest_key(&outcome);
+
+        assert!(
+            matches!(outcome, IngestKey::RosterIsCurated { keys: 1 }),
+            "{outcome:?}"
+        );
+        assert!(
+            !repo::authorize_ingest(&db, SECRET, 1).await.expect("auth"),
+            "the revoked key must not have come back"
+        );
+        assert_eq!(repo::count_api_keys(&db).await.expect("count"), 1);
+        capture.assert_never_logged(SECRET);
+        // ...and the Operator is told why, rather than being left to wonder.
+        let logged = capture.text();
+        assert!(logged.contains("managed in admin"), "{logged}");
+        assert!(!logged.contains("ERROR"), "{logged}");
+    }
+
+    /// ...while a roster that still holds the configured key says nothing about
+    /// curation: there is no leftover variable, so there is nothing to explain.
+    #[tokio::test]
+    async fn a_configured_key_already_in_the_roster_is_simply_known() {
+        let (db, tmp) = empty_db().await;
+        let env_file = tmp.path().join(".env");
+        repo::create_api_key(&db, SECRET, None, None, NOW)
+            .await
+            .expect("seed");
+        repo::create_api_key(&db, "issued-in-admin", None, None, NOW)
+            .await
+            .expect("seed");
+
+        let outcome = provision_ingest_key(&db, Some(SECRET), &env_file, NOW)
+            .await
+            .expect("provision");
+
+        assert!(matches!(outcome, IngestKey::AlreadyKnown), "{outcome:?}");
+        assert!(repo::authorize_ingest(&db, SECRET, 1).await.expect("auth"));
+    }
+
+    /// A wiped database re-seeds from the environment, which is the other half
+    /// of "the environment is a backup": an Instance whose roster is empty can
+    /// ingest nothing, and the variable is how it gets going again.
+    #[tokio::test]
+    async fn an_empty_roster_is_seeded_from_the_environment_again() {
+        let (db, tmp) = empty_db().await;
+        let env_file = tmp.path().join(".env");
+
+        let outcome = provision_ingest_key(&db, Some(SECRET), &env_file, NOW)
+            .await
+            .expect("provision");
+
+        assert!(matches!(outcome, IngestKey::Registered), "{outcome:?}");
+        assert!(repo::authorize_ingest(&db, SECRET, 1).await.expect("auth"));
     }
 
     /// A blank or whitespace-only value is what `RADIO_SCOUT_API_KEY=` in an env

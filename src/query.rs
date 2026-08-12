@@ -72,6 +72,23 @@ impl<'a> Params<'a> {
             .transpose()
     }
 
+    /// A yes/no filter, spelled the way a URL is actually typed.
+    ///
+    /// Both the machine spelling a checkbox produces (`true`/`false`) and the
+    /// ones a person writes by hand (`1`/`0`, `yes`/`no`), case-insensitively —
+    /// the same forgiveness the archive search extends to its sort order (#13),
+    /// and for the same reason: a read surface is typed into a URL bar as often
+    /// as it is generated, where configuration is strict.
+    pub(crate) fn flag(&self, key: &str) -> Filtered<Option<bool>> {
+        self.raw(key)
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => Ok(true),
+                "false" | "0" | "no" => Ok(false),
+                _ => Err(bad(format!("{key} must be true or false"))),
+            })
+            .transpose()
+    }
+
     /// A page size, defaulted and **clamped** rather than refused: one request
     /// must not be able to ask a Pi to serialize the whole table. Zero is read
     /// as "unset", never as "an empty page".

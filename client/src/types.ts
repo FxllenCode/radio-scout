@@ -234,3 +234,134 @@ export interface AdminSession {
   csrf_token: string
   expires_in_secs: number
 }
+
+// ---------------------------------------------------------------------------
+// Curation (#49, spec US 45–46) — the entities an Operator runs from a browser.
+// ---------------------------------------------------------------------------
+
+/** A small collection answered whole. The curation counterpart to a `Page`, and
+ *  deliberately the same `results` key: Systems, Groups, Tags and API keys are
+ *  counted in tens on the largest instance anybody runs, so paging them would be
+ *  a control that never did anything. */
+export interface Listing<T> {
+  results: T[]
+}
+
+/** One page of a collection that really does need one. Structurally a `LogPage`
+ *  over a different row — the shape both server read surfaces already answer
+ *  with. */
+export interface CuratedPage<T> {
+  results: T[]
+  count: number
+  limit: number
+  offset: number
+  hasMore: boolean
+}
+
+/** One **System**, as the curation screen lists it. */
+export interface AdminSystem {
+  id: number
+  ref: number
+  label?: string | null
+  autoPopulate: boolean
+  /** Talkgroup Refs never ingested here — canonical, sorted, de-duplicated. */
+  blacklist: number[]
+  /** `null` inherits the instance's `[enhancement] mode` (#20); a plain boolean
+   *  has no way to say "follow the instance". */
+  enhancement?: boolean | null
+  talkgroups: number
+  units: number
+  /** Calls in the Archive under it — what a delete would take. */
+  calls: number
+  createdAtMs: number
+}
+
+/** One **Talkgroup**. `blacklisted` is derived from the System's list rather
+ *  than being a column of its own. */
+export interface AdminTalkgroup {
+  id: number
+  systemId: number
+  systemRef: number
+  systemLabel?: string | null
+  ref: number
+  label?: string | null
+  name?: string | null
+  tag?: string | null
+  groups: string[]
+  led?: string | null
+  enhancement?: boolean | null
+  blacklisted: boolean
+  calls: number
+  createdAtMs: number
+}
+
+/** One **Group** or **Tag** — the two name-only entities. */
+export interface AdminLabel {
+  id: number
+  name: string
+  /** How many Talkgroups are behind it: what an Operator about to delete one
+   *  needs to know. */
+  talkgroups: number
+  createdAtMs: number
+}
+
+/** One **Unit** — a radio's roster entry. */
+export interface AdminUnit {
+  id: number
+  systemId: number
+  systemRef: number
+  systemLabel?: string | null
+  ref: number
+  label?: string | null
+  createdAtMs: number
+}
+
+/** One **API key**. Never the secret: it is stored hashed and the listing has
+ *  no field for it. */
+export interface AdminApiKey {
+  id: number
+  label?: string | null
+  /** The System Ref it may ingest into; `null` grants every System. */
+  systemRef?: number | null
+  disabled: boolean
+  createdAtMs: number
+}
+
+/** A key that has just been issued — the row plus **the one and only sight of
+ *  the secret**. */
+export interface IssuedApiKey extends AdminApiKey {
+  key: string
+}
+
+/** What the Talkgroups listing filters on. Blank is no filter, which is what the
+ *  form's own empty state produces. */
+export interface AdminTalkgroupQuery {
+  /** A System **Ref** — what an Operator reads on the screen. */
+  system?: number
+  q?: string
+  group?: string
+  tag?: string
+  blacklisted?: boolean
+  limit?: number
+  offset?: number
+}
+
+/** What the Units listing filters on. */
+export interface AdminUnitQuery {
+  system?: number
+  q?: string
+  /** Only radios nobody has named — the working set for naming a fleet, and
+   *  unreachable from a text search. */
+  unnamed?: boolean
+  limit?: number
+  offset?: number
+}
+
+/** One bulk action over selected Talkgroup rows (spec US 46). */
+export interface AdminAssignment {
+  ids: number[]
+  addGroups?: string[]
+  removeGroups?: string[]
+  /** `null` clears the Tag; omitted leaves it alone. */
+  tag?: string | null
+}

@@ -20,8 +20,11 @@ You need two things from the instance:
   on another machine can reach it — check the host's firewall if it can't.
 - **The ingest API key.** First run generates one and writes it to `.env`; it is never logged,
   so `cat .env` is how you read it back. You can also set `RADIO_SCOUT_API_KEY` yourself to
-  anything high-entropy (`openssl rand -hex 16`) — it is registered on every boot, so it
-  survives restarts and even a wiped database.
+  anything high-entropy (`openssl rand -hex 16`) — it seeds an instance whose key roster is
+  empty, which covers a first run and a wiped database alike. Once there are keys, the roster
+  is yours: issue, scope and revoke them in
+  [Settings → Admin → API keys](operating.md#running-the-instance-from-a-browser), and a
+  revoked key stays revoked even if the variable is still set.
 
 You do **not** need to define Systems or Talkgroups first. Unknown ones are created the first
 time a Call mentions them, so an empty instance fills itself in as traffic arrives. Tidy the

@@ -136,6 +136,16 @@ stages! {
     ImportTalkgroups => "import-talkgroups",
     /// Applying a Unit CSV (#47).
     ImportUnits => "import-units",
+    /// Reading or writing one of the entities an Operator curates (#49). One
+    /// stage for the surface rather than one per entity: the request line
+    /// beside it already names the method and the path, so `stage=curate` plus
+    /// `PATCH /api/admin/talkgroups/12` says everything a finer split would.
+    Curate => "curate",
+    /// Deleting the Calls a force-deleted System or Talkgroup still held (#49) —
+    /// its own stage because it is the only curation path that touches the
+    /// **object store**, and "the database refused" and "the bucket refused"
+    /// send an Operator to different places.
+    PurgeCalls => "purge-calls",
     // -- Web Push (#16) ----------------------------------------------------
     /// Storing (or re-storing) a device's subscription.
     StorePushSubscription => "store-push-subscription",
@@ -273,6 +283,19 @@ pub enum Reason {
     /// would be an *open* arm in a closed vocabulary, and #70 is about to put
     /// these slugs behind a metric label.
     BadImport(crate::import::ParseError),
+    // -- Curation (#49) -----------------------------------------------------
+    /// A curation write the admin surface refused — a blank field, a name or a
+    /// Ref already taken, a row that is not there, or a delete that would have
+    /// taken Calls with it.
+    ///
+    /// One arm carrying a closed inner vocabulary, the [`Reason::BadImport`]
+    /// shape: a `&'static str` per refusal would be an *open* arm inside a
+    /// closed enum, and #70 is about to put these slugs behind a metric label.
+    /// Unlike the others it also decides its own **status**, because one surface
+    /// legitimately answers 400, 404 and 409 — which is exactly the information
+    /// a form needs to tell "you typed something wrong" from "somebody else
+    /// changed this underneath you".
+    Curation(crate::curate::Rejected),
 }
 
 /// The rdio `417` family: a body too incomplete to be a Call.
@@ -579,6 +602,17 @@ impl Reason {
                 Told::Json(
                     serde_json::json!({ "error": error.reason(), "detail": error.to_string() }),
                 ),
+            ),
+            // **DEBUG, every arm.** An Operator is looking at the form that
+            // produced it — the message lands under the input they mistyped,
+            // and the request log's own 4xx line already covers the request.
+            // At WARN a county-scale bulk edit would fill an instance's log
+            // with the Operator's own typing (rule 8).
+            Reason::Curation(rejected) => Refusal::new(
+                rejected.slug(),
+                Level::DEBUG,
+                rejected.status(),
+                Told::Json(rejected.body()),
             ),
         }
     }

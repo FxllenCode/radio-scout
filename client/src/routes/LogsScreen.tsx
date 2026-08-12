@@ -1,24 +1,22 @@
-import { useState, type ReactNode } from 'react'
+import { useState } from 'react'
 
+import {
+  AdminGate,
+  Field,
+  Placeholder,
+  SignOutButton,
+  controlClass,
+} from '@/components/admin/AdminUi'
 import { Screen } from '@/components/layout/Screen'
 import { Button } from '@/components/ui/button'
-import { signInMessage } from '@/lib/adminError'
 import { dateTimeLocalToMs, formatCallTime, pageSummary } from '@/lib/archive'
 import { cn } from '@/lib/utils'
-import {
-  useAdminLoginMutation,
-  useAdminLogoutMutation,
-  useGetAdminSessionQuery,
-  useGetLogsQuery,
-} from '@/store/api'
+import { useGetAdminSessionQuery, useGetLogsQuery } from '@/store/api'
 import type { LogEvent, LogQuery } from '@/types'
 
 /** Events per page. Bigger than the archive's, because a log line is a row of
  *  text rather than a Call with audio behind it. */
 const PAGE_SIZE = 100
-
-const controlClass =
-  'w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground'
 
 /**
  * Settings → Logs (#30, ADR-0011) — what the server has been saying, for an
@@ -46,8 +44,6 @@ export function LogsScreen() {
     { ...filters, before: filters.before ?? pinned, limit: PAGE_SIZE, offset },
     { skip: !signedIn },
   )
-
-  const [logout] = useAdminLogoutMutation()
 
   /** Any filter change invalidates the page window we were on — and the pin,
    *  because a new question deserves a window of its own. */
@@ -84,125 +80,104 @@ export function LogsScreen() {
     if (previous === 0) setPinned(undefined)
   }
 
-  if (!signedIn) {
-    return (
-      <Screen title="Logs">
-        {session.isLoading ? (
-          <Placeholder>Checking your session…</Placeholder>
-        ) : (
-          <SignIn />
-        )}
-      </Screen>
-    )
-  }
-
   const results = page.data?.results ?? []
 
   return (
-    <Screen
-      title="Logs"
-      status={
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => logout(session.data?.csrf_token ?? '')}
+    <Screen title="Logs" status={<SignOutButton />}>
+      <AdminGate>
+        <form
+          role="search"
+          aria-label="Log filters"
+          className="grid grid-cols-2 gap-2"
+          onSubmit={(event) => event.preventDefault()}
         >
-          Sign out
-        </Button>
-      }
-    >
-      <form
-        role="search"
-        aria-label="Log filters"
-        className="grid grid-cols-2 gap-2"
-        onSubmit={(event) => event.preventDefault()}
-      >
-        <Field label="Level" htmlFor="filter-level">
-          <select
-            id="filter-level"
-            className={controlClass}
-            value={filters.level ?? ''}
-            onChange={(event) =>
-              updateFilters({ level: event.target.value || undefined })
-            }
+          <Field label="Level" htmlFor="filter-level">
+            <select
+              id="filter-level"
+              className={controlClass}
+              value={filters.level ?? ''}
+              onChange={(event) =>
+                updateFilters({ level: event.target.value || undefined })
+              }
+            >
+              {/* A floor, so each option includes everything above it. */}
+              <option value="">Everything</option>
+              <option value="info">Info and above</option>
+              <option value="warn">Warnings and errors</option>
+              <option value="error">Errors only</option>
+            </select>
+          </Field>
+
+          <Field label="Page" htmlFor="log-page-summary">
+            <p
+              id="log-page-summary"
+              aria-live="polite"
+              className="font-mono text-xs text-muted-foreground"
+            >
+              {pageSummary(offset, results.length, page.data?.count ?? 0, 'events')}
+            </p>
+          </Field>
+
+          <Field label="From" htmlFor="filter-after">
+            <input
+              id="filter-after"
+              type="datetime-local"
+              className={controlClass}
+              onChange={(event) =>
+                updateFilters({ after: dateTimeLocalToMs(event.target.value) })
+              }
+            />
+          </Field>
+          <Field label="To" htmlFor="filter-before">
+            <input
+              id="filter-before"
+              type="datetime-local"
+              className={controlClass}
+              onChange={(event) =>
+                updateFilters({ before: dateTimeLocalToMs(event.target.value) })
+              }
+            />
+          </Field>
+        </form>
+
+        {page.isError ? (
+          <Placeholder role="alert">
+            The log could not be read. Check that the server is reachable.
+          </Placeholder>
+        ) : results.length === 0 ? (
+          <Placeholder>
+            {page.isFetching ? 'Reading the log…' : 'No log events match.'}
+          </Placeholder>
+        ) : (
+          <ul
+            aria-label="Log events"
+            className="mt-3 divide-y divide-border rounded-xl border border-border bg-card"
           >
-            {/* A floor, so each option includes everything above it. */}
-            <option value="">Everything</option>
-            <option value="info">Info and above</option>
-            <option value="warn">Warnings and errors</option>
-            <option value="error">Errors only</option>
-          </select>
-        </Field>
+            {results.map((event) => (
+              <EventRow key={event.id} event={event} />
+            ))}
+          </ul>
+        )}
 
-        <Field label="Page" htmlFor="log-page-summary">
-          <p
-            id="log-page-summary"
-            aria-live="polite"
-            className="font-mono text-xs text-muted-foreground"
+        <div className="mt-4 flex justify-between gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={offset === 0}
+            onClick={pageBack}
           >
-            {pageSummary(offset, results.length, page.data?.count ?? 0, 'events')}
-          </p>
-        </Field>
-
-        <Field label="From" htmlFor="filter-after">
-          <input
-            id="filter-after"
-            type="datetime-local"
-            className={controlClass}
-            onChange={(event) =>
-              updateFilters({ after: dateTimeLocalToMs(event.target.value) })
-            }
-          />
-        </Field>
-        <Field label="To" htmlFor="filter-before">
-          <input
-            id="filter-before"
-            type="datetime-local"
-            className={controlClass}
-            onChange={(event) =>
-              updateFilters({ before: dateTimeLocalToMs(event.target.value) })
-            }
-          />
-        </Field>
-      </form>
-
-      {page.isError ? (
-        <Placeholder role="alert">
-          The log could not be read. Check that the server is reachable.
-        </Placeholder>
-      ) : results.length === 0 ? (
-        <Placeholder>
-          {page.isFetching ? 'Reading the log…' : 'No log events match.'}
-        </Placeholder>
-      ) : (
-        <ul
-          aria-label="Log events"
-          className="mt-3 divide-y divide-border rounded-xl border border-border bg-card"
-        >
-          {results.map((event) => (
-            <EventRow key={event.id} event={event} />
-          ))}
-        </ul>
-      )}
-
-      <div className="mt-4 flex justify-between gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={offset === 0}
-          onClick={pageBack}
-        >
-          Previous page
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={!page.data?.hasMore}
-          onClick={() => pageForward(results[0]?.atMs)}
-        >
-          Next page
-        </Button>
-      </div>
+            Previous page
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!page.data?.hasMore}
+            onClick={() => pageForward(results[0]?.atMs)}
+          >
+            Next page
+          </Button>
+        </div>
+      </AdminGate>
     </Screen>
   )
 }
@@ -263,91 +238,4 @@ function EventRow({ event }: { event: LogEvent }) {
  *  its JSON, so a nested object is still legible. */
 function format(value: unknown): string {
   return typeof value === 'string' ? value : JSON.stringify(value)
-}
-
-/** The password gate. Deliberately part of this screen rather than a route of
- *  its own: the Logs view is the only thing behind it so far, and an admin area
- *  with its own navigation is a later ticket's to design. */
-function SignIn() {
-  const [password, setPassword] = useState('')
-  const [login, attempt] = useAdminLoginMutation()
-
-  return (
-    <form
-      className="mt-3 flex flex-col gap-3 rounded-xl border border-border bg-card px-4 py-5"
-      onSubmit={(event) => {
-        event.preventDefault()
-        login(password)
-      }}
-    >
-      <p className="font-mono text-xs text-muted-foreground">
-        The log is admin-only: an instance's log names its recorders and its
-        failures.
-      </p>
-      <div className="flex flex-col gap-1">
-        <label
-          htmlFor="admin-password"
-          className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
-        >
-          Admin password
-        </label>
-        <input
-          id="admin-password"
-          type="password"
-          autoComplete="current-password"
-          className={controlClass}
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-        />
-      </div>
-      {attempt.isError && (
-        <p role="alert" className="font-mono text-xs text-red-400">
-          {signInMessage(attempt.error)}
-        </p>
-      )}
-      <Button type="submit" size="sm" disabled={attempt.isLoading}>
-        {attempt.isLoading ? 'Signing in…' : 'Sign in'}
-      </Button>
-    </form>
-  )
-}
-
-/** The empty / loading / failed states the list stands in for. */
-function Placeholder({
-  role,
-  children,
-}: {
-  role?: 'alert'
-  children: ReactNode
-}) {
-  return (
-    <p
-      role={role}
-      className="mt-3 rounded-xl border border-border bg-card px-6 py-8 text-center font-mono text-sm text-muted-foreground"
-    >
-      {children}
-    </p>
-  )
-}
-
-function Field({
-  label,
-  htmlFor,
-  children,
-}: {
-  label: string
-  htmlFor: string
-  children: ReactNode
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <label
-        htmlFor={htmlFor}
-        className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
-      >
-        {label}
-      </label>
-      {children}
-    </div>
-  )
 }
