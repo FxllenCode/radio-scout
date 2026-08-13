@@ -19,8 +19,14 @@ import type {
   Listing,
   LogPage,
   LogQuery,
+  MemberDelta,
+  MemberRef,
+  MergeReport,
+  RangeDelta,
+  RangeReport,
   SearchPage,
   SearchQuery,
+  Span,
   UnitHistory,
 } from '@/types'
 
@@ -268,6 +274,60 @@ export const api = createApi({
       invalidatesTags: ['Unit', 'Call'],
     }),
 
+    // -- Merge curation (#50, spec US 17) ---------------------------------
+    //
+    // The member Refs and Ranges #49 deliberately left off both listings,
+    // because carrying them would cost a query per row on a page of five
+    // hundred. Here there is exactly one row, so they are a read of their own.
+
+    getMembers: builder.query<Listing<MemberRef>, number>({
+      query: (id) => ({ url: `api/admin/talkgroups/${id}/members` }),
+      providesTags: ['Talkgroup'],
+    }),
+
+    /** **The preview**: the real transaction, rolled back (#18's dry run).
+     *
+     *  A mutation rather than a query because it is a `POST` with a body — and
+     *  deliberately **invalidating nothing**, which is the whole reason it is a
+     *  separate endpoint from the fold below. A preview that invalidated
+     *  `Talkgroup` would refetch every listing to show a page that has not
+     *  changed, and would do it on every click of a button whose entire promise
+     *  is that nothing happened. */
+    previewFold: builder.mutation<MergeReport, { id: number; delta: MemberDelta }>({
+      query: ({ id, delta }) => ({
+        url: `api/admin/talkgroups/${id}/members?dryRun`,
+        method: 'POST',
+        body: delta,
+      }),
+    }),
+
+    /** ...and the same request for real. A fold re-points archived Calls, so
+     *  `Call` goes with the configuration tags: every search page and the
+     *  catalog behind the panel are now answering with a channel that changed. */
+    foldMembers: builder.mutation<MergeReport, { id: number; delta: MemberDelta }>({
+      query: ({ id, delta }) => ({
+        url: `api/admin/talkgroups/${id}/members`,
+        method: 'POST',
+        body: delta,
+      }),
+      invalidatesTags: ['Talkgroup', 'System', 'Group', 'Tag', 'Call'],
+    }),
+
+    getRanges: builder.query<Listing<Span>, number>({
+      query: (id) => ({ url: `api/admin/units/${id}/ranges` }),
+      providesTags: ['Unit'],
+    }),
+    /** Add and remove spans, wholly or not at all — an overlap refuses the
+     *  edit rather than applying the half of it that fits. */
+    setRanges: builder.mutation<RangeReport, { id: number; delta: RangeDelta }>({
+      query: ({ id, delta }) => ({
+        url: `api/admin/units/${id}/ranges`,
+        method: 'POST',
+        body: delta,
+      }),
+      invalidatesTags: ['Unit', 'Call'],
+    }),
+
     getApiKeys: builder.query<Listing<AdminApiKey>, void>({
       query: () => ({ url: 'api/admin/api-keys' }),
       providesTags: ['ApiKey'],
@@ -313,6 +373,7 @@ export const {
   useDeleteTagMutation,
   useDeleteTalkgroupMutation,
   useDeleteUnitMutation,
+  useFoldMembersMutation,
   useGetAdminSessionQuery,
   useGetAdminTalkgroupsQuery,
   useGetAdminUnitsQuery,
@@ -322,10 +383,14 @@ export const {
   useGetGroupsQuery,
   useGetHealthQuery,
   useGetLogsQuery,
+  useGetMembersQuery,
+  useGetRangesQuery,
   useGetSystemsQuery,
   useGetTagsQuery,
   useGetUnitHistoryQuery,
+  usePreviewFoldMutation,
   useSearchCallsQuery,
+  useSetRangesMutation,
   useUpdateApiKeyMutation,
   useUpdateGroupMutation,
   useUpdateSystemMutation,

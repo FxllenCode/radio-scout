@@ -179,9 +179,9 @@ needs SSH:
 
 | Screen | What it owns |
 | --- | --- |
-| **Talkgroups** | labels, names, tags, groups, LED colours, blacklists — filtered and paged, with **multi-select bulk assignment** so categorising a county is one action rather than an afternoon |
+| **Talkgroups** | labels, names, tags, groups, LED colours, blacklists — filtered and paged, with **multi-select bulk assignment** so categorising a county is one action rather than an afternoon, and **Merges** for folding duplicates together |
 | **Systems** | label, ref, the per-system auto-populate toggle, the enhancement scope, and the raw blacklist |
-| **Units** | naming the radios, filtered to *the ones nobody has named yet* |
+| **Units** | naming the radios, filtered to *the ones nobody has named yet*, and the **Ranges** a fleet's block occupies |
 | **Groups** / **Tags** | the two category vocabularies, with a count of what is behind each |
 | **API keys** | issue (shown once), label, scope to a System, disable, revoke |
 
@@ -237,6 +237,35 @@ for each, so a county panel fills up with buttons nobody chose. A **member Ref**
 Talkgroup answers to several numbers, and everything else — the panel, search, the live feed,
 blacklists — sees one channel.
 
+There are two ways to do it: the **Merges** button on a talkgroup row, and a `memberRefs` column
+in the CSV. Both write the same thing.
+
+#### From the browser
+
+**Settings → Admin → Talkgroups → Merges** on the channel you want to keep. It lists the refs that
+channel already answers to, takes more to fold in, and unfolds one with a button.
+
+- **Nothing folds without being shown first.** Every action here previews: it names each ref, the
+  channel it would absorb, and how many archived Calls would move — then asks again. That is a real
+  `dryRun` of the same transaction, rolled back, not an estimate of it, so what it says is what
+  happens when you confirm.
+- **A ref with no channel behind it says so** (*"no channel yet, just recorded"*). That is normal
+  when you are naming a patch id ahead of hearing it — and it is also what you would see if the ref
+  belonged to a *different system*, since a ref only means something inside its own. If you expected
+  a fold and got a recording, check the system.
+- **Fold a whole selection at once.** Tick the churn rows *and* the real channel, pick which one
+  survives from **Fold into**, and it is one request. This is the one to reach for when a patch-happy
+  system has left you forty near-identical rows. Selections spanning two systems are refused for the
+  reason above.
+- **Unfolding is the same flow backwards** and gives back the channel with the label it had and
+  exactly the Calls that arrived under it.
+
+A **Ranges** button on a unit row does the equivalent for radios — `1201–1299` in one line, rather
+than a row per radio. No preview there, and none needed: Calls name radios by number, so a range
+only changes what an apparatus is *called*, and removing one puts the bare numbers back.
+
+#### From a CSV
+
 Add a `memberRefs` column, semicolon-separated:
 
 ```csv
@@ -259,10 +288,14 @@ ref,label,memberRefs
   undo your merges. Unmerge from the owner's row instead.
 - **Folding a channel that already has members of its own** is rejected (`member-ref-owns-members`)
   until the cell lists those too, and the message says which. Otherwise the file would stop
-  describing what it made, and re-importing it would unmerge them again.
+  describing what it made, and re-importing it would unmerge them again. The browser has no file to
+  round-trip, so it applies that fold instead and tells you what came across with it.
 
-Every merge leaves a log line saying what moved (`talkgroup member Refs changed`, with the counts),
-so `journalctl -u radio-scout` has the record even if you lost the report.
+Every merge leaves a log line saying what moved — `talkgroup member Refs changed`, with the counts,
+the refs and the talkgroup ids behind them — so `journalctl -u radio-scout` has the record even if
+you lost the report. Both paths write the same line, so it reads the same whichever door the merge
+came through. A `-` in `talkgroup_ids` is a ref that absorbed nothing; the two lists line up entry
+by entry.
 
 ### Naming the radios
 

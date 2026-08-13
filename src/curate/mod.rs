@@ -37,6 +37,7 @@
 
 pub mod keys;
 pub mod labels;
+pub mod members;
 pub mod systems;
 pub mod talkgroups;
 pub mod units;
@@ -76,6 +77,10 @@ pub fn routes() -> Router<AppState> {
             patch(talkgroups::update).delete(talkgroups::remove),
         )
         .route(
+            "/api/admin/talkgroups/{id}/members",
+            get(members::list_members).post(members::fold),
+        )
+        .route(
             "/api/admin/groups",
             get(labels::list_groups).post(labels::create_group),
         )
@@ -95,6 +100,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/admin/units/{id}",
             patch(units::update).delete(units::remove),
+        )
+        .route(
+            "/api/admin/units/{id}/ranges",
+            get(members::list_ranges).post(members::set_ranges),
         )
         .route("/api/admin/api-keys", get(keys::list).post(keys::create))
         .route(
@@ -199,6 +208,18 @@ pub enum Rejected {
     /// the CSV import makes (#18) — a typo becomes a reported field, never a
     /// Talkgroup that renders with no LED.
     UnknownLed { led: String },
+    /// A Range collides with one this System already owns (#50).
+    ///
+    /// Names the Range *in the way* rather than saying "that overlaps
+    /// something", which is not an actionable sentence about a fleet with forty
+    /// of them. A Ref inside two Ranges belongs to whichever row the query
+    /// returns first, so this is the refusal that keeps one radio's Calls from
+    /// attributing to two different apparatus depending on the day
+    /// ([`crate::merge`]).
+    RangeOverlaps {
+        wanted: crate::merge::Range,
+        held: crate::merge::Range,
+    },
     /// A delete that would take Calls with it, and nobody asked it to.
     ///
     /// Retention owns removing Calls end to end — the row, the audio object and
@@ -217,6 +238,7 @@ impl Rejected {
             Rejected::RefTaken { what, .. } => what.ref_taken(),
             Rejected::NotFound(what) => what.not_found(),
             Rejected::NoSuchSystem { .. } => "no-such-system",
+            Rejected::RangeOverlaps { .. } => "range-overlaps",
             Rejected::UnknownLed { .. } => "unknown-led",
             Rejected::HasCalls { what, .. } => what.has_calls(),
         }
@@ -229,9 +251,10 @@ impl Rejected {
             | Rejected::NoSuchSystem { .. }
             | Rejected::UnknownLed { .. } => StatusCode::BAD_REQUEST,
             Rejected::NotFound(_) => StatusCode::NOT_FOUND,
-            Rejected::NameTaken { .. } | Rejected::RefTaken { .. } | Rejected::HasCalls { .. } => {
-                StatusCode::CONFLICT
-            }
+            Rejected::NameTaken { .. }
+            | Rejected::RefTaken { .. }
+            | Rejected::RangeOverlaps { .. }
+            | Rejected::HasCalls { .. } => StatusCode::CONFLICT,
         }
     }
 
@@ -264,6 +287,14 @@ impl std::fmt::Display for Rejected {
             }
             Rejected::NotFound(what) => write!(f, "no such {}", what.noun()),
             Rejected::NoSuchSystem { system_id } => write!(f, "no system with id {system_id}"),
+            Rejected::RangeOverlaps { wanted, held } => write!(
+                f,
+                "{}-{} overlaps {}-{}, which is already owned on this system",
+                wanted.from(),
+                wanted.to(),
+                held.from(),
+                held.to()
+            ),
             Rejected::UnknownLed { led } => write!(
                 f,
                 "{led:?} is not an LED colour: choose one of {}",
@@ -541,6 +572,16 @@ mod tests {
     #[case::gone(Rejected::NotFound(What::Unit), 404, "unit-not-found", false, false)]
     #[case::no_system(Rejected::NoSuchSystem { system_id: 7 }, 400, "no-such-system", false, false)]
     #[case::led(Rejected::UnknownLed { led: String::from("puce") }, 400, "unknown-led", false, false)]
+    #[case::overlap(
+        Rejected::RangeOverlaps {
+            wanted: crate::merge::Range::new(1250, 1350),
+            held: crate::merge::Range::new(1200, 1299),
+        },
+        409,
+        "range-overlaps",
+        false,
+        false
+    )]
     #[case::calls(
         Rejected::HasCalls { what: What::System, calls: 12 },
         409,
@@ -566,6 +607,23 @@ mod tests {
         );
         assert_eq!(body.get("field").is_some(), names_a_field, "{body}");
         assert_eq!(body.get("calls").is_some(), counts_calls, "{body}");
+    }
+
+    /// An overlap names **both** Ranges — the one asked for and the one in the
+    /// way. "That overlaps something" is not an actionable sentence about a
+    /// fleet with forty of them, which is why [`crate::merge::first_overlap`]
+    /// returns the collision rather than a boolean.
+    #[test]
+    fn an_overlapping_range_names_the_one_in_the_way() {
+        let told = Rejected::RangeOverlaps {
+            wanted: crate::merge::Range::new(1250, 1350),
+            held: crate::merge::Range::new(1200, 1299),
+        }
+        .to_string();
+
+        for number in ["1250", "1350", "1200", "1299"] {
+            assert!(told.contains(number), "{told}");
+        }
     }
 
     /// The unknown-LED sentence lists what *is* allowed, because "puce is not an

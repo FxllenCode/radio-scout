@@ -10,6 +10,7 @@ import {
   SignOutButton,
   controlClass,
 } from '@/components/admin/AdminUi'
+import { RangesEditor } from '@/components/admin/RangesEditor'
 import { Screen } from '@/components/layout/Screen'
 import { useAdminSession } from '@/hooks/useAdminSession'
 import { Button } from '@/components/ui/button'
@@ -56,6 +57,10 @@ export function UnitsScreen() {
   )
   const [remove, removing] = useDeleteUnitMutation()
   const [editing, setEditing] = useState<number | undefined>(undefined)
+  // Ranges open independently of the name, because they are different work:
+  // naming a fleet is a hundred rows of typing, and writing down its blocks is
+  // a handful of spans on the few rows that own one.
+  const [ranging, setRanging] = useState<number | undefined>(undefined)
 
   const rows = page.data?.results ?? []
   /** Any filter change invalidates the window it was read in. */
@@ -142,6 +147,15 @@ export function UnitsScreen() {
                     <Button
                       variant="outline"
                       size="sm"
+                      onClick={() =>
+                        setRanging(ranging === row.id ? undefined : row.id)
+                      }
+                    >
+                      Ranges
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => remove(row.id)}
                     >
                       Delete
@@ -152,6 +166,7 @@ export function UnitsScreen() {
                 {editing === row.id && (
                   <UnitForm row={row} onSaved={() => setEditing(undefined)} />
                 )}
+                {ranging === row.id && <RangesEditor row={row} />}
               </RowCard>
             ))}
           </RowList>

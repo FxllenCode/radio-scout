@@ -6,6 +6,9 @@ import type {
   AdminSystem,
   AdminTalkgroup,
   AdminUnit,
+  MemberRef,
+  MovedRef,
+  Span,
 } from '@/types'
 import { ORIGIN } from './handlers'
 
@@ -30,6 +33,12 @@ export class FakeInstance {
   tags: AdminLabel[] = []
   units: AdminUnit[] = []
   keys: AdminApiKey[] = []
+  /** Member Refs, by owning Talkgroup id (#50). Kept beside the rows rather
+   *  than on them because the server deliberately keeps them off the listing —
+   *  a query per row on a page of five hundred, for a column it cannot edit. */
+  members = new Map<number, MemberRef[]>()
+  /** A Unit's Ranges, by owning Unit id. */
+  ranges = new Map<number, Span[]>()
   /** Every request that changed something, in order — so a test can assert on
    *  *what was sent* as well as on what came back, which is the half that
    *  catches a form posting the wrong shape. */
@@ -347,6 +356,79 @@ export function curationHandlers(instance: FakeInstance) {
       return new HttpResponse(null, { status: 204 })
     }),
 
+    // -- Merge curation (#50) ---------------------------------------------
+
+    http.get(`${ORIGIN}/api/admin/talkgroups/:id/members`, ({ params }) =>
+      HttpResponse.json({ results: membersOf(instance, Number(params.id)) }),
+    ),
+    http.post(
+      `${ORIGIN}/api/admin/talkgroups/:id/members`,
+      async ({ request, params }) => {
+        const url = new URL(request.url)
+        const dryRun = url.searchParams.has('dryRun')
+        const body = await record(
+          'POST',
+          request,
+          `/api/admin/talkgroups/${params.id}/members${url.search}`,
+        )
+        const owner = instance.talkgroups.find((it) => String(it.id) === params.id)
+        if (!owner) return refusal(404, 'talkgroup-not-found', 'no such talkgroup')
+        return HttpResponse.json(
+          applyDelta(
+            instance,
+            owner,
+            (body.fold as number[]) ?? [],
+            (body.unfold as number[]) ?? [],
+            dryRun,
+          ),
+        )
+      },
+    ),
+
+    http.get(`${ORIGIN}/api/admin/units/:id/ranges`, ({ params }) =>
+      HttpResponse.json({ results: instance.ranges.get(Number(params.id)) ?? [] }),
+    ),
+    http.post(`${ORIGIN}/api/admin/units/:id/ranges`, async ({ request, params }) => {
+      const body = await record(
+        'POST',
+        request,
+        `/api/admin/units/${params.id}/ranges`,
+      )
+      const unit = instance.units.find((it) => String(it.id) === params.id)
+      if (!unit) return refusal(404, 'unit-not-found', 'no such unit')
+      const held = instance.ranges.get(unit.id) ?? []
+      const add = (body.add as Span[]) ?? []
+      const remove = (body.remove as Span[]) ?? []
+
+      const clash = add.find((span) =>
+        held.some(
+          (owned) =>
+            !remove.some((gone) => sameSpan(gone, owned)) &&
+            span.from <= owned.to &&
+            owned.from <= span.to,
+        ),
+      )
+      if (clash) {
+        const owned = held.find(
+          (it) => clash.from <= it.to && it.from <= clash.to,
+        )!
+        return refusal(
+          409,
+          'range-overlaps',
+          `${clash.from}-${clash.to} overlaps ${owned.from}-${owned.to}, ` +
+            'which is already owned on this system',
+        )
+      }
+      const kept = held.filter(
+        (owned) => !remove.some((gone) => sameSpan(gone, owned)),
+      )
+      instance.ranges.set(unit.id, [...kept, ...add])
+      return HttpResponse.json({
+        added: add.length,
+        removed: held.length - kept.length,
+      })
+    }),
+
     http.get(`${ORIGIN}/api/admin/api-keys`, () =>
       HttpResponse.json({ results: instance.keys }),
     ),
@@ -376,6 +458,73 @@ export function curationHandlers(instance: FakeInstance) {
       return new HttpResponse(null, { status: 204 })
     }),
   ]
+}
+
+/** The member Refs a channel answers to. */
+function membersOf(instance: FakeInstance, id: number): MemberRef[] {
+  return instance.members.get(id) ?? []
+}
+
+function sameSpan(left: Span, right: Span): boolean {
+  return left.from === right.from && left.to === right.to
+}
+
+/** Fold and unfold, closely enough that a screen can be driven against it.
+ *
+ *  The one behaviour that matters here is the difference the preview exists to
+ *  show: a Ref naming an existing channel is **folded** and carries that
+ *  channel's Calls across, while a Ref naming nothing is merely **recorded**.
+ *  The real rules — patch rows, chain folds, the archive — are
+ *  `tests/merge.rs`'s over a real database on both dialects. */
+function applyDelta(
+  instance: FakeInstance,
+  owner: AdminTalkgroup,
+  fold: number[],
+  unfold: number[],
+  dryRun: boolean,
+) {
+  const held = membersOf(instance, owner.id)
+  const moved: MovedRef[] = []
+  let kept = held.filter((member) => !unfold.includes(member.ref))
+
+  for (const member of held.filter((it) => unfold.includes(it.ref))) {
+    moved.push({
+      ref: member.ref,
+      movement: 'unfolded',
+      label: member.label ?? null,
+      calls: 0,
+      carried: [],
+    })
+    if (!dryRun) {
+      instance.talkgroup({ ref: member.ref, label: member.label ?? null })
+    }
+  }
+  for (const ref of fold.filter((it) => !kept.some((m) => m.ref === it))) {
+    const source = instance.talkgroups.find(
+      (row) => row.ref === ref && row.systemId === owner.systemId,
+    )
+    moved.push({
+      ref,
+      movement: source ? 'folded' : 'recorded',
+      label: source?.label ?? null,
+      calls: source?.calls ?? 0,
+      carried: [],
+    })
+    kept = [...kept, { ref, label: source?.label ?? null }]
+    if (!dryRun && source) {
+      owner.calls += source.calls
+      instance.talkgroups = instance.talkgroups.filter((it) => it !== source)
+    }
+  }
+  if (!dryRun) instance.members.set(owner.id, kept)
+
+  return {
+    dryRun,
+    folded: moved.filter((it) => it.movement === 'folded').length,
+    unfolded: moved.filter((it) => it.movement === 'unfolded').length,
+    callsRepointed: moved.reduce((total, it) => total + it.calls, 0),
+    moved,
+  }
 }
 
 /** The LED palette the server validates against (`curate::checked_led`). */

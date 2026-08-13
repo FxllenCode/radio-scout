@@ -855,3 +855,203 @@ async fn a_gone_device_is_logged_by_its_id_and_not_its_endpoint() {
     assert!(line.contains("subscription="), "{line}");
     capture.assert_never_logged(&endpoint);
 }
+
+// ---------------------------------------------------------------------------
+// Merge curation leaves a line (#50)
+// ---------------------------------------------------------------------------
+
+/// **Every merge action logs what moved — counts *and* ids.**
+///
+/// A fold is the one curation act that rewrites the archive rather than the
+/// configuration, and the report it returns reaches only whoever clicked. An
+/// Operator reading journald a week later, wondering where a channel went, has
+/// this line and nothing else — so it has to carry the Refs that moved and the
+/// Talkgroup ids behind them, not merely a total.
+///
+/// INFO rather than WARN (ADR-0011 rule 7): nothing was rejected and no Call was
+/// destroyed. A Talkgroup row went, and unfolding brings it back.
+#[tokio::test]
+async fn a_fold_from_the_browser_says_what_it_moved() {
+    let capture = LogCapture::start();
+    let app = TestApp::with_key(RECORDER_KEY).await;
+    app.login().await;
+    app.upload_ok(CallUpload::new().key(RECORDER_KEY).talkgroup(100).at(1000))
+        .await;
+    app.upload_ok(CallUpload::new().key(RECORDER_KEY).talkgroup(8123).at(2000))
+        .await;
+    let owner = app.talkgroup_by_ref(11, 100).await.expect("the owner").id;
+    let absorbed = app
+        .talkgroup_by_ref(11, 8123)
+        .await
+        .expect("the churn row")
+        .id;
+
+    let (status, report) = app
+        .admin_post(
+            &format!("/api/admin/talkgroups/{owner}/members"),
+            serde_json::json!({"fold": [8123]}),
+        )
+        .await;
+    assert_eq!(status, 200, "{report}");
+
+    let line = capture.only_line_containing("talkgroup member Refs changed");
+    assert!(line.contains(" INFO "), "{line}");
+    assert!(line.contains(&format!("talkgroup_id={owner}")), "{line}");
+    assert!(line.contains("folded=1"), "{line}");
+    assert!(line.contains("calls_repointed=1"), "{line}");
+    assert!(line.contains("refs=8123"), "the Refs that moved: {line}");
+    assert!(
+        line.contains(&format!("talkgroup_ids={absorbed}")),
+        "the id of the channel that went: {line}"
+    );
+    assert!(line.contains("dry_run=false"), "{line}");
+}
+
+/// A preview leaves a line too, and it says it was one — so a log full of
+/// merges cannot be misread as a log full of merges that happened.
+#[tokio::test]
+async fn a_previewed_fold_says_it_wrote_nothing() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 8123).await;
+    let owner = app.talkgroup_by_ref(11, 100).await.expect("the owner").id;
+
+    app.admin_post(
+        &format!("/api/admin/talkgroups/{owner}/members?dryRun"),
+        serde_json::json!({"fold": [8123]}),
+    )
+    .await;
+
+    let line = capture.only_line_containing("talkgroup member Refs changed");
+    assert!(line.contains("dry_run=true"), "{line}");
+}
+
+/// A Range edit is a merge action too, and leaves its own line — no Call moved,
+/// so there is no `calls_repointed` to report and the counts are what changed.
+#[tokio::test]
+async fn a_range_edit_says_what_it_changed() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    let unit = app.unit_by_ref(11, 1200).await.expect("the Unit").id;
+
+    app.admin_post(
+        &format!("/api/admin/units/{unit}/ranges"),
+        serde_json::json!({"add": [{"from": 1201, "to": 1299}]}),
+    )
+    .await;
+
+    let line = capture.only_line_containing("unit Ranges changed");
+    assert!(line.contains(" INFO "), "{line}");
+    assert!(line.contains(&format!("unit_id={unit}")), "{line}");
+    assert!(line.contains("unit_ref=1200"), "{line}");
+    assert!(line.contains("added=1"), "{line}");
+    assert!(line.contains("removed=0"), "{line}");
+    assert!(
+        line.contains("spans=1201-1299"),
+        "which block, not merely how many: {line}"
+    );
+}
+
+/// **A Ref that named no channel is a hole in the line, not a missing column.**
+///
+/// The two lists are positional — `refs` and `talkgroup_ids` line up entry by
+/// entry — so a Ref that absorbed nothing has to occupy its place. Dropping it
+/// would silently shift every id after it onto the wrong Ref, which is the one
+/// way a log line about a merge could mislead rather than merely omit.
+#[tokio::test]
+async fn a_recorded_ref_leaves_a_gap_in_the_ids_rather_than_a_shorter_list() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 8123).await;
+    let owner = app.talkgroup_by_ref(11, 100).await.expect("the owner").id;
+    let absorbed = app
+        .talkgroup_by_ref(11, 8123)
+        .await
+        .expect("the churn row")
+        .id;
+
+    // 9000 names no channel at all; 8123 names one.
+    app.admin_post(
+        &format!("/api/admin/talkgroups/{owner}/members"),
+        serde_json::json!({"fold": [9000, 8123]}),
+    )
+    .await;
+
+    let line = capture.only_line_containing("talkgroup member Refs changed");
+    assert!(line.contains("refs=9000,8123"), "{line}");
+    assert!(
+        line.contains(&format!("talkgroup_ids=-,{absorbed}")),
+        "the ref that absorbed nothing holds its place: {line}"
+    );
+}
+
+/// **A merge that moved nothing is not a merge action, and leaves no line.**
+///
+/// A form submitted with nothing changed, or a re-imported file whose merges all
+/// already applied, must not write a line saying a merge happened — a log an
+/// Operator greps for "where did that channel go" is useless if it is full of
+/// merges that were not.
+#[tokio::test]
+async fn a_fold_that_moves_nothing_writes_no_line() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app.seed_talkgroup(11, 100).await;
+    let owner = app.talkgroup_by_ref(11, 100).await.expect("the owner").id;
+
+    app.admin_post(
+        &format!("/api/admin/talkgroups/{owner}/members"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    capture.assert_never_logged("talkgroup member Refs changed");
+}
+
+/// The same for Ranges, and the same reason. Both halves of the guard are
+/// asserted: a delta that changes nothing is silent...
+#[tokio::test]
+async fn a_range_edit_that_changes_nothing_writes_no_line() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    let unit = app.unit_by_ref(11, 1200).await.expect("the Unit").id;
+
+    app.admin_post(
+        &format!("/api/admin/units/{unit}/ranges"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    capture.assert_never_logged("unit Ranges changed");
+}
+
+/// ...and a delta that only *removes* still speaks, which is the half a guard
+/// written against additions alone would silently drop.
+#[tokio::test]
+async fn removing_a_range_says_so() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    let unit = app.unit_by_ref(11, 1200).await.expect("the Unit").id;
+
+    app.admin_post(
+        &format!("/api/admin/units/{unit}/ranges"),
+        serde_json::json!({"remove": [{"from": 1201, "to": 1299}]}),
+    )
+    .await;
+
+    let line = capture.only_line_containing("unit Ranges changed");
+    assert!(line.contains("added=0"), "{line}");
+    assert!(line.contains("removed=1"), "{line}");
+    assert!(line.contains("spans="), "{line}");
+}

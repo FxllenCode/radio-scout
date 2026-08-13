@@ -357,6 +357,73 @@ export interface AdminUnitQuery {
   offset?: number
 }
 
+/** One **member Ref** a channel answers to besides its own (#50, spec US 17).
+ *
+ *  `label` is what the folded channel called itself, so the list reads as the
+ *  names an Operator curated — and `null` for a Ref that was never a channel of
+ *  its own, which is the honest difference between "TAC 3, folded in" and
+ *  "8123, written down". */
+export interface MemberRef {
+  ref: number
+  label?: string | null
+}
+
+/** One **Range** of radio ids an apparatus answers to, both ends inclusive. */
+export interface Span {
+  from: number
+  to: number
+}
+
+/** A merge edit: fold these Refs in, unfold those, and say nothing about
+ *  anything else.
+ *
+ *  A delta rather than the finished set on purpose. A form is submitted by a tab
+ *  that read the list some minutes ago, and inferring an unmerge from absence is
+ *  exactly the rdio-scanner failure the curation surface exists to not repeat. */
+export interface MemberDelta {
+  fold?: number[]
+  unfold?: number[]
+}
+
+/** The same, for a Unit's Ranges. */
+export interface RangeDelta {
+  add?: Span[]
+  remove?: Span[]
+}
+
+/** Which way one Ref went. `recorded` is the arm the counts cannot express: a
+ *  Ref nothing has been heard on yet was written down, absorbing nothing — and
+ *  it is what a Ref belonging to another **System** looks like, since a Ref is
+ *  unique only within one. */
+export type Movement = 'folded' | 'recorded' | 'unfolded'
+
+/** One Ref's share of a merge, as the confirmation renders it. */
+export interface MovedRef {
+  ref: number
+  movement: Movement
+  label?: string | null
+  /** Calls this Ref would move. The number the whole preview exists for. */
+  calls: number
+  /** Member Refs the absorbed channel owned, which come across with it. */
+  carried: number[]
+}
+
+/** What a fold did — or, when `dryRun`, would do. */
+export interface MergeReport {
+  dryRun: boolean
+  folded: number
+  unfolded: number
+  callsRepointed: number
+  moved: MovedRef[]
+}
+
+/** What a Range edit did. No preview: a Call names the radios it heard by Ref,
+ *  never by a Unit's id, so nothing here moves one. */
+export interface RangeReport {
+  added: number
+  removed: number
+}
+
 /** One bulk action over selected Talkgroup rows (spec US 46). */
 export interface AdminAssignment {
   ids: number[]

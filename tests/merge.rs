@@ -750,3 +750,495 @@ async fn a_range_overlapping_one_already_owned_is_refused_and_says_which() {
         "and nothing was written"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Curated from a browser (#50, spec US 17)
+// ---------------------------------------------------------------------------
+//
+// The same folds as above, reached the other way. #45 gave merging exactly one
+// way in — a CSV cell — and #50 is the screen an Operator does it from. What is
+// asserted here is that the two paths *agree*: the archive reads back the same
+// whichever one moved it, because both go through `repo::set_member_refs` and
+// neither has a fold of its own.
+//
+// The wire is a delta rather than the whole set, for the reason
+// `curate::members` gives: a form is submitted by a tab that read the list some
+// minutes ago, and inferring an unmerge from absence is the rdio failure this
+// surface exists to not repeat.
+
+/// The id of the Talkgroup answering to `primary_ref`, for a path segment.
+async fn talkgroup_id(app: &TestApp, primary_ref: i64) -> i64 {
+    app.talkgroup_by_ref(11, primary_ref)
+        .await
+        .expect("the Talkgroup")
+        .id
+}
+
+/// Fold and unfold from the browser, optionally as a preview.
+async fn curate_members(
+    app: &TestApp,
+    id: i64,
+    fold: &[i64],
+    unfold: &[i64],
+    preview: bool,
+) -> (u16, serde_json::Value) {
+    let path = match preview {
+        true => format!("/api/admin/talkgroups/{id}/members?dryRun"),
+        false => format!("/api/admin/talkgroups/{id}/members"),
+    };
+    app.admin_post(&path, serde_json::json!({ "fold": fold, "unfold": unfold }))
+        .await
+}
+
+/// The founding case of #50, and the CSV test above rewritten as a form: an
+/// Operator discovers churn after the fact and folds it from the screen. The
+/// archive has to follow, exactly as it does for the file.
+#[tokio::test]
+async fn folding_from_the_browser_carries_the_calls_across() {
+    let app = curating_app().await;
+    app.upload_ok(CallUpload::new().talkgroup(100).at(1000))
+        .await;
+    app.upload_ok(CallUpload::new().talkgroup(8123).at(2000))
+        .await;
+    let owner = talkgroup_id(&app, 100).await;
+
+    let (status, report) = curate_members(&app, owner, &[8123], &[], false).await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["folded"], 1);
+    assert_eq!(report["callsRepointed"], 1);
+    assert_eq!(report["dryRun"], false);
+    assert_eq!(
+        app.count::<talkgroup::Entity>().await,
+        1,
+        "the folded channel is gone from the panel"
+    );
+    assert_eq!(app.member_refs(11, 100).await, vec![8123]);
+    assert_eq!(searched_refs(&app).await, vec![100, 100]);
+}
+
+/// **The preview is the real transaction, rolled back** — #18's dry run, for
+/// #18's reason. So the numbers it reports are a promise about the run that
+/// follows rather than a separate estimate of it, and this asserts exactly
+/// that: the same report twice, and nothing moved in between.
+#[tokio::test]
+async fn a_preview_reports_what_the_real_fold_then_does_and_changes_nothing() {
+    let app = curating_app().await;
+    app.upload_ok(CallUpload::new().talkgroup(100).at(1000))
+        .await;
+    for at in [2000, 3000] {
+        app.upload_ok(CallUpload::new().talkgroup(8123).at(at))
+            .await;
+    }
+    let owner = talkgroup_id(&app, 100).await;
+
+    let (status, preview) = curate_members(&app, owner, &[8123], &[], true).await;
+
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["dryRun"], true);
+    assert_eq!(preview["callsRepointed"], 2);
+    assert_eq!(
+        app.count::<talkgroup::Entity>().await,
+        2,
+        "a preview writes nothing"
+    );
+    assert!(app.member_refs(11, 100).await.is_empty());
+    assert_eq!(searched_refs(&app).await, vec![100, 8123, 8123]);
+
+    // ...and the run it described does exactly that.
+    let (_, real) = curate_members(&app, owner, &[8123], &[], false).await;
+    assert_eq!(real["folded"], preview["folded"]);
+    assert_eq!(real["callsRepointed"], preview["callsRepointed"]);
+    assert_eq!(real["moved"], preview["moved"]);
+}
+
+/// **A preview names what it is about to destroy.** The counts alone cannot:
+/// "1 folded, 412 calls" is the same sentence whichever channel went, and the
+/// confirmation step exists so an Operator recognises the one in front of them.
+#[tokio::test]
+async fn a_preview_names_the_channel_and_the_calls_it_would_take() {
+    let app = curating_app().await;
+    app.upload_ok(CallUpload::new().talkgroup(100).at(1000))
+        .await;
+    app.upload_ok(CallUpload::new().talkgroup(8123).at(2000))
+        .await;
+    let churn = talkgroup_id(&app, 8123).await;
+    app.admin_patch(
+        &format!("/api/admin/talkgroups/{churn}"),
+        serde_json::json!({"label": "TAC 3"}),
+    )
+    .await;
+    let owner = talkgroup_id(&app, 100).await;
+
+    let (_, preview) = curate_members(&app, owner, &[8123], &[], true).await;
+
+    assert_eq!(
+        preview["moved"],
+        serde_json::json!([{
+            "ref": 8123,
+            "movement": "folded",
+            "label": "TAC 3",
+            "calls": 1,
+            "carried": [],
+        }])
+    );
+}
+
+/// **A Ref nothing answers to is `recorded`, and the preview says so.**
+///
+/// This is also what a Ref belonging to *another System* looks like from here —
+/// a Ref is unique only within one, so folding another System's number resolves
+/// to no channel and simply writes a member Ref down. The counts cannot tell
+/// that from a fold; the per-Ref detail can, which is why it is what the
+/// confirmation renders.
+#[tokio::test]
+async fn a_ref_no_channel_answers_to_previews_as_recorded() {
+    let app = curating_app().await;
+    app.upload_ok(CallUpload::new().talkgroup(100).at(1000))
+        .await;
+    let owner = talkgroup_id(&app, 100).await;
+
+    let (_, preview) = curate_members(&app, owner, &[8123], &[], true).await;
+
+    assert_eq!(preview["folded"], 0, "nothing was absorbed");
+    assert_eq!(preview["callsRepointed"], 0);
+    assert_eq!(preview["moved"][0]["movement"], "recorded");
+    assert_eq!(preview["moved"][0]["calls"], 0);
+    assert_eq!(preview["moved"][0]["label"], serde_json::Value::Null);
+}
+
+/// The round trip from the screen: unfolding gives back the channel and exactly
+/// the Calls that arrived under it.
+#[tokio::test]
+async fn unfolding_from_the_browser_sends_the_calls_home() {
+    let app = curating_app().await;
+    app.upload_ok(CallUpload::new().talkgroup(100).at(1000))
+        .await;
+    app.upload_ok(CallUpload::new().talkgroup(8123).at(2000))
+        .await;
+    let owner = talkgroup_id(&app, 100).await;
+    curate_members(&app, owner, &[8123], &[], false).await;
+
+    let (status, report) = curate_members(&app, owner, &[], &[8123], false).await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["unfolded"], 1);
+    assert_eq!(report["callsRepointed"], 1);
+    assert_eq!(report["moved"][0]["movement"], "unfolded");
+    assert_eq!(app.count::<talkgroup::Entity>().await, 2);
+    assert_eq!(searched_refs(&app).await, vec![100, 8123]);
+}
+
+/// **A delta says nothing about what it did not name.** The whole reason the
+/// wire is not the finished set: a tab that read the members list before
+/// somebody else added one must not unfold it by staying silent.
+#[tokio::test]
+async fn a_fold_leaves_the_members_it_never_mentioned_alone() {
+    let app = curating_app().await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_member_ref(11, 100, 8123).await;
+    let owner = talkgroup_id(&app, 100).await;
+
+    curate_members(&app, owner, &[8124], &[], false).await;
+
+    assert_eq!(
+        app.member_refs(11, 100).await,
+        vec![8123, 8124],
+        "the Ref this request never mentioned is still a member"
+    );
+}
+
+/// **Bulk folding is the same request.** An Operator selects the churn rows and
+/// the real channel, says which survives, and the other Refs are that one
+/// request's `fold` list — so spec US 46's "categorizing a county doesn't take
+/// an afternoon" holds for merges too, and there is still exactly one writer.
+#[tokio::test]
+async fn a_county_of_churn_folds_into_one_channel_in_one_request() {
+    let app = curating_app().await;
+    app.upload_ok(CallUpload::new().talkgroup(100).at(1000))
+        .await;
+    let churn: Vec<i64> = (8000..8010).collect();
+    for (n, ref_) in churn.iter().enumerate() {
+        app.upload_ok(CallUpload::new().talkgroup(*ref_).at(2000 + n as i64 * 10))
+            .await;
+    }
+    assert_eq!(app.count::<talkgroup::Entity>().await, 11);
+    let owner = talkgroup_id(&app, 100).await;
+
+    let (status, report) = curate_members(&app, owner, &churn, &[], false).await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["folded"], 10);
+    assert_eq!(report["callsRepointed"], 10);
+    assert_eq!(
+        report["moved"].as_array().expect("moved").len(),
+        10,
+        "every Ref is accounted for, one row at a time"
+    );
+    assert_eq!(
+        app.count::<talkgroup::Entity>().await,
+        1,
+        "the panel is one channel"
+    );
+    assert_eq!(app.member_refs(11, 100).await, churn);
+    assert_eq!(searched_refs(&app).await, vec![100; 11]);
+}
+
+/// **A chain fold applies and reports what came with it.**
+///
+/// The CSV importer refuses this until the cell names every carried Ref, so the
+/// file keeps describing what it made and re-importing it does not read them as
+/// members the operator removed. A form has no file to round-trip, so the
+/// better answer is to apply it and say what arrived — the improvement the
+/// delta shape buys.
+#[tokio::test]
+async fn folding_a_channel_that_owns_members_carries_them_and_says_so() {
+    let app = curating_app().await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 8123).await;
+    app.seed_member_ref(11, 8123, 9000).await;
+    let owner = talkgroup_id(&app, 100).await;
+
+    let (status, report) = curate_members(&app, owner, &[8123], &[], false).await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["moved"][0]["carried"], serde_json::json!([9000]));
+    assert_eq!(
+        app.member_refs(11, 100).await,
+        vec![8123, 9000],
+        "the carried Ref keeps resolving to the surviving channel"
+    );
+}
+
+/// A Ref another channel holds as a member belongs to that channel's merge, and
+/// stealing it would silently break the other one to fix this one — the
+/// importer's `member-ref-owned-elsewhere`, as a form's refusal.
+#[tokio::test]
+async fn a_ref_another_channel_holds_as_a_member_is_refused() {
+    let app = curating_app().await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 200).await;
+    app.seed_member_ref(11, 200, 8123).await;
+    let owner = talkgroup_id(&app, 100).await;
+
+    let (status, refused) = curate_members(&app, owner, &[8123], &[], false).await;
+
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["error"], "talkgroup-ref-taken");
+    assert_eq!(
+        app.member_refs(11, 200).await,
+        vec![8123],
+        "the other channel's merge is untouched"
+    );
+}
+
+/// The members list is a read of its own, because the Talkgroup listing
+/// deliberately does not carry it (#49) — one query per row on a page of five
+/// hundred, for a column that page cannot edit.
+#[tokio::test]
+async fn the_members_of_a_channel_are_readable_on_their_own() {
+    let app = curating_app().await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 8123).await;
+    let owner = talkgroup_id(&app, 100).await;
+    curate_members(&app, owner, &[8123, 9000], &[], false).await;
+
+    let (status, listing) = app
+        .admin_get(&format!("/api/admin/talkgroups/{owner}/members"))
+        .await;
+
+    assert_eq!(status, 200, "{listing}");
+    assert_eq!(
+        listing["results"],
+        serde_json::json!([
+            {"ref": 8123, "label": null},
+            {"ref": 9000, "label": null},
+        ])
+    );
+}
+
+// -- A Unit's Ranges, from the browser --------------------------------------
+
+/// Ranges have no preview and need none: a Call names the radios it heard by
+/// **Ref**, never by a Unit's Id, so editing a Unit's spans moves no Call. What
+/// changes is what an apparatus is *called*, which is exactly what this asserts
+/// — a radio inside the new span reads as the fleet.
+#[tokio::test]
+async fn giving_a_unit_a_range_from_the_browser_names_the_radios_in_it() {
+    let app = curating_app().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    let unit = app.unit_by_ref(11, 1200).await.expect("the Unit").id;
+
+    let (status, report) = app
+        .admin_post(
+            &format!("/api/admin/units/{unit}/ranges"),
+            serde_json::json!({"add": [{"from": 1201, "to": 1299}]}),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["added"], 1);
+    app.upload_ok(CallUpload::new().talkgroup(100).set("source", 1250))
+        .await;
+    let call = app.get_json("/api/calls").await;
+    assert_eq!(
+        call["results"][0]["unitLabel"], "Engine 1",
+        "a radio inside the span reads as the apparatus that owns it"
+    );
+}
+
+/// **A Range edit applies wholly or not at all.** `repo::set_unit_ranges`
+/// reports a refused span and applies the rest, which is right for a CSV — the
+/// remainder of the file should still land. A form that half-applied is a form
+/// whose screen now lies, so this surface rolls back and names the collision.
+#[tokio::test]
+async fn an_overlapping_range_is_refused_and_takes_the_rest_of_the_edit_with_it() {
+    let app = curating_app().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit(11, 4400, "Ladder 2").await;
+    app.seed_unit_range(11, 4400, 4400, 4499).await;
+    let unit = app.unit_by_ref(11, 1200).await.expect("the Unit").id;
+
+    let (status, refused) = app
+        .admin_post(
+            &format!("/api/admin/units/{unit}/ranges"),
+            serde_json::json!({"add": [
+                {"from": 1, "to": 99},
+                {"from": 4450, "to": 4550},
+            ]}),
+        )
+        .await;
+
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["error"], "range-overlaps");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .expect("a sentence")
+            .contains("4400"),
+        "it names the Range in the way: {refused}"
+    );
+    assert_eq!(
+        app.count::<unit_ref::Entity>().await,
+        1,
+        "the span that would have applied did not"
+    );
+}
+
+/// Removing a Range un-names the radios it covered, which is the reversible
+/// half of the same edit — and the reason this surface needs no `force`.
+#[tokio::test]
+async fn removing_a_range_from_the_browser_un_names_its_radios() {
+    let app = curating_app().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    let unit = app.unit_by_ref(11, 1200).await.expect("the Unit").id;
+
+    let (status, report) = app
+        .admin_post(
+            &format!("/api/admin/units/{unit}/ranges"),
+            serde_json::json!({"remove": [{"from": 1201, "to": 1299}]}),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["removed"], 1);
+    assert_eq!(
+        app.admin_get(&format!("/api/admin/units/{unit}/ranges"))
+            .await
+            .1["results"],
+        serde_json::json!([])
+    );
+}
+
+/// **Naming both halves of a chain fold is not a conflict.** Folding a channel
+/// *and* one of the member Refs it holds is one coherent request — the Ref
+/// arrives with the channel — and refusing it would make the safest way to
+/// write a chain fold down (say everything you mean) the one way that fails.
+#[tokio::test]
+async fn naming_a_channel_and_the_member_it_holds_is_one_fold() {
+    let app = curating_app().await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 8123).await;
+    app.seed_member_ref(11, 8123, 9000).await;
+    let owner = talkgroup_id(&app, 100).await;
+
+    let (status, report) = curate_members(&app, owner, &[8123, 9000], &[], false).await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(app.member_refs(11, 100).await, vec![8123, 9000]);
+}
+
+/// The Ranges listing answers with the spans themselves, which is what the
+/// editor renders — asserted with one in hand, since an empty list would pass
+/// whatever the row shape was.
+#[tokio::test]
+async fn the_ranges_of_an_apparatus_are_readable_on_their_own() {
+    let app = curating_app().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    let unit = app.unit_by_ref(11, 1200).await.expect("the Unit").id;
+
+    let (status, listing) = app
+        .admin_get(&format!("/api/admin/units/{unit}/ranges"))
+        .await;
+
+    assert_eq!(status, 200, "{listing}");
+    assert_eq!(
+        listing["results"],
+        serde_json::json!([{"from": 1201, "to": 1299}])
+    );
+}
+
+/// A Range delta naming nothing is a legitimate request — a form submitted with
+/// nothing changed — and changes nothing rather than refusing.
+#[tokio::test]
+async fn a_range_delta_that_names_nothing_changes_nothing() {
+    let app = curating_app().await;
+    app.seed_unit(11, 1200, "Engine 1").await;
+    app.seed_unit_range(11, 1200, 1201, 1299).await;
+    let unit = app.unit_by_ref(11, 1200).await.expect("the Unit").id;
+
+    let (status, report) = app
+        .admin_post(
+            &format!("/api/admin/units/{unit}/ranges"),
+            serde_json::json!({}),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["added"], 0);
+    assert_eq!(report["removed"], 0);
+    assert_eq!(app.count::<unit_ref::Entity>().await, 1);
+}
+
+/// **Writing a Ref down is a change, and the report says so.**
+///
+/// A `memberRefs` cell naming a Ref no channel answers to inserts a member Ref
+/// row — the channel now answers to a number it did not before — so the row is
+/// `updated`. It read as `unchanged` until #50 gave [`repo::MergeChange`] its
+/// per-Ref detail, which is what made "nothing happened" tell a recorded Ref
+/// from a re-import that really did nothing.
+///
+/// The second half is the one that must not move: re-importing the same file is
+/// still a no-op, which is the property the count exists for.
+#[tokio::test]
+async fn recording_a_ref_no_channel_answers_to_is_reported_as_a_change() {
+    let app = curating_app().await;
+    app.seed_talkgroup(11, 100).await;
+
+    let first = import(&app, "ref,memberRefs\n100,8123\n").await;
+
+    assert_eq!(first["talkgroupsUpdated"], 1, "{first}");
+    assert_eq!(first["talkgroupsUnchanged"], 0, "{first}");
+    assert_eq!(first["talkgroupsFolded"], 0, "nothing was absorbed");
+    assert_eq!(app.member_refs(11, 100).await, vec![8123]);
+
+    let again = import(&app, "ref,memberRefs\n100,8123\n").await;
+
+    assert_eq!(
+        again["talkgroupsUnchanged"], 1,
+        "re-importing a curated file is still a no-op: {again}"
+    );
+    assert_eq!(again["talkgroupsUpdated"], 0, "{again}");
+}

@@ -914,20 +914,7 @@ async fn apply_edit<C: ConnectionTrait>(
             repo::set_member_refs(db, &owner, wanted, now_ms).await?
         }
     };
-    if !merged.is_empty() {
-        // A merge is the one curation act that rewrites the *archive* rather
-        // than the configuration, so it leaves a line an operator reading
-        // journald can find — the report only ever reaches whoever posted the
-        // CSV (ADR-0011 rule 7: a notable normal event is INFO).
-        tracing::info!(
-            talkgroup_ref = edit.talkgroup_ref,
-            folded = merged.folded,
-            unfolded = merged.unfolded,
-            calls_repointed = merged.calls_repointed,
-            dry_run = report.dry_run,
-            "talkgroup member Refs changed"
-        );
-    }
+    merged.record(talkgroup_id, edit.talkgroup_ref, report.dry_run);
     report.talkgroups_folded += merged.folded;
     report.talkgroups_unfolded += merged.unfolded;
     report.calls_repointed += merged.calls_repointed;
@@ -985,17 +972,22 @@ async fn merge_conflict<C: ConnectionTrait>(
         )));
     }
 
-    for wanted in edit.member_refs.iter().flatten() {
+    let all_wanted: Vec<i64> = edit.member_refs.iter().flatten().copied().collect();
+    for wanted in &all_wanted {
         if *wanted == edit.talkgroup_ref {
             continue;
         }
-        if let Some(owner) = repo::member_ref_owner(db, system_id, *wanted).await?
-            && Some(owner.talkgroup_id) != existing.map(|found| found.id)
-            // ...unless the channel holding it is one this very row is folding
-            // in, in which case the Ref arrives here with it. That is not a
-            // conflict, it is the chain fold the guard below insists on
-            // spelling out.
-            && !is_being_absorbed(db, owner.talkgroup_id, edit).await?
+        // The rule is `repo`'s, shared with #50's form so the two surfaces
+        // cannot disagree about what a fold may take; only the refusal's shape
+        // is this file's.
+        if repo::member_ref_held_elsewhere(
+            db,
+            system_id,
+            existing.map(|found| found.id),
+            *wanted,
+            &all_wanted,
+        )
+        .await?
         {
             return Ok(Some(RejectedRow::new(
                 edit.line,
@@ -1037,23 +1029,6 @@ async fn merge_conflict<C: ConnectionTrait>(
         }
     }
     Ok(None)
-}
-
-/// Is `talkgroup_id` one of the channels this row's member-Refs cell folds in?
-async fn is_being_absorbed<C: ConnectionTrait>(
-    db: &C,
-    talkgroup_id: i64,
-    edit: &TalkgroupEdit,
-) -> Result<bool, DbErr> {
-    Ok(talkgroup::Entity::find_by_id(talkgroup_id)
-        .one(db)
-        .await?
-        .is_some_and(|holder| {
-            edit.member_refs
-                .iter()
-                .flatten()
-                .any(|wanted| *wanted == holder.r#ref)
-        }))
 }
 
 /// Make the Talkgroup's Group set exactly `names`, returning whether that
@@ -1505,9 +1480,7 @@ pub async fn import_talkgroups(
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(SystemSelector::parse),
-        dry_run: params
-            .get("dryRun")
-            .is_some_and(|value| !matches!(value.trim(), "false" | "0" | "no" | "off")),
+        dry_run: asked_for_a_dry_run(&params),
     };
 
     import(&state.db, &body, &options, state.clock.now_ms())
@@ -1539,9 +1512,7 @@ pub async fn import_unit_csv(
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(SystemSelector::parse),
-        dry_run: params
-            .get("dryRun")
-            .is_some_and(|value| !matches!(value.trim(), "false" | "0" | "no" | "off")),
+        dry_run: asked_for_a_dry_run(&params),
     };
 
     import_units(&state.db, &body, &options, state.clock.now_ms())
@@ -1552,11 +1523,49 @@ pub async fn import_unit_csv(
         })
 }
 
+/// Did this request ask to be shown rather than performed?
+///
+/// **A flag, not a boolean**: `?dryRun`, `?dryRun=`, and `?dryRun=true` all mean
+/// "don't write", and only an explicit denial turns it back off. Requiring a
+/// value would make the bare `?dryRun` an operator plainly means as "preview
+/// this" silently perform the real thing instead — the one mistake here that
+/// cannot be undone.
+///
+/// Written once because #50's merge preview is the same promise over the same
+/// mechanism (the real transaction, rolled back), and a surface where `?dryRun`
+/// meant something subtly different would be a very bad place to learn that.
+/// Deliberately laxer than [`crate::query::Params::flag`], which refuses a value
+/// it cannot read — here an unreadable value is *safer* read as "preview".
+pub fn asked_for_a_dry_run(params: &HashMap<String, String>) -> bool {
+    params
+        .get("dryRun")
+        .is_some_and(|value| !matches!(value.trim(), "false" | "0" | "no" | "off"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     use rstest::rstest;
+
+    /// The preview flag, both ways. A bare `?dryRun` must never perform the real
+    /// import, and an explicit denial must never preview one.
+    #[rstest]
+    #[case::absent(&[], false)]
+    #[case::bare(&[("dryRun", "")], true)]
+    #[case::asked(&[("dryRun", "true")], true)]
+    #[case::anything(&[("dryRun", "yes please")], true)]
+    #[case::denied(&[("dryRun", "false")], false)]
+    #[case::zero(&[("dryRun", "0")], false)]
+    #[case::off(&[("dryRun", " off ")], false)]
+    fn a_dry_run_is_asked_for_by_naming_it(#[case] pairs: &[(&str, &str)], #[case] expected: bool) {
+        let params: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+
+        assert_eq!(asked_for_a_dry_run(&params), expected, "{pairs:?}");
+    }
 
     /// Parse with System 11 as the request-level default — the common case, and
     /// the only way a RadioReference export (which has no System column) lands.

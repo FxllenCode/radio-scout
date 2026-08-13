@@ -1338,7 +1338,13 @@ async fn create_populated_talkgroup<C: ConnectionTrait>(
 /// touches an operator's *archive* and not just their configuration — "this will
 /// re-point 1,412 Calls" is the sentence a preview has to be able to say (#18's
 /// dry run, and #50's confirmation step).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// And [`moved`](Self::moved) beside the counts, because "1 folded" is the same
+/// sentence whichever channel went. #50 needs to name the row it is about to
+/// destroy *before* it destroys it, and ADR-0011 wants the ids of what moved on
+/// the line it leaves behind — one structure rather than two that could disagree
+/// about what a fold did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MergeChange {
     /// Talkgroups that stopped existing in their own right.
     pub folded: u64,
@@ -1346,6 +1352,8 @@ pub struct MergeChange {
     pub unfolded: u64,
     /// Calls whose owning Talkgroup changed, in either direction.
     pub calls_repointed: u64,
+    /// Every Ref that changed hands, in the order it was asked for.
+    pub moved: Vec<Moved>,
 }
 
 impl MergeChange {
@@ -1359,7 +1367,109 @@ impl MergeChange {
         self.folded += other.folded;
         self.unfolded += other.unfolded;
         self.calls_repointed += other.calls_repointed;
+        self.moved.extend(other.moved);
     }
+
+    /// **Write down what this merge moved** (#50, ADR-0011 rule 7).
+    ///
+    /// A merge is the one curation act that rewrites the **archive** rather than
+    /// the configuration, so it leaves a line an Operator reading journald can
+    /// find — the report only ever reaches whoever posted the CSV or clicked the
+    /// button. INFO because nothing was rejected and no Call was destroyed: a
+    /// Talkgroup row went, and unfolding brings it back.
+    ///
+    /// **One callsite for one message**, which is #92's rule applied a layer up.
+    /// Two surfaces reach this (the CSV importer and the browser), and while they
+    /// each had their own `tracing::info!` they had already drifted into
+    /// different field sets under an identical message — so a log an Operator
+    /// greps said different things depending on which door the merge came
+    /// through, and a test matching on the message could not tell them apart.
+    ///
+    /// Silent when nothing moved: a form submitted twice, or a re-imported file
+    /// whose merges all already applied, is not a merge action.
+    pub fn record(&self, talkgroup_id: i64, talkgroup_ref: i64, dry_run: bool) {
+        if self.is_empty() {
+            return;
+        }
+        // Built here rather than inside the macro: a `tracing` field expression
+        // is expanded into machinery that runs only when a subscriber is
+        // interested — right for a hot path, and it makes these two lists look
+        // unreachable to coverage.
+        let refs = joined(self.moved.iter().map(|moved| Some(moved.r#ref)));
+        let talkgroup_ids = joined(self.moved.iter().map(|moved| moved.talkgroup_id));
+        tracing::info!(
+            talkgroup_id,
+            talkgroup_ref,
+            folded = self.folded,
+            unfolded = self.unfolded,
+            calls_repointed = self.calls_repointed,
+            %refs,
+            %talkgroup_ids,
+            dry_run,
+            "talkgroup member Refs changed"
+        );
+    }
+}
+
+/// The ids on a merge's log line — comma-separated, and `-` where a Ref named no
+/// channel.
+///
+/// Positional, so `refs` and `talkgroup_ids` line up entry by entry. Dropping the
+/// empty ones would shift every id after them onto the wrong Ref, which is the
+/// one way a line about a merge could mislead rather than merely omit.
+fn joined(values: impl Iterator<Item = Option<i64>>) -> String {
+    values
+        .map(|value| match value {
+            Some(id) => id.to_string(),
+            None => String::from("-"),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Which way one Ref went.
+///
+/// [`Recorded`](Movement::Recorded) is the arm the counts cannot express:
+/// naming a Ref nothing has been heard on yet is not a fold — no channel was
+/// absorbed and no Call moved — but it *is* a member Ref where there was none,
+/// and it is what a Ref belonging to another **System** looks like from here.
+/// Telling it apart from a fold is the whole reason a preview is worth showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Movement {
+    /// A channel was absorbed and its Calls carried across.
+    Folded,
+    /// A Ref was written down, ready for traffic. Nothing existed to absorb.
+    Recorded,
+    /// A member Ref became a channel again, with the Calls that arrived under it.
+    Unfolded,
+}
+
+/// One Ref that changed hands, and what came with it.
+///
+/// Deliberately **not** a wire shape — the data layer builds no view (#98), so
+/// the JSON a browser reads is [`crate::curate::members::MovedRow`], made from
+/// this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    pub r#ref: i64,
+    pub movement: Movement,
+    /// The Talkgroup this is about: the one absorbed by a fold, or the one an
+    /// unfold restored. `None` for a [`Movement::Recorded`] Ref, which is
+    /// exactly the fact worth showing about one.
+    ///
+    /// On a **dry run** a restored id is provisional — the row is rolled back
+    /// with everything else — so it is the Ref, never this, that a preview
+    /// renders.
+    pub talkgroup_id: Option<i64>,
+    /// What that channel called itself, so a confirmation reads "TAC 3" rather
+    /// than a number the operator has to go and look up.
+    pub label: Option<String>,
+    /// Calls this Ref moved. The number the whole preview exists for.
+    pub calls: u64,
+    /// Member Refs the absorbed channel owned, which come across with it. The
+    /// CSV importer refuses this outright so a file keeps describing what it
+    /// made; a form has no file to round-trip, so it applies and says so.
+    pub carried: Vec<i64>,
 }
 
 /// The Talkgroup that owns `ext_ref` as a **member** Ref on this System, if any.
@@ -1378,6 +1488,46 @@ pub async fn member_ref_owner<C: ConnectionTrait>(
         .filter(talkgroup_ref::Column::Ref.eq(ext_ref))
         .one(db)
         .await
+}
+
+/// **Would taking `candidate` as a member Ref steal it from another channel?**
+///
+/// Stealing one would silently break that channel to fix this one, so both
+/// surfaces refuse it — the CSV importer as `member-ref-owned-elsewhere` and the
+/// browser as `talkgroup-ref-taken`. The *rule* is written here once because the
+/// two are one merge policy wearing two error shapes, and a copy each is how
+/// they come to disagree about what a fold may take (`curate::systems`'s
+/// blacklist parser is the same argument).
+///
+/// Three things it is deliberately **not**:
+///
+/// - **A primary Ref is not a conflict.** Absorbing a channel is exactly what a
+///   fold is; only somebody else's *member* list is spoken for.
+/// - **The owner's own members are not a conflict**, which `owner_id` says.
+/// - **A chain fold is not a conflict.** If the channel holding `candidate` is
+///   itself named in `wanted`, the Ref arrives with it. What the two surfaces
+///   then *do* differs — the importer refuses until the cell lists the carried
+///   Refs so a file keeps describing what it made; a form has no file to
+///   round-trip and applies it — but that is a policy above this predicate, not
+///   inside it.
+pub async fn member_ref_held_elsewhere<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    owner_id: Option<i64>,
+    candidate: i64,
+    wanted: &[i64],
+) -> Result<bool, DbErr> {
+    let Some(elsewhere) = member_ref_owner(db, system_id, candidate)
+        .await?
+        .filter(|member| Some(member.talkgroup_id) != owner_id)
+    else {
+        return Ok(false);
+    };
+    let holder = talkgroup::Entity::find_by_id(elsewhere.talkgroup_id)
+        .one(db)
+        .await?;
+
+    Ok(!holder.is_some_and(|holder| wanted.contains(&holder.r#ref)))
 }
 
 /// The member Refs a Talkgroup answers to, in the operator's order.
@@ -1455,7 +1605,62 @@ pub async fn set_member_refs<C: ConnectionTrait>(
             None => change.add(fold_ref(db, owner, arrived, position, now_ms).await?),
         }
     }
+
+    // **A chain fold is the one way a member arrives without being asked for**,
+    // and it arrives carrying the position it held on the channel it came from —
+    // which collides with a position this loop just assigned. Two rows sharing
+    // one leaves the rendered order down to whatever the database returns first,
+    // and the two dialects need not agree (ADR-0003). Harmless while the order
+    // was only a CSV column's; #50 puts it on a screen.
+    //
+    // Guarded, so the steady-state cost is unchanged: nothing else can leave a
+    // member outside `wanted`, since everything else there was got unfolded.
+    if change.moved.iter().any(|moved| !moved.carried.is_empty()) {
+        renumber_members(db, owner, &wanted).await?;
+    }
     Ok(change)
+}
+
+/// Make the owner's member positions dense and unique: the Refs the operator
+/// named, in their order, then whatever a fold carried in behind them.
+///
+/// Carried Refs keep their relative order (by the position they had, then by
+/// Ref) rather than being interleaved, because the operator did not put them
+/// there and a list that reshuffles what they *did* write is worse than one with
+/// a tail they did not.
+async fn renumber_members<C: ConnectionTrait>(
+    db: &C,
+    owner: &talkgroup::Model,
+    wanted: &[i64],
+) -> Result<(), DbErr> {
+    let mut held: Vec<talkgroup_ref::Model> = talkgroup_ref::Entity::find()
+        .filter(talkgroup_ref::Column::TalkgroupId.eq(owner.id))
+        .all(db)
+        .await?;
+    held.sort_by_key(|member| {
+        (
+            wanted
+                .iter()
+                .position(|named| *named == member.r#ref)
+                .unwrap_or(usize::MAX),
+            member.position,
+            member.r#ref,
+        )
+    });
+
+    for (position, member) in held.iter().enumerate() {
+        let position = position as i32;
+        if member.position != position {
+            talkgroup_ref::ActiveModel {
+                id: Set(member.id),
+                position: Set(position),
+                ..Default::default()
+            }
+            .update(db)
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Give `owner` another Ref to answer to, absorbing the Talkgroup that Ref names
@@ -1485,7 +1690,20 @@ async fn fold_ref<C: ConnectionTrait>(
 
     let mut change = MergeChange::default();
     let mut label = None;
+    let mut moved = Moved {
+        r#ref: member_ref,
+        movement: Movement::Recorded,
+        talkgroup_id: None,
+        label: None,
+        calls: 0,
+        carried: Vec::new(),
+    };
     if let Some(source) = source {
+        // Read before the fold moves them onto the owner, where they become
+        // indistinguishable from the owner's own. One statement, and only on the
+        // arm that absorbed a channel — a Ref merely being written down asks the
+        // database nothing extra.
+        moved.carried = member_refs_of(db, source.id).await?;
         // The Ref each Call arrived under, for the ones stored before the column
         // existed. Written *before* the move, while "which Talkgroup was this"
         // is still answerable — afterwards it is the owner's, and the fold would
@@ -1555,9 +1773,14 @@ async fn fold_ref<C: ConnectionTrait>(
             .await?;
         talkgroup::Entity::delete_by_id(source.id).exec(db).await?;
 
+        moved.movement = Movement::Folded;
+        moved.talkgroup_id = Some(source.id);
+        moved.label = source.label.clone();
+        moved.calls = change.calls_repointed;
         label = source.label;
         change.folded = 1;
     }
+    change.moved.push(moved);
 
     // The Ref may already be a member — carried across a moment ago by the fold
     // of a channel that owned it (see the guard in `crate::import`, which is why
@@ -1658,6 +1881,14 @@ async fn unfold_ref<C: ConnectionTrait>(
         folded: 0,
         unfolded: 1,
         calls_repointed,
+        moved: vec![Moved {
+            r#ref: member.r#ref,
+            movement: Movement::Unfolded,
+            talkgroup_id: Some(restored.id),
+            label: member.label.clone(),
+            calls: calls_repointed,
+            carried: Vec::new(),
+        }],
     })
 }
 
@@ -3082,6 +3313,233 @@ mod tests {
                 .expect("count log events"),
             0
         );
+    }
+
+    // -- What a merge moved (#50) -------------------------------------------
+
+    /// A System with two channels and a Call on the second — the shape every
+    /// merge test below folds.
+    async fn a_system_with_two_channels() -> (tempfile::TempDir, crate::db::Db, talkgroup::Model) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
+        let system = system::ActiveModel {
+            r#ref: Set(11),
+            auto_populate: Set(true),
+            created_at_ms: Set(0),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("a system");
+        let owner = talkgroup::ActiveModel {
+            system_id: Set(system.id),
+            r#ref: Set(100),
+            label: Set(Some(String::from("Fire Dispatch"))),
+            created_at_ms: Set(0),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("the owner");
+        let churn = talkgroup::ActiveModel {
+            system_id: Set(system.id),
+            r#ref: Set(1201),
+            label: Set(Some(String::from("TAC 3"))),
+            created_at_ms: Set(0),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("the churn row");
+        for at_ms in [1_000, 2_000] {
+            call::ActiveModel {
+                system_id: Set(system.id),
+                talkgroup_id: Set(churn.id),
+                talkgroup_ref: Set(Some(1201)),
+                call_at_ms: Set(at_ms),
+                object_key: Set(format!("k{at_ms}.wav")),
+                emergency: Set(false),
+                encrypted: Set(false),
+                enhancement: Set(String::from(call::EnhancementState::NONE)),
+                created_at_ms: Set(at_ms),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("a call");
+        }
+        (tmp, db, owner)
+    }
+
+    /// **A fold says what it took, one Ref at a time.**
+    ///
+    /// The counts alone cannot: "1 folded, 2 calls re-pointed" is the same
+    /// sentence whichever channel went, and #50's confirmation step has to be
+    /// able to name the row it is about to destroy. The same detail is what the
+    /// log line's ids are made of, which is why it is one structure and not two.
+    #[tokio::test]
+    async fn a_fold_reports_the_channel_it_absorbed() {
+        let (_tmp, db, owner) = a_system_with_two_channels().await;
+
+        let change = set_member_refs(&db, &owner, &[1201], 3_000)
+            .await
+            .expect("the fold");
+
+        assert_eq!(change.folded, 1);
+        assert_eq!(change.calls_repointed, 2);
+        let moved = match change.moved.as_slice() {
+            [only] => only,
+            other => panic!("expected one move, got {other:?}"),
+        };
+        assert_eq!(moved.r#ref, 1201);
+        assert_eq!(moved.movement, Movement::Folded);
+        assert_eq!(moved.label.as_deref(), Some("TAC 3"));
+        assert_eq!(moved.calls, 2, "the Calls this Ref brought with it");
+        assert!(moved.talkgroup_id.is_some(), "the channel that went");
+        assert!(moved.carried.is_empty(), "it owned no members of its own");
+    }
+
+    /// **A Ref nothing has been heard on is `Recorded`, not `Folded`.**
+    ///
+    /// The two are indistinguishable in the counts — both leave a member Ref
+    /// behind and neither is an error — but only one of them destroyed a row.
+    /// This is also the shape a Ref selected from *another System* arrives in
+    /// (a Ref is unique only within one), which is the case the preview exists
+    /// to make visible rather than plausible.
+    #[tokio::test]
+    async fn a_ref_no_channel_answers_to_is_recorded_rather_than_folded() {
+        let (_tmp, db, owner) = a_system_with_two_channels().await;
+
+        let change = set_member_refs(&db, &owner, &[8123], 3_000)
+            .await
+            .expect("the record");
+
+        assert_eq!(change.folded, 0, "nothing was absorbed");
+        assert_eq!(change.calls_repointed, 0);
+        assert_eq!(
+            change
+                .moved
+                .iter()
+                .map(|moved| (moved.r#ref, moved.movement))
+                .collect::<Vec<_>>(),
+            [(8123, Movement::Recorded)]
+        );
+        assert!(change.moved[0].talkgroup_id.is_none());
+    }
+
+    /// An unfold reports the Calls it gave back, so the same confirmation works
+    /// in the direction that *creates* a channel.
+    #[tokio::test]
+    async fn an_unfold_reports_the_calls_it_gave_back() {
+        let (_tmp, db, owner) = a_system_with_two_channels().await;
+        set_member_refs(&db, &owner, &[1201], 3_000)
+            .await
+            .expect("the fold");
+
+        let change = set_member_refs(&db, &owner, &[], 4_000)
+            .await
+            .expect("the unfold");
+
+        assert_eq!(change.unfolded, 1);
+        let moved = match change.moved.as_slice() {
+            [only] => only,
+            other => panic!("expected one move, got {other:?}"),
+        };
+        assert_eq!(moved.r#ref, 1201);
+        assert_eq!(moved.movement, Movement::Unfolded);
+        assert_eq!(moved.calls, 2, "exactly the Calls that arrived under it");
+        assert_eq!(
+            moved.label.as_deref(),
+            Some("TAC 3"),
+            "the name the operator curated comes back with it"
+        );
+    }
+
+    /// **A chain fold says what came with it.** Folding a channel that owns
+    /// member Refs of its own carries them across silently otherwise, and the
+    /// operator finds out by noticing a number in a list later. The CSV
+    /// importer refuses this outright so a file keeps describing what it made;
+    /// a form has no file to round-trip, so it applies and reports.
+    #[tokio::test]
+    async fn a_fold_reports_the_members_that_came_with_the_channel() {
+        let (_tmp, db, owner) = a_system_with_two_channels().await;
+        let churn = talkgroup::Entity::find()
+            .filter(talkgroup::Column::Ref.eq(1201))
+            .one(&db)
+            .await
+            .expect("read")
+            .expect("the churn row");
+        set_member_refs(&db, &churn, &[8123, 8124], 2_500)
+            .await
+            .expect("its own members");
+
+        let change = set_member_refs(&db, &owner, &[1201], 3_000)
+            .await
+            .expect("the fold");
+
+        assert_eq!(change.moved.len(), 1, "one Ref was named");
+        assert_eq!(change.moved[0].carried, [8123, 8124]);
+    }
+
+    /// **A chain fold must not leave two members sharing a position.**
+    ///
+    /// A carried Ref arrives holding the position it had on the channel it came
+    /// from, which is one this call just handed out. Two rows at position 0
+    /// leave the order down to whatever the database returns first, and the two
+    /// dialects need not agree — invisible while the order was only a CSV
+    /// column's, and a list that renders differently per install once #50 puts
+    /// it on a screen.
+    #[tokio::test]
+    async fn a_carried_member_gets_a_position_of_its_own() {
+        let (_tmp, db, owner) = a_system_with_two_channels().await;
+        let churn = talkgroup::Entity::find()
+            .filter(talkgroup::Column::Ref.eq(1201))
+            .one(&db)
+            .await
+            .expect("read")
+            .expect("the churn row");
+        set_member_refs(&db, &churn, &[8123], 2_500)
+            .await
+            .expect("its own member");
+
+        set_member_refs(&db, &owner, &[1201], 3_000)
+            .await
+            .expect("the fold");
+
+        let mut held: Vec<(i32, i64)> = talkgroup_ref::Entity::find()
+            .filter(talkgroup_ref::Column::TalkgroupId.eq(owner.id))
+            .all(&db)
+            .await
+            .expect("read members")
+            .into_iter()
+            .map(|member| (member.position, member.r#ref))
+            .collect();
+        held.sort();
+
+        assert_eq!(
+            held,
+            [(0, 1201), (1, 8123)],
+            "the named Ref keeps the operator's order and the carried one follows"
+        );
+    }
+
+    /// Nothing moved is an empty report — which is what makes a re-import, and
+    /// a form submitted twice, a no-op rather than a merge action.
+    #[tokio::test]
+    async fn a_fold_that_changes_nothing_reports_nothing() {
+        let (_tmp, db, owner) = a_system_with_two_channels().await;
+        set_member_refs(&db, &owner, &[1201], 3_000)
+            .await
+            .expect("the fold");
+
+        let again = set_member_refs(&db, &owner, &[1201], 4_000)
+            .await
+            .expect("the same fold");
+
+        assert!(again.is_empty(), "{again:?}");
+        assert!(again.moved.is_empty());
     }
 
     // -- Mining a Call already in the Archive (#48) --------------------------

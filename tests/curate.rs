@@ -51,6 +51,10 @@ async fn no_session_reaches_no_curation_route() {
         "/api/admin/tags",
         "/api/admin/units",
         "/api/admin/api-keys",
+        // #50's merge curation, which reads and rewrites the archive — the two
+        // routes it would be worst to have mounted outside the layer.
+        "/api/admin/talkgroups/1/members",
+        "/api/admin/units/1/ranges",
     ] {
         let response = app.get(path).await;
         assert_eq!(response.status(), 401, "GET {path}");
@@ -1669,4 +1673,72 @@ async fn a_forced_delete_that_breaks_leaves_the_entity_to_retry() {
         1,
         "and the system is still there to delete again"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Merge curation (#50, spec US 17)
+// ---------------------------------------------------------------------------
+//
+// What a fold *does* to the archive is `tests/merge.rs`'s, beside the CSV path
+// that does the same thing. What is here is what this surface owes: a row that
+// is not there, a body it will not read, and the line an Operator finds
+// afterwards.
+
+/// A merge route naming a row that is not there is a 404, on both halves and in
+/// both directions — a merge screen opened from a stale list must say so rather
+/// than answering 500 or, worse, quietly succeeding against nothing.
+#[rstest]
+#[case::members("/api/admin/talkgroups/999/members", "talkgroup-not-found")]
+#[case::ranges("/api/admin/units/999/ranges", "unit-not-found")]
+#[tokio::test]
+async fn a_merge_route_naming_no_row_is_a_404(#[case] path: &str, #[case] expected: &str) {
+    let app = TestApp::spawn().await;
+    app.login().await;
+
+    let (status, refused) = app.admin_get(path).await;
+    assert_eq!(status, 404, "GET {path}: {refused}");
+    assert_eq!(slug(&refused), expected);
+
+    let (status, refused) = app.admin_post(path, json!({})).await;
+    assert_eq!(status, 404, "POST {path}: {refused}");
+    assert_eq!(slug(&refused), expected);
+}
+
+/// The delta's fields are closed, like every other body on this surface: a
+/// client that misspells `unfold` must be told, not silently have its unmerge
+/// dropped on the floor.
+#[rstest]
+#[case::members("/api/admin/talkgroups/1/members", json!({"unfolded": [8123]}))]
+#[case::ranges("/api/admin/units/1/ranges", json!({"added": [{"from": 1, "to": 9}]}))]
+#[tokio::test]
+async fn a_misspelled_delta_field_is_refused(#[case] path: &str, #[case] body: Value) {
+    let app = TestApp::spawn().await;
+    app.login().await;
+
+    let (status, _) = app.admin_post(path, body).await;
+
+    assert_eq!(status, 422, "an unknown field is not silently ignored");
+}
+
+/// An empty delta is a legitimate request — a form submitted with nothing
+/// changed — and answers with an empty report rather than a refusal.
+#[tokio::test]
+async fn a_delta_that_names_nothing_changes_nothing() {
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app.seed_talkgroup(11, 100).await;
+    let id = app
+        .talkgroup_by_ref(11, 100)
+        .await
+        .expect("the talkgroup")
+        .id;
+
+    let (status, report) = app
+        .admin_post(&format!("/api/admin/talkgroups/{id}/members"), json!({}))
+        .await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["folded"], 0);
+    assert_eq!(report["unfolded"], 0);
+    assert_eq!(report["moved"], json!([]));
 }

@@ -10,8 +10,13 @@ import {
   SignOutButton,
   controlClass,
 } from '@/components/admin/AdminUi'
+import {
+  MemberRefsEditor,
+  MergeConfirmation,
+} from '@/components/admin/MergeEditor'
 import { Screen } from '@/components/layout/Screen'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useMerge } from '@/hooks/useMerge'
 import { Button } from '@/components/ui/button'
 import { pageSummary } from '@/lib/archive'
 import { splitList } from '@/lib/curate'
@@ -62,6 +67,10 @@ export function AdminTalkgroupsScreen() {
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<number[]>([])
   const [editing, setEditing] = useState<number | undefined>(undefined)
+  // Merges open on their own control rather than inside the edit form: the
+  // fields above are this channel's own, and a fold is about its relationship
+  // to other channels — different work, and the destructive one.
+  const [merging, setMerging] = useState<number | undefined>(undefined)
 
   const page = useGetAdminTalkgroupsQuery(
     {
@@ -157,10 +166,31 @@ export function AdminTalkgroupsScreen() {
 
         {selected.length > 0 && (
           <BulkBar
-            ids={selected}
+            rows={rows.filter((row) => selected.includes(row.id))}
             onDone={() => setSelected([])}
             onClear={() => setSelected([])}
           />
+        )}
+
+        {rows.length > 0 && (
+          <label className="mt-3 flex items-center gap-2 font-mono text-xs">
+            <input
+              type="checkbox"
+              checked={rows.every((row) => selected.includes(row.id))}
+              onChange={(event) =>
+                setSelected(
+                  event.target.checked ? rows.map((row) => row.id) : [],
+                )
+              }
+            />
+            {/* The other half of "foldable in bulk": a system that mints a TGID
+                per patch event leaves dozens of near-identical rows, and forty
+                individual clicks is the afternoon US 46 exists to save. Bounded
+                to the page on purpose — a selection is rows an Operator can
+                see, which is the same rule that clears it when a filter
+                changes. */}
+            Select all {rows.length} on this page
+          </label>
         )}
 
         {page.isError ? (
@@ -218,6 +248,15 @@ export function AdminTalkgroupsScreen() {
                     <Button
                       variant="outline"
                       size="sm"
+                      onClick={() =>
+                        setMerging(merging === row.id ? undefined : row.id)
+                      }
+                    >
+                      Merges
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => remove({ id: row.id })}
                     >
                       Delete
@@ -231,6 +270,7 @@ export function AdminTalkgroupsScreen() {
                     onSaved={() => setEditing(undefined)}
                   />
                 )}
+                {merging === row.id && <MemberRefsEditor row={row} />}
               </RowCard>
             ))}
           </RowList>
@@ -369,11 +409,11 @@ function NewTalkgroupForm({
 
 /** One action over every selected row (spec US 46). */
 function BulkBar({
-  ids,
+  rows,
   onDone,
   onClear,
 }: {
-  ids: number[]
+  rows: AdminTalkgroup[]
   onDone: () => void
   onClear: () => void
 }) {
@@ -381,6 +421,7 @@ function BulkBar({
   const [addGroups, setAddGroups] = useState('')
   const [removeGroups, setRemoveGroups] = useState('')
   const [tag, setTag] = useState('')
+  const ids = rows.map((row) => row.id)
 
   return (
     <form
@@ -455,7 +496,85 @@ function BulkBar({
           Deselect
         </Button>
       </div>
+      {rows.length > 1 && <BulkFold rows={rows} onDone={onDone} />}
     </form>
+  )
+}
+
+/** **Folding a whole selection into one channel** (#50, spec US 17).
+ *
+ *  The case the feature exists for: a system mints a fresh TGID per patch
+ *  event, and a month later the panel is forty rows of churn around one real
+ *  channel. Selecting them and saying which survives is the whole gesture —
+ *  the others' Refs become that one request's fold list, so it is one
+ *  transaction rather than forty, and it still goes through the same preview
+ *  every other fold does.
+ *
+ *  **A Ref is unique only within its System**, so a selection spanning two
+ *  cannot be folded: the other System's number would resolve to no channel here
+ *  and record as a bare member Ref — a row that looks perfectly ordinary and did
+ *  nothing the Operator wanted. Refused in the control rather than explained in
+ *  the preview, because the preview is a request that would have to be sent
+ *  first. */
+function BulkFold({
+  rows,
+  onDone,
+}: {
+  rows: AdminTalkgroup[]
+  onDone: () => void
+}) {
+  const [survivor, setSurvivor] = useState('')
+  const oneSystem = new Set(rows.map((row) => row.systemId)).size === 1
+  // **Derived, not stored.** The selection changes under this control — a row
+  // ticked or unticked, a filter cleared — so a remembered id can name a row
+  // that is no longer selected. Falling back to the first keeps the box and the
+  // channel that would actually survive the same thing, which matters because
+  // the box is the only place it is named.
+  const target = rows.find((row) => String(row.id) === survivor) ?? rows[0]
+  const merge = useMerge(target.id, onDone)
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border pt-2">
+      <div className="flex items-end gap-2">
+        <Field label="Fold into" htmlFor="bulk-fold-into">
+          <select
+            id="bulk-fold-into"
+            className={controlClass}
+            disabled={!oneSystem}
+            value={String(target.id)}
+            onChange={(event) => setSurvivor(event.target.value)}
+          >
+            {rows.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.label ?? `Talkgroup ${row.ref}`}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Button
+          type="button"
+          size="sm"
+          disabled={!oneSystem}
+          onClick={() =>
+            merge.preview({
+              fold: rows
+                .filter((row) => row.id !== target.id)
+                .map((row) => row.ref),
+              unfold: [],
+            })
+          }
+        >
+          Preview fold
+        </Button>
+      </div>
+      {!oneSystem && (
+        <p className="font-mono text-xs text-muted-foreground">
+          A ref only means something inside its own system, so a fold takes one
+          system at a time.
+        </p>
+      )}
+      <MergeConfirmation merge={merge} into={target} />
+    </div>
   )
 }
 

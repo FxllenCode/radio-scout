@@ -1606,3 +1606,457 @@ describe('the details the forms owe', () => {
     expect(wrote()).toEqual([])
   })
 })
+
+// ---------------------------------------------------------------------------
+// Merge curation (#50, spec US 17)
+// ---------------------------------------------------------------------------
+
+describe('folding channels together', () => {
+  /** The member Refs a channel answers to are a read of their own — the
+   *  listing deliberately does not carry them, so opening the editor is what
+   *  fetches them. */
+  it('lists the refs a channel already answers to', async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    instance.members.set(owner.id, [{ ref: 8123, label: 'TAC 3' }])
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Merges' }))
+
+    const members = within(await screen.findByRole('list', { name: 'Member refs' }))
+    expect(members.getByRole('listitem')).toHaveTextContent('8123 · TAC 3')
+  })
+
+  /** **Nothing is folded without being shown first.** The preview is a
+   *  `?dryRun` of the real transaction, so it names the channel that would go
+   *  and the Calls that would move — and writes nothing until the Operator
+   *  says so again. */
+  it('previews a fold before anything is written', async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    instance.talkgroup({ ref: 8123, label: 'TAC 3', calls: 412 })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getAllByRole('button', { name: 'Merges' })[0])
+
+    await userEvent.type(
+      await screen.findByLabelText('Refs to fold in'),
+      '8123',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+
+    const preview = within(await screen.findByRole('group', { name: 'Fold preview' }))
+    expect(preview.getByRole('listitem')).toHaveTextContent(
+      '8123 · TAC 3 — folded in, bringing 412 calls',
+    )
+    // Previewed, not performed: the only request carried `?dryRun`.
+    expect(wrote().map((it) => it.path)).toEqual([
+      `/api/admin/talkgroups/${owner.id}/members?dryRun`,
+    ])
+    expect(instance.talkgroups).toHaveLength(2)
+  })
+
+  /** ...and confirming sends the same delta for real. */
+  it('folds once the preview is confirmed', async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    instance.talkgroup({ ref: 8123, label: 'TAC 3', calls: 412 })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getAllByRole('button', { name: 'Merges' })[0])
+    await userEvent.type(await screen.findByLabelText('Refs to fold in'), '8123')
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    await screen.findByRole('group', { name: 'Fold preview' })
+
+    await userEvent.click(screen.getByRole('button', { name: /^Fold/ }))
+
+    await waitFor(() => expect(instance.talkgroups).toHaveLength(1))
+    expect(wrote().map((it) => [it.path, it.body])).toEqual([
+      [`/api/admin/talkgroups/${owner.id}/members?dryRun`, { fold: [8123], unfold: [] }],
+      [`/api/admin/talkgroups/${owner.id}/members`, { fold: [8123], unfold: [] }],
+    ])
+  })
+
+  /** Backing out of a preview writes nothing — the confirmation is a real
+   *  decision point, not a speed bump. */
+  it('writes nothing when a preview is dismissed', async () => {
+    instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    instance.talkgroup({ ref: 8123, label: 'TAC 3', calls: 412 })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getAllByRole('button', { name: 'Merges' })[0])
+    await userEvent.type(await screen.findByLabelText('Refs to fold in'), '8123')
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    await screen.findByRole('group', { name: 'Fold preview' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(
+      screen.queryByRole('group', { name: 'Fold preview' }),
+    ).not.toBeInTheDocument()
+    expect(wrote()).toHaveLength(1)
+    expect(instance.talkgroups).toHaveLength(2)
+  })
+
+  /** **A Ref nothing answers to is shown as what it is.** The counts cannot
+   *  tell it from a fold — and it is what a Ref belonging to another System
+   *  looks like, which is the mistake this preview exists to catch. */
+  it('says when a ref would be recorded rather than folded', async () => {
+    instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getAllByRole('button', { name: 'Merges' })[0])
+
+    await userEvent.type(await screen.findByLabelText('Refs to fold in'), '8123')
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+
+    const preview = within(await screen.findByRole('group', { name: 'Fold preview' }))
+    expect(preview.getByText(/no channel/i)).toBeInTheDocument()
+  })
+
+  /** Unfolding goes through the same preview, because it moves Calls too —
+   *  back to the channel they arrived under. */
+  it('previews an unfold before restoring the channel', async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    instance.members.set(owner.id, [{ ref: 8123, label: 'TAC 3' }])
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getByRole('button', { name: 'Merges' }))
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Unfold 8123' }))
+
+    await screen.findByRole('group', { name: 'Fold preview' })
+    expect(wrote().map((it) => [it.path, it.body])).toEqual([
+      [`/api/admin/talkgroups/${owner.id}/members?dryRun`, { fold: [], unfold: [8123] }],
+    ])
+  })
+
+  /** **Bulk folding is one request** (spec US 46's argument, for merges): the
+   *  Operator selects the churn rows plus the real channel, says which
+   *  survives, and the rest become that one request's fold list. */
+  it('folds a selection into the channel that survives', async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    const churn = [8001, 8002, 8003].map((ref) =>
+      instance.talkgroup({ ref, calls: 3 }),
+    )
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    for (const row of [owner, ...churn]) {
+      await userEvent.click(
+        screen.getByRole('checkbox', { name: `Select ${row.label ?? row.ref}` }),
+      )
+    }
+
+    await userEvent.selectOptions(
+      screen.getByLabelText('Fold into'),
+      String(owner.id),
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Preview fold' }))
+    await screen.findByRole('group', { name: 'Fold preview' })
+    await userEvent.click(screen.getByRole('button', { name: /^Fold/ }))
+
+    await waitFor(() => expect(instance.talkgroups).toHaveLength(1))
+    expect(wrote().at(-1)).toEqual({
+      method: 'POST',
+      path: `/api/admin/talkgroups/${owner.id}/members`,
+      body: { fold: [8001, 8002, 8003], unfold: [] },
+    })
+  })
+
+  /** **A Ref is unique only within its System**, so a selection spanning two
+   *  cannot be folded: the other System's number would resolve to no channel
+   *  here and record as a bare member Ref — a row that looks perfectly ordinary
+   *  and did nothing the Operator wanted. */
+  it('refuses to offer a fold across two systems', async () => {
+    const first = instance.system({ ref: 11, label: 'Fulton' })
+    const second = instance.system({ ref: 12, label: 'Coweta' })
+    instance.talkgroup({ ref: 100, label: 'Fire Dispatch', systemId: first.id })
+    instance.talkgroup({
+      ref: 200,
+      label: 'Coweta Fire',
+      systemId: second.id,
+      systemRef: 12,
+    })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select Fire Dispatch' }))
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select Coweta Fire' }))
+
+    expect(screen.getByLabelText('Fold into')).toBeDisabled()
+    expect(screen.getByText(/one system at a time/i)).toBeInTheDocument()
+  })
+})
+
+describe("a unit's ranges", () => {
+  /** A fleet numbers its radios in blocks, and this is where the block is
+   *  written down — the half of #45 that had only a CSV until now. */
+  it('lists and adds the spans an apparatus answers to', async () => {
+    const unit = instance.unit({ ref: 1200, label: 'Engine 1' })
+    instance.ranges.set(unit.id, [{ from: 1201, to: 1249 }])
+    signedIn(<UnitsScreen />)
+    await screen.findByRole('list', { name: 'Units' })
+    await userEvent.click(screen.getByRole('button', { name: 'Ranges' }))
+
+    const ranges = within(await screen.findByRole('list', { name: 'Ranges' }))
+    expect(ranges.getByText('1201–1249')).toBeInTheDocument()
+
+    await userEvent.type(screen.getByLabelText('From'), '1250')
+    await userEvent.type(screen.getByLabelText('To'), '1299')
+    await userEvent.click(screen.getByRole('button', { name: 'Add range' }))
+
+    await waitFor(() =>
+      expect(instance.ranges.get(unit.id)).toEqual([
+        { from: 1201, to: 1249 },
+        { from: 1250, to: 1299 },
+      ]),
+    )
+    expect(wrote().at(-1)?.body).toEqual({
+      add: [{ from: 1250, to: 1299 }],
+      remove: [],
+    })
+  })
+
+  /** Removing one un-names the radios it covered — reversible, which is why
+   *  this is the one merge edit with nothing to confirm. */
+  it('removes a span', async () => {
+    const unit = instance.unit({ ref: 1200, label: 'Engine 1' })
+    instance.ranges.set(unit.id, [{ from: 1201, to: 1249 }])
+    signedIn(<UnitsScreen />)
+    await screen.findByRole('list', { name: 'Units' })
+    await userEvent.click(screen.getByRole('button', { name: 'Ranges' }))
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Remove 1201–1249' }))
+
+    await waitFor(() => expect(instance.ranges.get(unit.id)).toEqual([]))
+    expect(wrote().at(-1)?.body).toEqual({
+      add: [],
+      remove: [{ from: 1201, to: 1249 }],
+    })
+  })
+
+  /** **An overlap is refused whole**, and the sentence comes from the server —
+   *  it is the side that knows which Range is in the way. */
+  it("shows the server's sentence when a range overlaps", async () => {
+    const engine = instance.unit({ ref: 1200, label: 'Engine 1' })
+    instance.ranges.set(engine.id, [{ from: 4400, to: 4499 }])
+    signedIn(<UnitsScreen />)
+    await screen.findByRole('list', { name: 'Units' })
+    await userEvent.click(screen.getByRole('button', { name: 'Ranges' }))
+    await screen.findByRole('list', { name: 'Ranges' })
+
+    await userEvent.type(screen.getByLabelText('From'), '4460')
+    await userEvent.type(screen.getByLabelText('To'), '4470')
+    await userEvent.click(screen.getByRole('button', { name: 'Add range' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/overlaps/i)
+    expect(instance.ranges.get(engine.id)).toEqual([{ from: 4400, to: 4499 }])
+  })
+})
+
+describe('when a merge is refused', () => {
+  /** A preview that the server refuses shows the refusal instead of a
+   *  confirmation — and offers nothing to confirm, which is the point: there is
+   *  no promise to keep. */
+  it("shows the server's sentence when a preview is refused", async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getByRole('button', { name: 'Merges' }))
+    server.use(
+      http.post(`${ORIGIN}/api/admin/talkgroups/${owner.id}/members`, () =>
+        refusal(
+          409,
+          'talkgroup-ref-taken',
+          'another talkgroup already answers to 8123',
+        ),
+      ),
+    )
+
+    await userEvent.type(await screen.findByLabelText('Refs to fold in'), '8123')
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'another talkgroup already answers to 8123',
+    )
+    expect(
+      screen.queryByRole('group', { name: 'Fold preview' }),
+    ).not.toBeInTheDocument()
+  })
+
+  /** **A refused commit takes the preview down with it.** Whatever the server
+   *  refused, what was on screen has stopped being a promise about the run that
+   *  follows — leaving the confirmation up would invite a second click on a
+   *  sentence that is no longer true. */
+  it('drops the preview when the fold itself is refused', async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    instance.talkgroup({ ref: 8123, label: 'TAC 3', calls: 412 })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getAllByRole('button', { name: 'Merges' })[0])
+    await userEvent.type(await screen.findByLabelText('Refs to fold in'), '8123')
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    await screen.findByRole('group', { name: 'Fold preview' })
+    // Only the real write is refused; the preview already happened.
+    server.use(
+      http.post(`${ORIGIN}/api/admin/talkgroups/${owner.id}/members`, ({ request }) =>
+        new URL(request.url).searchParams.has('dryRun')
+          ? HttpResponse.json({
+              dryRun: true,
+              folded: 1,
+              unfolded: 0,
+              callsRepointed: 412,
+              moved: [],
+            })
+          : refusal(409, 'talkgroup-ref-taken', 'somebody folded it first'),
+      ),
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /^Fold/ }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'somebody folded it first',
+    )
+    expect(instance.talkgroups).toHaveLength(2)
+  })
+
+  /** An empty box is not a fold. Submitting one must not post a delta that
+   *  names nothing — a request whose only possible answer is "nothing
+   *  happened". */
+  it('sends nothing when no refs were typed', async () => {
+    instance.talkgroup({ ref: 100, label: null })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getByRole('button', { name: 'Merges' }))
+
+    fireEvent.submit(await screen.findByRole('form', { name: 'Fold refs into 100' }))
+
+    expect(wrote()).toEqual([])
+  })
+
+  /** ...and the same for a blank span. Both boxes are `required`, so a browser
+   *  refuses first — but a form is submittable from script, and `0-0` is a span
+   *  nobody asked for. */
+  it('sends nothing when a range is left blank', async () => {
+    instance.unit({ ref: 1200, label: null })
+    signedIn(<UnitsScreen />)
+    await screen.findByRole('list', { name: 'Units' })
+    await userEvent.click(screen.getByRole('button', { name: 'Ranges' }))
+
+    fireEvent.submit(await screen.findByRole('form', { name: 'Add a range to 1200' }))
+
+    expect(wrote()).toEqual([])
+  })
+
+  /** The preview counts in words an Operator reads, so a single Call is "1
+   *  call" — and a chain fold says what is coming with the channel, because a
+   *  Ref arriving unasked-for is the thing they would otherwise find later. */
+  it('names one call singular and the refs a fold brings with it', async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getByRole('button', { name: 'Merges' }))
+    server.use(
+      http.post(`${ORIGIN}/api/admin/talkgroups/${owner.id}/members`, () =>
+        HttpResponse.json({
+          dryRun: true,
+          folded: 1,
+          unfolded: 0,
+          callsRepointed: 1,
+          moved: [
+            {
+              ref: 8123,
+              movement: 'folded',
+              label: 'TAC 3',
+              calls: 1,
+              carried: [9000, 9001],
+            },
+          ],
+        }),
+      ),
+    )
+
+    await userEvent.type(await screen.findByLabelText('Refs to fold in'), '8123')
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+
+    const preview = within(await screen.findByRole('group', { name: 'Fold preview' }))
+    expect(preview.getByRole('listitem')).toHaveTextContent(
+      '8123 · TAC 3 — folded in, bringing 1 call — brings 9000, 9001 with it',
+    )
+    expect(preview.getByText('1 call would move.')).toBeInTheDocument()
+  })
+})
+
+/** Most radios own no block at all — they are one apparatus with one id — so
+ *  the empty state is the common one and has to read as a fact rather than as a
+ *  list that failed to load. */
+it('says so when an apparatus owns no ranges', async () => {
+  instance.unit({ ref: 1200, label: 'Engine 1' })
+  signedIn(<UnitsScreen />)
+  await screen.findByRole('list', { name: 'Units' })
+
+  await userEvent.click(screen.getByRole('button', { name: 'Ranges' }))
+
+  expect(await screen.findByText('Only its own radio id.')).toBeInTheDocument()
+  expect(screen.queryByRole('list', { name: 'Ranges' })).not.toBeInTheDocument()
+})
+
+describe('picking the channel that survives a bulk fold', () => {
+  /** **The box always names the channel that would actually survive.**
+   *
+   *  It is the only place the survivor appears, and the selection changes
+   *  underneath it — so a remembered id could name a row no longer selected
+   *  while a different one silently absorbed the rest. Derived from the
+   *  selection instead, and asserted without touching the control, because the
+   *  untouched state is the one an Operator is most likely to fold from.
+   */
+  it('folds into the shown channel without the dropdown being touched', async () => {
+    const owner = instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    instance.talkgroup({ ref: 8001, calls: 3 })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getByRole('checkbox', { name: /Select all/ }))
+
+    expect(screen.getByLabelText('Fold into')).toHaveValue(String(owner.id))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Preview fold' }))
+
+    // The confirmation names where the refs are going, not only what is going.
+    const preview = within(await screen.findByRole('group', { name: 'Fold preview' }))
+    expect(preview.getByText(/Into/)).toHaveTextContent('Into Fire Dispatch:')
+    expect(wrote().at(-1)).toEqual({
+      method: 'POST',
+      path: `/api/admin/talkgroups/${owner.id}/members?dryRun`,
+      body: { fold: [8001], unfold: [] },
+    })
+  })
+
+  /** **Select-all is the other half of "foldable in bulk".** A system that mints
+   *  a TGID per patch event leaves dozens of near-identical rows, and ticking
+   *  forty boxes is the afternoon spec US 46 exists to save. */
+  it('selects and deselects every row on the page at once', async () => {
+    instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    for (const ref of [8001, 8002, 8003]) instance.talkgroup({ ref })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Select all 4/ }))
+
+    expect(screen.getByText('4 selected')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Select all 4/ }))
+
+    expect(screen.queryByText('4 selected')).not.toBeInTheDocument()
+  })
+
+  /** One row selected is not a merge — there is nothing to fold into it — so the
+   *  control stays away rather than offering a fold of nothing. */
+  it('offers no fold for a single selected row', async () => {
+    instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select Fire Dispatch' }))
+
+    expect(screen.getByText('1 selected')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Fold into')).not.toBeInTheDocument()
+  })
+})
