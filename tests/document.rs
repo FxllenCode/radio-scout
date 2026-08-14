@@ -902,3 +902,36 @@ async fn a_document_creates_rows_carrying_every_field_it_named() {
 
     assert_eq!(export(&app).await["systems"], a_full_document()["systems"]);
 }
+
+/// **A Group nobody is in still travels.** An Operator who made "Rescue" before
+/// assigning it meant to keep it, and a restore that dropped every empty
+/// category would quietly undo an afternoon of setting them up — the same
+/// argument the Talkgroup listing makes for showing a Group with no channels.
+#[tokio::test]
+async fn a_group_and_a_tag_nothing_uses_still_travel() {
+    let app = curating_app().await;
+
+    let report = import(
+        &app,
+        &json!({
+            "version": 1,
+            "groups": ["Rescue"],
+            "tags": ["Aircraft"],
+            "systems": [],
+        }),
+    )
+    .await;
+
+    assert_eq!(report["groupsCreated"], 1, "{report}");
+    assert_eq!(report["tagsCreated"], 1, "{report}");
+
+    let document = export(&app).await;
+    assert_eq!(document["groups"], json!(["Rescue"]));
+    assert_eq!(document["tags"], json!(["Aircraft"]));
+
+    // ...and a second import creates neither again, which is what makes a
+    // retried restore a no-op for them too.
+    let again = import(&app, &document).await;
+    assert_eq!(again["groupsCreated"], 0, "{again}");
+    assert_eq!(again["tagsCreated"], 0, "{again}");
+}
