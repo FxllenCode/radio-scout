@@ -110,6 +110,92 @@ pub async fn resolve_or_create_group<C: ConnectionTrait>(
     .await
 }
 
+/// Find a Tag by name, **and say whether that created it**.
+///
+/// The count is what three callers wanted and each was computing for itself —
+/// the CSV importer's `Resolver`, the browser's Talkgroup form and the
+/// configuration document — each with its own `find` before the
+/// `resolve_or_create`. Two lookups where one answers, written three times.
+pub async fn ensure_tag<C: ConnectionTrait>(
+    db: &C,
+    name: &str,
+    now_ms: i64,
+) -> Result<(tag::Model, bool), DbErr> {
+    if let Some(found) = tag::Entity::find()
+        .filter(tag::Column::Name.eq(name))
+        .one(db)
+        .await?
+    {
+        return Ok((found, false));
+    }
+    let created = tag::ActiveModel {
+        name: Set(name.to_owned()),
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+    Ok((created, true))
+}
+
+/// The same, for a Group.
+pub async fn ensure_group<C: ConnectionTrait>(
+    db: &C,
+    name: &str,
+    now_ms: i64,
+) -> Result<(group::Model, bool), DbErr> {
+    if let Some(found) = group::Entity::find()
+        .filter(group::Column::Name.eq(name))
+        .one(db)
+        .await?
+    {
+        return Ok((found, false));
+    }
+    let created = group::ActiveModel {
+        name: Set(name.to_owned()),
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+    Ok((created, true))
+}
+
+/// **Make a Talkgroup's Groups exactly `names`**, and say how many Groups that
+/// brought into existence.
+///
+/// One writer, because CLAUDE.md's rule about Groups and Tags being *written
+/// once* applies to this too: the browser's Talkgroup form and the
+/// configuration document both set the whole set, and two copies are two
+/// chances for one to forget the stale-link delete and leave a channel in a
+/// Group its own row says it left.
+///
+/// Names are taken as given — trimming belongs to the surface, which is the
+/// side that knows whether a blank means "clear" or "leave alone".
+pub async fn set_talkgroup_groups<C: ConnectionTrait>(
+    db: &C,
+    talkgroup_id: i64,
+    names: &[String],
+    now_ms: i64,
+) -> Result<u64, DbErr> {
+    let mut created = 0;
+    let mut keep: Vec<i64> = Vec::new();
+    for name in names {
+        let (group, new) = ensure_group(db, name, now_ms).await?;
+        created += u64::from(new);
+        link_talkgroup_group(db, talkgroup_id, group.id).await?;
+        keep.push(group.id);
+    }
+
+    let mut stale = talkgroup_group::Entity::delete_many()
+        .filter(talkgroup_group::Column::TalkgroupId.eq(talkgroup_id));
+    if !keep.is_empty() {
+        stale = stale.filter(talkgroup_group::Column::GroupId.is_not_in(keep));
+    }
+    stale.exec(db).await?;
+    Ok(created)
+}
+
 /// Associate a Talkgroup with a Group (idempotent).
 pub async fn link_talkgroup_group<C: ConnectionTrait>(
     db: &C,
@@ -1915,6 +2001,26 @@ pub async fn add_unit_range<C: ConnectionTrait>(
 ) -> Result<RangeAdded, DbErr> {
     let owned = spans_on_system(db, unit.system_id).await?;
     insert_range(db, unit, range, &owned, position, now_ms).await
+}
+
+/// The Ranges a Unit owns, in the operator's order.
+///
+/// In `repo` rather than beside either caller because two now ask — the Ranges
+/// editor (#50) and the configuration document (#51) — and a Unit's spans are a
+/// row-shaped question the data layer already answers for Talkgroup members
+/// ([`member_refs_of`]).
+pub async fn ranges_of<C: ConnectionTrait>(
+    db: &C,
+    unit_id: i64,
+) -> Result<Vec<crate::merge::Range>, DbErr> {
+    Ok(unit_ref::Entity::find()
+        .filter(unit_ref::Column::UnitId.eq(unit_id))
+        .order_by_asc(unit_ref::Column::Position)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|span| crate::merge::Range::new(span.ref_from, span.ref_to))
+        .collect())
 }
 
 /// **Make the Refs a Unit answers to exactly `wanted`** (#47, spec US 43) — the

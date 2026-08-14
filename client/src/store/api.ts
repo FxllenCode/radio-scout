@@ -14,6 +14,7 @@ import type {
   AdminUnitQuery,
   Catalog,
   CuratedPage,
+  DocumentReport,
   FilterOptions,
   IssuedApiKey,
   Listing,
@@ -328,6 +329,30 @@ export const api = createApi({
       invalidatesTags: ['Unit', 'Call'],
     }),
 
+    // -- The configuration document (#51, spec US 47) ---------------------
+
+    /** **The preview**: the real transaction, rolled back. Invalidates nothing,
+     *  for the reason the fold preview gives — a request whose whole promise is
+     *  that nothing happened must not make every listing refetch. */
+    previewConfig: builder.mutation<DocumentReport, unknown>({
+      query: (document) => ({
+        url: 'api/admin/config/import?dryRun',
+        method: 'POST',
+        body: document,
+      }),
+    }),
+    /** ...and the same document for real. Everything is invalidated because
+     *  everything may have moved: this is the one write that touches every
+     *  entity at once. */
+    importConfig: builder.mutation<DocumentReport, unknown>({
+      query: (document) => ({
+        url: 'api/admin/config/import',
+        method: 'POST',
+        body: document,
+      }),
+      invalidatesTags: ['System', 'Talkgroup', 'Group', 'Tag', 'Unit', 'ApiKey', 'Call'],
+    }),
+
     getApiKeys: builder.query<Listing<AdminApiKey>, void>({
       query: () => ({ url: 'api/admin/api-keys' }),
       providesTags: ['ApiKey'],
@@ -388,6 +413,8 @@ export const {
   useGetSystemsQuery,
   useGetTagsQuery,
   useGetUnitHistoryQuery,
+  useImportConfigMutation,
+  usePreviewConfigMutation,
   usePreviewFoldMutation,
   useSearchCallsQuery,
   useSetRangesMutation,

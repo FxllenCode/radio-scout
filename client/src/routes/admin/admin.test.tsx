@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FakeInstance, curationHandlers, refusal } from '@/test/curation'
 import { ORIGIN } from '@/test/handlers'
@@ -2058,5 +2058,299 @@ describe('picking the channel that survives a bulk fold', () => {
 
     expect(screen.getByText('1 selected')).toBeInTheDocument()
     expect(screen.queryByLabelText('Fold into')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The configuration document (#51, spec US 47)
+// ---------------------------------------------------------------------------
+
+describe('carrying the configuration', () => {
+  /** **Backing up is one button**, and what comes down is the file an Operator
+   *  keeps — so the click has to produce a real download rather than a page
+   *  that renders the JSON. */
+  it('downloads the configuration as a named file', async () => {
+    instance.talkgroup({ ref: 100, label: 'Fire Dispatch' })
+    const saved: { name: string; text: string }[] = []
+    captureDownloads(saved)
+    signedIn(<AdminScreen />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Export' }))
+
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(saved[0].name).toMatch(/^radio-scout-config.*\.json$/)
+    expect(JSON.parse(saved[0].text).version).toBe(1)
+  })
+
+  /** **A restore is previewed first.** It is the one admin action that touches
+   *  every entity at once, so the counts an Operator sees before committing are
+   *  a `?dryRun` of the same transaction — and nothing is written until they say
+   *  so again. */
+  it('previews an imported document before applying it', async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+
+    await upload(a_document())
+
+    const preview = within(await screen.findByRole('group', { name: 'Import preview' }))
+    expect(preview.getByText(/1 system/)).toBeInTheDocument()
+    expect(preview.getByText(/2 talkgroups/)).toBeInTheDocument()
+    // Previewed, not performed.
+    expect(wrote().map((it) => it.path)).toEqual([
+      '/api/admin/config/import?dryRun',
+    ])
+    expect(instance.talkgroups).toHaveLength(0)
+  })
+
+  /** ...and confirming sends the identical document for real. */
+  it('applies the document once the preview is confirmed', async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+    await upload(a_document())
+    await screen.findByRole('group', { name: 'Import preview' })
+
+    await userEvent.click(screen.getByRole('button', { name: /^Import/ }))
+
+    await waitFor(() => expect(instance.talkgroups).toHaveLength(2))
+    expect(wrote().map((it) => it.path)).toEqual([
+      '/api/admin/config/import?dryRun',
+      '/api/admin/config/import',
+    ])
+  })
+
+  /** Backing out writes nothing — the confirmation is a decision point. */
+  it('writes nothing when a preview is dismissed', async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+    await upload(a_document())
+    await screen.findByRole('group', { name: 'Import preview' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(
+      screen.queryByRole('group', { name: 'Import preview' }),
+    ).not.toBeInTheDocument()
+    expect(wrote()).toHaveLength(1)
+  })
+
+  /** **A refused entry is shown with its path**, because a document is a file an
+   *  Operator has open in an editor and "something was wrong" sends them
+   *  hunting through a county's worth of JSON. */
+  it('shows which entry the server would not take', async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+    server.use(
+      http.post(`${ORIGIN}/api/admin/config/import`, () =>
+        HttpResponse.json({
+          dryRun: true,
+          systems: { created: 1, updated: 0, unchanged: 0 },
+          talkgroups: { created: 1, updated: 0, unchanged: 0 },
+          units: { created: 0, updated: 0, unchanged: 0 },
+          groupsCreated: 0,
+          tagsCreated: 0,
+          apiKeys: [],
+          rejected: [
+            {
+              at: 'systems[0].talkgroups[1]',
+              reason: 'unknown-led',
+              detail: '"puce" is not an LED colour',
+            },
+          ],
+        }),
+      ),
+    )
+
+    await upload(a_document())
+
+    const preview = within(await screen.findByRole('group', { name: 'Import preview' }))
+    expect(preview.getByText('systems[0].talkgroups[1]')).toBeInTheDocument()
+    expect(preview.getByText(/puce/)).toBeInTheDocument()
+  })
+
+  /** **A re-issued key is shown once**, beside the label that says which
+   *  recorder it belongs to — the file could not carry the secret, so this is
+   *  the only sight of it there will be. */
+  it('shows each re-issued key exactly once, with its label', async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+    server.use(
+      http.post(`${ORIGIN}/api/admin/config/import`, ({ request }) =>
+        HttpResponse.json({
+          dryRun: new URL(request.url).searchParams.has('dryRun'),
+          systems: { created: 1, updated: 0, unchanged: 0 },
+          talkgroups: { created: 0, updated: 0, unchanged: 0 },
+          units: { created: 0, updated: 0, unchanged: 0 },
+          groupsCreated: 0,
+          tagsCreated: 0,
+          apiKeys: new URL(request.url).searchParams.has('dryRun')
+            ? []
+            : [{ id: 1, key: 'issued-secret-0001', label: 'the pi', systemRef: 11, disabled: false, createdAtMs: 0 }],
+          rejected: [],
+        }),
+      ),
+    )
+    await upload(a_document())
+    await screen.findByRole('group', { name: 'Import preview' })
+
+    await userEvent.click(screen.getByRole('button', { name: /^Import/ }))
+
+    const issued = within(await screen.findByRole('group', { name: 'Re-issued keys' }))
+    expect(issued.getByText(/the pi/)).toBeInTheDocument()
+    expect(issued.getByText(/issued-secret-0001/)).toBeInTheDocument()
+  })
+
+  /** A file that is not JSON at all never reaches the server: the browser can
+   *  tell, and a 422 an Operator has to interpret is worse than a sentence. */
+  it('refuses a file that is not a document without asking the server', async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+
+    await upload('this is not json')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/not a configuration/i)
+    expect(wrote()).toEqual([])
+  })
+})
+
+/** The document every import test uploads. */
+function a_document() {
+  return JSON.stringify({
+    version: 1,
+    systems: [
+      {
+        ref: 11,
+        label: 'Fulton',
+        autoPopulate: true,
+        talkgroups: [{ ref: 100, label: 'Fire Dispatch' }, { ref: 200 }],
+      },
+    ],
+  })
+}
+
+/** Pick `text` as the import file. */
+async function upload(text: string) {
+  const input = screen.getByLabelText('Import a configuration document')
+  await userEvent.upload(
+    input,
+    new File([text], 'radio-scout-config.json', { type: 'application/json' }),
+  )
+}
+
+/** Record what an anchor-click download would have saved, since jsdom has no
+ *  Downloads folder — the object URL is created and revoked either way.
+ *
+ *  Through `vi.stubGlobal` and `vi.spyOn` so the config's `restoreMocks` really
+ *  puts them back: a hand-assigned `HTMLAnchorElement.prototype.click` would
+ *  survive into every test after this one. */
+function captureDownloads(saved: { name: string; text: string }[]) {
+  const blobs = new Map<string, Blob>()
+  let next = 0
+  // jsdom implements neither, and `vi.spyOn` needs something to stand on — so
+  // they are defined once (a no-op is enough for the shape) and then spied,
+  // which is what `restoreMocks` can put back.
+  for (const name of ['createObjectURL', 'revokeObjectURL'] as const) {
+    if (!(name in URL)) {
+      Object.defineProperty(URL, name, {
+        value: () => '',
+        configurable: true,
+        writable: true,
+      })
+    }
+  }
+  vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob | MediaSource) => {
+    const url = `blob:${next++}`
+    blobs.set(url, blob as Blob)
+    return url
+  })
+  vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+    this: HTMLAnchorElement,
+  ) {
+    const blob = blobs.get(this.href)
+    if (blob) void blob.text().then((text) => saved.push({ name: this.download, text }))
+  })
+}
+
+describe('when a configuration document is refused', () => {
+  /** **A failed export says so.** This is a `fetch` rather than an
+   *  `<a download>` precisely so a session that lapsed while the screen was
+   *  open can be reported — a navigation that 401s leaves an Operator staring
+   *  at a button that did nothing. */
+  it('says so when the export cannot be fetched', async () => {
+    // First in the array wins within one `use` call, so the refusal has to
+    // precede the handler it is standing in for.
+    server.use(
+      http.get(`${ORIGIN}/api/admin/config`, () => new HttpResponse(null, { status: 401 })),
+      ...curationHandlers(instance),
+    )
+    renderWithProviders(<AdminScreen />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Export' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/session may have expired/i)
+  })
+
+  /** The visible control is the one an Operator uses; the input behind it is a
+   *  hidden implementation detail, so the button has to really open it. */
+  it('opens the file picker from the visible button', async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+    const input = screen.getByLabelText('Import a configuration document')
+    const opened = vi.spyOn(input as HTMLInputElement, 'click')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Choose a file…' }))
+
+    expect(opened).toHaveBeenCalled()
+  })
+
+  /** A document the server will not read at all — the wrong version, say —
+   *  shows the server's own sentence and offers nothing to confirm, because
+   *  there is nothing it promised to do. */
+  it("shows the server's sentence when a preview is refused", async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+    server.use(
+      http.post(`${ORIGIN}/api/admin/config/import`, () =>
+        refusal(
+          400,
+          'unknown-document-version',
+          'this is a version 99 configuration document, and this instance reads version 1',
+        ),
+      ),
+    )
+
+    await upload(a_document())
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/version 99/)
+    expect(
+      screen.queryByRole('group', { name: 'Import preview' }),
+    ).not.toBeInTheDocument()
+  })
+
+  /** **A refused commit takes the preview down with it**, for the reason a
+   *  refused fold does: whatever the server refused, what is on screen has
+   *  stopped being a promise about the run that follows. */
+  it('drops the preview when the import itself is refused', async () => {
+    signedIn(<AdminScreen />)
+    await screen.findByRole('button', { name: 'Export' })
+    await upload(a_document())
+    await screen.findByRole('group', { name: 'Import preview' })
+    // Only the real write is refused; the preview already happened.
+    server.use(
+      http.post(`${ORIGIN}/api/admin/config/import`, ({ request }) =>
+        new URL(request.url).searchParams.has('dryRun')
+          ? HttpResponse.json({ dryRun: true })
+          : refusal(409, 'talkgroup-ref-taken', 'somebody curated it first'),
+      ),
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'somebody curated it first',
+    )
+    expect(
+      screen.queryByRole('group', { name: 'Import preview' }),
+    ).not.toBeInTheDocument()
   })
 })

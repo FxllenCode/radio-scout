@@ -89,6 +89,18 @@ pub struct KeyPatch {
     pub disabled: Option<bool>,
 }
 
+/// One issued key, as the caller sees it once.
+///
+/// A constructor rather than two literals, because [`super::document`] issues
+/// keys too when it restores a roster — and `row_of` is private, which is the
+/// shape that keeps `key_hash` from ever reaching a wire type by accident.
+pub fn issued(key: String, row: api_key::Model) -> IssuedKey {
+    IssuedKey {
+        key,
+        row: row_of(row),
+    }
+}
+
 /// `GET /api/admin/api-keys` — every key, newest first, secrets excluded.
 pub async fn list(State(state): State<AppState>) -> Result<Listing<KeyRow>, Failure> {
     Ok(Listing::new(

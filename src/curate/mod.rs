@@ -35,6 +35,7 @@
 //! never the port, the database URL or the storage backend. The admin password
 //! stays in the environment, for the reason ADR-0008 gives.
 
+pub mod document;
 pub mod keys;
 pub mod labels;
 pub mod members;
@@ -105,6 +106,8 @@ pub fn routes() -> Router<AppState> {
             "/api/admin/units/{id}/ranges",
             get(members::list_ranges).post(members::set_ranges),
         )
+        .route("/api/admin/config", get(document::export))
+        .route("/api/admin/config/import", post(document::import))
         .route("/api/admin/api-keys", get(keys::list).post(keys::create))
         .route(
             "/api/admin/api-keys/{id}",
@@ -208,6 +211,19 @@ pub enum Rejected {
     /// the CSV import makes (#18) — a typo becomes a reported field, never a
     /// Talkgroup that renders with no LED.
     UnknownLed { led: String },
+    /// A configuration document this Instance could not read at all (#51).
+    ///
+    /// Carries serde's own sentence, which names the field and the position —
+    /// the caller is holding the file, so the useful answer is where in it to
+    /// look. Distinct from [`Rejected::UnknownDocumentVersion`] on purpose: one
+    /// says "this is from a newer release", the other "this is not the file you
+    /// meant", and an Operator does different things about them.
+    MalformedDocument { detail: String },
+    /// A configuration document written by a version this one cannot read
+    /// (#51). Refused **whole** rather than half-applied by guessing — rdio's
+    /// own version check is commented out in its import component, so it takes
+    /// any release's file and finds out afterwards.
+    UnknownDocumentVersion { found: u32 },
     /// A Range collides with one this System already owns (#50).
     ///
     /// Names the Range *in the way* rather than saying "that overlaps
@@ -239,6 +255,8 @@ impl Rejected {
             Rejected::NotFound(what) => what.not_found(),
             Rejected::NoSuchSystem { .. } => "no-such-system",
             Rejected::RangeOverlaps { .. } => "range-overlaps",
+            Rejected::UnknownDocumentVersion { .. } => "unknown-document-version",
+            Rejected::MalformedDocument { .. } => "malformed-document",
             Rejected::UnknownLed { .. } => "unknown-led",
             Rejected::HasCalls { what, .. } => what.has_calls(),
         }
@@ -249,6 +267,8 @@ impl Rejected {
         match self {
             Rejected::Blank { .. }
             | Rejected::NoSuchSystem { .. }
+            | Rejected::UnknownDocumentVersion { .. }
+            | Rejected::MalformedDocument { .. }
             | Rejected::UnknownLed { .. } => StatusCode::BAD_REQUEST,
             Rejected::NotFound(_) => StatusCode::NOT_FOUND,
             Rejected::NameTaken { .. }
@@ -287,6 +307,14 @@ impl std::fmt::Display for Rejected {
             }
             Rejected::NotFound(what) => write!(f, "no such {}", what.noun()),
             Rejected::NoSuchSystem { system_id } => write!(f, "no system with id {system_id}"),
+            Rejected::MalformedDocument { detail } => {
+                write!(f, "this is not a configuration document: {detail}")
+            }
+            Rejected::UnknownDocumentVersion { found } => write!(
+                f,
+                "this is a version {found} configuration document, and this instance reads version {}",
+                document::VERSION
+            ),
             Rejected::RangeOverlaps { wanted, held } => write!(
                 f,
                 "{}-{} overlaps {}-{}, which is already owned on this system",

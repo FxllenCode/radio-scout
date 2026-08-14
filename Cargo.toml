@@ -31,7 +31,9 @@ http = "1"
 # their traits with, so cargo unifies rather than linking two copies.
 async-trait = "0.1"
 sha2 = "0.10"
-time = { version = "0.3", features = ["parsing"] }
+# `formatting` for the export document's filename (#51); `parsing` for the
+# recorder timestamps `query`/`ingest` read.
+time = { version = "0.3", features = ["parsing", "formatting"] }
 sea-orm = { version = "1", features = [
     "sqlx-sqlite",
     "sqlx-postgres",

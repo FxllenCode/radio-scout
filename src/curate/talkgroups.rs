@@ -833,6 +833,13 @@ fn distinct(values: impl IntoIterator<Item = i64>) -> Vec<i64> {
 }
 
 /// Make this Talkgroup's Groups exactly `names`, creating any that are new.
+///
+/// The write is [`repo::set_talkgroup_groups`], shared with the configuration
+/// document (#51) so the two surfaces cannot come to disagree about what
+/// replacing a set means — in particular about the stale-link delete, whose
+/// absence in one copy would leave a channel in a Group its own row says it
+/// left. What is this module's is the *trimming*: a stray comma in a form is
+/// not a Group called "".
 async fn set_groups<C: ConnectionTrait>(
     db: &C,
     talkgroup_id: i64,
@@ -840,20 +847,7 @@ async fn set_groups<C: ConnectionTrait>(
     now_ms: i64,
 ) -> Result<(), DbErr> {
     let wanted: Vec<String> = names.iter().filter_map(|name| trimmed(name)).collect();
-    let mut keep: HashSet<i64> = HashSet::new();
-    for name in &wanted {
-        let group_id = repo::resolve_or_create_group(db, name, now_ms).await?.id;
-        repo::link_talkgroup_group(db, talkgroup_id, group_id).await?;
-        keep.insert(group_id);
-    }
-    let mut stale = talkgroup_group::Entity::delete_many()
-        .filter(talkgroup_group::Column::TalkgroupId.eq(talkgroup_id));
-    if !keep.is_empty() {
-        stale = stale.filter(
-            talkgroup_group::Column::GroupId.is_not_in(keep.into_iter().collect::<Vec<_>>()),
-        );
-    }
-    stale.exec(db).await?;
+    repo::set_talkgroup_groups(db, talkgroup_id, &wanted, now_ms).await?;
     Ok(())
 }
 

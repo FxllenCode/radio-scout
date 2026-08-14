@@ -424,6 +424,40 @@ export interface RangeReport {
   removed: number
 }
 
+/** How one kind of row fared in a document import (#51, spec US 47). */
+export interface Applied {
+  created: number
+  updated: number
+  /** Rows the Instance already had exactly — the count that proves a re-import
+   *  is a no-op, and so that a half-finished restore is safe to retry. */
+  unchanged: number
+}
+
+/** One entry the import would not take, and **where it is** — a path into the
+ *  document, which is a JSON file's answer to a CSV's line number. */
+export interface RejectedEntry {
+  at: string
+  reason: string
+  detail: string
+}
+
+/** What a document import did — or, when `dryRun`, would do. */
+export interface DocumentReport {
+  dryRun: boolean
+  systems: Applied
+  talkgroups: Applied
+  units: Applied
+  groupsCreated: number
+  tagsCreated: number
+  /** Keys this import issued, each shown once. Empty on a preview: showing a
+   *  secret and then rolling it back is worse than showing none. */
+  apiKeys: IssuedApiKey[]
+  /** How many keys the roster is short — counted on a preview too, which is the
+   *  only thing it can honestly say about a credential it must not create. */
+  apiKeysToIssue: number
+  rejected: RejectedEntry[]
+}
+
 /** One bulk action over selected Talkgroup rows (spec US 46). */
 export interface AdminAssignment {
   ids: number[]

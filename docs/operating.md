@@ -504,3 +504,33 @@ Two things, and they must be consistent with each other:
 A row without its audio object is a Call that 404s on play; an object without its row is an
 orphan the next sweep reclaims. Neither is fatal, but taking both at the same moment avoids
 both.
+
+### The configuration on its own
+
+Everything you curated — systems, talkgroups with their merges, groups, tags, named units, and
+the API-key roster — also exports as **one JSON file**, separately from the archive. That is the
+one to keep in git: it is small, it is a plain document, and it is what you would hate to retype.
+
+**Settings → Admin → Export.** Import the same file on any instance to reproduce the setup.
+
+- **The file never carries a secret.** API keys are stored hashed, and the hash does not leave
+  either — so the export carries each key's *label, scope and disabled flag* and nothing else.
+  Importing **re-issues** them and shows the new keys once, labelled, so you know which recorder
+  each belongs to. Every recorder needs its new key; nothing else about the roster is lost.
+- **Importing never deletes.** A document adds and updates what it names and says nothing about
+  anything else, so a truncated or hand-edited file cannot destroy a county — and a restore is
+  safe to run twice, which matters when the first one died half-way.
+- **Preview before you commit.** The import screen shows what would change and lists any entry it
+  would refuse, each with its **path in the file** (`systems[0].talkgroups[3]`) so you can find it
+  in your editor. The rest still applies — one bad LED colour does not cost you the restore.
+- **It is diffable.** The document is a pure function of your configuration: no timestamps, no
+  database ids, everything in a fixed order. Two exports of an unchanged instance are byte-identical,
+  so `git diff` shows what you changed rather than when you last looked. The date is in the
+  filename instead.
+- **Only units you curated** are in it — the ones with a name or a range. An instance rosters a
+  unit for every radio it has ever heard, and those come back on their own from the next call.
+
+Ports, storage, the database URL and retention are **not** in it: those are `radio-scout.toml`,
+and an entity document that carried them between machines would be a way to point a second
+instance at the first one's bucket. (The *systems you receive* are in it — it is the machine's
+own configuration that is not.)

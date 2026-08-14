@@ -429,6 +429,67 @@ export function curationHandlers(instance: FakeInstance) {
       })
     }),
 
+    // -- The configuration document (#51) ----------------------------------
+
+    http.get(`${ORIGIN}/api/admin/config`, () =>
+      HttpResponse.json(
+        {
+          version: 1,
+          systems: instance.systems.map((row) => ({
+            ref: row.ref,
+            label: row.label,
+            autoPopulate: row.autoPopulate,
+            talkgroups: instance.talkgroups
+              .filter((it) => it.systemId === row.id)
+              .map((it) => ({ ref: it.ref, label: it.label ?? undefined })),
+          })),
+        },
+        {
+          headers: {
+            'content-disposition':
+              'attachment; filename="radio-scout-config-2026-08-13.json"',
+          },
+        },
+      ),
+    ),
+    http.post(`${ORIGIN}/api/admin/config/import`, async ({ request }) => {
+      const url = new URL(request.url)
+      const dryRun = url.searchParams.has('dryRun')
+      const body = (await record(
+        'POST',
+        request,
+        `/api/admin/config/import${url.search}`,
+      )) as { systems?: DocumentSystem[] }
+
+      let talkgroups = 0
+      for (const entry of body.systems ?? []) {
+        const system = dryRun
+          ? { id: -1 }
+          : (instance.systems.find((it) => it.ref === entry.ref) ??
+            instance.system({ ref: entry.ref, label: entry.label ?? null }))
+        for (const channel of entry.talkgroups ?? []) {
+          talkgroups += 1
+          if (!dryRun) {
+            instance.talkgroup({
+              systemId: system.id,
+              ref: channel.ref,
+              label: channel.label ?? null,
+            })
+          }
+        }
+      }
+      return HttpResponse.json({
+        dryRun,
+        systems: { created: (body.systems ?? []).length, updated: 0, unchanged: 0 },
+        talkgroups: { created: talkgroups, updated: 0, unchanged: 0 },
+        units: { created: 0, updated: 0, unchanged: 0 },
+        groupsCreated: 0,
+        tagsCreated: 0,
+        apiKeys: [],
+        rejected: [],
+      })
+    }),
+
     http.get(`${ORIGIN}/api/admin/api-keys`, () =>
       HttpResponse.json({ results: instance.keys }),
     ),
@@ -458,6 +519,13 @@ export function curationHandlers(instance: FakeInstance) {
       return new HttpResponse(null, { status: 204 })
     }),
   ]
+}
+
+/** One System as a configuration document carries it. */
+interface DocumentSystem {
+  ref: number
+  label?: string | null
+  talkgroups?: { ref: number; label?: string | null }[]
 }
 
 /** The member Refs a channel answers to. */

@@ -1055,3 +1055,85 @@ async fn removing_a_range_says_so() {
     assert!(line.contains("removed=1"), "{line}");
     assert!(line.contains("spans="), "{line}");
 }
+
+// ---------------------------------------------------------------------------
+// A configuration document leaves a line (#51)
+// ---------------------------------------------------------------------------
+
+/// **A restore says what it did**, in one line an Operator finds afterwards.
+///
+/// The report reaches only whoever clicked, and a configuration import is the
+/// single most consequential thing this surface does — every entity at once. So
+/// the counts are asserted with a *created and an updated row of the same kind*,
+/// which is the only shape that tells "created + updated" from either of them
+/// alone.
+#[tokio::test]
+async fn importing_a_configuration_says_what_it_moved() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    app.login().await;
+    let first = serde_json::json!({
+        "version": 1,
+        "systems": [{
+            "ref": 11,
+            "label": "Fulton",
+            "talkgroups": [{"ref": 100, "label": "Fire Dispatch"}],
+            "units": [{"ref": 1200, "label": "Engine 1"}],
+        }],
+    });
+    app.admin_post("/api/admin/config/import", first).await;
+
+    // One System updated, one Talkgroup updated and one created, one Unit
+    // updated, one key issued, and one entry refused.
+    app.admin_post(
+        "/api/admin/config/import",
+        serde_json::json!({
+            "version": 1,
+            "systems": [{
+                "ref": 11,
+                "label": "Fulton County",
+                "talkgroups": [
+                    {"ref": 100, "label": "Fire Dispatch 1"},
+                    {"ref": 200, "label": "EMS"},
+                    {"ref": 300, "led": "puce"},
+                ],
+                "units": [{"ref": 1200, "label": "Engine One"}],
+            }],
+            "apiKeys": [{"label": "the pi"}],
+        }),
+    )
+    .await;
+
+    // The seeding import left a line of its own; this is the one under test.
+    let lines = capture.lines_containing("configuration document imported");
+    let line = lines.last().expect("a line").clone();
+    assert!(line.contains(" INFO "), "{line}");
+    assert!(line.contains("systems=1"), "{line}");
+    assert!(
+        line.contains("talkgroups=2"),
+        "one updated and one created — the refused one is neither: {line}"
+    );
+    assert!(line.contains("units=1"), "{line}");
+    assert!(line.contains("keys_issued=1"), "{line}");
+    assert!(line.contains("rejected=1"), "{line}");
+    assert!(line.contains("dry_run=false"), "{line}");
+}
+
+/// A preview leaves a line too, and it says it was one — so a log full of
+/// restores cannot be misread as a log full of restores that happened.
+#[tokio::test]
+async fn a_previewed_configuration_import_says_it_wrote_nothing() {
+    let capture = LogCapture::start();
+    let app = TestApp::spawn().await;
+    app.login().await;
+
+    app.admin_post(
+        "/api/admin/config/import?dryRun",
+        serde_json::json!({"version": 1, "systems": [{"ref": 11}]}),
+    )
+    .await;
+
+    let line = capture.only_line_containing("configuration document imported");
+    assert!(line.contains("dry_run=true"), "{line}");
+    assert!(line.contains("systems=1"), "{line}");
+}

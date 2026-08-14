@@ -55,6 +55,10 @@ async fn no_session_reaches_no_curation_route() {
         // routes it would be worst to have mounted outside the layer.
         "/api/admin/talkgroups/1/members",
         "/api/admin/units/1/ranges",
+        // #51's document — the read is the whole configuration and the write
+        // rewrites it, so this is the pair it would be worst to leave open.
+        "/api/admin/config",
+        "/api/admin/config/import",
     ] {
         let response = app.get(path).await;
         assert_eq!(response.status(), 401, "GET {path}");

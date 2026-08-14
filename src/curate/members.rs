@@ -57,12 +57,12 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use sea_orm::{ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 
 use super::{Listing, Rejected, What};
 use crate::AppState;
-use crate::db::entities::{talkgroup, talkgroup_ref, unit, unit_ref};
+use crate::db::entities::{talkgroup, talkgroup_ref, unit};
 use crate::db::repo;
 use crate::failure::{Failure, Stage};
 use crate::merge::Range;
@@ -101,7 +101,7 @@ impl Span {
     /// Named rather than a `From` impl because [`Range::from`] is already the
     /// accessor for a Range's lower end, and `map(Range::from)` would silently
     /// resolve to that one.
-    fn range(self) -> Range {
+    pub fn range(self) -> Range {
         Range::new(self.from, self.to)
     }
 }
@@ -283,7 +283,7 @@ pub async fn list_ranges(
     let unit = apparatus(db, id).await?;
 
     Ok(Listing::new(
-        spans_of(db, &unit)
+        repo::ranges_of(db, unit.id)
             .await
             .map_err(Stage::Curate.failed())?
             .into_iter()
@@ -307,7 +307,7 @@ pub async fn set_ranges(
 
     let txn = db.begin().await.map_err(Stage::Curate.failed())?;
     let unit = apparatus(&txn, id).await?;
-    let held = spans_of(&txn, &unit)
+    let held = repo::ranges_of(&txn, unit.id)
         .await
         .map_err(Stage::Curate.failed())?;
     let wanted = after(&held, &add, &remove);
@@ -371,18 +371,6 @@ async fn apparatus<C: ConnectionTrait>(db: &C, id: i64) -> Result<unit::Model, F
         .await
         .map_err(Stage::Curate.failed())?
         .ok_or_else(|| Rejected::NotFound(What::Unit).into())
-}
-
-/// The spans a Unit owns, in the Operator's order.
-async fn spans_of<C: ConnectionTrait>(db: &C, unit: &unit::Model) -> Result<Vec<Range>, DbErr> {
-    Ok(unit_ref::Entity::find()
-        .filter(unit_ref::Column::UnitId.eq(unit.id))
-        .order_by_asc(unit_ref::Column::Position)
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|span| Range::new(span.ref_from, span.ref_to))
-        .collect())
 }
 
 /// Refuse a Ref that is already another channel's **member** Ref.

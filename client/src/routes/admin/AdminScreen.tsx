@@ -2,6 +2,7 @@ import { ChevronRight } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import { AdminGate, SignOutButton } from '@/components/admin/AdminUi'
+import { ConfigDocument } from '@/components/admin/ConfigDocument'
 import { Screen } from '@/components/layout/Screen'
 
 /** Where each entity is curated, and what an Operator would come here to do.
@@ -68,6 +69,7 @@ export function AdminScreen() {
             </li>
           ))}
         </ul>
+        <ConfigDocument />
         <p className="mt-4 px-1 font-mono text-[11px] text-muted-foreground">
           Ports, storage and retention are configured in radio-scout.toml — this
           screen owns the entities calls are addressed to, not the machine.

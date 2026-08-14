@@ -50,7 +50,7 @@ use sea_orm::{
 use serde::Serialize;
 
 use crate::AppState;
-use crate::db::entities::{group, system, tag, talkgroup, talkgroup_group, unit};
+use crate::db::entities::{system, talkgroup, talkgroup_group, unit};
 use crate::db::repo;
 use crate::failure::{Failure, Reason, Stage};
 
@@ -743,19 +743,10 @@ impl Resolver {
         if let Some(cached) = self.tags.get(name) {
             return Ok(*cached);
         }
-        let existed = tag::Entity::find()
-            .filter(tag::Column::Name.eq(name))
-            .one(db)
-            .await?;
-        let id = match existed {
-            Some(found) => found.id,
-            None => {
-                report.tags_created += 1;
-                repo::resolve_or_create_tag(db, name, now_ms).await?.id
-            }
-        };
-        self.tags.insert(name.to_owned(), id);
-        Ok(id)
+        let (row, created) = repo::ensure_tag(db, name, now_ms).await?;
+        report.tags_created += u64::from(created);
+        self.tags.insert(name.to_owned(), row.id);
+        Ok(row.id)
     }
 
     /// Resolve a Group by name, creating it if new and counting that.
@@ -769,19 +760,10 @@ impl Resolver {
         if let Some(cached) = self.groups.get(name) {
             return Ok(*cached);
         }
-        let existed = group::Entity::find()
-            .filter(group::Column::Name.eq(name))
-            .one(db)
-            .await?;
-        let id = match existed {
-            Some(found) => found.id,
-            None => {
-                report.groups_created += 1;
-                repo::resolve_or_create_group(db, name, now_ms).await?.id
-            }
-        };
-        self.groups.insert(name.to_owned(), id);
-        Ok(id)
+        let (row, created) = repo::ensure_group(db, name, now_ms).await?;
+        report.groups_created += u64::from(created);
+        self.groups.insert(name.to_owned(), row.id);
+        Ok(row.id)
     }
 }
 
