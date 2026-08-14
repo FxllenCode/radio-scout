@@ -619,7 +619,9 @@ async fn assemble(
     // rather than a feature switched off — and one added from the browser five
     // minutes from now must be forwarded to without a restart. With no peers it
     // sleeps on its wake-up and costs nothing.
-    running.push(workers.adopt(crate::downstream::sender::spawn(state.clone())));
+    running.extend(
+        crate::downstream::sender::spawn(state.clone()).map(|worker| workers.adopt(worker)),
+    );
     let app = build_app(state.clone());
 
     let bind = parts

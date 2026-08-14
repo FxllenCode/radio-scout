@@ -1237,6 +1237,12 @@ struct Stored {
 /// read of a table with single-digit rows — the one statement `tests/ingest.rs`
 /// accounts for — and that read is what buys the guarantee.
 ///
+/// **Resolve, decide purely, then perform** (#96's shape, in miniature): the
+/// roster is read, [`crate::downstream::routed_to`] decides, and
+/// [`repo::queue_deliveries`] writes the ids it is handed. The Selection is
+/// never compared inside the write, which is what keeps a domain module out of
+/// the data layer.
+///
 /// An **Encrypted Call** is never queued: it has no audio object at all (spec US
 /// 9) and the rdio dialect requires one, so a peer could only ever refuse it.
 async fn enqueue_forwarding<C: sea_orm::ConnectionTrait>(
@@ -1253,8 +1259,7 @@ async fn enqueue_forwarding<C: sea_orm::ConnectionTrait>(
     // same set the live feed routes on, which is the half rdio's own forwarder
     // omits. Both come from the [`repo::Resolved`] the pipeline already read
     // (#96), so scoping costs no lookup of its own: the only statement this
-    // whole feature adds to ingest is the roster read inside
-    // [`repo::enqueue_deliveries`].
+    // whole feature adds to ingest is the roster read below.
     //
     // The canonical Ref falls back to the one the recorder sent, which is the
     // auto-populate case — `insert_call` has just created that Talkgroup under
@@ -1266,7 +1271,10 @@ async fn enqueue_forwarding<C: sea_orm::ConnectionTrait>(
             talkgroups.push(*patched);
         }
     }
-    repo::enqueue_deliveries(db, call_id, new_call.system_ref, &talkgroups, now_ms).await
+
+    let roster = repo::forwarding_downstreams(db).await?;
+    let owed = crate::downstream::routed_to(&roster, new_call.system_ref, &talkgroups);
+    repo::queue_deliveries(db, call_id, &owed, now_ms).await
 }
 
 /// `POST /api/trunk-recorder-call-upload` — Trunk Recorder's native

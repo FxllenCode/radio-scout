@@ -78,6 +78,8 @@ pub struct Peer {
 struct PeerState {
     received: Arc<Mutex<Vec<Received>>>,
     status: Arc<AtomicU16>,
+    /// How long to hold a delivery before answering — see [`Peer::stall_for`].
+    stall: Arc<Mutex<Option<std::time::Duration>>>,
     /// The key this peer issued, if a test set one — see [`Peer::expect_key`].
     key: Arc<Mutex<Option<String>>>,
 }
@@ -120,6 +122,15 @@ impl Peer {
     /// Come back up, taking Calls again.
     pub fn come_back(&self) {
         self.answer_with(200);
+    }
+
+    /// Hold every delivery's socket open for this long before answering.
+    ///
+    /// A peer that is *slow* rather than refusing — the case that proves one
+    /// peer's trouble is its own, and the one rdio cannot survive because it
+    /// POSTs inline on the ingest goroutine.
+    pub fn stall_for(&self, holding: std::time::Duration) {
+        *self.state.stall.lock().expect("stall") = Some(holding);
     }
 
     /// Answer `401` to any delivery not carrying this key, as a real peer does.
@@ -178,6 +189,11 @@ async fn receive(State(state): State<PeerState>, mut multipart: Multipart) -> St
         if let Ok(value) = part.text().await {
             received.fields.insert(name, value);
         }
+    }
+
+    let stall = *state.stall.lock().expect("stall");
+    if let Some(holding) = stall {
+        tokio::time::sleep(holding).await;
     }
 
     let expected = state.key.lock().expect("key").clone();

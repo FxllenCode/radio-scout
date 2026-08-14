@@ -307,23 +307,38 @@ async fn a_peer_outage_queues_calls_and_drains_them_in_order() {
 
 /// **The queue survives a restart of this end**, which is the half the process
 /// itself has to carry: the rows are in the database, so the next boot picks up
-/// exactly where the last one stopped.
+/// exactly where the last one stopped — **and in the order it stopped in**.
+///
+/// Three Calls rather than one, because a queue that survives but comes back
+/// shuffled is a different bug from a queue that does not survive, and only the
+/// second of them is obvious.
 #[tokio::test]
-async fn a_restart_forwards_what_the_last_process_could_not() {
+async fn a_restart_forwards_what_the_last_process_could_not_in_order() {
     let (mut app, peer) = recovering_app().await;
     app.login().await;
     let id = app.add_downstream(&peer.url(), whole_system()).await;
     peer.answer_with(503);
 
-    app.upload_ok(CallUpload::new()).await;
+    for (n, talkgroup) in [101, 102, 103].into_iter().enumerate() {
+        app.upload_ok(
+            CallUpload::new()
+                .talkgroup(talkgroup)
+                .at(1_000 + n as i64 * 60_000),
+        )
+        .await;
+    }
     app.settle().await;
-    assert_eq!(app.queued_for(id).await, 1);
+    assert_eq!(app.queued_for(id).await, 3);
 
     peer.come_back();
     app.restart().await;
-    app.deliveries_settled(1).await;
+    app.deliveries_settled(3).await;
 
-    assert_eq!(peer.count(), 1, "the Call the last process could not send");
+    assert_eq!(
+        peer.talkgroups(),
+        vec![101, 102, 103],
+        "the Calls the last process could not send, in the order it queued them"
+    );
     assert_eq!(app.queued_for(id).await, 0);
 }
 
@@ -444,6 +459,63 @@ async fn a_better_copy_is_forwarded_to_the_peer_too() {
     );
 }
 
+/// **One peer's trouble is its own** — the arrangement rdio cannot have, because
+/// it POSTs inline on the ingest goroutine and a slow peer is backpressure on
+/// the recorder.
+///
+/// Attempts run one per peer in a `JoinSet`, so a peer holding the socket open
+/// delays nothing but its own backlog. Asserted by making one peer hold on for
+/// longer than this test is willing to wait and requiring the other to be
+/// delivered anyway.
+#[tokio::test]
+async fn a_peer_holding_the_socket_open_does_not_delay_another() {
+    let app = TestApp::with_key("k").await;
+    let slow = Peer::start().await;
+    let quick = Peer::start().await;
+    slow.stall_for(std::time::Duration::from_secs(30));
+    app.login().await;
+    app.add_downstream(&slow.url(), whole_system()).await;
+    app.add_downstream(&quick.url(), whole_system()).await;
+
+    app.upload_ok(CallUpload::new()).await;
+    // Deliberately *not* `settle()`: the slow peer is still holding its attempt,
+    // so the sender has not caught up and will not until that attempt ends. The
+    // whole claim is that the other peer does not have to wait for it.
+    app.deliveries_settled(1).await;
+
+    assert_eq!(quick.count(), 1, "delivered while the other peer hung on");
+    assert_eq!(slow.count(), 0);
+}
+
+/// **The peer's key never reaches a log line**, at any level, in any form
+/// (ADR-0011 rule 2) — the one secret this feature has to keep in a sendable
+/// form, so the one it would be easiest to let slip.
+///
+/// Driven through a *failing* delivery, because that is where the lines are: a
+/// refusal, a retry, and the transport error underneath them. `without_url` is
+/// what keeps reqwest's own `Display` from carrying the peer's address in
+/// through the back door, and the key rides in the body rather than the URL —
+/// which is exactly the kind of thing that stops being true when somebody adds
+/// a field to a log line.
+#[tokio::test]
+async fn a_peers_key_never_reaches_a_log_line() {
+    let (app, peer) = recovering_app().await;
+    let capture = app.store_logs();
+    peer.answer_with(503);
+    app.login().await;
+    app.add_downstream_as(&peer.url(), "s3cret-peer-key", whole_system())
+        .await;
+
+    app.upload_ok(CallUpload::new()).await;
+    app.settle().await;
+
+    let logged = capture.text();
+    assert!(!logged.contains("s3cret-peer-key"), "{logged}");
+    // ...and the failure an Operator does need is there, so this is not passing
+    // by having logged nothing at all.
+    assert!(logged.contains("peer-refused"), "{logged}");
+}
+
 // ---------------------------------------------------------------------------
 // Health, and the cost
 // ---------------------------------------------------------------------------
@@ -504,8 +576,14 @@ async fn a_peers_key_is_never_returned_by_the_surface() {
 async fn a_backup_carries_a_peers_shape_and_not_its_key() {
     let app = TestApp::spawn().await;
     app.login().await;
-    app.add_downstream_as("https://peer.example", "s3cret-peer-key", whole_system())
+    let id = app
+        .add_downstream_as("https://peer.example", "s3cret-peer-key", whole_system())
         .await;
+    app.admin_patch(
+        &format!("/api/admin/downstreams/{id}"),
+        json!({ "label": "county mirror" }),
+    )
+    .await;
 
     let (_, document) = app.admin_get("/api/admin/config").await;
     assert!(
@@ -526,6 +604,11 @@ async fn a_backup_carries_a_peers_shape_and_not_its_key() {
     let (_, body) = restored.admin_get("/api/admin/downstreams").await;
     let row = &body["results"][0];
     assert_eq!(row["url"], "https://peer.example");
+    assert_eq!(
+        row["label"], "county mirror",
+        "the name an Operator gave it travels too — a restored roster of \
+         unlabelled URLs is a roster they have to identify by hand"
+    );
     assert_eq!(row["scope"]["sel"], whole_system()["sel"]);
     assert_eq!(row["disabled"], true, "it has no credential yet");
     assert_eq!(row["hasKey"], false, "and the screen says so");

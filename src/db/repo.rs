@@ -3420,46 +3420,44 @@ pub async fn mark_mined<C: ConnectionTrait>(
 /// indexed read of a table that has single-digit rows on any real Instance.
 pub async fn forwarding_downstreams<C: ConnectionTrait>(
     db: &C,
-) -> Result<Vec<downstream::Model>, DbErr> {
-    downstream::Entity::find()
+) -> Result<Vec<crate::downstream::Downstream>, DbErr> {
+    Ok(downstream::Entity::find()
         .filter(downstream::Column::Disabled.eq(false))
         .order_by_asc(downstream::Column::Id)
         .all(db)
-        .await
+        .await?
+        .iter()
+        .map(crate::downstream::Downstream::from_row)
+        .collect())
 }
 
-/// Queue `call_id` for every Downstream whose scope it reaches, and say how
-/// many rows that was.
+/// Queue `call_id` for each of `downstream_ids`, and say how many rows that
+/// was.
 ///
 /// **Called inside the transaction that stores the Call** ([`insert_call`]'s
 /// caller), so "this Call exists" and "this Call is owed to these peers" commit
 /// or roll back together — which is the whole of what "durable" means here, and
 /// the thing rdio's inline POST cannot offer at any price.
 ///
-/// `talkgroups` is the Call's canonical channel **plus its patches**, because
-/// that is the set a Downstream's scope is asked over — see
-/// [`crate::downstream::Peer::admits`].
+/// **Which** peers is not decided here: [`crate::downstream::routed_to`] is the
+/// policy, and it is pure. A Selection compared inside a write would put a
+/// domain module in the data layer, which is exactly what #98 finished taking
+/// out of it.
 ///
 /// An already-queued Call is left alone rather than duplicated: a
 /// **Replacement** (#46) re-enqueues, and a row that has not been sent yet
 /// already means "whatever this Call is now" — the sender reads its current
 /// state at send time.
-pub async fn enqueue_deliveries<C: ConnectionTrait>(
+pub async fn queue_deliveries<C: ConnectionTrait>(
     db: &C,
     call_id: CallId,
-    system_ref: i64,
-    talkgroups: &[i64],
+    downstream_ids: &[i64],
     now_ms: i64,
 ) -> Result<usize, DbErr> {
-    let peers = forwarding_downstreams(db).await?;
     let mut queued = 0;
-    for row in peers {
-        let peer = crate::downstream::Peer::from_row(&row);
-        if !peer.admits(system_ref, talkgroups.iter().copied()) {
-            continue;
-        }
+    for downstream_id in downstream_ids {
         let inserted = downstream_delivery::Entity::insert(downstream_delivery::ActiveModel {
-            downstream_id: Set(row.id),
+            downstream_id: Set(*downstream_id),
             call_id: Set(call_id),
             attempts: Set(0),
             next_attempt_ms: Set(now_ms),

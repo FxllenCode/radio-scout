@@ -7,11 +7,12 @@
 //!
 //! # The shape
 //!
-//! - [`Peer`] is a configured Downstream as the sender uses it. Its scope is a
+//! - [`Downstream`] is a configured peer as the sender uses it. Its scope is a
 //!   [`Selection`] — **the same type and the same rule** the live feed and Web
-//!   Push are scoped by ([`Selection::reaches_channels`]).
+//!   Push are scoped by ([`Selection::reaches_channels`]) — and [`routed_to`] is
+//!   the routing decision, purely.
 //! - A delivery is **enqueued inside the transaction that stores the Call**
-//!   ([`crate::db::repo::enqueue_deliveries`]), so "the Call exists" and "the
+//!   ([`crate::db::repo::queue_deliveries`]), so "the Call exists" and "the
 //!   Call is owed to this peer" are one fact a crash cannot separate.
 //! - [`sender`] drains that queue: per peer, head first, one attempt in flight,
 //!   with [`backoff`] between tries.
@@ -27,7 +28,7 @@
 //! | POSTs inline on the ingest goroutine; an unreachable peer is logged and the Call **dropped** (`downstream.go:416`) | a durable queue, retried with backoff — an outage costs delay, not Calls |
 //! | scope tests `call.Talkgroup.TalkgroupRef` only (`downstream.go:99`), so a **Patch** never reaches a peer subscribed to the patched channel | [`Selection::reaches_channels`], which walks the patches — the live feed's own rule |
 //! | serializes `units`/`frequencies` with Go's **default struct-field names** (`CallUnit` has no JSON tags), which its own ingest parser does not read | the field names its parser actually reads, pinned by a fixture *and* by a real forward between two Instances |
-//! | sends 14 fields, omitting `site` and `frequency` that its parser accepts | every field [`crate::ingest::call_upload`] reads |
+//! | sends 14 fields, omitting `site` and `frequency` that its parser accepts | every field [`crate::ingest::call_upload`] reads, in an order that survives its parser |
 //! | stores the peer's key in plaintext **and returns it** from the admin API | stored of necessity, never returned and never logged |
 //!
 //! The `units`/`frequencies` one is worth stating plainly because it is
@@ -94,10 +95,12 @@ impl Default for DownstreamConfig {
             // Long enough that a peer restarting is not hammered, short enough
             // that a blip costs one Call's worth of delay.
             retry_initial: Duration::from_secs(5),
-            // A peer down overnight is polled twice a minute rather than
-            // thousands of times, and comes back within half a minute of
-            // returning.
-            retry_max: Duration::from_secs(300),
+            // **The ceiling is also the recovery latency**, which is the number
+            // that matters: a peer down overnight is polled once a minute rather
+            // than thousands of times, *and* its backlog starts moving within a
+            // minute of it returning. A longer cap saves a poll an hour and
+            // costs every one of those Calls the same delay again.
+            retry_max: Duration::from_secs(60),
         }
     }
 }
@@ -131,30 +134,44 @@ impl DownstreamConfig {
     }
 }
 
+/// **What a stored scope means, written once.**
+///
+/// A scope that will not parse selects **nothing** — the safe direction, since
+/// the alternative is forwarding an Operator's whole County to a peer that was
+/// scoped to one channel. Three places read one (the sender routing a Call, the
+/// curation listing rendering it, the configuration document exporting it), and
+/// the *screen* has to show the same empty scope that routing is applying rather
+/// than a shape it invented — so the fallback is one function rather than three
+/// `unwrap_or_default()`s that can drift apart.
+pub fn scope_of(stored: &str) -> Selection {
+    serde_json::from_str(stored).unwrap_or_default()
+}
+
 /// A configured Downstream, as the sender uses one.
 ///
-/// The scope arrives as a parsed [`Selection`] rather than the JSON the row
-/// stores, because a scope that will not parse must not silently become "select
-/// nothing" at the moment a Call is being routed — [`Peer::from_row`] decides
-/// that once, where it can be said out loud.
+/// The scope arrives parsed rather than as the JSON the row stores, because
+/// [`scope_of`] decides what an unreadable one means once, where it can be said
+/// out loud.
+///
+/// **`Downstream` is CONTEXT.md's word, and this is the type for it.** The
+/// harness's `common::Peer` is deliberately something else: this is *our
+/// configuration of* the far end, and that is the far end itself.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Peer {
+pub struct Downstream {
     pub id: i64,
     pub url: String,
     pub api_key: String,
     pub scope: Selection,
 }
 
-impl Peer {
-    /// Read a stored row. A scope that will not parse selects **nothing** — the
-    /// safe direction, since the alternative is forwarding an Operator's whole
-    /// County to a peer that was scoped to one channel.
+impl Downstream {
+    /// Read a stored row.
     pub fn from_row(row: &crate::db::entities::downstream::Model) -> Self {
-        Peer {
+        Downstream {
             id: row.id,
             url: row.url.clone(),
             api_key: row.api_key.clone(),
-            scope: serde_json::from_str(&row.scope).unwrap_or_default(),
+            scope: scope_of(&row.scope),
         }
     }
 
@@ -166,7 +183,7 @@ impl Peer {
     }
 
     /// Whether a Call on this System reaching these Talkgroups goes to this
-    /// peer.
+    /// Downstream.
     ///
     /// The Talkgroups are the Call's own **plus its patches**, both canonical —
     /// the same set the live feed asks over, which is the half rdio gets wrong.
@@ -174,6 +191,21 @@ impl Peer {
         self.scope
             .reaches_channels(system_ref, talkgroups, |_, _| true)
     }
+}
+
+/// Which of these Downstreams a Call on `system_ref` reaching `talkgroups` is
+/// owed to — **the routing decision, purely** (#96's shape).
+///
+/// It lives here rather than inside the write that uses it, because a write is
+/// not where a policy belongs: [`crate::db::repo::queue_deliveries`] is handed
+/// the ids and asks nothing about Selections, which keeps the data layer clear
+/// of a domain module the way #98 left it.
+pub fn routed_to(peers: &[Downstream], system_ref: i64, talkgroups: &[i64]) -> Vec<i64> {
+    peers
+        .iter()
+        .filter(|peer| peer.admits(system_ref, talkgroups.iter().copied()))
+        .map(|peer| peer.id)
+        .collect()
 }
 
 /// What a peer's answer means for the delivery that produced it — **the whole
@@ -282,6 +314,8 @@ impl std::fmt::Display for Failed {
 /// disabled form: a Downstream is a **row**, so an Instance with no peers is one
 /// whose roster is empty rather than one whose feature is off. The Worker it
 /// spawns sleeps until something is enqueued and costs nothing until then.
+///
+/// It does share their double-spawn guard, though — see [`Inner::start`].
 #[derive(Clone)]
 pub struct Downstreams(Arc<Inner>);
 
@@ -300,6 +334,16 @@ struct Inner {
     /// Deliveries that have left the queue since this Instance started — see
     /// [`Downstreams::deliveries_settled`].
     settled: tokio::sync::watch::Sender<u64>,
+    /// The right to be the sender, taken once by [`sender::spawn`] (#93).
+    ///
+    /// `Downstreams` is `Clone` and hangs off `AppState`, so `self`-by-value
+    /// cannot be the guard here the way it is for `retention::Sweeper`. What
+    /// this holds is the right to *drain*, and two holders would be worse than
+    /// merely wasteful: they would each attempt the same head, so a peer would
+    /// receive one Call twice and the in-order promise would stop being one —
+    /// and [`Downstreams::woken`] is a `notify_one`, so a wake-up would go to
+    /// one of them rather than to both.
+    start: crate::worker::Handoff<()>,
 }
 
 impl Default for Downstreams {
@@ -323,12 +367,18 @@ impl Downstreams {
             wake: tokio::sync::Notify::new(),
             client,
             settled: tokio::sync::watch::Sender::new(0),
+            start: crate::worker::Handoff::new(()),
         }))
     }
 
     /// What the sender owes, for the Worker envelope and the status registry.
     pub fn meter(&self) -> Arc<Meter> {
         self.0.meter.clone()
+    }
+
+    /// Claim the right to be the sender. `None` means one is already running.
+    pub(crate) fn claim(&self) -> Option<()> {
+        self.0.start.take()
     }
 
     /// The client every delivery is sent with.
@@ -393,6 +443,23 @@ impl Downstreams {
         }
     }
 
+    /// Take on the sender's **first pass**, before its task is spawned.
+    ///
+    /// Without this a freshly started Instance reads idle before the sender has
+    /// looked at anything, because a meter that has admitted nothing is idle by
+    /// definition — so `settle()` would return while the roster read was still
+    /// to come, and *any* statement-count assertion anywhere in the suite would
+    /// be a race with it. That is not hypothetical: it is how
+    /// `tests/mining.rs::mining_one_stored_call_costs_a_fixed_number_of_statements`
+    /// began failing on Postgres and not on SQLite, which is the worst way to
+    /// find out.
+    ///
+    /// It is also just the #93 rule applied honestly — work is owed from where
+    /// it is handed over, and a boot hands the sender a pass.
+    pub(crate) fn owes_a_first_pass(&self) {
+        self.0.meter.admit_untracked();
+    }
+
     /// Discharge everything outstanding — the sender has looked and has nothing
     /// in flight.
     ///
@@ -406,10 +473,18 @@ impl Downstreams {
     /// Note that one delivery has left the queue — taken by the peer, or
     /// abandoned.
     ///
-    /// Published **after** the row is gone, which is what makes it the signal a
-    /// recovery is asserted on: the peer having answered is a moment earlier
-    /// than the queue having shrunk, and a test that read the depth on the
-    /// former would race the delete on the latter.
+    /// **This Worker's `done` count, in the only place it can live.**
+    /// [`crate::worker::Load::done`] is "work settled", and for every other
+    /// Worker that is the same thing as "items completed" — but this one's unit
+    /// of work is *"I have caught up"* ([`Downstreams::owes`]), so its meter
+    /// cannot also answer "how many Calls have gone out". A peer's own
+    /// `last_success_ms` and `consecutive_failures` are the readings an Operator
+    /// acts on, and this is the process-lifetime total beside them.
+    ///
+    /// Published **after** the row is gone, which is also what makes it the
+    /// signal a recovery is asserted on: the peer having answered is a moment
+    /// earlier than the queue having shrunk, and a test that read the depth on
+    /// the former would race the delete on the latter.
     pub(crate) fn delivery_settled(&self) {
         self.0.settled.send_modify(|settled| *settled += 1);
     }
@@ -443,8 +518,8 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    fn peer(scope: serde_json::Value) -> Peer {
-        Peer::from_row(&crate::db::entities::downstream::Model {
+    fn peer(scope: serde_json::Value) -> Downstream {
+        Downstream::from_row(&crate::db::entities::downstream::Model {
             id: 1,
             label: None,
             url: String::from("https://peer.example"),

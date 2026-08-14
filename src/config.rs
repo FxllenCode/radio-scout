@@ -1597,9 +1597,11 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 
 # How long to wait before retrying a failed delivery, and the ceiling that wait
 # doubles up to. A peer restarting is not hammered; a peer down overnight is
-# poked twice a minute and catches up within half a minute of returning.
+# poked once a minute, and its backlog starts moving within a minute of it
+# coming back. Raising the ceiling saves a poll an hour and costs every queued
+# call that much more delay on recovery.
 # retry_initial_secs = 5
-# retry_max_secs = 300
+# retry_max_secs = 60
 
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a

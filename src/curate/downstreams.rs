@@ -126,9 +126,6 @@ pub async fn create(
         api_key: Set(api_key),
         scope: Set(scope_json(&body.scope)),
         disabled: Set(body.disabled),
-        last_success_ms: Set(None),
-        last_failure_ms: Set(None),
-        last_failure: Set(None),
         consecutive_failures: Set(0),
         created_at_ms: Set(state.clock.now_ms()),
         ..Default::default()
@@ -234,7 +231,9 @@ fn row_of(row: downstream::Model, queued: i64) -> DownstreamRow {
         id: row.id,
         label: row.label,
         url: row.url,
-        scope: serde_json::from_str(&row.scope).unwrap_or_default(),
+        // The same reading the sender applies, so the screen cannot show a
+        // scope routing is not using (`downstream::scope_of`).
+        scope: crate::downstream::scope_of(&row.scope),
         disabled: row.disabled,
         has_key: !row.api_key.is_empty(),
         queued,

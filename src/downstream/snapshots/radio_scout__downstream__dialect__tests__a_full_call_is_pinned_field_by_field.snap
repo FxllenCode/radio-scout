@@ -20,6 +20,10 @@ Content-Disposition: form-data; name="dateTime"
 
 2023-11-14T22:13:20.5Z
 --rsboundary
+Content-Disposition: form-data; name="frequency"
+
+853712500
+--rsboundary
 Content-Disposition: form-data; name="frequencies"
 
 [{"freq":853712500,"pos":0.0,"len":4.25,"dbm":-72.5,"errorCount":2,"spikeCount":0}]
@@ -67,10 +71,6 @@ Content-Disposition: form-data; name="timestamp"
 Content-Disposition: form-data; name="units"
 
 [{"id":4424000,"label":"MEDIC 7","offset":0.0},{"id":4424001,"offset":1.5}]
---rsboundary
-Content-Disposition: form-data; name="frequency"
-
-853712500
 --rsboundary
 Content-Disposition: form-data; name="site"
 

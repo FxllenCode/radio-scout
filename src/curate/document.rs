@@ -517,7 +517,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
         .map(|row| DownstreamEntry {
             url: row.url,
             label: row.label,
-            scope: serde_json::from_str(&row.scope).unwrap_or_default(),
+            scope: crate::downstream::scope_of(&row.scope),
         })
         .collect();
     // By value like the keys above, and for the same reason: two Instances
@@ -627,9 +627,6 @@ async fn apply_downstreams<C: ConnectionTrait>(
             api_key: Set(String::new()),
             scope: Set(super::downstreams::scope_json(&entry.scope)),
             disabled: Set(true),
-            last_success_ms: Set(None),
-            last_failure_ms: Set(None),
-            last_failure: Set(None),
             consecutive_failures: Set(0),
             created_at_ms: Set(now_ms),
             ..Default::default()

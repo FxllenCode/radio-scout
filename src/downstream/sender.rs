@@ -8,7 +8,7 @@
 //!
 //! **It drains in order, per peer.** Only the *head* of a peer's queue is ever
 //! attempted, and a head that is not yet due is waited for rather than skipped —
-//! see [`Peers::head`]. Skipping would reorder a peer's archive in a way the peer
+//! see [`Deliveries::head`]. Skipping would reorder a peer's archive in a way the peer
 //! cannot detect.
 //!
 //! **One peer's trouble is its own.** Attempts run in a `JoinSet`, one in flight
@@ -28,7 +28,7 @@
 //!
 //! # The seam
 //!
-//! [`Peers`] is the six questions forwarding asks of the world (#37, #97, the
+//! [`Deliveries`] is the six questions forwarding asks of the world (#37, #97, the
 //! [`crate::enhance::Archive`] precedent). Every interesting arm here is a
 //! failure of one of them — a Call pruned while its peer was down, an object
 //! store that will not answer, a queue row that cannot be written — and none is
@@ -44,13 +44,13 @@ use std::collections::HashSet;
 
 use tracing::{Instrument, Level, debug, info, span, warn};
 
-use super::{DownstreamConfig, Failed, Peer, Verdict, dialect};
+use super::{Downstream, DownstreamConfig, Failed, Verdict, dialect};
 use crate::AppState;
 use crate::call::CallId;
 use crate::db::repo;
 use crate::worker::Worker;
 
-/// Why one of [`Peers`]' answers could not be given.
+/// Why one of [`Deliveries`]' answers could not be given.
 ///
 /// The cause as text, the way [`crate::enhance::Failure`] and
 /// [`crate::mining::sweep::Failure`] each carry theirs: all anything here does
@@ -100,15 +100,16 @@ pub enum Settled {
     },
 }
 
-/// The six questions forwarding asks of the world.
+/// The six questions **one delivery** asks of the world — the queue it comes
+/// off, the Call and audio it is made of, the peer it goes to, and how it ends.
 ///
 /// A port for the reason [`crate::enhance::Archive`] is one: the arms worth
 /// testing here are the failures, and a filesystem that works and a database
 /// that answers cannot produce them.
 #[async_trait::async_trait]
-pub trait Peers: Send + Sync {
+pub trait Deliveries: Send + Sync {
     /// Every Downstream currently forwarding.
-    async fn forwarding(&self) -> Result<Vec<Peer>, Failure>;
+    async fn forwarding(&self) -> Result<Vec<Downstream>, Failure>;
 
     /// The head of one peer's queue — due or not.
     async fn head(&self, downstream_id: i64) -> Result<Option<Queued>, Failure>;
@@ -126,7 +127,7 @@ pub trait Peers: Send + Sync {
     /// renders the URL, and a peer's URL is an Operator-supplied string that may
     /// carry a query parameter (ADR-0011 rule 2's instinct). What an Operator
     /// needs — that this peer cannot be reached — is the `Err` itself.
-    async fn deliver(&self, peer: &Peer, body: dialect::Body) -> Result<u16, ()>;
+    async fn deliver(&self, peer: &Downstream, body: dialect::Body) -> Result<u16, ()>;
 
     /// Apply what was decided, to the queue row and to the peer's health.
     async fn settle(
@@ -138,16 +139,26 @@ pub trait Peers: Send + Sync {
     ) -> Result<(), Failure>;
 }
 
-/// Start the sender.
+/// Start the sender. `None` means one is already running.
 ///
-/// Always started, unlike the push and enhancement workers: a Downstream is a
-/// **row**, so an Instance with no peers has an empty roster rather than a
-/// disabled feature, and a peer created from the browser five minutes from now
-/// must be forwarded to without a restart. With none configured it sleeps on its
-/// wake-up and costs nothing.
-pub fn spawn(state: AppState) -> Worker {
+/// Started whatever the roster says, unlike the push and enhancement workers: a
+/// Downstream is a **row**, so an Instance with no peers has an empty roster
+/// rather than a disabled feature, and a peer created from the browser five
+/// minutes from now must be forwarded to without a restart. With none
+/// configured it sleeps on its wake-up and costs nothing.
+///
+/// The `Option` is therefore the **double-spawn guard** (#93) rather than a
+/// feature switch: two senders would each attempt the same head, so a peer would
+/// receive one Call twice and "drains in order" would stop being true.
+pub fn spawn(state: AppState) -> Option<Worker> {
     let downstreams = state.downstreams.clone();
+    // Taken, not checked: a second call finds it gone and starts nothing.
+    downstreams.claim()?;
     let meter = downstreams.meter();
+    // The first pass is owed before the task exists, so an Instance is never
+    // observed idle in the window before the sender has looked — see
+    // `Downstreams::owes_a_first_pass`.
+    downstreams.owes_a_first_pass();
 
     // What a previous process left. Admitted before the task is spawned, so
     // there is no window in which an Instance reads idle because the sender has
@@ -163,90 +174,94 @@ pub fn spawn(state: AppState) -> Worker {
     let outstanding = state.downstreams.clone();
     let db = state.db.clone();
 
-    Worker::start(super::WORKER, meter, move |mut stop| async move {
-        match repo::delivery_depths(&db).await {
-            Ok(depths) => outstanding.owes(depths.values().sum::<i64>().max(0) as usize),
-            Err(error) => warn!(
-                reason = %"resume-failed",
-                %error,
-                "could not count the deliveries a previous process left; the sender's depth will read low until they drain"
-            ),
-        }
-
-        // One attempt in flight per peer, and the set is what remembers which.
-        let mut attempts: tokio::task::JoinSet<i64> = tokio::task::JoinSet::new();
-        let mut in_flight: HashSet<i64> = HashSet::new();
-
-        loop {
-            let Plan { due, next_due } = plan(&state, &in_flight, state.clock.now_ms()).await;
-            for (peer, head) in due {
-                let peer_id = peer.id;
-                let call_id = head.call_id;
-                in_flight.insert(peer_id);
-                let state = state.clone();
-                attempts.spawn(
-                    async move {
-                        // The Instance's clock, not the machine's (#90): a test
-                        // that arranges "this delivery is due" must measure from
-                        // the same instant the sender stamps with.
-                        let now_ms = state.clock.now_ms();
-                        attempt(&state, state.downstreams.config(), &peer, &head, now_ms).await;
-                        peer_id
-                    }
-                    // Everything one attempt says names the peer and the Call,
-                    // so a failure and the statements around it read as one
-                    // story.
-                    .instrument(span!(
-                        Level::ERROR,
-                        "forward",
-                        downstream = peer_id,
-                        call_id
-                    )),
-                );
+    Some(Worker::start(
+        super::WORKER,
+        meter,
+        move |mut stop| async move {
+            match repo::delivery_depths(&db).await {
+                Ok(depths) => outstanding.owes(depths.values().sum::<i64>().max(0) as usize),
+                Err(error) => warn!(
+                    reason = %"resume-failed",
+                    %error,
+                    "could not count the deliveries a previous process left; the sender's depth will read low until they drain"
+                ),
             }
 
-            // **Where the Worker goes idle**, and the only place it does.
-            // Nothing in flight means every peer has either been tried just now
-            // or is waiting out a backoff nobody asked for — either way the
-            // sender has caught up with what was handed to it, which is what an
-            // admission means here. A pass with an attempt running settles
-            // nothing, so on a working peer this is reached only once the queue
-            // has drained.
-            if attempts.is_empty() {
-                downstreams.caught_up();
-            }
+            // One attempt in flight per peer, and the set is what remembers which.
+            let mut attempts: tokio::task::JoinSet<i64> = tokio::task::JoinSet::new();
+            let mut in_flight: HashSet<i64> = HashSet::new();
 
-            tokio::select! {
-                biased;
-                _ = stop.cancelled() => break,
-                Some(finished) = attempts.join_next(), if !attempts.is_empty() => {
-                    // One attempt ended, however it ended — including by
-                    // panicking, which `join_next` reports rather than swallows.
-                    if let Ok(peer_id) = finished {
-                        in_flight.remove(&peer_id);
-                    }
+            loop {
+                let Plan { due, next_due } = plan(&state, &in_flight, state.clock.now_ms()).await;
+                for (peer, head) in due {
+                    let peer_id = peer.id;
+                    let call_id = head.call_id;
+                    in_flight.insert(peer_id);
+                    let state = state.clone();
+                    attempts.spawn(
+                        async move {
+                            // The Instance's clock, not the machine's (#90): a test
+                            // that arranges "this delivery is due" must measure from
+                            // the same instant the sender stamps with.
+                            let now_ms = state.clock.now_ms();
+                            attempt(&state, state.downstreams.config(), &peer, &head, now_ms).await;
+                            peer_id
+                        }
+                        // Everything one attempt says names the peer and the Call,
+                        // so a failure and the statements around it read as one
+                        // story.
+                        .instrument(span!(
+                            Level::ERROR,
+                            "forward",
+                            downstream = peer_id,
+                            call_id
+                        )),
+                    );
                 }
-                // A Call has just been queued: forward it now rather than on some
-                // timer, because a scanner peer is only useful if it is prompt.
-                () = downstreams.woken() => {}
-                // The earliest moment a backing-off head becomes due. `None` is
-                // "nothing is waiting on a clock", and the wake-up above is then
-                // the only thing that can start work — which is exactly the
-                // steady state of an Instance with no peers.
-                () = sleep_until(next_due), if next_due.is_some() => {}
+
+                // **Where the Worker goes idle**, and the only place it does.
+                // Nothing in flight means every peer has either been tried just now
+                // or is waiting out a backoff nobody asked for — either way the
+                // sender has caught up with what was handed to it, which is what an
+                // admission means here. A pass with an attempt running settles
+                // nothing, so on a working peer this is reached only once the queue
+                // has drained.
+                if attempts.is_empty() {
+                    downstreams.caught_up();
+                }
+
+                tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => break,
+                    Some(finished) = attempts.join_next(), if !attempts.is_empty() => {
+                        // One attempt ended, however it ended — including by
+                        // panicking, which `join_next` reports rather than swallows.
+                        if let Ok(peer_id) = finished {
+                            in_flight.remove(&peer_id);
+                        }
+                    }
+                    // A Call has just been queued: forward it now rather than on some
+                    // timer, because a scanner peer is only useful if it is prompt.
+                    () = downstreams.woken() => {}
+                    // The earliest moment a backing-off head becomes due. `None` is
+                    // "nothing is waiting on a clock", and the wake-up above is then
+                    // the only thing that can start work — which is exactly the
+                    // steady state of an Instance with no peers.
+                    () = sleep_until(next_due), if next_due.is_some() => {}
+                }
             }
-        }
-    })
+        },
+    ))
 }
 
 /// What one pass of the loop should do.
 ///
-/// `PartialEq` and not `Eq`, because a [`Peer`]'s scope is a [`Selection`]
+/// `PartialEq` and not `Eq`, because a [`Downstream`]'s scope is a [`Selection`]
 /// (a `HashMap`), which has no total equality.
 #[derive(Debug, Default, PartialEq)]
 pub struct Plan {
     /// The peers with a delivery due now, one each.
-    pub due: Vec<(Peer, Queued)>,
+    pub due: Vec<(Downstream, Queued)>,
     /// The earliest moment an *undue* head becomes due, if any is waiting.
     pub next_due: Option<i64>,
 }
@@ -261,7 +276,7 @@ pub struct Plan {
 /// Everything that can fail is a *skip*, never a stop: a queue that cannot be
 /// read is asked again on the next wake-up, and the rows are in the same
 /// database either way.
-pub async fn plan(peers: &dyn Peers, in_flight: &HashSet<i64>, now_ms: i64) -> Plan {
+pub async fn plan(peers: &dyn Deliveries, in_flight: &HashSet<i64>, now_ms: i64) -> Plan {
     let roster = match peers.forwarding().await {
         Ok(roster) => roster,
         // The roster is unreadable — the database is down or mid-migration.
@@ -335,9 +350,9 @@ async fn sleep_until(at_ms: Option<i64>) {
 /// One delivery attempt, start to finish: read the Call, read its audio, POST
 /// it, and settle the row.
 pub async fn attempt(
-    peers: &dyn Peers,
+    peers: &dyn Deliveries,
     config: &DownstreamConfig,
-    peer: &Peer,
+    peer: &Downstream,
     head: &Queued,
     now_ms: i64,
 ) {
@@ -407,11 +422,19 @@ fn say(settled: &Settled) {
             next_attempt_ms,
             why,
         } => {
-            // INFO on the *first* failure only — that is the one an Operator
-            // acts on. Every one after it is DEBUG, because a peer down for a
-            // night would otherwise write a line every few minutes saying
-            // exactly the same thing (rule 8), and the standing reading is
-            // `consecutive_failures` on the row.
+            // **INFO, not WARN, and the level is the whole judgement.** Rule 7
+            // spends WARN on something *rejected or dropped*; nothing has been.
+            // The queue has absorbed the outage, which is the feature working —
+            // a notable normal event. What earns a WARN is a Call actually lost,
+            // which is the `Abandoned` arm above and the only line that says one
+            // was.
+            //
+            // On the first failure only. Every one after it is DEBUG, because a
+            // peer down for a night would otherwise write a line every few
+            // minutes saying exactly the same thing (rule 8), and the standing
+            // reading an Operator acts on is `consecutive_failures` and
+            // `last_failure` on the row — which is what the admin screen shows
+            // and what #70 will read.
             if *attempts == 1 {
                 info!(
                     failure = %why,
@@ -429,7 +452,7 @@ fn say(settled: &Settled) {
 }
 
 /// Read, build and POST. `Err` is the one word that explains what went wrong.
-async fn forward(peers: &dyn Peers, peer: &Peer, call_id: CallId) -> Result<(), Failed> {
+async fn forward(peers: &dyn Deliveries, peer: &Downstream, call_id: CallId) -> Result<(), Failed> {
     let call = peers
         .forwardable(call_id)
         .await
@@ -476,13 +499,9 @@ async fn forward(peers: &dyn Peers, peer: &Peer, call_id: CallId) -> Result<(), 
 /// above, and each of these is one call. This is the half a test cannot
 /// substitute, so it is the half that must have nothing in it worth testing.
 #[async_trait::async_trait]
-impl Peers for AppState {
-    async fn forwarding(&self) -> Result<Vec<Peer>, Failure> {
-        Ok(repo::forwarding_downstreams(&self.db)
-            .await?
-            .iter()
-            .map(Peer::from_row)
-            .collect())
+impl Deliveries for AppState {
+    async fn forwarding(&self) -> Result<Vec<Downstream>, Failure> {
+        Ok(repo::forwarding_downstreams(&self.db).await?)
     }
 
     async fn head(&self, downstream_id: i64) -> Result<Option<Queued>, Failure> {
@@ -510,7 +529,7 @@ impl Peers for AppState {
         Ok(self.audio.get(key).await?)
     }
 
-    async fn deliver(&self, peer: &Peer, body: dialect::Body) -> Result<u16, ()> {
+    async fn deliver(&self, peer: &Downstream, body: dialect::Body) -> Result<u16, ()> {
         self.downstreams
             .client()
             .post(peer.upload_url())
@@ -568,6 +587,29 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    /// **One sender, and only ever one** (#93). Two would each take the head of
+    /// the same peer's queue, so that peer would receive one Call twice and
+    /// "drains in order" would stop being true — and `notify_one` would hand a
+    /// wake-up to one of them rather than to both.
+    ///
+    /// The right to drain *is* the guard, so a second start has nothing to drain
+    /// with. `push` makes the same bargain with its coalescer.
+    #[tokio::test]
+    async fn a_second_sender_cannot_be_started() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::connect(&crate::testing::sqlite_url(&tmp))
+            .await
+            .expect("db");
+        let store = std::sync::Arc::new(crate::BlobStore::filesystem(tmp.path()).expect("store"));
+        let state = AppState::new(store, db, crate::IngestConfig::default());
+
+        let first = spawn(state.clone()).expect("the first sender starts");
+        let second = spawn(state.clone());
+
+        assert!(second.is_none(), "a second Downstream sender was started");
+        first.stop().await;
+    }
+
     /// A sleep with no deadline never completes — which is what an Instance with
     /// no peers rests in, and the arm a `select!` would spin on if it returned.
     #[tokio::test(start_paused = true)]
@@ -609,7 +651,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeWorld {
-        roster: Vec<Peer>,
+        roster: Vec<Downstream>,
         heads: std::collections::HashMap<i64, Queued>,
         call: Option<dialect::Forwardable>,
         audio: Option<bytes::Bytes>,
@@ -635,8 +677,8 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl Peers for FakeWorld {
-        async fn forwarding(&self) -> Result<Vec<Peer>, Failure> {
+    impl Deliveries for FakeWorld {
+        async fn forwarding(&self) -> Result<Vec<Downstream>, Failure> {
             self.refuse("read the roster")?;
             Ok(self.roster.clone())
         }
@@ -659,7 +701,7 @@ mod tests {
             Ok(self.audio.clone())
         }
 
-        async fn deliver(&self, _peer: &Peer, body: dialect::Body) -> Result<u16, ()> {
+        async fn deliver(&self, _peer: &Downstream, body: dialect::Body) -> Result<u16, ()> {
             self.delivered.lock().expect("delivered").push(body);
             self.answer.ok_or(())
         }
@@ -677,8 +719,8 @@ mod tests {
         }
     }
 
-    fn peer(id: i64) -> Peer {
-        Peer {
+    fn peer(id: i64) -> Downstream {
+        Downstream {
             id,
             url: format!("https://peer{id}.example"),
             api_key: String::from("peer-key"),
@@ -849,7 +891,7 @@ mod tests {
     /// Every way an attempt can fail, and what each one does to the queue.
     ///
     /// The three that are unreachable while the database answers and the store
-    /// works are the whole reason [`Peers`] is a port: a Call pruned while its
+    /// works are the whole reason [`Deliveries`] is a port: a Call pruned while its
     /// peer was down, an object store that will not answer, and a Call read that
     /// fails outright.
     #[rstest]

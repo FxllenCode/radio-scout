@@ -141,6 +141,19 @@ pub fn body(call: &Forwardable, api_key: &str, audio: &[u8], boundary: &str) -> 
     if let Some(iso) = rfc3339(call.call_at_ms) {
         text_part(&mut out, boundary, "dateTime", &iso);
     }
+    // **`frequency` before `frequencies`, and this order is load-bearing.**
+    // rdio's parser *replaces* the whole array when it sees the singular field
+    // — `call.Frequencies = []CallFrequency{{…}}` (`parsers.go:318`), an
+    // assignment, not an append — and `api.go` feeds the parts through it in
+    // the order they arrive. Sent the other way round, an rdio peer parses every
+    // frequency sample and then throws all of them away for one entry at offset
+    // zero, which is the exact opposite of what sending the field at all is for.
+    // Our own ingest keeps the two in separate columns and cannot see the
+    // difference, which is why this is pinned by the snapshot rather than by the
+    // two-Instance forward.
+    if let Some(frequency) = call.frequency {
+        text_part(&mut out, boundary, "frequency", &frequency.to_string());
+    }
     if !call.frequencies.is_empty() {
         json_part(&mut out, boundary, "frequencies", &call.frequencies);
     }
@@ -187,12 +200,10 @@ pub fn body(call: &Forwardable, api_key: &str, audio: &[u8], boundary: &str) -> 
         json_part(&mut out, boundary, "units", &call.units);
     }
 
-    // Ours, and both are fields rdio's *parser* accepts while its forwarder
-    // never sends them — so an rdio peer gains the tower and the frequency it
-    // would not have got from another rdio.
-    if let Some(frequency) = call.frequency {
-        text_part(&mut out, boundary, "frequency", &frequency.to_string());
-    }
+    // Ours: a field rdio's *parser* accepts while its forwarder never sends it,
+    // so an rdio peer gains the tower it would not have got from another rdio.
+    // (`frequency` is the same kind of gift and is sent above, for the ordering
+    // reason written there.)
     if let Some(site_ref) = call.site_ref {
         text_part(&mut out, boundary, "site", &site_ref.to_string());
     }
@@ -365,6 +376,29 @@ mod tests {
                 r#""freq":853712500,"pos":0.0,"len":4.25,"dbm":-72.5,"errorCount":2,"spikeCount":0"#
             ),
             "{rendered}"
+        );
+    }
+
+    /// **`frequency` must arrive before `frequencies`**, because rdio's parser
+    /// *replaces* the array when it sees the singular field (`parsers.go:318` is
+    /// an assignment) and reads the parts in the order they arrive.
+    ///
+    /// Sent the other way round — which is how this shipped until `/code-review`
+    /// caught it — an rdio peer parses every frequency sample and then discards
+    /// all of them for one entry at offset zero. The two-Instance forward cannot
+    /// see it: our own ingest keeps `frequency` and `frequencies` in separate
+    /// columns, so both survive whatever order they come in. Only a peer that
+    /// conflates them is harmed, and only this assertion notices.
+    #[test]
+    fn the_single_frequency_cannot_overwrite_the_array_it_precedes() {
+        let rendered = rendered(&full(), "peer-key");
+
+        let singular = rendered.find(r#"name="frequency""#).expect("frequency");
+        let plural = rendered.find(r#"name="frequencies""#).expect("frequencies");
+        assert!(
+            singular < plural,
+            "`frequency` is parsed as a replacement for `frequencies`, so it has \
+             to be overwritten by the array rather than overwrite it"
         );
     }
 
