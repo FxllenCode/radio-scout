@@ -599,6 +599,7 @@ async fn assemble(
     state.push = push;
     state.enhancer = Enhancer::from_config(config.enhancement.clone());
     state.mining = config.mining.clone();
+    state.downstreams = crate::downstream::Downstreams::new(config.downstream.clone());
     state.clock = parts.clock;
     // Notifications ride the live-feed fanout (#16), so an ingest never waits
     // on a push service. An Instance with no identity spawns nothing.
@@ -613,6 +614,12 @@ async fn assemble(
     // has nothing left to do — the first sweep runs immediately, so an Instance
     // that restarts often still makes progress.
     running.extend(crate::mining::sweep::spawn(state.clone()).map(|worker| workers.adopt(worker)));
+    // Forwarding to **Downstream** peers (#52). Always started, unlike the three
+    // above: a peer is a *row*, so an Instance with none has an empty roster
+    // rather than a feature switched off — and one added from the browser five
+    // minutes from now must be forwarded to without a restart. With no peers it
+    // sleeps on its wake-up and costs nothing.
+    running.push(workers.adopt(crate::downstream::sender::spawn(state.clone())));
     let app = build_app(state.clone());
 
     let bind = parts

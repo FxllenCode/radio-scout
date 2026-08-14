@@ -874,8 +874,8 @@ async fn a_restart_leaves_the_operator_log_still_being_written() {
 
 /// **Every Worker is named on the registry**, because a status surface (#70)
 /// reads it through `AppState` and can never see the `Instance` that owns the
-/// handles. An Instance with enhancement off runs four; turning it on is what
-/// adds the fifth — a surface must show what is running, not a row of zeroes
+/// handles. An Instance with enhancement off runs five; turning it on is what
+/// adds the sixth — a surface must show what is running, not a row of zeroes
 /// for what is not.
 #[tokio::test]
 async fn the_registry_names_the_workers_this_instance_is_running() {
@@ -898,8 +898,14 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // Call once and then has nothing left to do, so an Operator
             // upgrading gets their archive's names without finding a setting.
             radio_scout::mining::sweep::WORKER,
+            // Always started (#52), unlike the two switchable ones above it: a
+            // **Downstream** is a *row*, so an Instance with no peers has an
+            // empty roster rather than a feature that is off — and one added
+            // from the browser must be forwarded to without a restart. It sleeps
+            // on its wake-up until something is queued.
+            radio_scout::downstream::WORKER,
         ],
-        "the shipped default runs four: enhancement is off, the backfill is on"
+        "the shipped default runs five: enhancement is off, the rest are on"
     );
 
     let mut app = app;
@@ -918,6 +924,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::push::WORKER,
             radio_scout::enhance::WORKER,
             radio_scout::mining::sweep::WORKER,
+            radio_scout::downstream::WORKER,
         ],
     );
 }

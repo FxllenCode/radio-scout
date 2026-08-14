@@ -884,7 +884,24 @@ async fn replace(
     )
     .await
     .map_err(Stage::ReplaceCall.failed())?;
+    // **A replacement is forwarded again** (#52). The peer is holding the copy
+    // this Instance has just decided was the worse one — which for an
+    // encrypted-versus-decoded pair means it is holding no audio where we have
+    // some. A peer running Radio-Scout applies its own keep-best and upgrades;
+    // an rdio peer answers `duplicate call rejected` and keeps what it had, so
+    // the cost of asking is one refused upload on a path that only fires inside
+    // the replace window.
+    let forwarding = enqueue_forwarding(
+        &txn,
+        &new_call,
+        resolved,
+        replacement.call().id,
+        state.clock.now_ms(),
+    )
+    .await
+    .map_err(Stage::ReplaceCall.failed())?;
     txn.commit().await.map_err(Stage::ReplaceCall.failed())?;
+    state.downstreams.owes(forwarding);
 
     let call = match replacement {
         repo::Replacement::Replaced(call) => call,
@@ -928,8 +945,9 @@ async fn perform(
     let audio_bytes = stored.as_ref().map(|a| a.bytes()).unwrap_or_default();
 
     // Insert the row (+ children) atomically, into the channel already resolved
-    // for this Call rather than one looked up a second time (#96).
-    let call = insert_in_txn(
+    // for this Call rather than one looked up a second time (#96) — and, in the
+    // same transaction, queue it for every **Downstream** it reaches (#52).
+    let Stored { call, forwarding } = insert_in_txn(
         &state.db,
         &new_call,
         stored,
@@ -941,6 +959,9 @@ async fn perform(
     .map_err(Stage::StoreCall.failed())?;
     // Everything this upload says from here on names the row it became.
     Span::current().record("call_id", call.id);
+    // After the commit, never inside it: an attempt admitted for a delivery
+    // that then rolled back would be a debt nothing could settle.
+    state.downstreams.owes(forwarding);
 
     publish(state, &call).await?;
     offer_for_enhancement(state, &call).await;
@@ -1189,11 +1210,63 @@ async fn insert_in_txn(
     resolved: &repo::Resolved,
     auto_populate: bool,
     now_ms: i64,
-) -> Result<crate::db::entities::call::Model, sea_orm::DbErr> {
+) -> Result<Stored, sea_orm::DbErr> {
     let txn = db.begin().await?;
     let call = repo::insert_call(&txn, new_call, audio, resolved, auto_populate, now_ms).await?;
+    let forwarding = enqueue_forwarding(&txn, new_call, resolved, call.id, now_ms).await?;
     txn.commit().await?;
-    Ok(call)
+    Ok(Stored { call, forwarding })
+}
+
+/// A Call that is now a row, and how many **Downstream** peers are owed it.
+///
+/// Two facts from one transaction, because the second is only true if the first
+/// committed — and the count has to leave the transaction to be admitted to the
+/// sender's meter afterwards. See [`crate::downstream::Downstreams::owes`] for
+/// why it cannot be admitted inside.
+struct Stored {
+    call: crate::db::entities::call::Model,
+    forwarding: usize,
+}
+
+/// Queue this Call for every **Downstream** whose scope it reaches (#52).
+///
+/// **Inside the storing transaction, on purpose.** "This Call exists" and "this
+/// Call is owed to these peers" are one fact; written separately, a crash
+/// between them loses the forward silently and forever. It costs one indexed
+/// read of a table with single-digit rows — the one statement `tests/ingest.rs`
+/// accounts for — and that read is what buys the guarantee.
+///
+/// An **Encrypted Call** is never queued: it has no audio object at all (spec US
+/// 9) and the rdio dialect requires one, so a peer could only ever refuse it.
+async fn enqueue_forwarding<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    new_call: &NewCall,
+    resolved: &repo::Resolved,
+    call_id: CallId,
+    now_ms: i64,
+) -> Result<usize, sea_orm::DbErr> {
+    if new_call.encrypted {
+        return Ok(0);
+    }
+    // The channel this Call resolved to, then everything it is patched to — the
+    // same set the live feed routes on, which is the half rdio's own forwarder
+    // omits. Both come from the [`repo::Resolved`] the pipeline already read
+    // (#96), so scoping costs no lookup of its own: the only statement this
+    // whole feature adds to ingest is the roster read inside
+    // [`repo::enqueue_deliveries`].
+    //
+    // The canonical Ref falls back to the one the recorder sent, which is the
+    // auto-populate case — `insert_call` has just created that Talkgroup under
+    // exactly this Ref, and it was `None` here only because nothing had
+    // resolved it beforehand.
+    let mut talkgroups = vec![resolved.talkgroup_ref().unwrap_or(new_call.talkgroup_ref)];
+    for patched in resolved.patches.as_deref().unwrap_or_default() {
+        if !talkgroups.contains(patched) {
+            talkgroups.push(*patched);
+        }
+    }
+    repo::enqueue_deliveries(db, call_id, new_call.system_ref, &talkgroups, now_ms).await
 }
 
 /// `POST /api/trunk-recorder-call-upload` — Trunk Recorder's native

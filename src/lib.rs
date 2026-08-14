@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod config;
 pub mod curate;
 pub mod db;
+pub mod downstream;
 pub mod enhance;
 pub mod failure;
 pub mod http_log;
@@ -79,6 +80,11 @@ pub struct AppState {
     pub enhancer: Enhancer,
     /// How the **Mining** sweep walks the Archive that was already there (#48).
     pub mining: crate::mining::MiningConfig,
+    /// Forwarding to **Downstream** peers (#52) — the policy and the sender's
+    /// wake-up. Unlike push and enhancement there is no disabled form: a peer is
+    /// a row, so an Instance with none has an empty roster rather than a feature
+    /// switched off.
+    pub downstreams: crate::downstream::Downstreams,
     /// What time it is, for everything a handler stamps or expires (#90).
     pub clock: Clock,
     /// What every background Worker owes right now (#93) — the reading half, so
@@ -102,6 +108,7 @@ impl AppState {
             push: Push::disabled(),
             enhancer: Enhancer::disabled(),
             mining: crate::mining::MiningConfig::default(),
+            downstreams: crate::downstream::Downstreams::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
         }

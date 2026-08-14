@@ -2,6 +2,7 @@ import { http, HttpResponse } from 'msw'
 
 import type {
   AdminApiKey,
+  AdminDownstream,
   AdminLabel,
   AdminSystem,
   AdminTalkgroup,
@@ -33,6 +34,7 @@ export class FakeInstance {
   tags: AdminLabel[] = []
   units: AdminUnit[] = []
   keys: AdminApiKey[] = []
+  downstreams: AdminDownstream[] = []
   /** Member Refs, by owning Talkgroup id (#50). Kept beside the rows rather
    *  than on them because the server deliberately keeps them off the listing —
    *  a query per row on a page of five hundred, for a column it cannot edit. */
@@ -115,6 +117,26 @@ export class FakeInstance {
       ...row,
     }
     this.units.push(created)
+    return created
+  }
+
+  downstream(row: Partial<AdminDownstream> = {}): AdminDownstream {
+    const created: AdminDownstream = {
+      id: this.id(),
+      label: 'county mirror',
+      url: 'https://peer.example',
+      scope: { all: false, sel: { 11: { '*': true } } },
+      disabled: false,
+      hasKey: true,
+      queued: 0,
+      lastSuccessMs: null,
+      lastFailureMs: null,
+      lastFailure: null,
+      consecutiveFailures: 0,
+      createdAtMs: 1_700_000_000_000,
+      ...row,
+    }
+    this.downstreams.push(created)
     return created
   }
 
@@ -486,6 +508,8 @@ export function curationHandlers(instance: FakeInstance) {
         groupsCreated: 0,
         tagsCreated: 0,
         apiKeys: [],
+        apiKeysToIssue: 0,
+        downstreamsToKey: 0,
         rejected: [],
       })
     }),
@@ -516,6 +540,56 @@ export function curationHandlers(instance: FakeInstance) {
         body: undefined,
       })
       instance.keys = instance.keys.filter((it) => String(it.id) !== params.id)
+      return new HttpResponse(null, { status: 204 })
+    }),
+
+    // **Downstream** peers (#52). The listing carries each peer's health beside
+    // it and — the thing worth modelling faithfully — never its key: the fake
+    // answers with exactly the fields the real one does, so a screen that reads
+    // a credential back reads `undefined` here too.
+    http.get(`${ORIGIN}/api/admin/downstreams`, () =>
+      HttpResponse.json({ results: instance.downstreams }),
+    ),
+    http.post(`${ORIGIN}/api/admin/downstreams`, async ({ request }) => {
+      const body = await record('POST', request, '/api/admin/downstreams')
+      const url = String(body.url ?? '').trim()
+      if (url === '') return refusal(400, 'field-required', 'url is required')
+      const apiKey = String(body.apiKey ?? '').trim()
+      if (apiKey === '') {
+        return refusal(400, 'field-required', 'apiKey is required')
+      }
+      const row = instance.downstream({
+        label: (body.label as string) ?? null,
+        url,
+        scope: body.scope as AdminDownstream['scope'],
+        disabled: (body.disabled as boolean) ?? false,
+        hasKey: true,
+      })
+      return HttpResponse.json(row, { status: 201 })
+    }),
+    http.patch(`${ORIGIN}/api/admin/downstreams/:id`, async ({ request, params }) => {
+      const body = await record('PATCH', request, `/api/admin/downstreams/${params.id}`)
+      const row = instance.downstreams.find((it) => String(it.id) === params.id)
+      if (!row) {
+        return refusal(404, 'downstream-not-found', 'no such downstream')
+      }
+      // The key is write-only on the real surface: it goes in and never comes
+      // back out, so the fake stores only the *fact* of one.
+      const { apiKey, ...rest } = body as Record<string, unknown>
+      if (typeof apiKey === 'string') row.hasKey = apiKey.trim() !== ''
+      Object.assign(row, rest)
+      if (row.disabled) row.queued = 0
+      return HttpResponse.json(row)
+    }),
+    http.delete(`${ORIGIN}/api/admin/downstreams/:id`, ({ params }) => {
+      instance.wrote.push({
+        method: 'DELETE',
+        path: `/api/admin/downstreams/${params.id}`,
+        body: undefined,
+      })
+      instance.downstreams = instance.downstreams.filter(
+        (it) => String(it.id) !== params.id,
+      )
       return new HttpResponse(null, { status: 204 })
     }),
   ]

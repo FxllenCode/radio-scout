@@ -189,8 +189,10 @@ after switching:
 - **No access codes yet.** Listening is open to anyone who can reach the instance; scoped,
   per-listener PINs are not built. Put it behind a VPN or a reverse proxy with auth if that
   matters.
-- **No admin web UI.** Configuration is a TOML file, environment variables and flags. The
-  admin surface currently covers login and talkgroup CSV import.
+- **The machine is still configured in a file.** Ports, storage, retention and the database
+  live in `radio-scout.toml`, environment variables and flags. Everything *else* — systems,
+  talkgroups, groups, tags, units, API keys and downstream peers — is edited in the browser
+  under Settings → Admin.
 - **`/rdio-scanner` is not served.** Radio-Scout does not host the legacy app.
 - **A different UI.** It is a replacement, not a reskin — the screens are not where rdio put
   them.

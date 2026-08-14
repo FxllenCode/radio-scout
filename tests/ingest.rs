@@ -98,14 +98,18 @@ async fn a_steady_state_call_resolves_its_channel_once() {
 
     assert_eq!(
         spent,
-        18 + read_backs,
+        19 + read_backs,
         "one steady-state Call, end to end: the API key; the System and the \
-         Talkgroup, once each; the dedup window; the Call row and its one \
-         `call_units` row (+ a read-back each on SQLite); the Unit the roster \
-         resolves the radio to; the nine the live-feed view is denormalized \
-         from, two of which resolve that radio to its apparatus for the wire; \
-         the emission; and the push sender asking who is subscribed. Two more \
-         than this and something is being resolved twice again."
+         Talkgroup, once each; the dedup window; the **Downstream** roster \
+         (#52 — one indexed read of a table with single-digit rows, and the \
+         price of writing a peer's delivery row inside the same transaction \
+         that stores the Call, so a crash cannot separate the two); the Call \
+         row and its one `call_units` row (+ a read-back each on SQLite); the \
+         Unit the roster resolves the radio to; the nine the live-feed view is \
+         denormalized from, two of which resolve that radio to its apparatus \
+         for the wire; the emission; and the push sender asking who is \
+         subscribed. Two more than this and something is being resolved twice \
+         again."
     );
 }
 

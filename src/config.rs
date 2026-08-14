@@ -59,6 +59,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::AdminConfig;
 use crate::blob::{Backend, Storage, StorageConfig};
+use crate::downstream::DownstreamConfig;
 use crate::enhance::{EnhancementConfig, Output};
 use crate::ingest::IngestConfig;
 use crate::logsink;
@@ -403,6 +404,7 @@ pub struct Config {
     pub push: PushConfig,
     pub enhancement: EnhancementConfig,
     pub mining: MiningConfig,
+    pub downstream: DownstreamConfig,
     pub log: LogConfig,
 }
 
@@ -1031,6 +1033,36 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "downstream.timeout_secs",
+        var: "RADIO_SCOUT_DOWNSTREAM_TIMEOUT_SECS",
+        expected: "a number of seconds",
+        example: "60",
+        set: |setting, config, value| {
+            config.downstream.timeout = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "downstream.retry_initial_secs",
+        var: "RADIO_SCOUT_DOWNSTREAM_RETRY_INITIAL_SECS",
+        expected: "a number of seconds",
+        example: "10",
+        set: |setting, config, value| {
+            config.downstream.retry_initial = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "downstream.retry_max_secs",
+        var: "RADIO_SCOUT_DOWNSTREAM_RETRY_MAX_SECS",
+        expected: "a number of seconds",
+        example: "600",
+        set: |setting, config, value| {
+            config.downstream.retry_max = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
         key: "log.directives",
         // Not a `RADIO_SCOUT_`-prefixed name: it is the variable every Rust
         // operator already reaches for, and ADR-0011 documents it as the
@@ -1548,6 +1580,26 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # or raise the interval to make it gentler.
 # interval_secs = 30
 # batch_size = 100
+
+[downstream]
+# Forwarding Calls on to other rdio-compatible instances (#52). The peers
+# themselves are not configured here — you add them in Settings -> Downstreams,
+# with a URL, the API key that peer issued you, and which Systems and Talkgroups
+# to send. This section is only the policy for how hard we try.
+#
+# Nothing is lost when a peer goes down: matching Calls are written to a durable
+# queue as they are stored, and drained in the order they arrived once the peer
+# comes back — across a restart of either end. (rdio-scanner posts inline and
+# drops the Call, so a peer's outage costs you the traffic.)
+
+# How long a peer has to answer one delivery.
+# timeout_secs = 30
+
+# How long to wait before retrying a failed delivery, and the ceiling that wait
+# doubles up to. A peer restarting is not hammered; a peer down overnight is
+# poked twice a minute and catches up within half a minute of returning.
+# retry_initial_secs = 5
+# retry_max_secs = 300
 
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a

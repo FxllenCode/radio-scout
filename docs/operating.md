@@ -184,6 +184,7 @@ needs SSH:
 | **Units** | naming the radios, filtered to *the ones nobody has named yet*, and the **Ranges** a fleet's block occupies |
 | **Groups** / **Tags** | the two category vocabularies, with a count of what is behind each |
 | **API keys** | issue (shown once), label, scope to a System, disable, revoke |
+| **Downstreams** | the other instances you forward calls to — see [below](#forwarding-to-other-instances) |
 
 Four things are worth knowing before you start:
 
@@ -202,6 +203,37 @@ Four things are worth knowing before you start:
   owns the entities Calls are addressed to, not the machine.
 
 Bulk CSV import is still there and still the fastest way to name a county at once — see below.
+
+## Forwarding to other instances
+
+**Settings → Admin → Downstreams.** Each peer is an address, the API key *that peer* issued you,
+and which systems and talkgroups to send. Receiving needs nothing configured at either end: a
+peer forwarding to *you* is just another recorder, so give them an API key and they are done.
+
+**A peer's outage costs you delay, not calls.** Matching calls are written to a durable queue as
+they are stored and drained in the order they arrived once the peer comes back — across a
+restart of either end. rdio-scanner posts inline and drops the call when a peer is unreachable,
+which is silent: nothing anywhere records what went missing.
+
+The row tells you where each peer stands: how many calls are **queued** for it, when it **last
+delivered**, and how many attempts have failed since, with the reason. A peer that has been
+restored from a backup says **needs its key** — see [Backups](#backups).
+
+Three things behave the way they do on purpose:
+
+- **A call the peer refuses outright is dropped rather than retried forever.** A `400`, `413`,
+  `415`, `417` or `422` means those same bytes will never be accepted, and retrying them would
+  hold up every call behind it. Everything else — a wrong key, a wrong address, a restart, a
+  rate limit, an unreachable host — keeps the backlog, because those are things you fix.
+- **Disabling a peer empties its queue.** Otherwise switching one off for a week and back on
+  again replays the week, into an instance whose own retention has probably aged past it.
+- **The key is write-only.** It is stored so it can be sent, and it is never shown again, never
+  returned by the API and never written to a log. Editing a peer's scope does not mean re-typing
+  it — leave the field blank and the stored one is kept.
+
+How hard we try is `[downstream]` in `radio-scout.toml`: `timeout_secs`, and the retry wait,
+which doubles from `retry_initial_secs` up to `retry_max_secs`. The peers themselves are never in
+the TOML — they are entities, and they live in the browser with everything else you curate.
 
 ### Tidying up talkgroup names
 
@@ -507,9 +539,10 @@ both.
 
 ### The configuration on its own
 
-Everything you curated — systems, talkgroups with their merges, groups, tags, named units, and
-the API-key roster — also exports as **one JSON file**, separately from the archive. That is the
-one to keep in git: it is small, it is a plain document, and it is what you would hate to retype.
+Everything you curated — systems, talkgroups with their merges, groups, tags, named units, the
+API-key roster and your downstream peers — also exports as **one JSON file**, separately from the
+archive. That is the one to keep in git: it is small, it is a plain document, and it is what you
+would hate to retype.
 
 **Settings → Admin → Export.** Import the same file on any instance to reproduce the setup.
 
@@ -517,6 +550,12 @@ one to keep in git: it is small, it is a plain document, and it is what you woul
   either — so the export carries each key's *label, scope and disabled flag* and nothing else.
   Importing **re-issues** them and shows the new keys once, labelled, so you know which recorder
   each belongs to. Every recorder needs its new key; nothing else about the roster is lost.
+
+  The same goes for a **downstream** peer's key, for the opposite reason: that one has to be
+  stored in a sendable form, which is exactly why it must not be in a file you commit. A restored
+  peer comes back with its address and its scope, **switched off and marked *needs its key***
+  until you paste in the one that peer issued you. rdio-scanner's export includes every
+  downstream's key in plaintext.
 - **Importing never deletes.** A document adds and updates what it names and says nothing about
   anything else, so a truncated or hand-edited file cannot destroy a county — and a restore is
   safe to run twice, which matters when the first one died half-way.

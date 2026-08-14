@@ -13,16 +13,14 @@
  * no client-side watchdog here: a dead connection reaches us as a `close`, and
  * `close` is what we retry.
  */
-import type { Call } from '@/types'
+import type { Call, SelectionMatrix } from '@/types'
 
 export type LiveStatus = 'offline' | 'connecting' | 'connected'
 
 /** The subscription matrix as it goes on the wire (ADR-0004): `all` is the
  *  default, and `sel[system][talkgroup | "*"]` overrides it. */
-export interface Subscription {
-  all: boolean
-  sel: Record<string, Record<string, boolean>>
-}
+/** One declaration, three surfaces — see [`SelectionMatrix`]. */
+export type Subscription = SelectionMatrix
 
 export interface LiveFeedHandlers {
   onStatus(status: LiveStatus): void

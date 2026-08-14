@@ -27,8 +27,9 @@ use sea_orm::{
 use crate::blob::StoredAudio;
 use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
-    site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
+    api_key, call, call_frequency, call_patch, call_unit, downstream, downstream_delivery, group,
+    log_event, push_subscription, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref,
+    unit, unit_ref,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -927,6 +928,17 @@ pub enum Replacement {
     /// The Call this was a better copy *of* is gone, so the copy became a Call
     /// of its own.
     Stored(call::Model),
+}
+
+impl Replacement {
+    /// The row either way — for the callers that need the id rather than the
+    /// distinction, which is everything that happens *inside* the same
+    /// transaction (#52's forwarding queue).
+    pub fn call(&self) -> &call::Model {
+        match self {
+            Replacement::Replaced(call) | Replacement::Stored(call) => call,
+        }
+    }
 }
 
 /// Point an already-stored Call at a better copy of its transmission, **under
@@ -3389,6 +3401,219 @@ pub async fn mark_mined<C: ConnectionTrait>(
     call::Entity::update_many()
         .col_expr(call::Column::MinedAtMs, Expr::value(now_ms))
         .filter(call::Column::Id.is_in(call_ids.iter().copied()))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Downstream forwarding (#52)
+// ---------------------------------------------------------------------------
+
+/// Every Downstream that is currently forwarding, oldest first.
+///
+/// Read **per Call**, inside the storing transaction, rather than cached in the
+/// process. A cache would cost one statement less on the shipped default (an
+/// empty roster) and would buy an invalidation problem with five call sites —
+/// four curation handlers and the configuration import — where a missed one is a
+/// peer that silently receives nothing until the next restart. This is one
+/// indexed read of a table that has single-digit rows on any real Instance.
+pub async fn forwarding_downstreams<C: ConnectionTrait>(
+    db: &C,
+) -> Result<Vec<downstream::Model>, DbErr> {
+    downstream::Entity::find()
+        .filter(downstream::Column::Disabled.eq(false))
+        .order_by_asc(downstream::Column::Id)
+        .all(db)
+        .await
+}
+
+/// Queue `call_id` for every Downstream whose scope it reaches, and say how
+/// many rows that was.
+///
+/// **Called inside the transaction that stores the Call** ([`insert_call`]'s
+/// caller), so "this Call exists" and "this Call is owed to these peers" commit
+/// or roll back together — which is the whole of what "durable" means here, and
+/// the thing rdio's inline POST cannot offer at any price.
+///
+/// `talkgroups` is the Call's canonical channel **plus its patches**, because
+/// that is the set a Downstream's scope is asked over — see
+/// [`crate::downstream::Peer::admits`].
+///
+/// An already-queued Call is left alone rather than duplicated: a
+/// **Replacement** (#46) re-enqueues, and a row that has not been sent yet
+/// already means "whatever this Call is now" — the sender reads its current
+/// state at send time.
+pub async fn enqueue_deliveries<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+    system_ref: i64,
+    talkgroups: &[i64],
+    now_ms: i64,
+) -> Result<usize, DbErr> {
+    let peers = forwarding_downstreams(db).await?;
+    let mut queued = 0;
+    for row in peers {
+        let peer = crate::downstream::Peer::from_row(&row);
+        if !peer.admits(system_ref, talkgroups.iter().copied()) {
+            continue;
+        }
+        let inserted = downstream_delivery::Entity::insert(downstream_delivery::ActiveModel {
+            downstream_id: Set(row.id),
+            call_id: Set(call_id),
+            attempts: Set(0),
+            next_attempt_ms: Set(now_ms),
+            queued_at_ms: Set(now_ms),
+            last_failure: Set(None),
+            ..Default::default()
+        })
+        // The unique index on (downstream_id, call_id) is what makes a
+        // re-enqueue idempotent; `do_nothing` is how both dialects spell
+        // "leave the one that is there".
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::columns([
+                downstream_delivery::Column::DownstreamId,
+                downstream_delivery::Column::CallId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(db)
+        .await;
+        match inserted {
+            Ok(_) => queued += 1,
+            // `do_nothing` reports the conflict as "nothing was inserted" rather
+            // than as an error on both dialects, and that is a delivery already
+            // owed — not a new one, and not a failure.
+            Err(DbErr::RecordNotInserted) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(queued)
+}
+
+/// The next delivery owed to this Downstream — **the head of its queue**, due or
+/// not.
+///
+/// Taken unconditionally rather than filtered on `next_attempt_ms <= now`, and
+/// that is the whole of "drains in order": filtering would skip a backing-off
+/// Call and send the one behind it first, which is precisely the reordering a
+/// peer cannot detect and an Operator would never find out about. The caller
+/// waits for it instead.
+pub async fn next_delivery<C: ConnectionTrait>(
+    db: &C,
+    downstream_id: i64,
+) -> Result<Option<downstream_delivery::Model>, DbErr> {
+    downstream_delivery::Entity::find()
+        .filter(downstream_delivery::Column::DownstreamId.eq(downstream_id))
+        .order_by_asc(downstream_delivery::Column::Id)
+        .one(db)
+        .await
+}
+
+/// Forget a delivery — it landed, or it never will.
+pub async fn drop_delivery<C: ConnectionTrait>(db: &C, id: i64) -> Result<(), DbErr> {
+    downstream_delivery::Entity::delete_by_id(id)
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Leave a delivery at the head of its queue, due again later.
+pub async fn defer_delivery<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    attempts: i32,
+    next_attempt_ms: i64,
+    failure: &str,
+) -> Result<(), DbErr> {
+    downstream_delivery::Entity::update_many()
+        .col_expr(downstream_delivery::Column::Attempts, Expr::value(attempts))
+        .col_expr(
+            downstream_delivery::Column::NextAttemptMs,
+            Expr::value(next_attempt_ms),
+        )
+        .col_expr(
+            downstream_delivery::Column::LastFailure,
+            Expr::value(failure),
+        )
+        .filter(downstream_delivery::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Record that this peer took a Call — the health reading an Operator watches,
+/// and the reset of its failure count.
+pub async fn downstream_succeeded<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    now_ms: i64,
+) -> Result<(), DbErr> {
+    downstream::Entity::update_many()
+        .col_expr(downstream::Column::LastSuccessMs, Expr::value(now_ms))
+        .col_expr(downstream::Column::ConsecutiveFailures, Expr::value(0))
+        .filter(downstream::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Record that an attempt on this peer failed, and why.
+///
+/// The counter is incremented in the database rather than read-modify-written,
+/// so a curation edit landing between the two cannot lose the increment — and so
+/// this is one statement on a path that runs once per failed attempt for as long
+/// as a peer is down.
+pub async fn downstream_failed<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    now_ms: i64,
+    failure: &str,
+) -> Result<(), DbErr> {
+    downstream::Entity::update_many()
+        .col_expr(downstream::Column::LastFailureMs, Expr::value(now_ms))
+        .col_expr(downstream::Column::LastFailure, Expr::value(failure))
+        .col_expr(
+            downstream::Column::ConsecutiveFailures,
+            Expr::col(downstream::Column::ConsecutiveFailures).add(1),
+        )
+        .filter(downstream::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// How many Calls each Downstream is owed, by Downstream Id.
+///
+/// **This is the queue depth an Operator is shown** — the durable one, which
+/// survives a restart — as distinct from the sender Worker's `depth`, which
+/// counts attempts in flight (see [`crate::downstream::Downstreams::owes`]). One
+/// `GROUP BY` for the whole roster rather than a `COUNT` per row, because the
+/// admin listing renders every peer at once.
+pub async fn delivery_depths<C: ConnectionTrait>(db: &C) -> Result<HashMap<i64, i64>, DbErr> {
+    Ok(downstream_delivery::Entity::find()
+        .select_only()
+        .column(downstream_delivery::Column::DownstreamId)
+        .column_as(downstream_delivery::Column::Id.count(), "depth")
+        .group_by(downstream_delivery::Column::DownstreamId)
+        .into_tuple::<(i64, i64)>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect())
+}
+
+/// Forget everything queued for a Downstream that is being deleted or switched
+/// off.
+///
+/// A disabled peer keeping its backlog would mean that switching one off for a
+/// week and back on again replays the week — which is not what "disabled" reads
+/// as, and would deliver a flood of Calls the peer's own **Retention** may
+/// already have aged past.
+pub async fn clear_deliveries<C: ConnectionTrait>(db: &C, downstream_id: i64) -> Result<(), DbErr> {
+    downstream_delivery::Entity::delete_many()
+        .filter(downstream_delivery::Column::DownstreamId.eq(downstream_id))
         .exec(db)
         .await?;
     Ok(())

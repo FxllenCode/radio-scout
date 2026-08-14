@@ -10,6 +10,7 @@ import { UnitScreen } from '@/routes/UnitScreen'
 import { AdminScreen } from '@/routes/admin/AdminScreen'
 import { AdminTalkgroupsScreen } from '@/routes/admin/AdminTalkgroupsScreen'
 import { ApiKeysScreen } from '@/routes/admin/ApiKeysScreen'
+import { DownstreamsScreen } from '@/routes/admin/DownstreamsScreen'
 import { GroupsScreen, TagsScreen } from '@/routes/admin/LabelsScreen'
 import { SystemsScreen } from '@/routes/admin/SystemsScreen'
 import { UnitsScreen } from '@/routes/admin/UnitsScreen'
@@ -46,6 +47,10 @@ export default function App() {
         <Route path="settings/admin/tags" element={<TagsScreen />} />
         <Route path="settings/admin/units" element={<UnitsScreen />} />
         <Route path="settings/admin/api-keys" element={<ApiKeysScreen />} />
+        <Route
+          path="settings/admin/downstreams"
+          element={<DownstreamsScreen />}
+        />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

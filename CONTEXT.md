@@ -227,6 +227,8 @@ _Avoid_: tag mining (**Tag** is a Talkgroup's service label), scraping, extracti
 
 **Downstream**:
 Another instance this **Instance** forwards matching **Calls** to, speaking the rdio upload dialect, scoped per System/Talkgroup. Forwarding only — *receiving* a peer's downstream is just **Ingest** with an API key.
+
+**A peer's outage costs delay, not Calls.** A matching Call is written to a durable queue inside the same transaction that stores it, so "the Call exists" and "the Call is owed to this peer" are one fact a crash cannot separate; the queue drains **in order, per peer**, one attempt at a time, and survives a restart of either end. The scope is a **Selection** — the live feed's own — so a **Patch** reaches a peer subscribed to the channel it was patched onto.
 _Avoid_: relay, mirror, federation, upstream.
 
 **Dirwatch**:
@@ -281,7 +283,9 @@ One running Radio-Scout: a process, its **Archive**, its configuration and its *
 _Avoid_: scanner, server, deployment, node, site (Site is a tower).
 
 **Worker**:
-A background task an **Instance** owns and can account for. There are five — the **Retention** sweeper, the **Web Push** sender, the **enhancement** worker, the **Mining** backfill, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
+A background task an **Instance** owns and can account for. There are six — the **Retention** sweeper, the **Web Push** sender, the **enhancement** worker, the **Mining** backfill, the **Downstream** sender, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
+
+What one *unit* of that work is belongs to the Worker, and is not always one item: the Downstream sender's is "I have caught up with what was handed to me", because a delivery waiting out a retry is owed by nobody — and a Worker that stayed non-idle through a peer's outage would make "this Instance has settled" unanswerable for as long as the outage lasted.
 _Avoid_: job, task, background thread, daemon (a **Service** is the operating system's).
 
 **Service**:

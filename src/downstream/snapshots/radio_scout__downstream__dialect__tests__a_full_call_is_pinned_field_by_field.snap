@@ -1,0 +1,78 @@
+---
+source: src/downstream/dialect.rs
+expression: "rendered(&full(), \"peer-key\")"
+---
+--rsboundary
+Content-Disposition: form-data; name="audio"; filename="54241-1700000000.wav"
+Content-Type: audio/wav
+
+<AUDIO>
+--rsboundary
+Content-Disposition: form-data; name="audioFilename"
+
+54241-1700000000.wav
+--rsboundary
+Content-Disposition: form-data; name="audioMime"
+
+audio/wav
+--rsboundary
+Content-Disposition: form-data; name="dateTime"
+
+2023-11-14T22:13:20.5Z
+--rsboundary
+Content-Disposition: form-data; name="frequencies"
+
+[{"freq":853712500,"pos":0.0,"len":4.25,"dbm":-72.5,"errorCount":2,"spikeCount":0}]
+--rsboundary
+Content-Disposition: form-data; name="key"
+
+peer-key
+--rsboundary
+Content-Disposition: form-data; name="patches"
+
+[54242,54243]
+--rsboundary
+Content-Disposition: form-data; name="system"
+
+11
+--rsboundary
+Content-Disposition: form-data; name="systemLabel"
+
+Fulton County
+--rsboundary
+Content-Disposition: form-data; name="talkgroup"
+
+54241
+--rsboundary
+Content-Disposition: form-data; name="talkgroupGroups"
+
+Fire,EMS
+--rsboundary
+Content-Disposition: form-data; name="talkgroupLabel"
+
+FD Disp
+--rsboundary
+Content-Disposition: form-data; name="talkgroupName"
+
+Fire Dispatch
+--rsboundary
+Content-Disposition: form-data; name="talkgroupTag"
+
+Fire Dispatch
+--rsboundary
+Content-Disposition: form-data; name="timestamp"
+
+1700000000500
+--rsboundary
+Content-Disposition: form-data; name="units"
+
+[{"id":4424000,"label":"MEDIC 7","offset":0.0},{"id":4424001,"offset":1.5}]
+--rsboundary
+Content-Disposition: form-data; name="frequency"
+
+853712500
+--rsboundary
+Content-Disposition: form-data; name="site"
+
+3
+--rsboundary--

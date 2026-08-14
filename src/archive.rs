@@ -655,6 +655,127 @@ pub struct Download {
     pub filename: String,
 }
 
+/// One Call as a **Downstream** peer is about to be told about it (#52).
+///
+/// A third single-Call read rather than a reuse of [`call_detail`], and the
+/// difference is the point: a detail view is what a *Listener* is shown — the
+/// first radio resolved to its curated **Unit**, one Group, no filename — where
+/// a forward has to carry **what the Recorder said**, because the peer is going
+/// to store it as if it were the recorder. So this reads the Talkgroup's whole
+/// Group list, every radio with the alias that arrived on the Call rather than
+/// the one an Operator has since written down, and the audio's own name.
+///
+/// It lives here because the Archive is read by one module (#98), and it is
+/// eight statements for one Call — deliberately unbatched, because it runs on
+/// the sender's Worker where #86's N+1 argument does not apply: there is no page,
+/// only ever one Call at a time, and the object read behind it costs more than
+/// all eight.
+pub async fn forwardable<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<crate::downstream::dialect::Forwardable>, DbErr> {
+    use crate::downstream::dialect::{ForwardFrequency, ForwardUnit, Forwardable, seconds};
+
+    let Some(row) = call::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+    // A Call whose System or Talkgroup has been deleted underneath it cannot be
+    // described in a dialect whose two mandatory fields are their Refs. Treated
+    // as gone rather than forwarded with a zero, which a peer would happily
+    // auto-populate into a System nobody has.
+    let (Some(system), Some(talkgroup)) = (
+        system::Entity::find_by_id(row.system_id).one(db).await?,
+        talkgroup::Entity::find_by_id(row.talkgroup_id)
+            .one(db)
+            .await?,
+    ) else {
+        return Ok(None);
+    };
+
+    let tag = match talkgroup.tag_id {
+        Some(tag_id) => tag::Entity::find_by_id(tag_id).one(db).await?,
+        None => None,
+    };
+    let talkgroup_groups = talkgroup_group::Entity::find()
+        .select_only()
+        .column(group::Column::Name)
+        .join(JoinType::InnerJoin, talkgroup_group::Relation::Group.def())
+        .filter(talkgroup_group::Column::TalkgroupId.eq(talkgroup.id))
+        .order_by_asc(group::Column::Name)
+        .into_tuple::<String>()
+        .all(db)
+        .await?;
+    let site = match row.site_id {
+        Some(site_id) => site::Entity::find_by_id(site_id).one(db).await?,
+        None => None,
+    };
+    let units = call_unit::Entity::find()
+        .filter(call_unit::Column::CallId.eq(id))
+        .order_by_asc(call_unit::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|unit| ForwardUnit {
+            id: unit.unit_ref,
+            // The alias this Call arrived with — the configured one, else the
+            // **OTA alias** — by `call::unit_name`, the one precedence (#47).
+            // Deliberately not the owning Unit's curated name: a peer running
+            // its own curation would have that overwritten by ours, and
+            // **Curation always wins over discovery** on the instance that did
+            // it, not on somebody else's.
+            label: crate::call::unit_name(unit.label.as_deref(), unit.tag_ota.as_deref())
+                .map(str::to_string),
+            offset: seconds(unit.offset_ms.unwrap_or_default()),
+        })
+        .collect();
+    let frequencies = call_frequency::Entity::find()
+        .filter(call_frequency::Column::CallId.eq(id))
+        .order_by_asc(call_frequency::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|freq| ForwardFrequency {
+            freq: freq.freq,
+            pos: seconds(freq.pos_ms.unwrap_or_default()),
+            len: freq.len_ms.map(seconds),
+            dbm: freq.dbm,
+            error_count: freq.error_count,
+            spike_count: freq.spike_count,
+        })
+        .collect();
+    let patches = call_patch::Entity::find()
+        .select_only()
+        .column(call_patch::Column::TalkgroupRef)
+        .filter(call_patch::Column::CallId.eq(id))
+        .order_by_asc(call_patch::Column::Id)
+        .into_tuple::<i64>()
+        .all(db)
+        .await?;
+
+    Ok(Some(Forwardable {
+        system_ref: system.r#ref,
+        system_label: system.label,
+        // The **canonical** Ref, not `calls.talkgroup_ref` (#45): a Call that
+        // arrived on a member Ref is one this Instance has decided belongs to
+        // this channel, and forwarding the number it arrived under would ask the
+        // peer to re-derive a merge it knows nothing about.
+        talkgroup_ref: talkgroup.r#ref,
+        talkgroup_label: talkgroup.label,
+        talkgroup_name: talkgroup.name,
+        talkgroup_tag: tag.map(|tag| tag.name),
+        talkgroup_groups,
+        call_at_ms: row.call_at_ms,
+        frequency: row.frequency,
+        site_ref: site.map(|site| site.r#ref),
+        audio_name: row.audio_name,
+        audio_mime: row.audio_mime,
+        patches,
+        units,
+        frequencies,
+        object_key: row.object_key,
+    }))
+}
+
 /// The denormalized view of a row already read.
 ///
 /// One row in gives one view out, so the `Option` is the shape [`stored_calls`]

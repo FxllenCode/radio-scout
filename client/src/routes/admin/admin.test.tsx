@@ -11,6 +11,7 @@ import { renderWithProviders } from '@/test/utils'
 import { AdminScreen } from './AdminScreen'
 import { AdminTalkgroupsScreen } from './AdminTalkgroupsScreen'
 import { ApiKeysScreen } from './ApiKeysScreen'
+import { DownstreamsScreen } from './DownstreamsScreen'
 import { GroupsScreen, TagsScreen } from './LabelsScreen'
 import { SystemsScreen } from './SystemsScreen'
 import { UnitsScreen } from './UnitsScreen'
@@ -52,6 +53,7 @@ describe('the admin gate', () => {
     ['tags', () => <TagsScreen />],
     ['units', () => <UnitsScreen />],
     ['api keys', () => <ApiKeysScreen />],
+    ['downstreams', () => <DownstreamsScreen />],
   ])('asks for the password on the %s screen', async (_name, ui) => {
     // The default handlers answer `/api/admin/session` with a 401.
     renderWithProviders(ui())
@@ -102,6 +104,7 @@ describe('the admin gate', () => {
       '/settings/admin/groups',
       '/settings/admin/tags',
       '/settings/admin/api-keys',
+      '/settings/admin/downstreams',
       '/settings/logs',
     ])
   })
@@ -2352,5 +2355,342 @@ describe('when a configuration document is refused', () => {
     expect(
       screen.queryByRole('group', { name: 'Import preview' }),
     ).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Downstream peers (#52, spec US 1-2)
+// ---------------------------------------------------------------------------
+
+describe('downstreams', () => {
+  /** Adding a peer: where it is, the key *it* issued us, and what to send it.
+   *
+   *  The key is typed into a masked field and posted once. This is the only
+   *  moment it is on screen — nothing reads it back, which is the whole
+   *  difference from rdio-scanner, whose admin payload carries every peer's
+   *  credential in plaintext. */
+  it('adds a peer scoped to one system', async () => {
+    signedIn(<DownstreamsScreen />)
+    await screen.findByLabelText('Address')
+
+    await userEvent.type(screen.getByLabelText('What is it'), 'county mirror')
+    await userEvent.type(
+      screen.getByLabelText('Address'),
+      'https://peer.example',
+    )
+    await userEvent.type(
+      screen.getByLabelText('The key that peer issued you'),
+      'the-peers-key',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Add a system' }))
+    await userEvent.type(screen.getByLabelText('System ref'), '11')
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0]).toEqual({
+      method: 'POST',
+      path: '/api/admin/downstreams',
+      body: {
+        label: 'county mirror',
+        url: 'https://peer.example',
+        apiKey: 'the-peers-key',
+        scope: { all: false, sel: { 11: { '*': true } } },
+      },
+    })
+  })
+
+  /** Naming individual channels, then dropping the row again — the two edits
+   *  the row list exists for. Refs are read as they are typed rather than
+   *  refused mid-word, so what the form understood is on screen. */
+  it('names channels within a system, and removes the row again', async () => {
+    signedIn(<DownstreamsScreen />)
+    await screen.findByLabelText('Address')
+    await userEvent.type(screen.getByLabelText('Address'), 'https://peer')
+    await userEvent.type(
+      screen.getByLabelText('The key that peer issued you'),
+      'k',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Add a system' }))
+    await userEvent.type(screen.getByLabelText('System ref'), '11')
+
+    const channels = screen.getByLabelText('Talkgroup refs (blank = all)')
+    await userEvent.type(channels, '100, 101')
+    expect(channels).toHaveValue('100, 101')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect((wrote()[0].body as { scope: unknown }).scope).toEqual({
+      all: false,
+      sel: { 11: { 100: true, 101: true } },
+    })
+
+    // ...and taking the row away takes the system with it.
+    await userEvent.click(screen.getAllByRole('button', { name: 'Remove' })[0])
+    expect(
+      screen.queryByLabelText('Talkgroup refs (blank = all)'),
+    ).not.toBeInTheDocument()
+  })
+
+  /** "Forward everything" is one checkbox, because it is what most operators
+   *  want and the row list would be an empty gesture for it. */
+  it('forwards everything when asked to', async () => {
+    signedIn(<DownstreamsScreen />)
+    await screen.findByLabelText('Address')
+
+    await userEvent.type(screen.getByLabelText('Address'), 'https://peer')
+    await userEvent.type(
+      screen.getByLabelText('The key that peer issued you'),
+      'k',
+    )
+    await userEvent.click(screen.getByLabelText('Forward everything'))
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect((wrote()[0].body as { scope: unknown }).scope).toEqual({
+      all: true,
+      sel: {},
+    })
+  })
+
+  /** Turning "everything" back off leaves nothing selected rather than
+   *  whatever was there before — the safe direction, and the only one that is
+   *  honest: the rows it would restore were discarded when the box was ticked. */
+  it('unticking everything forwards nothing until a system is named', async () => {
+    signedIn(<DownstreamsScreen />)
+    await screen.findByLabelText('Address')
+
+    await userEvent.click(screen.getByLabelText('Forward everything'))
+    await userEvent.click(screen.getByLabelText('Forward everything'))
+
+    await userEvent.type(screen.getByLabelText('Address'), 'https://peer')
+    await userEvent.type(
+      screen.getByLabelText('The key that peer issued you'),
+      'k',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect((wrote()[0].body as { scope: unknown }).scope).toEqual({
+      all: false,
+      sel: {},
+    })
+  })
+
+  /** A listing that cannot be read says so, rather than rendering an empty list
+   *  an Operator would read as "no peers configured". */
+  it('says so when the listing cannot be read', async () => {
+    server.use(...curationHandlers(instance))
+    server.use(
+      http.get(`${ORIGIN}/api/admin/downstreams`, () =>
+        HttpResponse.json({ error: 'nope' }, { status: 500 }),
+      ),
+    )
+    renderWithProviders(<DownstreamsScreen />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /could not be read/,
+    )
+  })
+
+  /** **The health an Operator acts on**, since #70's status page does not exist
+   *  yet. The queue depth is the number that matters: a peer down for an hour
+   *  reads as an hour of Calls *waiting*, which is the difference from rdio
+   *  dropping them. */
+  it('shows a struggling peer its queue depth and its last failure', async () => {
+    instance.downstream({
+      label: 'county mirror',
+      queued: 12,
+      consecutiveFailures: 4,
+      lastFailure: 'peer-refused (503)',
+      lastSuccessMs: null,
+    })
+    signedIn(<DownstreamsScreen />)
+
+    const list = await screen.findByRole('list', { name: 'Downstreams' })
+    expect(within(list).getByText(/12 queued/)).toBeInTheDocument()
+    expect(within(list).getByText(/4 failed/)).toBeInTheDocument()
+    expect(
+      within(list).getByText(/peer-refused \(503\)/),
+    ).toBeInTheDocument()
+    expect(within(list).getByText(/never delivered/)).toBeInTheDocument()
+  })
+
+  /** A peer restored from a backup arrives with no credential, because a backup
+   *  carries a peer's shape and never its key. Saying so is the only way to tell
+   *  it from a peer whose key is simply wrong. */
+  it('says when a peer still needs its key', async () => {
+    instance.downstream({ hasKey: false, disabled: true })
+    signedIn(<DownstreamsScreen />)
+
+    const list = await screen.findByRole('list', { name: 'Downstreams' })
+    expect(within(list).getByText(/needs its key/)).toBeInTheDocument()
+  })
+
+  /** **Re-scoping must not mean re-typing a credential the screen can never show
+   *  again.** A blank key field is omitted from the PATCH entirely, which is
+   *  what makes the server leave the stored one alone. */
+  it('re-scopes a peer without touching its key', async () => {
+    instance.downstream({ label: 'county mirror' })
+    signedIn(<DownstreamsScreen />)
+    await screen.findByRole('list', { name: 'Downstreams' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const form = await screen.findByRole('form', {
+      name: 'Edit county mirror',
+    })
+    await userEvent.clear(within(form).getByLabelText('What is it'))
+    await userEvent.type(within(form).getByLabelText('What is it'), 'the mirror')
+    await userEvent.clear(within(form).getByLabelText('Address'))
+    await userEvent.type(
+      within(form).getByLabelText('Address'),
+      'https://elsewhere.example',
+    )
+    await userEvent.click(within(form).getByLabelText('Forward everything'))
+    await userEvent.click(within(form).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    const body = wrote()[0].body as Record<string, unknown>
+    expect(body).not.toHaveProperty('apiKey')
+    expect(body.label).toBe('the mirror')
+    expect(body.url).toBe('https://elsewhere.example')
+    expect(body.scope).toEqual({ all: true, sel: {} })
+  })
+
+  /** Clearing the label clears it — `null` rather than an absent field, which
+   *  could only ever leave what is there. */
+  it('clears a peer label', async () => {
+    instance.downstream({ label: 'county mirror' })
+    signedIn(<DownstreamsScreen />)
+    await screen.findByRole('list', { name: 'Downstreams' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const form = await screen.findByRole('form', { name: 'Edit county mirror' })
+    await userEvent.clear(within(form).getByLabelText('What is it'))
+    await userEvent.click(within(form).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect((wrote()[0].body as { label: unknown }).label).toBeNull()
+  })
+
+  /** An unlabelled peer is titled by its address, which is its identity
+   *  anyway — a row headed by nothing would be unreachable. */
+  it('titles an unlabelled peer by its address', async () => {
+    instance.downstream({ label: null, url: 'https://peer.example' })
+    signedIn(<DownstreamsScreen />)
+
+    const list = await screen.findByRole('list', { name: 'Downstreams' })
+    await userEvent.click(within(list).getByRole('button', { name: 'Edit' }))
+
+    expect(
+      await screen.findByRole('form', { name: 'Edit https://peer.example' }),
+    ).toBeInTheDocument()
+  })
+
+  /** ...and typing one in *does* send it, which is how a mistyped key is fixed
+   *  without losing the backlog behind it. */
+  it('replaces a key when one is typed', async () => {
+    instance.downstream({ label: 'county mirror' })
+    signedIn(<DownstreamsScreen />)
+    await screen.findByRole('list', { name: 'Downstreams' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const form = await screen.findByRole('form', { name: 'Edit county mirror' })
+    await userEvent.type(
+      within(form).getByLabelText(/Replace the key/),
+      'the-right-key',
+    )
+    await userEvent.click(within(form).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect((wrote()[0].body as { apiKey: string }).apiKey).toBe('the-right-key')
+  })
+
+  /** Switching a peer off empties its queue, so switching it back on a week
+   *  later does not replay the week. The screen shows that immediately. */
+  it('disables a peer and its queue goes with it', async () => {
+    const peer = instance.downstream({ queued: 7 })
+    signedIn(<DownstreamsScreen />)
+    const list = await screen.findByRole('list', { name: 'Downstreams' })
+    expect(within(list).getByText(/7 queued/)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Disable' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0]).toEqual({
+      method: 'PATCH',
+      path: `/api/admin/downstreams/${peer.id}`,
+      body: { disabled: true },
+    })
+    await waitFor(() =>
+      expect(screen.queryByText(/7 queued/)).not.toBeInTheDocument(),
+    )
+    expect(await screen.findByText(/disabled/)).toBeInTheDocument()
+  })
+
+  it('removes a peer', async () => {
+    const peer = instance.downstream({})
+    signedIn(<DownstreamsScreen />)
+    await screen.findByRole('list', { name: 'Downstreams' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].method).toBe('DELETE')
+    expect(wrote()[0].path).toBe(`/api/admin/downstreams/${peer.id}`)
+  })
+
+  /** A refusal is rendered from the server's own sentence, beside the form —
+   *  the rule every other curation screen follows (#49). */
+  it('renders the server refusal for a peer with no address', async () => {
+    signedIn(<DownstreamsScreen />)
+    await screen.findByLabelText('Address')
+
+    await userEvent.type(
+      screen.getByLabelText('The key that peer issued you'),
+      'k',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    expect(await screen.findByText(/url is required/)).toBeInTheDocument()
+  })
+
+  /** **A scope this form cannot draw is not silently narrowed.** The matrix can
+   *  say "everything except this channel"; the row list cannot, so the editor
+   *  says so and offers the one replacement it can make honestly. */
+  it('refuses to edit a scope carrying exceptions', async () => {
+    instance.downstream({
+      label: 'county mirror',
+      scope: { all: false, sel: { 11: { '*': true, 100: false } } },
+    })
+    signedIn(<DownstreamsScreen />)
+    await screen.findByRole('list', { name: 'Downstreams' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const form = await screen.findByRole('form', { name: 'Edit county mirror' })
+
+    expect(
+      within(form).getByText(/carries exceptions/),
+    ).toBeInTheDocument()
+    expect(
+      within(form).queryByLabelText('System ref'),
+    ).not.toBeInTheDocument()
+  })
+
+  /** **The edit form never shows a stored key back**, because it cannot: the
+   *  server has no field for it in the listing. So the input opens empty and is
+   *  labelled as a *replacement*, which is the honest offer — the alternative,
+   *  a field pre-filled with something, would be a screen inventing a
+   *  credential. */
+  it('opens the key field empty, however long the peer has had one', async () => {
+    instance.downstream({ label: 'county mirror', hasKey: true })
+    signedIn(<DownstreamsScreen />)
+    await screen.findByRole('list', { name: 'Downstreams' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const form = await screen.findByRole('form', { name: 'Edit county mirror' })
+
+    const key = within(form).getByLabelText(/Replace the key/)
+    expect(key).toHaveValue('')
+    expect(key).toHaveAttribute('type', 'password')
   })
 })

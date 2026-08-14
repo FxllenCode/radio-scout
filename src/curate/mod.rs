@@ -36,6 +36,7 @@
 //! stays in the environment, for the reason ADR-0008 gives.
 
 pub mod document;
+pub mod downstreams;
 pub mod keys;
 pub mod labels;
 pub mod members;
@@ -108,6 +109,14 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/admin/config", get(document::export))
         .route("/api/admin/config/import", post(document::import))
+        .route(
+            "/api/admin/downstreams",
+            get(downstreams::list).post(downstreams::create),
+        )
+        .route(
+            "/api/admin/downstreams/{id}",
+            patch(downstreams::update).delete(downstreams::remove),
+        )
         .route("/api/admin/api-keys", get(keys::list).post(keys::create))
         .route(
             "/api/admin/api-keys/{id}",
@@ -129,6 +138,7 @@ pub enum What {
     Tag,
     Unit,
     ApiKey,
+    Downstream,
 }
 
 impl What {
@@ -141,6 +151,7 @@ impl What {
             What::Tag => "tag",
             What::Unit => "unit",
             What::ApiKey => "API key",
+            What::Downstream => "downstream",
         }
     }
 
@@ -155,6 +166,7 @@ impl What {
             What::Tag => "tag-not-found",
             What::Unit => "unit-not-found",
             What::ApiKey => "api-key-not-found",
+            What::Downstream => "downstream-not-found",
         }
     }
 
@@ -166,7 +178,7 @@ impl What {
             What::System => "system-ref-taken",
             What::Talkgroup => "talkgroup-ref-taken",
             What::Unit => "unit-ref-taken",
-            What::Group | What::Tag | What::ApiKey => "ref-taken",
+            What::Group | What::Tag | What::ApiKey | What::Downstream => "ref-taken",
         }
     }
 
@@ -175,7 +187,7 @@ impl What {
         match self {
             What::System => "system-has-calls",
             What::Talkgroup => "talkgroup-has-calls",
-            What::Group | What::Tag | What::Unit | What::ApiKey => "has-calls",
+            What::Group | What::Tag | What::Unit | What::ApiKey | What::Downstream => "has-calls",
         }
     }
 }
@@ -543,13 +555,14 @@ mod tests {
     use rstest::rstest;
 
     /// Every kind there is, so the tables below cannot go stale by omission.
-    const KINDS: [What; 6] = [
+    const KINDS: [What; 7] = [
         What::System,
         What::Talkgroup,
         What::Group,
         What::Tag,
         What::Unit,
         What::ApiKey,
+        What::Downstream,
     ];
 
     /// Every kind gets its **own** not-found slug — a shared one would make two

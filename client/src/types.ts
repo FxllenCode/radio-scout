@@ -333,6 +333,59 @@ export interface IssuedApiKey extends AdminApiKey {
   key: string
 }
 
+/** The **Selection** matrix (ADR-0004): `all` plus exceptions under
+ *  `sel[system][talkgroup | "*"]`.
+ *
+ *  It lives here rather than in `lib/liveFeed` because three things are scoped
+ *  by it and one of them is an admin type: a Listener's live feed, their Web
+ *  Push subscription, and — since #52 — a **Downstream** peer. One declaration,
+ *  so the algebra in `lib/selection.ts` applies to all three by construction.
+ *  `Subscription` and `Selection` remain the names each surface knows it by. */
+export interface SelectionMatrix {
+  all: boolean
+  sel: Record<string, Record<string, boolean>>
+}
+
+/** One **Downstream** peer (#52) — another instance this one forwards matching
+ *  Calls to.
+ *
+ *  **Never the key it issued us.** Unlike our own roster the server has to store
+ *  that one recoverably, because it goes on the wire on every delivery; what it
+ *  does not do is hand it back, so there is no field for it here and no future
+ *  edit to this type can start rendering one. `hasKey` is the diagnostic that
+ *  replaces it: "refusing everything" and "never given a credential" are
+ *  different problems and look identical without it. */
+export interface AdminDownstream {
+  id: number
+  label?: string | null
+  url: string
+  /** Which Calls reach it — the live feed's own **Selection**. */
+  scope: SelectionMatrix
+  disabled: boolean
+  hasKey: boolean
+  /** **The durable queue depth**: Calls written down and not yet taken. Survives
+   *  a restart, unlike anything the sender holds in memory. */
+  queued: number
+  lastSuccessMs?: number | null
+  lastFailureMs?: number | null
+  /** The last failure as a slug plus its status — `peer-refused (401)`. */
+  lastFailure?: string | null
+  consecutiveFailures: number
+  createdAtMs: number
+}
+
+/** What a new peer needs. `apiKey` is write-only: it goes up and never comes
+ *  back, and a `PATCH` that omits it leaves the stored one alone — which is what
+ *  makes re-scoping a peer possible without re-typing a credential the screen
+ *  can never show again. */
+export interface NewDownstream {
+  label?: string | null
+  url: string
+  apiKey: string
+  scope: SelectionMatrix
+  disabled?: boolean
+}
+
 /** What the Talkgroups listing filters on. Blank is no filter, which is what the
  *  form's own empty state produces. */
 export interface AdminTalkgroupQuery {
@@ -455,6 +508,10 @@ export interface DocumentReport {
   /** How many keys the roster is short — counted on a preview too, which is the
    *  only thing it can honestly say about a credential it must not create. */
   apiKeysToIssue: number
+  /** **Downstream** peers this import added, each disabled until it is given the
+   *  key its own peer issued — a backup carries a peer's shape and never its
+   *  credential (#52). */
+  downstreamsToKey: number
   rejected: RejectedEntry[]
 }
 

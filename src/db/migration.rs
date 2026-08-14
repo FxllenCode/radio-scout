@@ -7,8 +7,9 @@ use sea_orm::Schema;
 use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, group, log_event, push_subscription,
-    site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
+    api_key, call, call_frequency, call_patch, call_unit, downstream, downstream_delivery, group,
+    log_event, push_subscription, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref,
+    unit, unit_ref,
 };
 
 pub struct Migrator;
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0010_emission_sequence::Migration),
             Box::new(m0011_units_first_class::Migration),
             Box::new(m0012_mining_leaves_a_mark::Migration),
+            Box::new(m0013_downstream_peers::Migration),
         ]
     }
 }
@@ -1200,6 +1202,109 @@ mod m0012_mining_leaves_a_mark {
                     Table::alter()
                         .table(call::Entity)
                         .drop_column(call::Column::MinedAtMs)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+}
+
+/// **Downstream peers, and the queue that keeps them honest** (#52, spec US 1–2).
+///
+/// Two tables. `downstreams` is **Curation** — an Operator's peers, edited from
+/// the browser like every other entity. `downstream_deliveries` is the durable
+/// queue, and it is the half rdio-scanner does not have: its forwarder POSTs
+/// inline and drops the Call when the peer is unreachable, so a peer's outage
+/// costs Calls rather than delay.
+///
+/// The one index that matters is the queue's, and it is the shape of the query
+/// that runs forever: **per Downstream, the oldest row**. The sender takes only
+/// the head of each peer's queue — that is what makes in-order draining a
+/// property of the schema rather than of a sort — so this is looked up once per
+/// peer per wake-up, on a table that is empty for the whole life of a healthy
+/// Instance and unbounded during an outage. Without it, an outage's backlog
+/// makes every wake-up a scan of the backlog.
+///
+/// The unique index is the other half: a **Replacement** (#46) re-enqueues a
+/// Call that may still be queued from its first copy, and one row per (peer,
+/// Call) is exactly right — the sender reads the Call's *current* state when it
+/// sends, so the queued row already means "whatever this Call is now".
+mod m0013_downstream_peers {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0013_downstream_peers"
+        }
+    }
+
+    const QUEUE_HEAD: &str = "idx_downstream_deliveries_head";
+    const ONE_PER_CALL: &str = "idx_downstream_deliveries_peer_call";
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            if !manager.has_table("downstreams").await? {
+                manager
+                    .create_table(schema.create_table_from_entity(downstream::Entity))
+                    .await?;
+            }
+            if !manager.has_table("downstream_deliveries").await? {
+                manager
+                    .create_table(schema.create_table_from_entity(downstream_delivery::Entity))
+                    .await?;
+            }
+            if !manager
+                .has_index("downstream_deliveries", QUEUE_HEAD)
+                .await?
+            {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(QUEUE_HEAD)
+                            .table(downstream_delivery::Entity)
+                            .col(downstream_delivery::Column::DownstreamId)
+                            .col(downstream_delivery::Column::Id)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager
+                .has_index("downstream_deliveries", ONE_PER_CALL)
+                .await?
+            {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(ONE_PER_CALL)
+                            .table(downstream_delivery::Entity)
+                            .col(downstream_delivery::Column::DownstreamId)
+                            .col(downstream_delivery::Column::CallId)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(downstream_delivery::Entity)
+                        .if_exists()
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(downstream::Entity)
+                        .if_exists()
                         .to_owned(),
                 )
                 .await

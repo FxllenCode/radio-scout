@@ -63,6 +63,7 @@
 mod audio;
 mod faults;
 pub mod logs;
+mod peer;
 mod push;
 pub mod s3;
 mod upload;
@@ -75,6 +76,8 @@ mod ws;
 pub use audio::{SdrTrunkMp3, silence_ms, wav};
 #[allow(unused_imports)]
 pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faults_over_store, faulty_store};
+#[allow(unused_imports)]
+pub use peer::{Peer, Received, unreachable_url};
 #[allow(unused_imports)]
 pub use push::{PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRIBER_PUBLIC};
 #[allow(unused_imports)]
@@ -95,7 +98,7 @@ use radio_scout::blob::{AudioStore, StoredAudio};
 use radio_scout::config::{Cli, Config};
 use radio_scout::db::Db;
 use radio_scout::db::entities::{
-    call, call_patch, site, system, tag, talkgroup, talkgroup_ref, unit,
+    call, call_frequency, call_patch, call_unit, site, system, tag, talkgroup, talkgroup_ref, unit,
 };
 use radio_scout::db::repo::{self, NewCall, NewLogEvent};
 use radio_scout::enhance::EnhancementConfig;
@@ -248,6 +251,12 @@ impl TestApp {
     /// An absolute URL for `path` on this app.
     pub fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.addr)
+    }
+
+    /// This app's base URL, with no path — what an Operator would configure
+    /// another Instance's **Downstream** with (#52).
+    pub fn addr_url(&self) -> String {
+        format!("http://{}", self.addr)
     }
 
     /// The `ws://` URL of the live feed.
@@ -1034,6 +1043,49 @@ impl TestApp {
             .collect()
     }
 
+    /// Every radio heard on a Call, in the order the recorder listed them, as
+    /// `(ref, name, offset)`.
+    ///
+    /// The comparable shape rather than the rows: a forward between two
+    /// Instances gives the receiving side its own ids and its own `call_id`, so
+    /// comparing `call_unit::Model`s directly would compare bookkeeping.
+    pub async fn units_of(&self, call_id: i64) -> Vec<(i64, Option<String>, Option<i64>)> {
+        call_unit::Entity::find()
+            .filter(call_unit::Column::CallId.eq(call_id))
+            .order_by_asc(call_unit::Column::Id)
+            .all(&self.db)
+            .await
+            .expect("read call units")
+            .into_iter()
+            .map(|unit| {
+                // The name this Call carries for the radio, by the one
+                // precedence (#47) — which is what crosses the wire, where the
+                // two columns behind it do not.
+                let name =
+                    radio_scout::call::unit_name(unit.label.as_deref(), unit.tag_ota.as_deref())
+                        .map(str::to_string);
+                (unit.unit_ref, name, unit.offset_ms)
+            })
+            .collect()
+    }
+
+    /// Every frequency segment on a Call, comparably — `(freq, pos, len,
+    /// errors)`, for the same reason [`TestApp::units_of`] drops its ids.
+    pub async fn frequencies_of(
+        &self,
+        call_id: i64,
+    ) -> Vec<(i64, Option<i64>, Option<i64>, Option<i32>)> {
+        call_frequency::Entity::find()
+            .filter(call_frequency::Column::CallId.eq(call_id))
+            .order_by_asc(call_frequency::Column::Id)
+            .all(&self.db)
+            .await
+            .expect("read call frequencies")
+            .into_iter()
+            .map(|freq| (freq.freq, freq.pos_ms, freq.len_ms, freq.error_count))
+            .collect()
+    }
+
     /// The Talkgroup Refs a Call is patched to, ascending — the `call_patches`
     /// rows that survived membership resolution (#81).
     pub async fn patch_refs(&self, call_id: i64) -> Vec<i64> {
@@ -1047,6 +1099,60 @@ impl TestApp {
             .collect();
         refs.sort_unstable();
         refs
+    }
+
+    // -- Downstream peers (#52) ---------------------------------------------
+
+    /// Register a **Downstream** through the admin surface, and answer with its
+    /// Id.
+    ///
+    /// Through the real routes rather than by seeding a row, because "a peer
+    /// added from the browser is forwarded to without a restart" is a claim
+    /// worth every test making: the sender reads its roster per wake-up, and a
+    /// seeded row would prove nothing about the surface an Operator uses.
+    pub async fn add_downstream(&self, url: &str, scope: serde_json::Value) -> i64 {
+        self.add_downstream_as(url, "peer-key", scope).await
+    }
+
+    /// [`TestApp::add_downstream`] with the key the peer issued us.
+    pub async fn add_downstream_as(
+        &self,
+        url: &str,
+        api_key: &str,
+        scope: serde_json::Value,
+    ) -> i64 {
+        let (status, body) = self
+            .admin_post(
+                "/api/admin/downstreams",
+                serde_json::json!({ "url": url, "apiKey": api_key, "scope": scope }),
+            )
+            .await;
+        assert_eq!(status, 201, "creating a downstream: {body}");
+        body["id"].as_i64().expect("the new downstream's id")
+    }
+
+    /// How many Calls are queued for `downstream_id` — the **durable** depth,
+    /// read from the table rather than from the sender's meter.
+    pub async fn queued_for(&self, downstream_id: i64) -> i64 {
+        radio_scout::db::repo::delivery_depths(&self.db)
+            .await
+            .expect("delivery depths")
+            .get(&downstream_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Wait until `n` deliveries have left this Instance's **Downstream** queue
+    /// — taken by a peer, or abandoned.
+    ///
+    /// [`TestApp::settle`] covers everything ingest handed the sender. What it
+    /// deliberately does *not* cover is a **retry**, which nobody handed over: a
+    /// backing-off delivery leaves the sender idle on purpose, so one
+    /// unreachable peer cannot hang every `settle()` in the suite (see
+    /// `downstream::Downstreams::owes`). This is how a test watches a recovery,
+    /// and it is a wait rather than a sleep.
+    pub async fn deliveries_settled(&self, n: u64) {
+        self.instance.state.downstreams.deliveries_settled(n).await;
     }
 
     /// Refuse every statement this app issues that names `table` (#97).

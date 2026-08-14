@@ -10,6 +10,8 @@ pub mod call;
 pub mod call_frequency;
 pub mod call_patch;
 pub mod call_unit;
+pub mod downstream;
+pub mod downstream_delivery;
 pub mod group;
 pub mod log_event;
 pub mod push_subscription;

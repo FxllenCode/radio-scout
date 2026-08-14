@@ -109,6 +109,9 @@ pub struct Document {
     /// The key roster's *shape* — never a credential. See the module docs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_keys: Vec<KeyEntry>,
+    /// **Downstream** peers' shape — never the key they issued us (#52).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downstreams: Vec<DownstreamEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +181,29 @@ pub struct KeyEntry {
     pub disabled: bool,
 }
 
+/// One **Downstream** peer, as a backup can carry it (#52).
+///
+/// **No key**, for the reason no credential is in this file at all: it gets
+/// emailed and committed. rdio's export includes every downstream's `apikey` in
+/// plaintext, which is the same document an Operator pastes into a support
+/// thread.
+///
+/// So an imported peer arrives **disabled**, whatever it was when it was
+/// exported — a peer with no credential would answer `401` on every Call and
+/// spend an Operator's afternoon looking like a network problem. Disabled is the
+/// honest state for "here is the peer you configured; give it its key back", and
+/// it is what the screen shows a `hasKey: false` row as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DownstreamEntry {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Which Calls reach it — the live feed's own **Selection** JSON, carried
+    /// verbatim so what an Operator ticked is what comes back.
+    pub scope: crate::selection::Selection,
+}
+
 // -- What an import did ------------------------------------------------------
 
 /// How one kind of row fared. Exactly one of the three per entry, so the totals
@@ -225,6 +251,11 @@ pub struct DocumentReport {
     /// not create. Without it a preview of a six-key roster reports nothing and
     /// the real run then issues six.
     pub api_keys_to_issue: u64,
+    /// Peers the import added, each **disabled until it is given a key** — the
+    /// count rather than the rows, because the screen re-lists them anyway and
+    /// what an Operator needs from the report is "and there are three peers to
+    /// re-key".
+    pub downstreams_to_key: u64,
     /// Every entry that was not applied, in document order.
     pub rejected: Vec<RejectedEntry>,
 }
@@ -479,12 +510,31 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
     // must write the same bytes, and their ids and timestamps differ.
     keys.sort();
 
+    let mut peers: Vec<DownstreamEntry> = crate::db::entities::downstream::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| DownstreamEntry {
+            url: row.url,
+            label: row.label,
+            scope: serde_json::from_str(&row.scope).unwrap_or_default(),
+        })
+        .collect();
+    // By value like the keys above, and for the same reason: two Instances
+    // holding the same roster must write the same bytes. By URL and label
+    // rather than by the whole entry, because a **Selection** is a `HashMap` and
+    // has no order — and the URL is the identity a restore matches on anyway, so
+    // two entries that tie here are two peers pointed at one address, which sort
+    // stably and therefore still write the same bytes.
+    peers.sort_by(|left, right| (&left.url, &left.label).cmp(&(&right.url, &right.label)));
+
     Ok(Document {
         version: VERSION,
         systems: entries,
         groups: group_list,
         tags: tag_list,
         api_keys: keys,
+        downstreams: peers,
     })
 }
 
@@ -510,6 +560,7 @@ async fn apply<C: ConnectionTrait>(
         tags_created: 0,
         api_keys: Vec::new(),
         api_keys_to_issue: 0,
+        downstreams_to_key: 0,
         rejected: Vec::new(),
     };
 
@@ -535,8 +586,58 @@ async fn apply<C: ConnectionTrait>(
         apply_system(db, entry, &at, now_ms, &mut report).await?;
     }
     apply_keys(db, document, dry_run, now_ms, &mut report).await?;
+    apply_downstreams(db, document, now_ms, &mut report).await?;
 
     Ok(report)
+}
+
+/// Restore the **Downstream** roster's shape (#52).
+///
+/// Matched on the **URL**, which is a peer's identity here the way (label,
+/// scope) is an API key's: two entries for one address are one peer configured
+/// twice, and a restore run twice must not end with two. An existing peer keeps
+/// its stored key and its enabled state — a restore is not a reason to switch
+/// off a peer that is working — and only a genuinely new one is created, always
+/// disabled, because it has no credential yet.
+async fn apply_downstreams<C: ConnectionTrait>(
+    db: &C,
+    document: &Document,
+    now_ms: i64,
+    report: &mut DocumentReport,
+) -> Result<(), DbErr> {
+    let mut held: HashSet<String> = crate::db::entities::downstream::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| row.url)
+        .collect();
+
+    for entry in &document.downstreams {
+        let Some(url) = optional_text(Some(entry.url.clone())) else {
+            continue;
+        };
+        if !held.insert(url.clone()) {
+            continue;
+        }
+        report.downstreams_to_key += 1;
+        crate::db::entities::downstream::ActiveModel {
+            label: Set(optional_text(entry.label.clone())),
+            url: Set(url),
+            // Nothing to put here, which is exactly why the row arrives off.
+            api_key: Set(String::new()),
+            scope: Set(super::downstreams::scope_json(&entry.scope)),
+            disabled: Set(true),
+            last_success_ms: Set(None),
+            last_failure_ms: Set(None),
+            last_failure: Set(None),
+            consecutive_failures: Set(0),
+            created_at_ms: Set(now_ms),
+            ..Default::default()
+        }
+        .insert(db)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Upsert one System and everything addressed under it.
@@ -925,6 +1026,7 @@ mod tests {
             groups: Vec::new(),
             tags: Vec::new(),
             api_keys: Vec::new(),
+            downstreams: Vec::new(),
         };
 
         assert_eq!(
@@ -971,6 +1073,14 @@ mod tests {
                 system_ref: Some(11),
                 disabled: false,
             }],
+            downstreams: vec![DownstreamEntry {
+                url: String::from("https://peer.example"),
+                label: Some(String::from("county mirror")),
+                scope: serde_json::from_value(
+                    serde_json::json!({ "sel": { "11": { "*": true } } }),
+                )
+                .expect("a selection"),
+            }],
         };
 
         let text = serde_json::to_string(&document).expect("serialize");
@@ -983,11 +1093,37 @@ mod tests {
     /// Operator handed a document from a future version must be told, not have
     /// half of it silently ignored — which is what rdio's commented-out version
     /// check leaves it doing.
+    ///
+    /// The example used to be `downstreams`, and #52 made it real — which is the
+    /// whole shape of this hazard, so the replacement is deliberately a field
+    /// nothing in the roadmap is going to add.
     #[test]
     fn an_unknown_field_is_refused() {
         let parsed: Result<Document, _> =
-            serde_json::from_str(r#"{"version": 1, "downstreams": []}"#);
+            serde_json::from_str(r#"{"version": 1, "sprockets": []}"#);
 
         assert!(parsed.is_err());
+    }
+
+    /// **No credential leaves in a backup, in either direction** (#52). The peer
+    /// issued us a key we must keep in a sendable form, which is exactly why it
+    /// must not be in the file an Operator commits — and `deny_unknown_fields`
+    /// means a document that tried to carry one is refused rather than silently
+    /// stripped, so nothing downstream has to remember to drop it.
+    #[test]
+    fn a_downstream_entry_has_nowhere_to_put_a_key() {
+        let entry = DownstreamEntry {
+            url: String::from("https://peer.example"),
+            label: None,
+            scope: crate::selection::Selection::default(),
+        };
+
+        let json = serde_json::to_string(&entry).expect("serialize");
+        assert!(!json.contains("key"), "{json}");
+
+        let with_a_key: Result<DownstreamEntry, _> = serde_json::from_str(
+            r#"{"url": "https://peer.example", "scope": {}, "apiKey": "s3cret"}"#,
+        );
+        assert!(with_a_key.is_err(), "a document carrying a key is refused");
     }
 }

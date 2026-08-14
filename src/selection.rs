@@ -71,11 +71,30 @@ impl Selection {
     /// `IsEnabled` (primary OR patch); the gate is the live feed's access scope
     /// (ADR-0008), which Web Push has no equivalent of and passes open.
     pub fn reaches(&self, call: &StoredCall, permits: impl Fn(i64, i64) -> bool) -> bool {
+        self.reaches_channels(call.system_ref, call.talkgroups(), permits)
+    }
+
+    /// [`Selection::reaches`] over the Refs alone.
+    ///
+    /// The same rule, reachable before a [`StoredCall`] exists — which is where
+    /// a **Downstream**'s scope is asked (#52): forwarding is decided inside the
+    /// transaction that stores the Call, with the Refs in hand and the
+    /// denormalized view not yet built. Written as the one implementation and
+    /// delegated to, rather than a second copy that only *looks* the same:
+    /// rdio's own forwarder is exactly that second copy, and it checks the
+    /// Call's own Talkgroup and **not its patches** (`downstream.go:99`), so a
+    /// patched transmission never reaches a peer subscribed to the channel it
+    /// was patched onto.
+    pub fn reaches_channels(
+        &self,
+        system_ref: i64,
+        talkgroups: impl Iterator<Item = i64>,
+        permits: impl Fn(i64, i64) -> bool,
+    ) -> bool {
         if self.is_all_off() {
             return false;
         }
-        let system_ref = call.system_ref;
-        call.talkgroups().any(|talkgroup_ref| {
+        talkgroups.into_iter().any(|talkgroup_ref| {
             self.selects(system_ref, talkgroup_ref) && permits(system_ref, talkgroup_ref)
         })
     }

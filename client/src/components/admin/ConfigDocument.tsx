@@ -140,6 +140,18 @@ export function ConfigDocument() {
                   : `${report.apiKeysToIssue} API keys re-issued`}
               </li>
             )}
+            {/* A document carries a peer's shape and never the key that peer
+                issued us (#52), so a restored peer arrives switched off. Said
+                here rather than discovered on the Downstreams screen: an
+                Operator restoring a county wants to know how many credentials
+                they are about to have to go and find. */}
+            {report.downstreamsToKey > 0 && (
+              <li>
+                {report.downstreamsToKey === 1
+                  ? '1 downstream restored, disabled until you give it its key'
+                  : `${report.downstreamsToKey} downstreams restored, disabled until you give them their keys`}
+              </li>
+            )}
           </ul>
           {report.rejected.length > 0 && (
             <ul className="flex flex-col gap-0.5 font-mono text-xs text-red-400">

@@ -5,6 +5,7 @@ import { searchParams } from '@/lib/archive'
 import type {
   AdminApiKey,
   AdminAssignment,
+  AdminDownstream,
   AdminLabel,
   AdminSession,
   AdminSystem,
@@ -23,6 +24,7 @@ import type {
   MemberDelta,
   MemberRef,
   MergeReport,
+  NewDownstream,
   RangeDelta,
   RangeReport,
   SearchPage,
@@ -68,6 +70,7 @@ export const api = createApi({
     'Tag',
     'Unit',
     'ApiKey',
+    'Downstream',
   ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
@@ -350,7 +353,16 @@ export const api = createApi({
         method: 'POST',
         body: document,
       }),
-      invalidatesTags: ['System', 'Talkgroup', 'Group', 'Tag', 'Unit', 'ApiKey', 'Call'],
+      invalidatesTags: [
+        'System',
+        'Talkgroup',
+        'Group',
+        'Tag',
+        'Unit',
+        'ApiKey',
+        'Downstream',
+        'Call',
+      ],
     }),
 
     getApiKeys: builder.query<Listing<AdminApiKey>, void>({
@@ -378,6 +390,36 @@ export const api = createApi({
       query: (id) => ({ url: `api/admin/api-keys/${id}`, method: 'DELETE' }),
       invalidatesTags: ['ApiKey'],
     }),
+
+    /** **Downstream** peers (#52), with their health beside them — queue depth,
+     *  last success, consecutive failures. The listing is the operator-facing
+     *  status surface until #70 exists. */
+    getDownstreams: builder.query<Listing<AdminDownstream>, void>({
+      query: () => ({ url: 'api/admin/downstreams' }),
+      providesTags: ['Downstream'],
+    }),
+    createDownstream: builder.mutation<AdminDownstream, NewDownstream>({
+      query: (body) => ({ url: 'api/admin/downstreams', method: 'POST', body }),
+      invalidatesTags: ['Downstream'],
+    }),
+    /** An edit that omits `apiKey` leaves the stored credential alone — the
+     *  screen can never show it again, so re-scoping a peer must not require
+     *  re-typing it. */
+    updateDownstream: builder.mutation<
+      AdminDownstream,
+      { id: number; patch: Partial<NewDownstream> }
+    >({
+      query: ({ id, patch }) => ({
+        url: `api/admin/downstreams/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['Downstream'],
+    }),
+    deleteDownstream: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/downstreams/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Downstream'],
+    }),
     // Live-feed hydration etc. are added by later tickets.
   }),
 })
@@ -387,12 +429,14 @@ export const {
   useAdminLogoutMutation,
   useAssignTalkgroupsMutation,
   useCreateApiKeyMutation,
+  useCreateDownstreamMutation,
   useCreateGroupMutation,
   useCreateSystemMutation,
   useCreateTagMutation,
   useCreateTalkgroupMutation,
   useCreateUnitMutation,
   useDeleteApiKeyMutation,
+  useDeleteDownstreamMutation,
   useDeleteGroupMutation,
   useDeleteSystemMutation,
   useDeleteTagMutation,
@@ -404,6 +448,7 @@ export const {
   useGetAdminUnitsQuery,
   useGetApiKeysQuery,
   useGetCatalogQuery,
+  useGetDownstreamsQuery,
   useGetFilterOptionsQuery,
   useGetGroupsQuery,
   useGetHealthQuery,
@@ -419,6 +464,7 @@ export const {
   useSearchCallsQuery,
   useSetRangesMutation,
   useUpdateApiKeyMutation,
+  useUpdateDownstreamMutation,
   useUpdateGroupMutation,
   useUpdateSystemMutation,
   useUpdateTagMutation,
