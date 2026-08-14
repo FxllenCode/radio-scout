@@ -192,6 +192,10 @@ pub fn spawn(state: AppState) -> Option<Worker> {
             let mut in_flight: HashSet<i64> = HashSet::new();
 
             loop {
+                // Read **before** the pass looks at anything: these are the
+                // items this pass is about to consider, and discharging any
+                // more than them would discharge work nobody has looked at yet.
+                let owed = downstreams.outstanding();
                 let Plan { due, next_due } = plan(&state, &in_flight, state.clock.now_ms()).await;
                 for (peer, head) in due {
                     let peer_id = peer.id;
@@ -227,7 +231,7 @@ pub fn spawn(state: AppState) -> Option<Worker> {
                 // nothing, so on a working peer this is reached only once the queue
                 // has drained.
                 if attempts.is_empty() {
-                    downstreams.caught_up();
+                    downstreams.caught_up(owed);
                 }
 
                 tokio::select! {

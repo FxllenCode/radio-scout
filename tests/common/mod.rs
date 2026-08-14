@@ -1473,7 +1473,7 @@ impl TestAppBuilder {
         }
 
         let instance = instance::start(config, wiring).await.expect("start");
-        TestApp {
+        let app = TestApp {
             addr: loopback(&instance),
             db: instance.db.clone(),
             store: instance.store.clone(),
@@ -1490,7 +1490,24 @@ impl TestAppBuilder {
             session: std::sync::Mutex::new(None),
             clock: self.clock.unwrap_or_default(),
             tmp,
-        }
+        };
+        // **A spawned app has finished booting**, and every statement-count
+        // assertion in the suite depends on it.
+        //
+        // Booting is *work*: the Retention sweeper's first sweep, the Mining
+        // sweep's, and — since #52 — the Downstream sender reading its roster.
+        // Each is admitted before its task is spawned (#93), so each is
+        // waitable; what nobody could wait for is a boot still in flight when a
+        // test takes its `before` sample, and then landing inside the window.
+        // That is a statement appearing from nowhere, in whichever window the
+        // scheduler happened to put it — and it reads as a flake in a *different*
+        // test every time.
+        //
+        // #52 is where it started failing (a new boot-time reader), but the
+        // hazard was always there, so the fix belongs here rather than as a
+        // `settle()` bolted onto each of the dozen sampling sites.
+        app.settle().await;
+        app
     }
 }
 

@@ -460,14 +460,30 @@ impl Downstreams {
         self.0.meter.admit_untracked();
     }
 
-    /// Discharge everything outstanding — the sender has looked and has nothing
-    /// in flight.
+    /// What the sender is owed **right now** — read at the top of a pass, before
+    /// it looks at anything.
+    pub(crate) fn outstanding(&self) -> u64 {
+        self.0.meter.load().depth
+    }
+
+    /// Discharge the `owed` items the sender had been handed *before* it looked.
     ///
-    /// Reading the depth and settling that many can never overshoot: anything
-    /// admitted between the two reads simply stays outstanding, which is the
-    /// direction that keeps `idle()` honest.
-    pub(crate) fn caught_up(&self) {
-        self.0.meter.settle_n(self.0.meter.load().depth);
+    /// **The count has to be the one read before the pass, and that is the whole
+    /// of this method's correctness.** Settling the depth as it stands *after* a
+    /// pass discharges anything admitted while the pass was running — an upload
+    /// that committed its delivery row a microsecond after the queue was read —
+    /// so `settle()` returns having promised that a Call was considered when it
+    /// was not, and the delivery goes out some time later.
+    ///
+    /// It is a check-then-act race and it reads as a flake: it failed
+    /// `tests/downstream.rs::re_scoping_a_peer_keeps_the_key_it_already_had` on
+    /// Postgres in CI and never once locally on SQLite, because the window is
+    /// exactly as wide as a database round trip.
+    ///
+    /// Work admitted *during* a pass is simply left outstanding — the wake-up
+    /// that came with it guarantees another pass, which will discharge it.
+    pub(crate) fn caught_up(&self, owed: u64) {
+        self.0.meter.settle_n(owed);
     }
 
     /// Note that one delivery has left the queue — taken by the peer, or
@@ -532,6 +548,37 @@ mod tests {
             consecutive_failures: 0,
             created_at_ms: 0,
         })
+    }
+
+    /// **A pass discharges only what it was handed before it looked** — the
+    /// check-then-act race that broke
+    /// `tests/downstream.rs::re_scoping_a_peer_keeps_the_key_it_already_had` on
+    /// Postgres in CI and never once on SQLite.
+    ///
+    /// The sender reads what it is owed, reads the queue, then discharges.
+    /// Discharging the depth *as it stands afterwards* also discharges the
+    /// upload that committed its delivery row while that read was in flight — so
+    /// `settle()` returns having claimed the Call was considered, and the
+    /// delivery goes out some time later, by which point the test has already
+    /// asserted the peer received nothing. The window is exactly one database
+    /// round trip wide, which is why a slower dialect finds it and a faster one
+    /// does not.
+    #[test]
+    fn a_pass_discharges_only_what_it_was_handed_before_it_looked() {
+        let downstreams = Downstreams::default();
+        downstreams.owes(1);
+
+        // The pass begins: it reads what it is owed, and *then* reads the queue.
+        let owed = downstreams.outstanding();
+        // ...and an upload commits while it is doing so.
+        downstreams.owes(1);
+        downstreams.caught_up(owed);
+
+        assert_eq!(
+            downstreams.outstanding(),
+            1,
+            "the Call that arrived mid-pass is still owed a look"
+        );
     }
 
     /// The one that matters, and the one rdio gets wrong: a **Patch** puts a

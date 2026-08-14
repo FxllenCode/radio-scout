@@ -714,6 +714,10 @@ async fn editing_a_peer_that_is_not_there_is_a_404() {
 
     assert_eq!(status, 404);
     assert_eq!(body["error"], "downstream-not-found");
+    // ...and the sentence beside the slug names the kind of row, which is what
+    // an Operator reads. `curate::What::noun` had no assertion on it anywhere
+    // until #52 added an arm and the mutation sweep pointed that out.
+    assert_eq!(body["detail"], "no such downstream");
 }
 
 /// Relabelling and re-pointing a peer — the two edits that are not the scope or
