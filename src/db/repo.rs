@@ -3462,7 +3462,6 @@ pub async fn queue_deliveries<C: ConnectionTrait>(
             attempts: Set(0),
             next_attempt_ms: Set(now_ms),
             queued_at_ms: Set(now_ms),
-            last_failure: Set(None),
             ..Default::default()
         })
         // The unique index on (downstream_id, call_id) is what makes a

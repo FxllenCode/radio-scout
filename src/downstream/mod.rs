@@ -566,6 +566,11 @@ mod tests {
     #[test]
     fn a_pass_discharges_only_what_it_was_handed_before_it_looked() {
         let downstreams = Downstreams::default();
+        assert_eq!(
+            downstreams.outstanding(),
+            0,
+            "a sender nobody has handed anything owes nothing"
+        );
         downstreams.owes(1);
 
         // The pass begins: it reads what it is owed, and *then* reads the queue.

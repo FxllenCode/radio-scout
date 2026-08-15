@@ -269,6 +269,102 @@ async fn an_encrypted_call_is_never_forwarded() {
 // Outage, durability and order
 // ---------------------------------------------------------------------------
 
+/// **`[downstream] timeout_secs` is applied**, which is only observable as a
+/// peer that answers *eventually* being given up on.
+///
+/// Two things ride on this one assertion, and neither has another test: that the
+/// sender's HTTP client is built from the configured timeout rather than
+/// reqwest's default of none, and that the sender reads *this Instance's*
+/// configuration rather than a default one. Both survived the mutation sweep
+/// until this existed — a peer that stalls forever is delivered to eventually
+/// either way, so nothing else noticed.
+#[tokio::test]
+async fn a_peer_that_answers_too_late_is_given_up_on_and_retried() {
+    let app = TestApp::builder()
+        .config(|config| {
+            config.downstream.timeout = std::time::Duration::from_millis(200);
+            // Long enough that the retry does not land inside the assertions
+            // below — this test is about the first attempt.
+            config.downstream.retry_initial = std::time::Duration::from_secs(30);
+        })
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+    let peer = Peer::start().await;
+    // Far longer than the configured timeout, and far longer than the test.
+    peer.stall_for(std::time::Duration::from_secs(30));
+    app.login().await;
+    let id = app.add_downstream(&peer.url(), whole_system()).await;
+
+    app.upload_ok(CallUpload::new()).await;
+    app.settle().await;
+
+    assert_eq!(
+        app.queued_for(id).await,
+        1,
+        "the Call is still owed — the peer never answered in time"
+    );
+    let (_, body) = app.admin_get("/api/admin/downstreams").await;
+    assert_eq!(
+        body["results"][0]["lastFailure"], "peer-unreachable",
+        "and it reads as unreachable, which is what a timeout is from here"
+    );
+}
+
+/// **A spawned Instance has already looked for work to forward**, which is what
+/// makes every statement-count assertion in the suite deterministic.
+///
+/// The boot pass is admitted before the sender's task exists (#93's rule), so
+/// `settle()` covers it. Without that admission the roster read is still made —
+/// just at no particular moment — and it lands inside whichever test happened to
+/// be sampling, as a statement from nowhere. It failed `tests/document.rs` about
+/// one Postgres run in three before this was true.
+#[tokio::test]
+async fn a_spawned_instance_has_already_looked_for_work_to_forward() {
+    let app = TestApp::spawn().await;
+
+    let load = app
+        .workers()
+        .meter(radio_scout::downstream::WORKER)
+        .expect("the sender is registered")
+        .load();
+
+    assert!(
+        load.done >= 1,
+        "the boot pass was owed and has been discharged: {load:?}"
+    );
+    assert_eq!(load.depth, 0, "and nothing is left outstanding");
+}
+
+/// A peer is created with what it was given — including the name an Operator
+/// typed, which is the one thing on the row that is theirs rather than the
+/// peer's.
+#[tokio::test]
+async fn a_new_peer_keeps_the_label_it_was_created_with() {
+    let app = TestApp::spawn().await;
+    app.login().await;
+
+    let (status, created) = app
+        .admin_post(
+            "/api/admin/downstreams",
+            json!({
+                "label": "county mirror",
+                "url": "https://peer.example",
+                "apiKey": "k",
+                "scope": whole_system(),
+            }),
+        )
+        .await;
+
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["label"], "county mirror");
+    let (_, listing) = app.admin_get("/api/admin/downstreams").await;
+    assert_eq!(
+        listing["results"][0]["label"], "county mirror",
+        "and it survived the round trip to the row"
+    );
+}
+
 /// **A peer's outage costs delay, not Calls** — and the backlog comes back in
 /// the order it arrived.
 ///
@@ -293,6 +389,17 @@ async fn a_peer_outage_queues_calls_and_drains_them_in_order() {
 
     assert_eq!(peer.count(), 0, "the peer took none of them");
     assert_eq!(app.queued_for(id).await, 3, "all three are written down");
+    // **The backoff is this Instance's, not a default one.** The only place
+    // that is a *value* rather than a wait: a sender reading a default
+    // configuration would retry five seconds later instead of five
+    // milliseconds, and every assertion about what eventually arrives would
+    // still pass.
+    let head = app.head_delivery(id).await.expect("a head to retry");
+    assert!(head.attempts >= 1, "tried and deferred: {head:?}");
+    assert!(
+        head.next_attempt_ms - head.queued_at_ms < 1_000,
+        "the configured 5ms backoff, not the 5s default: {head:?}"
+    );
 
     peer.come_back();
     app.deliveries_settled(3).await;

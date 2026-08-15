@@ -1142,6 +1142,23 @@ impl TestApp {
             .unwrap_or_default()
     }
 
+    /// The delivery at the head of `downstream_id`'s queue — the row the sender
+    /// will attempt next.
+    ///
+    /// What it is *for* is `next_attempt_ms`, which is the only place the
+    /// configured backoff is observable as a value rather than as a wait: a
+    /// sender reading a default configuration instead of this Instance's would
+    /// still retry, just five seconds later, and no assertion about *what*
+    /// arrives can tell the difference.
+    pub async fn head_delivery(
+        &self,
+        downstream_id: i64,
+    ) -> Option<radio_scout::db::entities::downstream_delivery::Model> {
+        radio_scout::db::repo::next_delivery(&self.db, downstream_id)
+            .await
+            .expect("read the head of the queue")
+    }
+
     /// Wait until `n` deliveries have left this Instance's **Downstream** queue
     /// — taken by a peer, or abandoned.
     ///
