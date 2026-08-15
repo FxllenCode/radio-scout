@@ -13,13 +13,30 @@ local TDD changes.
 
 ```bash
 # A throwaway server. Nothing in it is worth keeping.
-docker run -d --name rs-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres \
+docker run -d --name rs-pg --shm-size=1g \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres \
   -e POSTGRES_DB=postgres -p 55432:5432 postgres:17-alpine
 
 TEST_POSTGRES_URL='postgres://postgres:postgres@localhost:55432/postgres' cargo nextest run
 
 docker rm -f rs-pg
 ```
+
+**`--shm-size=1g` is not optional, and leaving it off wastes an afternoon.** Docker gives a
+container 64 MB of `/dev/shm`, which Postgres uses for the shared memory its parallel workers need.
+The suite runs its tests in parallel processes, each with its own connection pool, and past a couple
+of hundred tests that budget runs out — at which point a *random handful* of tests fail with
+
+```
+could not resize shared memory segment "/PostgreSQL.1654513628" to 33554432 bytes:
+No space left on device
+```
+
+and everything behind them times out. It reads exactly like a flaky suite or a genuine
+dialect-specific bug, it lands on different tests every run, and it has nothing to do with the code
+under test. It cost real time during #52 to tell it apart from two real Postgres-only defects the
+same run was hiding. CI's service container is not affected — it runs one job's worth of
+parallelism, not a developer machine's eighteen cores.
 
 ## Each test gets a database of its own
 

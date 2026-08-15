@@ -229,7 +229,12 @@ cargo clippy --all-targets  # lint
 
 # The dual-dialect run (#22): set TEST_POSTGRES_URL and the WHOLE suite moves to
 # Postgres, a database per test. Unset = SQLite. docs/agents/dual-dialect.md.
-docker run -d --name rs-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres \
+# `--shm-size` is not optional: Docker's default 64MB of /dev/shm runs out
+# part-way through the suite's parallelism, and a random handful of tests then
+# fail with "could not resize shared memory segment" while everything behind
+# them times out. It reads as a flaky suite and is nothing of the sort.
+docker run -d --name rs-pg --shm-size=1g \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres \
   -e POSTGRES_DB=postgres -p 55432:5432 postgres:17-alpine
 TEST_POSTGRES_URL='postgres://postgres:postgres@localhost:55432/postgres' cargo nextest run
 docker rm -f rs-pg          # the per-test databases are not dropped; the server is
