@@ -5,10 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { CallPlayer } from '@/components/CallPlayer'
 import { ARTWORK_SIZES } from '@/lib/artwork'
-import { PushProvider } from '@/hooks/usePush'
 import { advance, received, replay } from '@/store/live'
 import { makeStore, type AppStore } from '@/store/store'
-import { inertPush } from '@/test/push'
 import { wavDataUrl } from '@/test/wav'
 import type { Call } from '@/types'
 
@@ -50,9 +48,7 @@ function mount(): { store: AppStore; audio: HTMLAudioElement } {
   const store = makeStore({ storage: undefined })
   const { container } = render(
     <Provider store={store}>
-      <PushProvider push={inertPush()}>
-        <CallPlayer />
-      </PushProvider>
+      <CallPlayer />
     </Provider>,
   )
   const audio = container.querySelector('audio')

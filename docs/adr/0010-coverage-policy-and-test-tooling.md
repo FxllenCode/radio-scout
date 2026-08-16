@@ -98,8 +98,10 @@ Two smaller consequences. **`fail-fast` lives on the command line.** Every workf
 
 ## Amendment (#107, 2026-08-16): a removal may re-baseline the floor
 
-The ratcheting floor is *"allowed to rise, never to fall"*. That was written about **erosion** — new code landing under-tested and dragging the number down a fraction at a time, which is exactly what the ratchet exists to stop. It was never written about **deletion**, and [ADR-0014](0014-no-notifications.md) is the case that shows the difference: removing Web Push deletes ~500 lines of client code that were at or near 100%, so the measured percentage can only fall, and no amount of testing the *remaining* code is a response to that.
+The ratcheting floor is *"allowed to rise, never to fall"*. That was written about **erosion** — new code landing under-tested and dragging the number down a fraction at a time, which is exactly what the ratchet exists to stop. It was never written about **deletion**, and [ADR-0014](0014-no-notifications.md) is the case that raised the question: removing Web Push deleted ~500 lines of client code that were at or near 100%, and deleting well-covered code can only push the measured percentage down.
 
 **A removal may lower the floor to what the smaller codebase actually measures**, on three conditions: the before and after are recorded in the commit that moves it, the move is a consequence of deleted code rather than of new code, and the floor is set to the new measurement rather than below it — the headroom allowance in the original policy is for a deterministic dip, not for a fresh cushion.
+
+**In the case that prompted this, the floor did not have to move.** Measured after the removal: 100% lines, 99.69% statements, 99.73% functions, 96.61% branches, against a floor of 99/98/98/94. Branches gave up a third of a point and nothing else moved, because what was deleted was about as well covered as what remains. The permission is recorded anyway, since the next removal may not be so tidy and the honest answer then should not require re-arguing this.
 
 The alternative was to hold the number and backfill unrelated tests until it was met, which is the coverage theatre the rest of this ADR exists to reject. A rule quietly ignored once is worth less than a rule amended in the open.

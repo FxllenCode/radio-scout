@@ -5,7 +5,6 @@ import {
   type LiveFeedHandle,
   type LiveStatus,
 } from '@/lib/liveFeed'
-import { usePush } from '@/hooks/usePush'
 import { useAppDispatch, useAppSelector, useAppStore } from '@/store/hooks'
 import {
   connected,
@@ -37,10 +36,6 @@ export function LiveFeedLink() {
   const dispatch = useAppDispatch()
   const store = useAppStore()
   const feed = useRef<LiveFeedHandle>(null)
-  // Notifications (#16): the socket presents the subscription so the server
-  // knows this listener is listening, and re-registers the matrix so what wakes
-  // their phone is what they actually hear.
-  const { push, token: pushToken } = usePush()
 
   // Compared by reference: the selector holds its identity while nothing it
   // reads has changed (#91), so this re-runs when the *matrix* changes and not
@@ -50,9 +45,8 @@ export function LiveFeedLink() {
 
   useEffect(() => {
     // Feed off is a **hard** off (#80): no socket at all, so bandwidth and
-    // battery go to zero and Web Push takes over — the server's "an open socket
-    // means someone is listening" rule then tells the truth about a listener who
-    // stopped listening.
+    // battery go to zero. Nothing takes over — Radio-Scout does not notify
+    // (ADR-0014) — so switching it back on is the only way back in.
     //
     // The one place that reads the *particular* cause rather than
     // `feedPlays` (#88), because the two silences differ here and nowhere else:
@@ -77,9 +71,6 @@ export function LiveFeedLink() {
       // and only matters when the socket comes back (ADR-0004). Turning the feed
       // off clears it, so coming back subscribes from now.
       since: () => selectSince(store.getState()),
-      // Read at send time: notifications can be switched on while this socket
-      // is already open, and the next `sub` frame is what tells the server.
-      pushToken: () => push?.token,
     })
     feed.current = handle
     // Tell it what to send *here*, not only from the matrix effect below.
@@ -88,28 +79,21 @@ export function LiveFeedLink() {
     // until it has one, so whoever creates a handle owns subscribing it. That
     // used to be free — one handle per mount, paired with the matrix effect's
     // first run — but a handle is now created again whenever the feed comes back
-    // on (#80), and `turnFeedOn` changes neither the matrix nor the push token,
-    // so the matrix effect does not re-run. Without this the listener would get
-    // a connected socket the server has nothing selected on: a green light and
-    // permanent silence until they next touched the Selection.
+    // on (#80), and `turnFeedOn` does not change the matrix, so the matrix
+    // effect does not re-run. Without this the listener would get a connected
+    // socket the server has nothing selected on: a green light and permanent
+    // silence until they next touched the Selection.
     handle.subscribe(selectSubscription(store.getState()))
     return () => {
       feed.current = null
       handle.close()
     }
-  }, [dispatch, store, push, feedOff])
+  }, [dispatch, store, feedOff])
 
-  // Re-sent on both counts: when the listener changes what they hear, and when
-  // a push subscription appears or goes while this socket is already open —
-  // otherwise someone who just switched notifications on would keep being
-  // notified about their own listening until the next reconnect.
+  // Re-sent when the listener changes what they hear.
   useEffect(() => {
     feed.current?.subscribe(matrix)
-    // The server's copy of the Selection decides which Calls are worth waking a
-    // phone for, so it moves with the listener's. A no-op while notifications
-    // are off, and a no-op when the server already has this one.
-    void push?.sync(matrix)
-  }, [matrix, push, pushToken])
+  }, [matrix])
 
   return null
 }

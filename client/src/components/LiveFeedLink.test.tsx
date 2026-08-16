@@ -6,7 +6,6 @@ import { feedOffKey } from '@/lib/persist'
 import {
   avoid,
   chooseEverything,
-  chooseTalkgroups,
   received,
   selectLiveMatrix,
   turnFeedOff,
@@ -17,8 +16,6 @@ import { enterLiveFeed, enterPlaybackMode } from '@/store/playback'
 import { progressed } from '@/store/transport'
 import { liveFeed } from '@/test/handlers'
 import { server } from '@/test/setup'
-import { fakePush } from '@/test/push'
-import { createPush } from '@/lib/push'
 import { renderApp } from '@/test/utils'
 import type { Call } from '@/types'
 
@@ -37,8 +34,7 @@ beforeEach(() => {
   greeting = []
   // The socket the *previous* test opened is closed when its component
   // unmounts, but a frame already in flight can still land after this test has
-  // begun — and a `sub` re-sent when a push subscription resolves (#16) makes
-  // that a routine event rather than a rare one. Each test's handler therefore
+  // begun. Each test's handler therefore
   // closes over its own arrays rather than over the bindings above, so a late
   // frame is recorded against the test that caused it and nothing leaks
   // forward.
@@ -87,55 +83,6 @@ function offStorage(): Storage {
     setItem: (key, value) => void map.set(key, value),
   }
 }
-
-describe('the live-feed link and Web Push (#16)', () => {
-  /** A listener with notifications on, holding the server's token. */
-  const subscribed = () => createPush({ environment: fakePush({ permission: 'granted', subscribed: true }) })
-
-  // While this socket is open the listener is demonstrably listening, so the
-  // server holds its notifications; presenting the subscription id is how it
-  // knows which listener that is.
-  it('tells the server which push subscription is listening', async () => {
-    renderApp('/', undefined, subscribed())
-
-    await waitFor(async () =>
-      expect(await lastSubscription()).toMatchObject({
-        push: 'a-subscription-token',
-      }),
-    )
-  })
-
-  it('sends no subscription id when notifications are off', async () => {
-    renderApp('/', undefined, createPush({ environment: fakePush() }))
-
-    expect(await lastSubscription()).toEqual({ t: 'sub', all: true, sel: {} })
-  })
-
-  // Notifications are about *watched* Talkgroups, so a Selection the listener
-  // changes has to reach the server's copy — otherwise a phone in a pocket
-  // keeps being woken by a Talkgroup its owner turned off an hour ago.
-  it('re-registers the Selection when the listener changes it', async () => {
-    const push = subscribed()
-    const store = makeStore()
-    const synced = vi.spyOn(push, 'sync')
-    renderApp('/', store, push)
-    await lastSubscription()
-
-    act(() => {
-      store.dispatch(
-        chooseTalkgroups({
-          keys: [{ systemRef: 11, talkgroupRef: 54241 }],
-          on: false,
-        }),
-      )
-    })
-
-    await waitFor(() => expect(synced).toHaveBeenCalled())
-    expect(synced.mock.lastCall?.[0]).toMatchObject({
-      sel: { 11: { 54241: false } },
-    })
-  })
-})
 
 describe('the live-feed link', () => {
   it('asks for everything until the listener says otherwise', async () => {
@@ -314,9 +261,9 @@ describe('the live-feed link', () => {
    * Feed off is a **hard** off (#80, CONTEXT.md **Feed off**), and the socket is
    * where that becomes true. Playback mode narrows the subscription to nothing —
    * the connection stays up because the listener is still here. Off closes it,
-   * so bandwidth and battery go to zero, and so Web Push takes over: the
-   * server's "an open socket means someone is listening" rule then tells the
-   * truth about a listener who stopped listening.
+   * so bandwidth and battery go to zero — and nothing takes over, because
+   * Radio-Scout does not notify (ADR-0014). Switching it back on is the only
+   * way back in.
    */
   describe('feed off (#80)', () => {
     it('closes the socket and opens no other', async () => {
@@ -339,9 +286,8 @@ describe('the live-feed link', () => {
      * Coming back **subscribes**, and subscribes from now.
      *
      * Both halves matter and the first is the one that bit: a handle sends
-     * nothing until it is given a matrix, and `turnFeedOn` changes neither the
-     * matrix nor the push token — so the effect that normally subscribes does not
-     * re-run. Left to that, the listener got a connected socket with nothing
+     * nothing until it is given a matrix, and `turnFeedOn` does not change the
+     * matrix — so the effect that normally subscribes does not re-run. Left to that, the listener got a connected socket with nothing
      * selected on the server: a green light and permanent silence.
      *
      * Counted **per connection** for exactly that reason. Asserting on the last

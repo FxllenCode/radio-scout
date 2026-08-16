@@ -14,17 +14,20 @@ export default defineConfig({
     tailwindcss(),
     // The PWA half of #15. Installing is the gate on everything mobile: iOS
     // gives a home-screen app the standalone display mode background audio
-    // needs (ADR-0005), and offers Web Push (#16) to nothing else.
+    // needs (ADR-0005).
     VitePWA({
       // We register the worker ourselves (src/lib/serviceWorker.ts) because
       // *when a new version takes over* is a product decision here, not a
       // default — see that module.
       injectRegister: false,
       registerType: 'prompt',
-      // Our own worker source (#16): a generated worker cannot have a `push`
-      // handler, and handling `push` is the whole of Web Push on the device.
-      // Everything the generated one did — precache, navigation fallback, the
-      // `/api` denylist — `src/sw.ts` now does explicitly.
+      // Our own worker source. The original reason was that a generated worker
+      // cannot have a `push` handler; #107 removed notifications (ADR-0014) and
+      // the conclusion outlived its argument — `src/sw.ts` stays ours because
+      // *when a new version takes over* is decided by the listener's tap, and
+      // because the worker must never answer `/api/*` from cache. Everything
+      // the generated one did — precache, navigation fallback, the `/api`
+      // denylist — it does explicitly.
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
@@ -33,7 +36,8 @@ export default defineConfig({
         short_name: 'Radio-Scout',
         description:
           'Scanner audio from Trunk Recorder and SDRTrunk — live feed, archive, and background playback.',
-        // Required for iOS Web Push, and what takes us out of a browser tab.
+        // What takes us out of a browser tab, and what iOS requires before it
+        // will give a web app the background-audio behaviour ADR-0005 is about.
         display: 'standalone',
         start_url: '/',
         scope: '/',
@@ -116,18 +120,21 @@ export default defineConfig({
         'src/test/**',
         'src/main.tsx',
         // The service worker is a different global scope with no jsdom
-        // implementation (no `PushEvent`, no `clients`, no precache manifest).
-        // Everything in it with a decision is `lib/pushMessage.ts`, at 100%;
-        // what is left is glue, covered by the Playwright layer and the
-        // real-device gate (ADR-0010).
+        // implementation (no `clients`, no precache manifest, no workbox
+        // runtime). Since #107 took the push handler out there is no decision
+        // left in it at all — it is precache, one navigation route and a
+        // `SKIP_WAITING` message — and that glue is covered by the Playwright
+        // layer (ADR-0010). It is still typechecked (#102).
         'src/sw.ts',
         'src/components/ui/**',
         'src/**/*.d.ts',
       ],
       // Ratcheting project floor (ADR-0010): below the measured baseline, only
-      // ever raised. Raised with #16 (Web Push), which holds 100% lines and
-      // ~97% branches with the push manager, the notification builder and the
-      // Settings switch all covered.
+      // ever raised. Last raised with #16; #107 removed that feature and the
+      // floor **held** — 100% lines, 99.7% functions, 99.7% statements, 96.6%
+      // branches — because what was deleted was about as well covered as what
+      // remains. A removal is allowed to re-baseline it (ADR-0010's #107
+      // amendment); this one did not need to.
       thresholds: {
         lines: 99,
         functions: 98,

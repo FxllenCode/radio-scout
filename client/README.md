@@ -36,8 +36,8 @@ network boundary — never `fetch` or module mocking. Unit tests cover `store/`,
 `utils/`. Coverage thresholds are enforced and ratchet upward.
 
 Playwright is reserved for what jsdom cannot do at all: service-worker registration, offline
-app-shell serving, install criteria, and delivering a real push. It runs against a production
-build served by `vite preview`, because the service worker only exists in a build.
+app-shell serving, and install criteria. It runs against a production build served by
+`vite preview`, because the service worker only exists in a build.
 
 **iOS background audio, lock-screen controls and Add-to-Home-Screen are a real-device manual
 gate.** Playwright's bundled WebKit is not iOS Safari and cannot validate them.

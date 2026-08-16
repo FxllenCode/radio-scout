@@ -4,10 +4,7 @@ import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
 
 import App from '@/App'
-import { PushProvider } from '@/hooks/usePush'
-import type { Push } from '@/lib/push'
 import { makeStore, type AppStore } from '@/store/store'
-import { inertPush } from './push'
 
 /** Render `ui` inside a fresh store + router, so RTK Query's cache and the
  *  playback queue never leak between tests. */
@@ -16,20 +13,13 @@ export function renderWithProviders(
   {
     route = '/',
     store = makeStore(),
-    // Inert unless a test asks for the real thing: a live handle would put a
-    // `/api/push/key` request — and a second `sub` frame when it settles —
-    // inside every test that renders the app, which is how one test's timing
-    // becomes another's.
-    push = inertPush(),
-  }: { route?: string; store?: AppStore; push?: Push } = {},
+  }: { route?: string; store?: AppStore } = {},
 ) {
   return {
     store,
     ...render(
       <Provider store={store}>
-        <PushProvider push={push}>
-          <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
-        </PushProvider>
+        <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
       </Provider>,
     ),
   }
@@ -38,6 +28,6 @@ export function renderWithProviders(
 /** Render the whole app at `route` — the shell, the router, the shared audio
  *  element (where a queue actually reaches a speaker), and the live-feed
  *  socket. Pass a `store` to drive the feed from a test. */
-export function renderApp(route: string, store?: AppStore, push?: Push) {
-  return renderWithProviders(<App />, { route, store, push })
+export function renderApp(route: string, store?: AppStore) {
+  return renderWithProviders(<App />, { route, store })
 }

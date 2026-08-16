@@ -3,11 +3,9 @@ import { Provider } from 'react-redux'
 import { expect, it } from 'vitest'
 
 import { CallPlayer } from '@/components/CallPlayer'
-import { PushProvider } from '@/hooks/usePush'
 import { received } from '@/store/live'
 import { makeStore } from '@/store/store'
 import { selectIsPaused } from '@/store/transport'
-import { inertPush } from '@/test/push'
 import { wavDataUrl } from '@/test/wav'
 
 /**
@@ -32,9 +30,7 @@ it('records a refused play() as paused, rather than showing it as playing', asyn
   const store = makeStore({ storage: undefined })
   const { container } = render(
     <Provider store={store}>
-      <PushProvider push={inertPush()}>
-        <CallPlayer />
-      </PushProvider>
+      <CallPlayer />
     </Provider>,
   )
   const audio = container.querySelector('audio')

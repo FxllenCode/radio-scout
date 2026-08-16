@@ -26,8 +26,8 @@ test.describe('PWA', () => {
       icons: { src: string; sizes: string; purpose?: string }[]
     }
     expect(manifest.name).toBe('Radio-Scout')
-    // Standalone is not cosmetic: iOS offers Web Push (#16) to nothing else,
-    // and background audio needs the app out of a browser tab (ADR-0005).
+    // Standalone is not cosmetic: background audio needs the app out of a
+    // browser tab, which is what iOS gives a home-screen app (ADR-0005).
     expect(manifest.display).toBe('standalone')
     expect(manifest.start_url).toBe('/')
 

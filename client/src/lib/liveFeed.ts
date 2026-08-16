@@ -45,11 +45,6 @@ export interface LiveFeedHandlers {
    *  cursor on an ordinary matrix change would ask the server to backfill
    *  traffic the listener just chose to stop hearing. */
   since(): number | undefined
-  /** The token of the listener's push subscription (#16), read at send time
-   *  because notifications can be turned on while the socket is already open.
-   *  While the server holds this it sends no notifications to that device: a
-   *  listener with the feed open is not a listener to wake. */
-  pushToken?(): string | undefined
 }
 
 export interface LiveFeedOptions {
@@ -97,8 +92,7 @@ export function connectLiveFeed(
   function send({ catchUp = false } = {}) {
     if (!subscription || socket?.readyState !== WebSocket.OPEN) return
     const since = catchUp ? handlers.since() : undefined
-    const push = handlers.pushToken?.()
-    socket.send(JSON.stringify({ t: 'sub', ...subscription, since, push }))
+    socket.send(JSON.stringify({ t: 'sub', ...subscription, since }))
   }
 
   function open() {

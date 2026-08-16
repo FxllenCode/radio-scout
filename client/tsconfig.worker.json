@@ -17,5 +17,5 @@
      Empty for the reason `tsconfig.test.json` gives: the defaults this also
      discards cannot match an `src/`-rooted include. */
   "exclude": [],
-  "include": ["src/sw.ts", "src/lib/pushMessage.ts", "src/lib/pushOpen.ts"]
+  "include": ["src/sw.ts"]
 }
