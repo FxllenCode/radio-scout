@@ -13,7 +13,7 @@ The person who runs an **Instance** — installs it, points **Recorders** at it,
 _Avoid_: admin, user, host, owner.
 
 **Listener**:
-The person who listens through the web app. Needs no account and no **Session**: their whole state — **Selection**, **Hold**, **Avoid**, **Profile**, **push subscription** — lives in their own browser. One person is often both a Listener and the **Operator**; the terms name the role, not the human.
+The person who listens through the web app. Needs no account and no **Session**: their whole state — **Selection**, **Hold**, **Avoid**, **Profile** — lives in their own browser. One person is often both a Listener and the **Operator**; the terms name the role, not the human.
 _Avoid_: user, client, subscriber, viewer.
 
 ### Core entities
@@ -57,7 +57,13 @@ _Avoid_: length (the recorder's word — TR's `call_length` — reserve it for t
 
 **Emergency**:
 The bit a radio sets on a transmission when its emergency button is pressed. A property of a **Call**, and separately of each **Unit** heard within one — the Call says somebody keyed it, the per-source flag says which radio did. Absent means no, never unknown.
-_Avoid_: alert (an **Alert** is what an emergency may *produce*), panic, priority (the recorder's own unrelated field).
+
+**A mark is all it is.** An Emergency is shown, filtered and searched on, and nothing is delivered for it: Radio-Scout does not notify ([ADR-0014](docs/adr/0014-no-notifications.md)). "Alert" was the word for what an emergency used to produce, and it is no longer a word this project uses.
+_Avoid_: alert, notification, panic, priority (the recorder's own unrelated field).
+
+**Tone profile**:
+The per-talkgroup definition of a paging tone sequence (two-tone/Quick Call) that tone-out detection matches against a call's audio. Signal processing, not speech recognition — transcription is banned ([ADR-0013](docs/adr/0013-no-transcription.md)). A match **marks** the Call, the way an **Emergency** does, and like an Emergency it is shown rather than delivered.
+_Avoid_: tone set, page definition.
 
 **Encrypted Call**:
 A **Call** on a talkgroup whose traffic is encrypted: stored as a flagged, metadata-only row with **no audio object at all**, because what a recorder captures there is the vocoder's noise rather than speech. It reaches **Listeners** so the activity is visible, carries no audio URL, and never enters the **Listening queue**.
@@ -95,7 +101,7 @@ The mode where incoming calls play automatically as they arrive, filtered to the
 _Avoid_: live mode, streaming.
 
 **Feed off**:
-The live feed switched off by the **Listener** — a hard off, and not a pause: the playing call stops, the **listening queue** clears, the connection closes, and **Web Push** (if subscribed) takes over, because nothing is being listened to. Persists until switched back on; rejoining starts from now, never backfilling the silence.
+The live feed switched off by the **Listener** — a hard off, and not a pause: the playing call stops, the **listening queue** clears, and the connection closes, because nothing is being listened to. Persists until switched back on; rejoining starts from now, never backfilling the silence. Nothing reaches the Listener in the meantime — Radio-Scout does not notify ([ADR-0014](docs/adr/0014-no-notifications.md)) — so switching it back on is the only way back in.
 _Avoid_: offline (the network's state, not the listener's choice), disabled, standby.
 
 **Feed down**:
@@ -131,14 +137,6 @@ _Avoid_: subscription, filter.
 One named, independent **Listener** setup within a single browser — its own **Selection**, **Avoid** list and **Hold** state. Two Profiles behave as two entirely separate radios in the same browser: a "truck" Profile and a "desk" Profile share nothing. Spelled `namespace` in the client's persistence layer, which is the mechanism rather than the concept.
 _Avoid_: namespace (in prose), workspace, preset, scanner.
 
-**Push subscription**:
-One browser's registration for **Web Push** notifications — the push service endpoint it is reachable at, the keys that make a message readable only by that device, and the **Selection** it wants to be woken for. The delivery half, distinct from the Selection itself: a listener has one Selection and zero or one push subscription per browser. Identified in logs by its **Id**, never by its endpoint (a stable per-device identifier).
-_Avoid_: notification subscription, device token, registration.
-
-**Coalescing**:
-The rule that bounds notifications: at most one per **talkgroup** per push subscription per configured window, each carrying a count of the calls it stands for. A busy system must never storm a phone, and nothing is silently dropped for it.
-_Avoid_: throttling, rate limiting, batching, debouncing.
-
 **Priority**:
 A **Listener's** per-talkgroup preference that makes its calls jump the **listening queue** instead of waiting their turn. Queue order, not selection — a priority talkgroup still has to be selected to be heard.
 _Avoid_: preempt (SDRTrunk's stronger notion — interrupting the playing call — which this is not), favorite.
@@ -166,20 +164,6 @@ _Avoid_: time machine, rewind mode, tape.
 **Station stream**:
 A continuous audio stream of a **Selection** — calls in order, silence-filled — for players that can't run the app (smart speakers, stream URLs, car radios).
 _Avoid_: radio mode, icecast feed (the mechanism), broadcast.
-
-### Alerting
-
-**Alert**:
-A notification fired by something a call's *metadata or signal* proves — an emergency flag, a **tone profile** match — delivered by **Web Push** and **Webhooks**. Never fired by speech content: transcription is banned ([ADR-0013](docs/adr/0013-no-transcription.md)).
-_Avoid_: notification (the delivery, not the occurrence), alarm.
-
-**Tone profile**:
-The per-talkgroup definition of a paging tone sequence (two-tone/Quick Call) that tone-out detection matches against a call's audio. Signal processing, not speech recognition.
-_Avoid_: tone set, page definition.
-
-**Webhook**:
-An **Operator**-configured URL that receives **Alert** payloads (optionally Discord-shaped). The automation escape hatch; delivery is retried and never blocks anything.
-_Avoid_: integration, callback.
 
 ### Ingest & distribution
 
@@ -230,6 +214,10 @@ Another instance this **Instance** forwards matching **Calls** to, speaking the 
 
 **A peer's outage costs delay, not Calls.** A matching Call is written to a durable queue inside the same transaction that stores it, so "the Call exists" and "the Call is owed to this peer" are one fact a crash cannot separate; the queue drains **in order, per peer**, one attempt at a time, and survives a restart of either end. The scope is a **Selection** — the live feed's own — so a **Patch** reaches a peer subscribed to the channel it was patched onto.
 _Avoid_: relay, mirror, federation, upstream.
+
+**Webhook**:
+An **Operator**-configured URL that receives the **Calls** they asked to hear about — one carrying an **Emergency**, or a **Tone profile** match — as JSON, optionally Discord-shaped. The automation escape hatch, and a sibling of **Downstream** rather than of anything listener-facing: an Operator wiring up their own inbox is a different act from this Instance waking a **Listener**, which it does not do ([ADR-0014](docs/adr/0014-no-notifications.md)). Delivery is retried and never blocks anything; the URL is a secret and is never logged.
+_Avoid_: integration, callback, alert, notification.
 
 **Dirwatch**:
 Ingesting **Calls** from a watched directory instead of an HTTP upload — recorder drop folders, DSDPlus, filename masks.
@@ -283,7 +271,7 @@ One running Radio-Scout: a process, its **Archive**, its configuration and its *
 _Avoid_: scanner, server, deployment, node, site (Site is a tower).
 
 **Worker**:
-A background task an **Instance** owns and can account for. There are six — the **Retention** sweeper, the **Web Push** sender, the **enhancement** worker, the **Mining** backfill, the **Downstream** sender, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
+A background task an **Instance** owns and can account for. There are five — the **Retention** sweeper, the **enhancement** worker, the **Mining** backfill, the **Downstream** sender, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
 
 What one *unit* of that work is belongs to the Worker, and is not always one item: the Downstream sender's is "I have caught up with what was handed to me", because a delivery waiting out a retry is owed by nobody — and a Worker that stayed non-idle through a peer's outage would make "this Instance has settled" unanswerable for as long as the outage lasted.
 _Avoid_: job, task, background thread, daemon (a **Service** is the operating system's).

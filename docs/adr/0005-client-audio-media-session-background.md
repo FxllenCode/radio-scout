@@ -174,3 +174,18 @@ woke the listener is
 deliberately left open — the notification carries the Call id (`/?call=<id>`),
 and the app currently uses the tap to resume the feed rather than to open one
 Call.
+
+## Amendment (#107, 2026-08-16): tier 3 is removed, and the floor is vacated
+
+[ADR-0014](0014-no-notifications.md) removes Web Push permanently. Everything above stands as the record of what was decided and shipped; this says what is no longer true.
+
+**Tier 3 is gone**, and so is the whole of *Implementation notes (#16)* as a description of the running system — the `src/webpush.rs` RFC implementation, the fanout-not-ingest rule for notifications, the suppression-while-listening rule, leading-edge coalescing and its `Topic` header, and the VAPID credential in `.env`. The deep link left open in the paragraph above will never be built.
+
+**The guaranteed fallback is vacated and nothing replaces it.** This ADR's floor was *"the robust baseline… + Web Push to notify of new activity when suspended (tap to resume)"*, and its revised ladder terminated in **Web-Push-only**. The ladder now ends one rung earlier: if the keep-alive fails, **Radio-Scout does not bridge a fully-suspended app** and the listener hears nothing until they return to it. #33's real-device gate passed 3/3 on mechanism (a), so the floor was never used in practice — but it was insurance, and ADR-0014 records deliberately that the insurance is gone rather than letting it lapse by omission.
+
+**Two of this ADR's conclusions outlived their arguments**, which is worth stating so nobody "fixes" them:
+
+- **`display: 'standalone'` stays.** It was justified here as *"the only way to Web Push in #16"*. It is still required for background audio, which is this ADR's actual subject.
+- **The service worker stays ours** (`sw.ts`, `injectManifest`). The reason recorded above — *"a generated worker cannot have a `push` handler at all"* — no longer applies. It stays because the update flow messages `SKIP_WAITING`, and because the worker must never answer `/api/*` from cache.
+
+The keep-alive's idle timeout is unchanged in mechanism and changed in meaning: past the budget we still stop fighting iOS, but what follows is silence rather than a handoff.

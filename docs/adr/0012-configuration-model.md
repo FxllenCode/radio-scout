@@ -105,3 +105,13 @@ Two more are there on borrowed time and say so in their doc comments: `bind`, be
 **A restart is stop-then-start on one handle.** `Instance::stop` is graceful and does not return until the socket is closed, so "the old Instance stopped" is a fact rather than a race; `restart_with` takes the configuration the next boot will have, which is what an Operator who edited their file and restarted actually does. It replaced eight copies of a four-line preamble in the enhancement tests that stood a second app up on a hand-shared database URL while the first one was still running.
 
 **What did not change:** every key, every variable, every default, every exit code, and `--write-config` byte for byte. `[server] port` still decides the port. The one behavioural difference is inside the test suite, and it is the one worth stating — a spawned app now runs the sweeper and the sink for real, so the harness turns the Retention *windows* off (`days = 0`, `log_days = 0`) rather than the sweeper, because the suite dates its fixtures in 1970 and 2020 and a background sweep would otherwise decide tests by when it got to them.
+
+## Amendment (#107, 2026-08-16): two credentials, one section fewer, and half a worked example
+
+[ADR-0014](0014-no-notifications.md) removes Web Push. Three things in this ADR change, none of them a decision.
+
+**`[push]` is gone as a section**, and with it the strongest single illustration of the #87 rule that a section *is* its subsystem's type: `PushConfig` carried `coalesce_secs`, `ttl_secs` and a `subject` validated at boot against RFC 8292's contact-URI requirement. `[retention]`, `[admin]`, `[ingest]`, `[enhancement]` and `[downstream]` demonstrate the same shape unchanged.
+
+**`Credentials` carries two, not three** — `{ env_file, ingest_key, admin_password }`. The one that leaves is the one that was *different*: an ingest key and an admin password need only be secret, while the VAPID key had to be **stable**, because a browser pins its public half at subscribe time and a regenerated identity silently orphans every existing subscription. That asymmetry is why a key that could not be saved left notifications off rather than running on a fresh one. Nothing that remains has that property.
+
+**The #90 "outcomes, not knobs" argument keeps one of its two worked examples.** `Push::disabled()` is gone; `AdminAuth::locked()` remains, and it is the stronger of the pair anyway — an env file that cannot be written leaves the admin surface shut, reachable by arranging the cause rather than by injecting the effect. The argument is unchanged and the harness still provisions for real; it now has one proof instead of two.

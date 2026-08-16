@@ -82,3 +82,13 @@ Two concurrent ingests can still be *delivered* in the opposite order to the one
 - **The access scope is an input.** `Connection::new` takes one, so a test can open a restricted connection and assert what it does and does not receive — on the Backfill path as well as the live one, since a restriction that held on only one of them would hand the archive to anyone who reconnected. Production still resolves to `AccessScope::All`, because nothing grants a scope until #68; that is now one line in `ws_handler` rather than a constant buried in the loop.
 
   The `#[allow(dead_code)]` on the scope type is gone, and it is worth being exact about what removed it. `AccessScope` and `TalkgroupScope` are now **public**, which is what silences the lint; the restricted variants are still constructed only by tests, because nothing grants a scope yet. What changed beyond the lint is that those tests now drive a *connection* — a `sub`, a broadcast, a Backfill — rather than calling `permits` directly, so the promise is asserted where it is kept. The rest of the state machine (`Connection`, `Event`, `Action`, `Backfill`) is `pub(crate)`: it has no consumer outside this crate, and the tests that drive it live in the module.
+
+## Amendment (#107, 2026-08-16): the fully-suspended case is uncovered, and the ordering example moved
+
+[ADR-0014](0014-no-notifications.md) removes Web Push, which this ADR leaned on twice.
+
+**The division of labour above is now half a promise.** "Background behavior is handled separately in the PWA/Media Session design (ADR-0005) — Web Push covers the fully-suspended case, catch-up covers the brief-reconnect case" was true when written. The Backfill still covers the reconnect, which is the half this ADR is actually about; **nothing covers the fully-suspended case**, deliberately, and ADR-0014 records what that costs.
+
+**The #94 amendment's ordering example is gone with it.** "Ordering is a value" was illustrated by the push claim's release-before-reclaim — `[Release, Claim(token), …]` in a returned list, so swapping the two lines that produce it fails a test rather than passing review. `Action::Claim` and `Action::Release` no longer exist, and neither does the `push` field on a `sub` frame. The rule stands unchanged and is now carried by the Backfill's own action ordering; only the worked example died.
+
+Removing an optional client-to-server field is not a wire break — `protocol` names what the *server* emits, and that is untouched — so it stays at **2**.

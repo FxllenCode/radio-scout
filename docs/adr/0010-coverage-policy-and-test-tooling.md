@@ -95,3 +95,11 @@ The ticket framed this as a real decision rather than a fix, and it is: **either
 Two smaller consequences. **`fail-fast` lives on the command line.** Every workflow step that runs the suite already passed `--no-fail-fast` by hand, so the profile's `fail-fast = false` was a duplicate whose deletion would have looked effective and changed nothing; the command-line copy survives because it is the one a reader of the workflow can see. `cargo mutants --test-tool nextest` is deliberately outside this rule — inside a single mutant, stopping at the first failing test *is* the answer. And **JUnit goes with the profile**: nothing consumed `junit.xml`, and an unread report is the same decoration in a different file.
 
 `tests/ci.rs` now pins all of it, and pins the profile **per call site** rather than per pipeline — a set union over the workflows cannot tell "every run selects it" from "one of four does", which is precisely the shape the original failure had.
+
+## Amendment (#107, 2026-08-16): a removal may re-baseline the floor
+
+The ratcheting floor is *"allowed to rise, never to fall"*. That was written about **erosion** — new code landing under-tested and dragging the number down a fraction at a time, which is exactly what the ratchet exists to stop. It was never written about **deletion**, and [ADR-0014](0014-no-notifications.md) is the case that shows the difference: removing Web Push deletes ~500 lines of client code that were at or near 100%, so the measured percentage can only fall, and no amount of testing the *remaining* code is a response to that.
+
+**A removal may lower the floor to what the smaller codebase actually measures**, on three conditions: the before and after are recorded in the commit that moves it, the move is a consequence of deleted code rather than of new code, and the floor is set to the new measurement rather than below it — the headroom allowance in the original policy is for a deterministic dip, not for a fresh cushion.
+
+The alternative was to hold the number and backfill unrelated tests until it was met, which is the coverage theatre the rest of this ADR exists to reject. A rule quietly ignored once is worth less than a rule amended in the open.
