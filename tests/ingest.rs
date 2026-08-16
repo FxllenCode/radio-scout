@@ -98,7 +98,7 @@ async fn a_steady_state_call_resolves_its_channel_once() {
 
     assert_eq!(
         spent,
-        19 + read_backs,
+        18 + read_backs,
         "one steady-state Call, end to end: the API key; the System and the \
          Talkgroup, once each; the dedup window; the **Downstream** roster \
          (#52 — one indexed read of a table with single-digit rows, and the \
@@ -107,9 +107,10 @@ async fn a_steady_state_call_resolves_its_channel_once() {
          row and its one `call_units` row (+ a read-back each on SQLite); the \
          Unit the roster resolves the radio to; the nine the live-feed view is \
          denormalized from, two of which resolve that radio to its apparatus \
-         for the wire; the emission; and the push sender asking who is \
-         subscribed. Two more than this and something is being resolved twice \
-         again."
+         for the wire; and the emission. One fewer than before #107, which \
+         removed notifications and with them the push sender's per-Call read \
+         of who was subscribed. Two more than this and something is being \
+         resolved twice again."
     );
 }
 

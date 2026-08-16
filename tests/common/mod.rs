@@ -64,7 +64,6 @@ mod audio;
 mod faults;
 pub mod logs;
 mod peer;
-mod push;
 pub mod s3;
 mod upload;
 mod ws;
@@ -78,8 +77,6 @@ pub use audio::{SdrTrunkMp3, silence_ms, wav};
 pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faults_over_store, faulty_store};
 #[allow(unused_imports)]
 pub use peer::{Peer, Received, unreachable_url};
-#[allow(unused_imports)]
-pub use push::{PushService, Pushed, SUBSCRIBER_AUTH, SUBSCRIBER_PRIVATE, SUBSCRIBER_PUBLIC};
 #[allow(unused_imports)]
 pub use upload::CallUpload;
 #[allow(unused_imports)]
@@ -178,7 +175,8 @@ impl TestApp {
     }
 
     /// This Instance's background Workers, by name (#93) — the sweeper, the
-    /// push sender, the enhancement worker and the log sink.
+    /// enhancement worker, the Mining sweep, the Downstream sender and the log
+    /// sink.
     ///
     /// What a test waits on instead of sleeping. Most callers want
     /// [`TestApp::settle`]; reach for a named one when the wait is for a count
@@ -1292,18 +1290,17 @@ impl TestApp {
 /// a row in the live connection's own table now, so nothing has to shorten a
 /// period from outside in order to watch one happen.
 ///
-/// What went away: `.admin(AdminAuth)` and `.push(Push)`. Both handed the app a
-/// finished subsystem, which is precisely how the old harness could be green
-/// about an Instance that had never been provisioned. A shut admin surface and
-/// a disabled Push are now *outcomes* — [`TestAppBuilder::without_credentials`]
-/// and [`TestAppBuilder::without_push`].
+/// What went away: `.admin(AdminAuth)`, which handed the app a finished
+/// subsystem — precisely how the old harness could be green about an Instance
+/// that had never been provisioned. A shut admin surface is now an *outcome*,
+/// [`TestAppBuilder::without_credentials`]. (`.push(Push)` and `.without_push()`
+/// were the other half of that story until #107 removed notifications.)
 #[derive(Default)]
 pub struct TestAppBuilder {
     toml: Option<String>,
     edits: Vec<ConfigEdit>,
     store: Option<Arc<dyn AudioStore>>,
     clock: Option<Clock>,
-    vapid: Option<String>,
     unwritable_env: bool,
 }
 
@@ -1318,10 +1315,6 @@ pub const FORWARDED_FOR: &str = "x-forwarded-for";
 /// hands it to `instance::start` as `RADIO_SCOUT_ADMIN_PASSWORD` would, and the
 /// Instance provisions the admin surface from it exactly as a boot does.
 pub const ADMIN_PASSWORD: &str = "test-admin-password";
-
-/// A value that is not a P-256 key, so provisioning leaves Web Push off — the
-/// same outcome an operator gets from a typo'd `RADIO_SCOUT_VAPID_PRIVATE_KEY`.
-const NOT_A_VAPID_KEY: &str = "not-a-key";
 
 impl TestAppBuilder {
     /// Edit the configuration this app is started from — the general seam, for
@@ -1376,21 +1369,13 @@ impl TestAppBuilder {
         self.config(move |config| config.server.trusted_proxies = proxies)
     }
 
-    /// Boot with no Web Push identity, the way an operator with a typo'd key
-    /// does: notifications are off and the routes say so.
-    pub fn without_push(mut self) -> Self {
-        self.vapid = Some(NOT_A_VAPID_KEY.to_string());
-        self
-    }
-
     /// Boot with the admin surface shut, the way an operator whose env file
     /// cannot be written does: a password was generated, nobody can read it, so
     /// none is set and nothing authenticates.
     ///
     /// A provisioning *outcome* rather than an injected `AdminAuth` — the
     /// difference between proving the state is refusable and proving a boot can
-    /// arrive at it. It takes Web Push with it, for the same reason: the two
-    /// generated credentials share the file that cannot be written.
+    /// arrive at it.
     pub fn without_credentials(mut self) -> Self {
         self.unwritable_env = true;
         self
@@ -1469,11 +1454,10 @@ impl TestAppBuilder {
             .decorate_db(decorate)
             .credentials(Credentials {
                 env_file: Some(env_file),
-                // Configured, so `login()` knows it; the other two are
+                // Configured, so `login()` knows it; the ingest key is
                 // generated into this app's own env file, which is what makes a
                 // spawned Instance genuinely provisioned.
                 admin_password: (!self.unwritable_env).then(|| ADMIN_PASSWORD.to_string()),
-                vapid_key: self.vapid,
                 ingest_key: None,
             })
             // ...so an app with the sink off simply has no writer to drain.

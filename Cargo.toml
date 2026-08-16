@@ -60,13 +60,9 @@ argon2 = { version = "0.5.3", features = ["std"] }
 # via argon2's `password-hash`; named directly because a hand-rolled loop is one
 # the optimiser is free to turn back into an early exit.
 subtle = { version = "2.6.1", default-features = false }
-p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
-hkdf = "0.12"
-aes-gcm = "0.10"
-base64 = "0.22"
-# Outbound HTTP, for delivering Web Push (#16). Default features are rustls in
-# 0.13 — no OpenSSL, so the aarch64 and Windows cross-builds stay a plain
-# `cargo build`.
+# Outbound HTTP, for forwarding Calls to **Downstream** peers (#52). Default
+# features are rustls in 0.13 — no OpenSSL, so the aarch64 and Windows
+# cross-builds stay a plain `cargo build`.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # `id3v2` is the metadata reader #48 mines SDRTrunk's uploads with. It is a
 # feature of a crate already in the tree, not a new dependency — but it is not
@@ -122,7 +118,7 @@ dbg_macro = "deny"
 # sleep to be flaky about (#94). A dev-dependency, so a release build never
 # carries the mock clock.
 tokio = { version = "1", features = ["full", "test-util"] }
-# The same major the library sends push notifications with (and the same one
+# The same major the library forwards Calls with (and the same one
 # `object_store` already pulls in): two versions of reqwest in one package makes
 # the name ambiguous in test targets.
 reqwest = { version = "0.13", default-features = false, features = ["multipart", "json", "cookies"] }

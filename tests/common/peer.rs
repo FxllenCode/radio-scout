@@ -1,5 +1,4 @@
-//! A stub **Downstream** peer (#52), on the [`super::push::PushService`]
-//! precedent.
+//! A stub **Downstream** peer (#52).
 //!
 //! Forwarding is an outbound HTTP request to somebody else's server, which is
 //! the kind of thing a suite normally mocks. It is not mocked here: [`Peer`] is

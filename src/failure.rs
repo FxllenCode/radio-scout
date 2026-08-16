@@ -146,11 +146,6 @@ stages! {
     /// **object store**, and "the database refused" and "the bucket refused"
     /// send an Operator to different places.
     PurgeCalls => "purge-calls",
-    // -- Web Push (#16) ----------------------------------------------------
-    /// Storing (or re-storing) a device's subscription.
-    StorePushSubscription => "store-push-subscription",
-    /// Forgetting one.
-    DeletePushSubscription => "delete-push-subscription",
 }
 
 impl Stage {
@@ -193,11 +188,11 @@ macro_rules! answers_json {
 /// Deliberately not the same vocabulary as a [`Stage`]: this is "a Recorder sent
 /// something we refused", where a Stage is "an Operator must act".
 ///
-/// Two arms describe *our* state rather than a mistake — [`Reason::AudioNotFound`]
-/// and [`Reason::PushNotConfigured`] — and they still belong here, because what
-/// they tell the caller is the same thing: stop asking for this, nothing an
-/// Operator does will change the answer. What separates them from a [`Stage`] is
-/// that nobody has to go and fix anything.
+/// One arm describes *our* state rather than a mistake — [`Reason::AudioNotFound`]
+/// — and it still belongs here, because what it tells the caller is the same
+/// thing: stop asking for this, nothing an Operator does will change the
+/// answer. What separates it from a [`Stage`] is that nobody has to go and fix
+/// anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
     // -- Ingest (ADR-0001's wire contract) ---------------------------------
@@ -246,15 +241,6 @@ pub enum Reason {
     /// rdio-scanner coerces whatever it can and silently ignores the rest, so a
     /// typo returns plausible wrong results; the detail is the whole difference.
     BadQuery(String),
-    // -- Web Push (#16) -----------------------------------------------------
-    /// This Instance has no VAPID identity, so there are no notifications to
-    /// offer and nothing to subscribe to.
-    PushNotConfigured,
-    /// A subscription we could not deliver to, refused before it is stored.
-    ///
-    /// The endpoint is never named: it is a stable per-device identifier, which
-    /// is exactly what rule 5 keeps out of an operator's log.
-    BadSubscription(crate::webpush::InvalidSubscription),
     // -- The admin surface (#19) -------------------------------------------
     /// No session cookie at all.
     NoSession,
@@ -279,9 +265,9 @@ pub enum Reason {
     /// renders a successful import's report in.
     ///
     /// Carries the parse error itself rather than a slug and a sentence, for
-    /// the same reason [`Reason::BadSubscription`] does: a `&'static str` here
-    /// would be an *open* arm in a closed vocabulary, and #70 is about to put
-    /// these slugs behind a metric label.
+    /// the same reason [`Reason::BadQuery`] does: a `&'static str` here would
+    /// be an *open* arm in a closed vocabulary, and #70 is about to put these
+    /// slugs behind a metric label.
     BadImport(crate::import::ParseError),
     // -- Curation (#49) -----------------------------------------------------
     /// A curation write the admin surface refused — a blank field, a name or a
@@ -535,25 +521,6 @@ impl Reason {
                 Level::DEBUG,
                 StatusCode::BAD_REQUEST,
                 text(format!("{detail}\n")),
-            ),
-            // **DEBUG, and one body for both routes** (changed by #92). Push is
-            // off in what ships, so a browser asking `/api/push/key` on an
-            // ordinary instance is the *normal* answer, not news — at WARN it
-            // would be a warning per page load on every instance nobody
-            // configured push on (rule 8). The two routes used to disagree about
-            // the body as well (`push is not configured` here, `not-configured`
-            // there); one condition now has one answer.
-            Reason::PushNotConfigured => Refusal::new(
-                "not-configured",
-                Level::DEBUG,
-                StatusCode::NOT_FOUND,
-                text("not-configured\n"),
-            ),
-            Reason::BadSubscription(invalid) => Refusal::new(
-                invalid.reason(),
-                Level::WARN,
-                StatusCode::BAD_REQUEST,
-                text(format!("{}\n", invalid.reason())),
             ),
             Reason::NoSession => Refusal::new(
                 "no-session",
@@ -833,7 +800,6 @@ pub(crate) fn redact(response: Response, request_id: &RequestId) -> Response {
 mod tests {
     use super::*;
     use crate::testing::LogCapture;
-    use crate::webpush::InvalidSubscription;
     use axum::body::to_bytes;
     use axum::http::{HeaderName, header};
     use rstest::rstest;
@@ -979,21 +945,6 @@ mod tests {
         Reason::BadQuery("system must be an integer".to_string()),
         "bad-query", 400, "system must be an integer\n", " DEBUG "
     )]
-    // -- Web Push ----------------------------------------------------------
-    #[case::push_off(
-        Reason::PushNotConfigured,
-        "not-configured",
-        404,
-        "not-configured\n",
-        " DEBUG "
-    )]
-    #[case::bad_subscription(
-        Reason::BadSubscription(InvalidSubscription::PublicKey),
-        "bad-key",
-        400,
-        "bad-key\n",
-        " WARN "
-    )]
     // -- The admin surface -------------------------------------------------
     //
     // The guard's own refusals are DEBUG: a tab left open overnight, or an
@@ -1046,8 +997,9 @@ mod tests {
         let logged = capture.text();
         assert!(logged.contains(level), "{logged}");
         // Bare, never quoted: `reason=duplicate` greps and `reason="duplicate"`
-        // does not. This is the drift #92 closed — `push::rejected` rendered it
-        // quoted while three other funnels rendered it bare.
+        // does not. This is the drift #92 closed — one of the four refusal
+        // funnels it replaced rendered the slug quoted while the others rendered
+        // it bare, and one callsite is what makes that unrepeatable.
         assert!(logged.contains(&format!("reason={slug}")), "{logged}");
         assert!(!logged.contains("reason=\""), "quoted: {logged}");
         assert!(logged.contains("request refused"), "{logged}");

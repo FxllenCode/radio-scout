@@ -46,11 +46,11 @@ exclude_globs = [
 # it and cry "ledger is full" on every failed login. It is killed by
 # `tests/admin.rs::an_ordinary_failed_login_does_not_claim_the_ledger_is_full`.
 exclude_re = [
-    # `Push` and `Enhancer` are both `#[derive(Default)]` newtypes over
-    # `Option<Arc<Inner>>`, and `Option::default()` is `None` — so
-    # `Default::default()` *is* the value `disabled()` returns. The mutation
-    # rewrites the constructor into a different spelling of itself.
-    "replace Push::disabled -> Self with Default::default\\(\\)",
+    # `Enhancer` is a `#[derive(Default)]` newtype over `Option<Arc<Inner>>`,
+    # and `Option::default()` is `None` — so `Default::default()` *is* the value
+    # `disabled()` returns. The mutation rewrites the constructor into a
+    # different spelling of itself. (`Push::disabled` was the other half of this
+    # entry until #107 removed notifications entirely.)
     "replace Enhancer::disabled -> Self with Default::default\\(\\)",
 
     # `spa_is_embedded` reports whether `client/dist` was embedded at compile

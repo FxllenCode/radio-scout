@@ -30,24 +30,18 @@ Two things worth knowing because they differ from what you may be used to:
   wasn't one — and then the settings that resulted. "Why isn't my setting applying?" is
   answerable from the log.
 
-### The three credentials that are not in the file
+### The two credentials that are not in the file
 
-The ingest **API key**, the **admin password** and the **Web Push identity** live in `.env`
-(mode `0600`), because first run *writes* them. They are never logged — only the path is — so
-`cat .env` is how you read them back.
+The ingest **API key** and the **admin password** live in `.env` (mode `0600`), because first
+run *writes* them. They are never logged — only the path is — so `cat .env` is how you read
+them back.
 
 Set them yourself and nothing is generated, which is usually what you want in a container:
 
 ```sh
 RADIO_SCOUT_API_KEY=…            # what recorders authenticate with
 RADIO_SCOUT_ADMIN_PASSWORD=…     # opens /api/admin/
-RADIO_SCOUT_VAPID_PRIVATE_KEY=…  # signs push notifications
 ```
-
-> **The push identity must stay the same across restarts.** A browser pins its public half when
-> it subscribes, so a new identity silently stops every existing subscription from ever being
-> notified again. If the key cannot be saved, notifications are left **off** with an error
-> rather than running on one that will not survive a reboot.
 
 ---
 
@@ -457,15 +451,15 @@ What you can rely on:
   assets) sit at DEBUG so a Pi is not writing a line per range request; a 4xx or 5xx escalates
   whatever the route.
 - **Every refused request says why**, with a machine-readable `reason=` — `invalid-api-key`,
-  `duplicate`, `blacklisted`, `no-talkgroup`, and the same for the admin and notification
-  surfaces. A Call that does not become a row leaves a line explaining itself. The message is
-  always `request refused`; what it was is the `reason=`, so one grep finds all of them.
+  `duplicate`, `blacklisted`, `no-talkgroup`, and the same for the admin surface. A Call that
+  does not become a row leaves a line explaining itself. The message is always
+  `request refused`; what it was is the `reason=`, so one grep finds all of them.
 - **Every 5xx logs its cause against that request id**, and the response body carries only the
   id. The cause goes to you, never to the client.
 - **Secrets are never logged**, at any level, in any form. Nor are listener IP addresses above
-  DEBUG, nor push endpoints ever — a public instance must not accumulate a record of who
-  listened and when. Recorder addresses may appear on ingest routes, and refused admin logins
-  name their source, because that one is unactionable without an address to firewall.
+  DEBUG — a public instance must not accumulate a record of who listened and when. Recorder
+  addresses may appear on ingest routes, and refused admin logins name their source, because
+  that one is unactionable without an address to firewall.
 
 A filter the logger cannot parse **refuses to boot** and names the layer it came from — an
 operator who asked for TRACE and silently got INFO debugs the wrong log.

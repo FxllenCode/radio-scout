@@ -65,7 +65,6 @@ use crate::ingest::IngestConfig;
 use crate::logsink;
 use crate::mining::MiningConfig;
 use crate::observability::{self, LogConfig};
-use crate::push::PushConfig;
 use crate::retention::{self, RetentionConfig};
 
 /// Radio-Scout's command line. Every flag here overrides the same setting from
@@ -401,7 +400,6 @@ pub struct Config {
     pub retention: RetentionConfig,
     pub ingest: IngestConfig,
     pub admin: AdminConfig,
-    pub push: PushConfig,
     pub enhancement: EnhancementConfig,
     pub mining: MiningConfig,
     pub downstream: DownstreamConfig,
@@ -491,18 +489,6 @@ impl Config {
                 "mining.batch_size",
                 "0",
                 "a positive number of Calls per batch",
-            ));
-        }
-        // RFC 8292 §2.1: `sub` is a contact URI. A push service that refuses a
-        // token over it fails *every* notification, silently, hours later.
-        if !["mailto:", "https://"]
-            .iter()
-            .any(|scheme| self.push.subject.starts_with(scheme))
-        {
-            return Err(ConfigError::invalid_key(
-                "push.subject",
-                &self.push.subject,
-                EXPECTED_SUBJECT,
             ));
         }
         // Zero admits nothing, so enhancement would be configured on and never
@@ -929,36 +915,6 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
-        key: "push.coalesce_secs",
-        var: "RADIO_SCOUT_PUSH_COALESCE_SECS",
-        expected: "a number of seconds",
-        example: "60",
-        set: |setting, config, value| {
-            config.push.coalesce = Duration::from_secs(setting.parse(value)?);
-            Ok(())
-        },
-    },
-    Setting {
-        key: "push.ttl_secs",
-        var: "RADIO_SCOUT_PUSH_TTL_SECS",
-        expected: "a number of seconds",
-        example: "600",
-        set: |setting, config, value| {
-            config.push.ttl = Duration::from_secs(setting.parse(value)?);
-            Ok(())
-        },
-    },
-    Setting {
-        key: "push.subject",
-        var: "RADIO_SCOUT_PUSH_SUBJECT",
-        expected: EXPECTED_SUBJECT,
-        example: "mailto:you@example.com",
-        set: |_, config, value| {
-            config.push.subject = value.to_string();
-            Ok(())
-        },
-    },
-    Setting {
         key: "enhancement.mode",
         var: "RADIO_SCOUT_ENHANCEMENT_MODE",
         expected: EXPECTED_MODE,
@@ -1107,13 +1063,13 @@ pub fn rejected(key: &str, value: impl std::fmt::Display, expected: &str) -> Str
 
 /// A whole number of seconds in the file, a [`Duration`] in the type.
 ///
-/// Seven settings across `[retention]`, `[admin]` and `[push]` are written by an
-/// operator as seconds and used by the code as a `Duration`. Before #87 each one
-/// was a `u64` field on a mirrored section type plus a `Duration::from_secs` in
-/// a translation function; this is that conversion, once, so a section and the
+/// Settings across `[retention]` and `[admin]` are written by an operator as
+/// seconds and used by the code as a `Duration`. Before #87 each one was a
+/// `u64` field on a mirrored section type plus a `Duration::from_secs` in a
+/// translation function; this is that conversion, once, so a section and the
 /// subsystem it configures can be the same type without either giving up its
 /// own units. The `_secs` suffix stays on the TOML key — it is the unit an
-/// operator is being asked for, and dropping it would rename seven settings.
+/// operator is being asked for, and dropping it would rename every one of them.
 ///
 /// Sub-second precision is deliberately not offered: nothing here is a timing
 /// knob, and `session_max_secs = 604800.5` is a typo rather than an intention.
@@ -1173,12 +1129,6 @@ impl std::fmt::Debug for Database {
             .finish()
     }
 }
-
-/// What an unusable `[push] subject` is told it should have been. RFC 8292
-/// §2.1: `sub` is a contact URI, and a push service that refuses a token over
-/// it fails *every* notification, silently, hours later.
-const EXPECTED_SUBJECT: &str =
-    "a contact URI: \"mailto:you@example.com\" or \"https://example.com/contact\"";
 
 /// What an unusable `[enhancement] mode` is told it should have been.
 ///
@@ -1499,29 +1449,6 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # that peer in [server] trusted_proxies.
 # lockout_attempts = 5
 # lockout_secs = 900
-
-[push]
-# Web Push notifications for a phone that has the app installed (#16). The
-# identity notifications are signed with is NOT here: first run generates one
-# and writes it to the env file as RADIO_SCOUT_VAPID_PRIVATE_KEY, exactly like
-# the ingest key. Delete that line and the next boot makes a new one — which
-# every browser that had already subscribed will no longer be notified by.
-#
-# Notifications only go to a listener who is *not* listening: a device with the
-# live feed open already has the Call.
-
-# At most one notification per Talkgroup per device in this window, carrying a
-# count of the Calls it stands for. 0 notifies about every Call.
-# coalesce_secs = 300
-
-# How long a push service should hold a notification for a phone that is off or
-# out of signal before giving up.
-# ttl_secs = 3600
-
-# The contact a push service's operator can reach you through (RFC 8292 asks
-# for a mailto: or https: URI). Some services refuse notifications without a
-# real one, so set it if you use a public instance.
-# subject = "mailto:admin@localhost"
 
 [enhancement]
 # Audio enhancement (#20): reprocess each Call's audio after it is stored, to
@@ -1937,7 +1864,6 @@ mod tests {
         assert_eq!(config.enhancement, EnhancementConfig::default());
         assert_eq!(config.storage.s3, S3Config::default());
         assert_eq!(config.admin, AdminConfig::default());
-        assert_eq!(config.push, PushConfig::default());
         assert_eq!(config.retention, RetentionConfig::default());
     }
 
@@ -2448,58 +2374,24 @@ mod tests {
         assert_eq!(admin.lockout, Duration::from_secs(30));
     }
 
-    /// Web Push (#16). The window is the anti-storm knob and the subject is
-    /// what a push service's operator contacts ours through, so both have to be
-    /// settable on a headless install.
+    /// A section this Instance no longer has is an unknown key, and an unknown
+    /// key refuses to boot naming itself (#107, ADR-0014).
+    ///
+    /// This is the upgrade path from 0.1.0: an Operator who uncommented
+    /// anything under `[push]` finds out at the boot that removes it rather
+    /// than by wondering why a setting stopped applying. Strict validation
+    /// earns its keep exactly here, so there is no shim — and the message has
+    /// to name the key, or the refusal sends them hunting.
     #[test]
-    fn push_coalescing_and_contact_are_configurable() {
-        let config = resolve(
-            &cli(&[]),
-            no_env,
-            Some(&file(
-                "[push]\ncoalesce_secs = 60\nttl_secs = 120\nsubject = \"mailto:ops@example.com\"\n",
-            )),
-        )
-        .expect("resolve");
-
-        let push = config.push;
-        assert_eq!(push.coalesce, Duration::from_secs(60));
-        assert_eq!(push.ttl, Duration::from_secs(120));
-        assert_eq!(push.subject, "mailto:ops@example.com");
-    }
-
-    /// RFC 8292 requires `sub` to be a `mailto:` or `https:` URI, and some push
-    /// services refuse a token without one — which would surface as every
-    /// notification silently failing, long after the boot that misconfigured
-    /// it.
-    #[rstest]
-    #[case("ops@example.com")] // an address, not a URI
-    #[case("http://example.com/contact")] // not TLS
-    #[case("")]
-    fn a_contact_that_is_not_a_uri_refuses_to_boot(#[case] subject: &str) {
+    fn a_removed_section_refuses_to_boot_and_names_the_key() {
         let error = resolve(
             &cli(&[]),
             no_env,
-            Some(&file(&format!("[push]\nsubject = \"{subject}\"\n"))),
+            Some(&file("[push]\ncoalesce_secs = 300\n")),
         )
-        .expect_err("an unusable contact");
+        .expect_err("a section that no longer exists");
 
-        assert!(error.to_string().contains("push.subject"), "{error}");
-        assert!(error.to_string().contains("mailto:"), "{error}");
-    }
-
-    /// Zero is a legitimate window — "tell me about everything" — and must not
-    /// be mistaken for the impossible values `[admin]` refuses.
-    #[test]
-    fn a_zero_coalescing_window_is_allowed() {
-        let config = resolve(
-            &cli(&[]),
-            no_env,
-            Some(&file("[push]\ncoalesce_secs = 0\n")),
-        )
-        .expect("resolve");
-
-        assert_eq!(config.push.coalesce, Duration::ZERO);
+        assert!(error.to_string().contains("push"), "{error}");
     }
 
     /// Every one of these bricks the admin surface at zero — a session already
@@ -3495,8 +3387,6 @@ mod tests {
     #[case::session_idle_secs(&[("RADIO_SCOUT_ADMIN_SESSION_IDLE_SECS", "60")], |c: &Config| assert_eq!(c.admin.session_idle, Duration::from_secs(60)))]
     #[case::session_max_secs(&[("RADIO_SCOUT_ADMIN_SESSION_MAX_SECS", "600")], |c: &Config| assert_eq!(c.admin.session_max, Duration::from_secs(600)))]
     #[case::lockout_secs(&[("RADIO_SCOUT_ADMIN_LOCKOUT_SECS", "30")], |c: &Config| assert_eq!(c.admin.lockout, Duration::from_secs(30)))]
-    #[case::coalesce_secs(&[("RADIO_SCOUT_PUSH_COALESCE_SECS", "60")], |c: &Config| assert_eq!(c.push.coalesce, Duration::from_secs(60)))]
-    #[case::ttl_secs(&[("RADIO_SCOUT_PUSH_TTL_SECS", "120")], |c: &Config| assert_eq!(c.push.ttl, Duration::from_secs(120)))]
     #[case::database_level(&[("RADIO_SCOUT_LOG_DATABASE_LEVEL", "warn")], |c: &Config| assert_eq!(c.log.database_level.level(), Some(Level::WARN)))]
     #[case::proxy_list(&[("RADIO_SCOUT_TRUSTED_PROXIES", "10.0.0.1, 172.17.0.0/16")], |c: &Config| {
         assert!(c.trusted_proxies().trusts(ip("10.0.0.1")));

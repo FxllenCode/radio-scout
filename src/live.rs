@@ -52,7 +52,6 @@ use tracing::{Instrument, Span, debug, info, warn};
 
 use crate::AppState;
 use crate::call::{Emission, StoredCall};
-use crate::db::repo;
 use crate::selection::Selection;
 
 /// Live-feed protocol version, announced in the `hello` frame. Bumped on a
@@ -237,9 +236,9 @@ pub(crate) enum Event<'a> {
 /// What the adapter is to do about an [`Event`].
 ///
 /// Deliberately small, and deliberately *ordered*: a list is a sequence, so
-/// "release the push claim before taking the next one" is a property of the
-/// value this returns rather than a comment above two statements that could be
-/// swapped without a test noticing.
+/// "acknowledge the subscription before the Backfill it asked for" is a
+/// property of the value this returns rather than a comment above two
+/// statements that could be swapped without a test noticing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Action {
     /// Send this text frame to the client.
@@ -249,12 +248,6 @@ pub(crate) enum Action {
     /// Read the **Backfill** from this cursor and feed it back as
     /// [`Event::Backfilled`].
     Backfill(Emission),
-    /// Let go of the push subscription this connection was standing in for.
-    Release,
-    /// Stand in for the push subscription this token names (#16) — while the
-    /// socket is open its Listener is demonstrably listening, and is not
-    /// notified.
-    Claim(String),
     /// End the connection.
     Close,
 }
@@ -345,28 +338,14 @@ impl Connection {
     /// the protocol is versioned and expected to grow, and a frame nobody
     /// understands must never end a connection.
     fn on_text(&mut self, text: &str) -> Vec<Action> {
-        let Ok(ClientMessage::Sub {
-            sel,
-            all,
-            since,
-            push,
-        }) = serde_json::from_str::<ClientMessage>(text)
+        let Ok(ClientMessage::Sub { sel, all, since }) =
+            serde_json::from_str::<ClientMessage>(text)
         else {
             return Vec::new();
         };
         self.sub = Selection { sel, all };
 
-        let mut actions = Vec::with_capacity(4);
-        // **Released before the next claim is taken.** Re-subscribing with the
-        // subscription this socket already holds would otherwise take it and
-        // then immediately hand it back as the old claim dropped — leaving a
-        // Listener with the feed open being notified about Calls they are
-        // watching arrive. The order is a property of this value, so it is
-        // asserted rather than reviewed.
-        actions.push(Action::Release);
-        if let Some(token) = push {
-            actions.push(Action::Claim(token));
-        }
+        let mut actions = Vec::with_capacity(3);
         // Protocol detail, so DEBUG (ADR-0011 rule 7): a Listener re-subscribes
         // every time they toggle a Talkgroup. The shape of the Selection, never
         // its contents — what someone listens to is theirs (rule 5's spirit).
@@ -514,14 +493,6 @@ enum ClientMessage {
         /// delayed.
         #[serde(default)]
         since: Option<Emission>,
-        /// The token of the Listener's push subscription (#16), if they have
-        /// one. While this socket is open they are demonstrably listening, so
-        /// the push sender leaves them alone; when it closes — a shut tab, or
-        /// the heartbeat reaping a phone iOS suspended — notifications take
-        /// over. A **token**, not an Id: an Id is sequential, and a client that
-        /// could name any subscription could silence any Listener.
-        #[serde(default)]
-        push: Option<String>,
     },
 }
 
@@ -706,13 +677,9 @@ enum Flow {
 async fn run_connection(mut socket: impl Socket, state: AppState, scope: AccessScope) {
     let mut receiver = state.live.subscribe();
     let mut conn = Connection::new(scope);
-    // The Listener's claim on their push subscription, held for as long as this
-    // connection is. Dropping it (any way this function returns) is what hands
-    // them back to the push sender (#16).
-    let mut attached: Option<crate::push::Attached> = None;
 
     let opening = conn.on(Event::Opened);
-    if !carried_on(perform(&mut socket, &state, &mut conn, &mut attached, opening).await) {
+    if !carried_on(perform(&mut socket, &state, &mut conn, opening).await) {
         return;
     }
 
@@ -733,7 +700,7 @@ async fn run_connection(mut socket: impl Socket, state: AppState, scope: AccessS
             Wake::Broadcast(result) => conn.on(Event::Broadcast(result)),
             Wake::Tick => conn.on(Event::Tick),
         };
-        if !carried_on(perform(&mut socket, &state, &mut conn, &mut attached, actions).await) {
+        if !carried_on(perform(&mut socket, &state, &mut conn, actions).await) {
             break;
         }
     }
@@ -755,7 +722,6 @@ async fn perform(
     socket: &mut impl Socket,
     state: &AppState,
     conn: &mut Connection,
-    attached: &mut Option<crate::push::Attached>,
     actions: Vec<Action>,
 ) -> Result<Flow, Disconnected> {
     let mut queue = VecDeque::from(actions);
@@ -763,18 +729,6 @@ async fn perform(
         match action {
             Action::Send(text) => socket.send(Outbound::Text(text)).await?,
             Action::Ping => socket.send(Outbound::Ping).await?,
-            Action::Release => {
-                attached.take();
-            }
-            Action::Claim(token) => {
-                // A token nobody holds attaches nothing — silently, because a
-                // stale token is what a client that unsubscribed on another
-                // device has.
-                *attached = repo::push_subscription_id(&state.db, &token)
-                    .await
-                    .unwrap_or_default()
-                    .map(|subscription| state.push.attach(subscription));
-            }
             Action::Backfill(since) => {
                 let page = read_backfill(&state.db, since).await;
                 queue.extend(conn.on(Event::Backfilled(page)));
@@ -845,6 +799,7 @@ async fn read_backfill(db: &crate::db::Db, since: Emission) -> Backfill {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::repo;
     use crate::testing::LogCapture;
     use rstest::rstest;
 
@@ -1206,21 +1161,15 @@ mod tests {
         assert_eq!(greeting[0]["heartbeatMs"], HEARTBEAT.as_millis() as u64);
     }
 
-    /// A `sub` acks and does nothing else when it names neither a push
-    /// subscription nor a cursor — the ordinary first connect.
+    /// A `sub` acks and does nothing else when it names no cursor — the
+    /// ordinary first connect.
     #[test]
-    fn subscribing_acks_and_takes_no_claim() {
+    fn subscribing_acks_and_asks_for_nothing_else() {
         let mut fresh = Connection::new(AccessScope::All);
 
         let actions = fresh.on(Event::Text(r#"{"t":"sub","sel":{"11":{"100":true}}}"#));
 
-        assert_eq!(
-            actions,
-            vec![
-                Action::Release,
-                Action::Send(subscribed_frame().to_string())
-            ]
-        );
+        assert_eq!(actions, vec![Action::Send(subscribed_frame().to_string())]);
         assert!(fresh.wants(&call(11, 100)), "and the Selection is live");
     }
 
@@ -1237,27 +1186,21 @@ mod tests {
         assert!(c.wants(&call(11, 200)));
     }
 
-    /// **Release before reclaim** (#16). A Listener who re-subscribes with the
-    /// subscription this socket already holds must not be released *after* the
-    /// new claim is taken — that leaves them detached with the feed open, being
-    /// notified about Calls they are watching arrive.
+    /// A field this protocol no longer has is ignored, not fatal (#107).
     ///
-    /// An ordering in a returned list, so it is asserted rather than reviewed:
-    /// swapping the two lines that produce it fails here.
+    /// A `sub` used to carry a `push` token naming the Listener's subscription.
+    /// A 0.1.0 client cached on a phone still sends one, and the rule for an
+    /// unknown frame applies to an unknown *field*: the protocol is expected to
+    /// grow and shrink, and a key nobody understands must never cost a Listener
+    /// their connection.
     #[test]
-    fn a_push_claim_is_released_before_the_next_one_is_taken() {
+    fn a_sub_carrying_a_field_this_protocol_dropped_still_subscribes() {
         let mut fresh = Connection::new(AccessScope::All);
 
         let actions = fresh.on(Event::Text(r#"{"t":"sub","all":true,"push":"a-token"}"#));
 
-        assert_eq!(
-            actions,
-            vec![
-                Action::Release,
-                Action::Claim("a-token".to_string()),
-                Action::Send(subscribed_frame().to_string()),
-            ]
-        );
+        assert_eq!(actions, vec![Action::Send(subscribed_frame().to_string())]);
+        assert!(fresh.wants(&call(11, 100)), "and the Selection is live");
     }
 
     /// A cursor asks for a **Backfill**, *after* the ack — so a client is never
@@ -1271,7 +1214,6 @@ mod tests {
         assert_eq!(
             actions,
             vec![
-                Action::Release,
                 Action::Send(subscribed_frame().to_string()),
                 Action::Backfill(41),
             ]
@@ -1523,38 +1465,29 @@ mod tests {
     fn sub_message_parses_since_cursor() {
         let msg: ClientMessage =
             serde_json::from_str(r#"{"t":"sub","sel":{"11":{"100":true}},"since":42}"#).unwrap();
-        let ClientMessage::Sub {
-            since, all, push, ..
-        } = msg;
+        let ClientMessage::Sub { since, all, .. } = msg;
         assert_eq!(since, Some(42));
         assert!(!all);
-        assert_eq!(push, None, "a client without notifications sends none");
     }
 
-    /// The push subscription a socket stands in for (#16): while it is open, its
-    /// Listener is not notified. A token rather than an Id, so a client cannot
-    /// name a subscription it was never given.
+    /// A field this protocol dropped is ignored rather than fatal (#107): a
+    /// 0.1.0 client cached on a phone still sends the `push` token that named
+    /// its Web Push subscription, and it must still subscribe.
     #[test]
-    fn sub_message_parses_the_push_subscription() {
+    fn sub_message_ignores_a_field_this_protocol_dropped() {
         let msg: ClientMessage =
             serde_json::from_str(r#"{"t":"sub","all":true,"push":"a-token"}"#).unwrap();
-        let ClientMessage::Sub { push, .. } = msg;
-        assert_eq!(push.as_deref(), Some("a-token"));
+        let ClientMessage::Sub { all, .. } = msg;
+        assert!(all);
     }
 
     #[test]
     fn sub_message_without_since_defaults_to_none() {
         let msg: ClientMessage = serde_json::from_str(r#"{"t":"sub","all":true}"#).unwrap();
-        let ClientMessage::Sub {
-            since,
-            all,
-            sel,
-            push,
-        } = msg;
+        let ClientMessage::Sub { since, all, sel } = msg;
         assert_eq!(since, None);
         assert!(all);
         assert!(sel.is_empty());
-        assert_eq!(push, None);
     }
 
     // --- The socket edge -----------------------------------------------------

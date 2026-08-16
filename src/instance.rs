@@ -47,7 +47,6 @@ use crate::blob::AudioStore;
 use crate::config::Config;
 use crate::enhance::Enhancer;
 use crate::logsink;
-use crate::push::Push;
 use crate::retention;
 use crate::startup;
 use crate::worker::{Worker, Workers};
@@ -174,8 +173,8 @@ impl Wiring {
 /// `RADIO_SCOUT_API_KEY=` in an env file produces.
 ///
 /// This is an input rather than a `std::env::var` inside [`start`] for two
-/// reasons. A test gets a genuinely *provisioned* Instance — a real generated
-/// Web Push identity, a real env file in a directory of its own — instead of
+/// reasons. A test gets a genuinely *provisioned* Instance — a real registered
+/// ingest key, a real env file in a directory of its own — instead of
 /// subsystems assembled by hand around the provisioning step. And process
 /// environment is a global: reading it in here would make two Instances in one
 /// process impossible to configure differently, and would make every test that
@@ -193,13 +192,10 @@ pub struct Credentials {
     /// `RADIO_SCOUT_ADMIN_PASSWORD` (#19) — with none configured and none
     /// generatable, the admin surface stays shut.
     pub admin_password: Option<String>,
-    /// `RADIO_SCOUT_VAPID_PRIVATE_KEY` (#16) — the one that must be the *same*
-    /// next boot, because a browser pins its public half at subscribe time.
-    pub vapid_key: Option<String>,
 }
 
 /// Written by hand rather than derived, for the reason `blob::S3Config`'s is:
-/// three plaintext secrets live in here, and this is exactly the kind of type
+/// two plaintext secrets live in here, and this is exactly the kind of type
 /// that ends up in a `{:?}` on an error line an operator then pastes into an
 /// issue. ADR-0011 rule 2 has no exception for `Debug`.
 ///
@@ -216,13 +212,12 @@ impl std::fmt::Debug for Credentials {
             .field("env_file", &self.env_file)
             .field("ingest_key", &set(&self.ingest_key))
             .field("admin_password", &set(&self.admin_password))
-            .field("vapid_key", &set(&self.vapid_key))
             .finish()
     }
 }
 
 impl Credentials {
-    /// The three credentials as this process's environment has them, written
+    /// The two credentials as this process's environment has them, written
     /// back to `env_file` when one has to be generated.
     ///
     /// `env` is a lookup rather than a call to `std::env::var` for the reason
@@ -233,7 +228,6 @@ impl Credentials {
             env_file,
             ingest_key: env(startup::INGEST_KEY_VAR),
             admin_password: env(startup::ADMIN_PASSWORD_VAR),
-            vapid_key: env(startup::VAPID_KEY_VAR),
         }
     }
 }
@@ -549,16 +543,6 @@ async fn assemble(
         startup::provision_admin_password(parts.credentials.admin_password.as_deref(), &env_file);
     startup::log_admin_password(&admin);
 
-    // Unlike the other two, an identity that cannot be read back leaves push
-    // *off*: a new key every boot would silently orphan every subscription a
-    // browser had already pinned to the old one.
-    let vapid = startup::provision_vapid_key(parts.credentials.vapid_key.as_deref(), &env_file);
-    startup::log_vapid_key(&vapid);
-    let push = match vapid.key() {
-        Some(key) => Push::new(key, config.push.clone()),
-        None => Push::disabled(),
-    };
-
     let audio = match store {
         Some(store) => store,
         None => Arc::new(BlobStore::open(&config.storage()).map_err(StartError::Store)?),
@@ -596,14 +580,10 @@ async fn assemble(
     }
     state.trusted_proxies = config.trusted_proxies();
     state.admin = AdminAuth::provisioned(&admin, config.admin.clone());
-    state.push = push;
     state.enhancer = Enhancer::from_config(config.enhancement.clone());
     state.mining = config.mining.clone();
     state.downstreams = crate::downstream::Downstreams::new(config.downstream.clone());
     state.clock = parts.clock;
-    // Notifications ride the live-feed fanout (#16), so an ingest never waits
-    // on a push service. An Instance with no identity spawns nothing.
-    running.extend(crate::push::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     // Enhancement (#20) runs off its own queue, behind ingest rather than in
     // it. With `[enhancement] mode = "off"` — what ships — this spawns nothing,
     // and the first thing it does when it is on is pick up whatever a previous
@@ -700,17 +680,21 @@ mod tests {
         );
         assert_eq!(credentials.ingest_key.as_deref(), Some("a-key"));
         assert_eq!(credentials.admin_password.as_deref(), Some("a-password"));
-        assert_eq!(
-            credentials.vapid_key, None,
-            "a variable the environment does not set is unset, not blank"
-        );
+
+        // ...and a variable the environment does not set is unset, not blank —
+        // the difference between "the admin surface stays shut" and "the admin
+        // password is the empty string".
+        let sparse = Credentials::from_env(None, |name| {
+            (name == startup::INGEST_KEY_VAR).then(|| "a-key".to_string())
+        });
+        assert_eq!(sparse.admin_password, None);
     }
 
     /// `Debug` is written by hand precisely so a `{:?}` — in a `?` chain, an
     /// `assert!` message, a future panic handler — cannot be the thing that
     /// leaks a credential (ADR-0011 rule 2), the same bargain
-    /// `startup::AdminPassword` and `blob::S3Config` make. All three secrets,
-    /// because a redaction that covers two of three is not one.
+    /// `startup::AdminPassword` and `blob::S3Config` make. Both secrets,
+    /// because a redaction that covers one of two is not one.
     #[test]
     fn debugging_the_credential_sources_never_shows_one() {
         let credentials = Credentials::from_env(Some(PathBuf::from("/srv/.env")), |_| {
@@ -723,7 +707,7 @@ mod tests {
         // ...and *which* are set still comes through, because "the admin
         // surface is shut" and "I could not read the password you configured"
         // are different problems and this is how they are told apart.
-        assert_eq!(rendered.matches("<redacted>").count(), 3, "{rendered}");
+        assert_eq!(rendered.matches("<redacted>").count(), 2, "{rendered}");
         assert!(rendered.contains("/srv/.env"), "{rendered}");
         assert!(
             format!("{:?}", Credentials::default()).contains("unset"),

@@ -22,7 +22,6 @@ use radio_scout::instance::{self, Credentials, Wiring};
 use radio_scout::logsink::{self, StoredLevel};
 use radio_scout::retention;
 use radio_scout::startup;
-use radio_scout::webpush::VapidKey;
 use radio_scout::{BlobStore, Clock};
 use sea_orm::{EntityTrait, PaginatorTrait};
 
@@ -201,18 +200,6 @@ async fn the_first_request_the_port_accepts_is_already_provisioned() {
         200,
         "the generated admin password was not set"
     );
-
-    // ...and the Web Push identity, whose public half is what a browser pins.
-    let served = client
-        .get(url(&instance, "/api/push/key"))
-        .send()
-        .await
-        .expect("push key")
-        .json::<serde_json::Value>()
-        .await
-        .expect("json");
-    let generated = VapidKey::parse(&saved(&tmp, startup::VAPID_KEY_VAR)).expect("a saved key");
-    assert_eq!(served["key"], generated.public_base64url());
 }
 
 /// **The sink is installed before the subscriber, and drained after the
@@ -405,7 +392,7 @@ async fn stopping_an_instance_stops_and_joins_every_worker() {
         .iter()
         .map(|reading| reading.name)
         .collect();
-    assert_eq!(names.len(), 6, "all six Workers are running: {names:?}");
+    assert_eq!(names.len(), 5, "all five Workers are running: {names:?}");
 
     instance.stop().await;
 
@@ -559,50 +546,6 @@ async fn an_env_file_that_cannot_be_written_leaves_the_admin_surface_shut() {
         refused.status(),
         401,
         "an unprovisioned admin surface let somebody in"
-    );
-    // ...and the same boot leaves Web Push off, for the same reason: an
-    // identity that cannot be saved would be a different one next restart, and
-    // every subscription a browser had pinned would go quietly dead.
-    assert_eq!(
-        reqwest::get(url(&instance, "/api/push/key"))
-            .await
-            .expect("push key")
-            .status(),
-        404
-    );
-}
-
-/// **A disabled Push is a provisioning outcome too** — and this is its other
-/// route: a configured value that is not a P-256 key. A typo is a configuration
-/// mistake, but not one worth refusing to serve audio over, so notifications go
-/// off and the scanner keeps scanning.
-#[tokio::test]
-async fn a_vapid_value_that_is_not_a_key_leaves_push_off_and_the_scanner_up() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let instance = instance::start(
-        config_in(&tmp).await,
-        Wiring::default().credentials(Credentials {
-            vapid_key: Some("not-a-key".into()),
-            ..Credentials::default()
-        }),
-    )
-    .await
-    .expect("start");
-
-    assert_eq!(
-        reqwest::get(url(&instance, "/api/push/key"))
-            .await
-            .expect("push key")
-            .status(),
-        404
-    );
-    assert_eq!(
-        reqwest::get(url(&instance, "/healthz"))
-            .await
-            .expect("healthz")
-            .status(),
-        200,
-        "a typo'd push key took the whole scanner down"
     );
 }
 

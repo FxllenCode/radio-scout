@@ -27,7 +27,6 @@ pub mod logview;
 pub mod merge;
 pub mod mining;
 pub mod observability;
-pub mod push;
 pub mod query;
 pub mod retention;
 pub mod selection;
@@ -35,7 +34,6 @@ pub mod serve;
 pub mod service;
 pub mod startup;
 pub mod web;
-pub mod webpush;
 pub mod worker;
 
 #[cfg(test)]
@@ -52,7 +50,6 @@ use crate::blob::AudioStore;
 use crate::config::TrustedProxies;
 use crate::enhance::Enhancer;
 use crate::live::LiveFeed;
-use crate::push::Push;
 
 // Re-exported so the binary and the integration harness can wire the app up
 // without reaching into module paths.
@@ -72,17 +69,14 @@ pub struct AppState {
     pub trusted_proxies: TrustedProxies,
     /// The admin surface's credential and its live sessions (#19).
     pub admin: AdminAuth,
-    /// The Web Push surface: the server's VAPID identity, or nothing at all
-    /// when push is unconfigured (#16).
-    pub push: Push,
     /// The enhancement queue, or nothing at all when `[enhancement] mode` is
     /// `off` — which is what ships (#20).
     pub enhancer: Enhancer,
     /// How the **Mining** sweep walks the Archive that was already there (#48).
     pub mining: crate::mining::MiningConfig,
     /// Forwarding to **Downstream** peers (#52) — the policy and the sender's
-    /// wake-up. Unlike push and enhancement there is no disabled form: a peer is
-    /// a row, so an Instance with none has an empty roster rather than a feature
+    /// wake-up. Unlike enhancement there is no disabled form: a peer is a row,
+    /// so an Instance with none has an empty roster rather than a feature
     /// switched off.
     pub downstreams: crate::downstream::Downstreams,
     /// What time it is, for everything a handler stamps or expires (#90).
@@ -105,7 +99,6 @@ impl AppState {
             ingest,
             trusted_proxies: TrustedProxies::default(),
             admin: AdminAuth::locked(),
-            push: Push::disabled(),
             enhancer: Enhancer::disabled(),
             mining: crate::mining::MiningConfig::default(),
             downstreams: crate::downstream::Downstreams::default(),
@@ -118,20 +111,8 @@ impl AppState {
     /// record that on the row, and hand it to everything that follows the
     /// live-feed fanout.
     ///
-    /// One method rather than a bare `live.publish`, for two reasons that have
-    /// converged on the same place.
-    ///
-    /// The fanout has two kinds of follower and only one of them can be counted
-    /// from inside it. A socket is served and forgotten; the Web Push sender
-    /// (#16) **owes** the Call until it has decided whether to notify, and that
-    /// debt has to be taken on *here* — where there is still one owner —
-    /// because the fanout hands every follower a clone and no clone can carry
-    /// the ticket. Without it, "no notification was sent" could only ever be a
-    /// sleep long enough to feel safe: the sender is idle both before it has
-    /// seen a Call and after it has declined one, and nothing outside could tell
-    /// which.
-    ///
-    /// And this is where a Call stops being merely *stored* and becomes
+    /// One method rather than a bare `live.publish`, because this is where a
+    /// Call stops being merely *stored* and becomes
     /// *emitted* (#94). Ingest reaches here a breath after the insert; a
     /// **Delay** (#73) will reach here whenever its policy releases the Call.
     /// Either way the emission is allocated and written down at the moment the
@@ -144,7 +125,6 @@ impl AppState {
     /// that is already stored, over a bookkeeping write, would cost the Listener
     /// far more than the missed replay does.
     pub async fn publish(&self, call: Arc<crate::call::StoredCall>) {
-        self.push.owes_a_call();
         let emitted = crate::live::Emitted {
             seq: self.live.next_emission(),
             call,
@@ -190,12 +170,6 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/unit/{system}/{ref}", get(archive::unit))
         .route("/api/call/{id}/audio", get(serve::audio))
         .route("/api/call/{id}/download", get(archive::download))
-        // Web Push (#16): the listener-facing half. Unauthenticated like the
-        // rest of listening (ADR-0008) — what it grants is notifications to a
-        // device that already holds the endpoint.
-        .route("/api/push/key", get(push::key))
-        .route("/api/push/subscribe", post(push::subscribe))
-        .route("/api/push/unsubscribe", post(push::unsubscribe))
         // The way in to the admin surface, and the only route under
         // `/api/admin/` outside the session guard — there is no session yet.
         .route("/api/admin/login", post(admin::login))

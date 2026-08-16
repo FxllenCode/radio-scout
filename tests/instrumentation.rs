@@ -794,67 +794,11 @@ async fn a_backfill_that_cannot_build_its_view_says_so_and_keeps_the_socket() {
 // reaching it here meant shortening the shipped heartbeat from outside and then
 // sleeping through it.
 
-/// Rule 5 on the Web Push path (#16). A push endpoint is a stable per-device
-/// identifier — worse than an IP address, because it survives a lease — so it
-/// never appears in a log line, at any level, however the subscription is
-/// refused. The push *service* may be named on a failure, because which service
-/// is broken is the operator's problem; the device may not.
-#[tokio::test]
-async fn a_refused_push_subscription_says_why_without_naming_the_device() {
-    let capture = LogCapture::start();
-    let app = TestApp::spawn().await;
-    let endpoint = "https://push.example.net/p/a-device-nobody-else-should-see";
-
-    let response = app
-        .post_json(
-            "/api/push/subscribe",
-            serde_json::json!({
-                "endpoint": endpoint,
-                "keys": { "p256dh": "not-a-key", "auth": "BTBZMqHH6r4Tts7J_aSIgg" },
-            }),
-        )
-        .await;
-
-    assert_eq!(response.status(), 400);
-    let line = capture.only_line_containing("request refused");
-    assert!(line.contains(" WARN "), "{line}");
-    // Bare, not quoted. This is the line #92 fixed: `push::rejected` used to
-    // render its reason with `Debug`, so `reason="bad-key"` was pinned here
-    // while three other funnels rendered `reason=…` bare — and only one of the
-    // two spellings is greppable (ADR-0011 rule 6).
-    assert!(line.contains("reason=bad-key"), "{line}");
-    assert!(!line.contains("reason=\""), "quoted: {line}");
-    capture.assert_never_logged(endpoint);
-}
-
-/// A push service that says the device is gone is worth one line — the
-/// subscription's **Id**, never its endpoint — because a subscription
-/// disappearing on its own is otherwise invisible.
-#[tokio::test]
-async fn a_gone_device_is_logged_by_its_id_and_not_its_endpoint() {
-    let capture = LogCapture::start();
-    let service = common::PushService::start().await;
-    let app = TestApp::with_key("k").await;
-    let endpoint = service.endpoint();
-    app.post_json(
-        "/api/push/subscribe",
-        serde_json::json!({
-            "endpoint": endpoint,
-            "keys": { "p256dh": common::SUBSCRIBER_PUBLIC, "auth": common::SUBSCRIBER_AUTH },
-            "selection": { "all": true, "sel": {} },
-        }),
-    )
-    .await;
-    service.answer_with(410);
-
-    app.upload_ok(CallUpload::new()).await;
-
-    let line = capture.wait_for("push subscription gone").await;
-    assert!(line.contains(" INFO "), "{line}");
-    assert!(line.contains("status=410"), "{line}");
-    assert!(line.contains("subscription="), "{line}");
-    capture.assert_never_logged(&endpoint);
-}
+// Rule 5's sharpest case was the Web Push endpoint — a stable per-device
+// identifier, worse than an IP because it survives a lease — and the two tests
+// that pinned it went with #107 (ADR-0014). The rule is unchanged and its live
+// subjects are the listener IP tests above and the **Downstream** peer key,
+// which is stored recoverably and asserted on in `tests/downstream.rs`.
 
 // ---------------------------------------------------------------------------
 // Merge curation leaves a line (#50)

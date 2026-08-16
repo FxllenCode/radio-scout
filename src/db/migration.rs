@@ -8,8 +8,7 @@ use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, downstream, downstream_delivery, group,
-    log_event, push_subscription, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref,
-    unit, unit_ref,
+    log_event, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
 };
 
 pub struct Migrator;
@@ -31,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0011_units_first_class::Migration),
             Box::new(m0012_mining_leaves_a_mark::Migration),
             Box::new(m0013_downstream_peers::Migration),
+            Box::new(m0014_drop_push_subscriptions::Migration),
         ]
     }
 }
@@ -339,10 +339,19 @@ mod m0004_system_auto_populate {
     }
 }
 
-/// Web Push (#16) needs a device to survive the restart between the Call that
-/// interested it and the one that arrives at 3am — so a subscription is a row,
-/// not memory. A new table rather than a column, so the entity-derived-DDL tax
-/// m0003 and m0004 pay does not apply: nothing already exists to diverge from.
+/// Web Push (#16) needed a device to survive the restart between the Call that
+/// interested it and the one that arrives at 3am — so a subscription was a row,
+/// not memory.
+///
+/// **Kept as history, and hand-written since #107** ([ADR-0014](../../docs/adr/0014-no-notifications.md)).
+/// Web Push is gone and `push_subscription::Entity` with it, but a migration is
+/// a dated fact about what a database went through: a 0.1.0 install ran this
+/// one, `seaql_migrations` records that it did, and deleting it from the vec
+/// would make every already-migrated database disagree with the code. So the
+/// DDL that was derived from the entity is spelled out here instead, and
+/// [`m0014_drop_push_subscriptions`] undoes it a few steps later. On a fresh
+/// database that is one `CREATE` and one `DROP` at first boot, which is the
+/// price of not rewriting history.
 mod m0005_push_subscriptions {
     use super::*;
 
@@ -354,19 +363,133 @@ mod m0005_push_subscriptions {
         }
     }
 
+    /// The columns as the entity declared them, so what this emits today is what
+    /// it emitted then.
+    #[derive(DeriveIden)]
+    enum PushSubscriptions {
+        Table,
+        Id,
+        Endpoint,
+        Token,
+        P256dh,
+        Auth,
+        Selection,
+        CreatedAtMs,
+        UpdatedAtMs,
+    }
+
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            let schema = Schema::new(manager.get_database_backend());
             manager
-                .create_table(schema.create_table_from_entity(push_subscription::Entity))
+                .create_table(
+                    Table::create()
+                        .table(PushSubscriptions::Table)
+                        .if_not_exists()
+                        .col(
+                            ColumnDef::new(PushSubscriptions::Id)
+                                .big_integer()
+                                .not_null()
+                                .auto_increment()
+                                .primary_key(),
+                        )
+                        .col(
+                            ColumnDef::new(PushSubscriptions::Endpoint)
+                                .string()
+                                .not_null()
+                                .unique_key(),
+                        )
+                        .col(
+                            ColumnDef::new(PushSubscriptions::Token)
+                                .string()
+                                .not_null()
+                                .unique_key(),
+                        )
+                        .col(
+                            ColumnDef::new(PushSubscriptions::P256dh)
+                                .string()
+                                .not_null(),
+                        )
+                        .col(ColumnDef::new(PushSubscriptions::Auth).string().not_null())
+                        .col(
+                            ColumnDef::new(PushSubscriptions::Selection)
+                                .string()
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(PushSubscriptions::CreatedAtMs)
+                                .big_integer()
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(PushSubscriptions::UpdatedAtMs)
+                                .big_integer()
+                                .not_null(),
+                        )
+                        .to_owned(),
+                )
                 .await
         }
 
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
-                .drop_table(Table::drop().table(push_subscription::Entity).to_owned())
+                .drop_table(
+                    Table::drop()
+                        .table(PushSubscriptions::Table)
+                        .if_exists()
+                        .to_owned(),
+                )
                 .await
+        }
+    }
+}
+
+/// Notifications are removed, permanently ([ADR-0014](../../docs/adr/0014-no-notifications.md), #107),
+/// so the table nothing reads goes with them.
+///
+/// `if_exists`, because this has to be right on two different histories: a
+/// 0.1.0 database that ran [`m0005_push_subscriptions`] for real and holds
+/// devices, and a database created after this release, where m0005 created the
+/// table moments earlier. Both end with no table.
+///
+/// The rows are endpoints and device keys — nothing an Operator would miss, and
+/// nothing that could be restored anyway once the VAPID identity they were
+/// pinned to has gone. Dropping the table takes its two unique indexes with it
+/// on both dialects, which is why there is no hand-branched SQL here.
+mod m0014_drop_push_subscriptions {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0014_drop_push_subscriptions"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum PushSubscriptions {
+        Table,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(PushSubscriptions::Table)
+                        .if_exists()
+                        .to_owned(),
+                )
+                .await
+        }
+
+        /// Deliberately not a re-create. Down-migrating past a removed feature
+        /// would rebuild a table that nothing in this binary can read or write,
+        /// and the subscriptions it held cannot come back.
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            Ok(())
         }
     }
 }

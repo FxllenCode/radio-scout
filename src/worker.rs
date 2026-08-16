@@ -1,9 +1,10 @@
 //! One lifecycle envelope for every background worker (#93).
 //!
 //! A **Worker** (CONTEXT.md) is a background task an Instance owns. There are
-//! five — the retention sweeper, the Web Push sender, the enhancement worker,
-//! the **Mining** sweep (#48) and the operator log writer — and before this
-//! module each had invented its own answers to the same four questions: how it
+//! five — the retention sweeper, the enhancement worker, the **Mining** sweep
+//! (#48), the **Downstream** sender (#52) and the operator log writer — and
+//! before this module each had invented its own answers to the same four
+//! questions: how it
 //! is started, how it is stopped, how much work it has in hand, and how
 //! anything else knows it has settled.
 //!
@@ -87,9 +88,9 @@ impl Meter {
 
     /// Take on one item of work whose ticket nobody can hold.
     ///
-    /// The Web Push sender's only one: a Call is admitted where it is published
-    /// to the live-feed fanout, and the fanout hands every follower a clone, so
-    /// there is no single owner to give the ticket to. Its partner is
+    /// The **Downstream** sender's only one: what it owes is "I have caught up
+    /// with what was handed to me", which is not a thing any single delivery
+    /// owns, so there is nobody to give a ticket to. Its partner is
     /// [`Meter::settle`].
     pub fn admit_untracked(&self) {
         self.admitted.fetch_add(1, Ordering::Relaxed);
@@ -100,9 +101,10 @@ impl Meter {
         self.settle_n(1);
     }
 
-    /// Settle `n` at once — the Web Push sender's, when the fanout tells it how
-    /// many Calls it fell behind by. Each was admitted where it was published,
-    /// and a Call the sender will never see is not one it still owes.
+    /// Settle `n` at once — the **Downstream** sender's, when one pass
+    /// discharges every wake-up that was waiting on it. Each was admitted where
+    /// the work was handed over, and a pass that has caught up owes none of
+    /// them any longer.
     pub fn settle_n(&self, n: u64) {
         if n > 0 {
             self.settled.send_modify(|settled| *settled += n);
@@ -284,12 +286,13 @@ impl Workers {
 
 /// The right to start a Worker, held once and taken once.
 ///
-/// The double-spawn guard for a worker whose owner is `Clone`: [`crate::push`]
-/// and [`crate::enhance`] both hang off `AppState`, which is cloned into every
-/// handler, so `self`-by-value cannot be the guard there the way it is for
-/// [`crate::retention::Sweeper`]. What it holds is the piece of state a second
-/// worker must not have a second of — a queue's receiving end, a coalescer — so
-/// a second start finds it gone and starts nothing.
+/// The double-spawn guard for a worker whose owner is `Clone`:
+/// [`crate::enhance`] and [`crate::downstream`] both hang off `AppState`, which
+/// is cloned into every handler, so `self`-by-value cannot be the guard there
+/// the way it is for [`crate::retention::Sweeper`]. What it holds is the piece
+/// of state a second worker must not have a second of — a queue's receiving
+/// end, the right to drain — so a second start finds it gone and starts
+/// nothing.
 pub struct Handoff<T>(std::sync::Mutex<Option<T>>);
 
 impl<T> Handoff<T> {
@@ -426,9 +429,9 @@ impl Worker {
 /// Reverse order because that is the only ordering that is safe without knowing
 /// the dependencies: a Worker started later may have been given something an
 /// earlier one owns, never the other way round — the enhancement worker and the
-/// push sender are both handed the `AppState` the sweeper was already running
-/// beside. Teardown that ran forwards would stop a provider while a consumer
-/// was still using it.
+/// Downstream sender are both handed the `AppState` the sweeper was already
+/// running beside. Teardown that ran forwards would stop a provider while a
+/// consumer was still using it.
 ///
 /// A function rather than a loop inside `Instance::stop`, because an ordering
 /// nothing can observe is an ordering nothing can hold you to: here it has a
@@ -460,15 +463,16 @@ mod tests {
         assert_eq!(meter.load(), Load { depth: 0, done: 2 });
         assert!(meter.load().is_idle());
 
-        // Settling *nothing* must claim nothing. The push sender settles by a
-        // count the fanout hands it, and a count that turned into a phantom
-        // completed item would make `done` a number an Operator cannot trust.
+        // Settling *nothing* must claim nothing. The Downstream sender settles
+        // by a count of the wake-ups one pass discharged, and a count that
+        // turned into a phantom completed item would make `done` a number an
+        // Operator cannot trust.
         meter.settle_n(0);
         assert_eq!(meter.load(), Load { depth: 0, done: 2 });
     }
 
     /// The signal that replaces a fixed sleep. A test that means "nothing was
-    /// pushed" has to know the sender *considered* the Call and declined it,
+    /// forwarded" has to know the sender *considered* the Call and declined it,
     /// which is what waiting for the work in hand buys and what sleeping for
     /// 400ms only guesses at.
     ///
@@ -549,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn workers_are_stopped_in_reverse_order_of_starting() {
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let started: Vec<Worker> = ["retention", "push", "enhancement"]
+        let started: Vec<Worker> = ["retention", "downstream", "enhancement"]
             .into_iter()
             .map(|name| {
                 let order = order.clone();
@@ -564,7 +568,7 @@ mod tests {
 
         assert_eq!(
             *order.lock().expect("order"),
-            vec!["enhancement", "push", "retention"]
+            vec!["enhancement", "downstream", "retention"]
         );
     }
 

@@ -156,18 +156,17 @@ fn every_setting_the_docs_name_is_one_the_binary_reads() {
     }
 }
 
-/// The three credentials that are not settings.
+/// The two credentials that are not settings.
 ///
-/// First run **writes** each of these, so none has a TOML key, a default or a
-/// place in `--write-config`'s output — they live in `.env` and nowhere else
+/// First run **writes** each of these, so neither has a TOML key, a default or
+/// a place in `--write-config`'s output — they live in `.env` and nowhere else
 /// (ADR-0012). They are named here rather than derived because that is exactly
-/// what makes them different from everything in [`SETTINGS`]: a fourth appearing
-/// in `.env.example` should have to be argued for in this list.
-const WRITTEN_CREDENTIALS: &[&str] = &[
-    "RADIO_SCOUT_API_KEY",
-    "RADIO_SCOUT_ADMIN_PASSWORD",
-    "RADIO_SCOUT_VAPID_PRIVATE_KEY",
-];
+/// what makes them different from everything in [`SETTINGS`]: a third appearing
+/// in `.env.example` should have to be argued for in this list. There was one,
+/// `RADIO_SCOUT_VAPID_PRIVATE_KEY`, until #107 removed notifications
+/// (ADR-0014) — and it was the odd one out, since it had to be the *same* key
+/// next boot rather than merely secret.
+const WRITTEN_CREDENTIALS: &[&str] = &["RADIO_SCOUT_API_KEY", "RADIO_SCOUT_ADMIN_PASSWORD"];
 
 /// ...and the one variable that selects a file rather than a setting inside one.
 const CONFIG_FILE_VAR: &str = "RADIO_SCOUT_CONFIG";
