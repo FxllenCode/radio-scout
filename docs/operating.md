@@ -30,6 +30,12 @@ Two things worth knowing because they differ from what you may be used to:
   wasn't one — and then the settings that resulted. "Why isn't my setting applying?" is
   answerable from the log.
 
+> **Upgrading from 0.1.x: delete any `[push]` section.** Notifications were removed in 0.2.0
+> ([ADR-0014](adr/0014-no-notifications.md)) and `[push]` is now an unknown key, so a file that
+> still sets one **refuses to boot** and names it. Nothing else in your file changes, and any
+> push-related variables left behind in `.env` are simply never looked up, so they cost you
+> nothing. Listeners who had notifications switched on lose them; there is no replacement.
+
 ### The two credentials that are not in the file
 
 The ingest **API key** and the **admin password** live in `.env` (mode `0600`), because first

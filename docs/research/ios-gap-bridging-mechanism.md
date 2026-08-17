@@ -1,5 +1,13 @@
 # Bridging the Silent Gap on iOS — Keep‑Alive vs Managed Media Source
 
+> **Partly superseded (#107, 2026-08-16).** Wherever this file says the keep-alive's idle timeout
+> "hands off to Web Push", or names option **E — Accept suspension; Web Push only** as the honest
+> floor, there is no longer such a floor: notifications were removed permanently, see
+> [ADR-0014](../adr/0014-no-notifications.md). Past the idle timeout what follows is silence.
+> Left as written, because this is dated research rather than a claim about the product — and the
+> mechanism it actually chose (a), plus §14's real-device checklist, are unaffected: neither ever
+> involved push.
+
 **Scope:** Radio‑Scout is an installed iOS home‑screen PWA that plays a queue of short Calls (seconds each) arriving irregularly from a live WebSocket feed. iOS suspends the page shortly after audible audio stops, so the queue cannot self‑advance across a quiet gap. This document picks the gap‑bridging mechanism for [ADR‑0005](../adr/0005-client-audio-media-session-background.md) §"gap‑bridging is prototype‑decided", between:
 
 - **(a) single reused `<audio>` + inaudible keep‑alive** — the one element ADR‑0005 mandates plays an inaudible‑but‑nonzero looping asset whenever the listening queue is empty, so it never reaches `paused`/`ended`; a real Call swaps into `src` when one arrives.

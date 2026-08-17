@@ -17,7 +17,7 @@ Beyond the cutover, the product has real gaps its research phase documented from
 
 v2 makes the cutover real and the instance worth visiting. One release, planned backwards from "the maintainer's public instance runs Radio-Scout in production":
 
-Ingest grows up — the native Trunk Recorder endpoint parses everything TR knows (emergency, encrypted, priority, duration, site, signal health, over-the-air aliases), reachable from any stock TR via a shipped `uploadScript` and a first-party plugin; **channel merge** lets one Talkgroup own many member Refs (and Units own UIDs and Ranges) so patch churn and per-site duplicates collapse into one channel; **keep-best dedup** recognizes the same transmission arriving under different TGIDs and stores the best copy once. Listening grows teeth — a queue you can see, reorder by Priority, and drain with Catch-up; alerts fire on what the signal proves (emergency flags, tone-out matches — never speech, per ADR-0013) over Web Push and Webhooks. The Archive becomes a place — everything URL-addressable, calls shareable by expiring public links, ranges exportable, activity charted and scrubbable, and a **DVR** that replays any talkgroup's night gaplessly. Units become people and apparatus, not numbers. Operators get a full admin surface, a status page, Prometheus metrics, a live recorder dashboard, access codes, per-entity retention, built-in TLS, Dirwatch, the Delay policy, an embeddable player, and a Station stream. The client ships the full UI-critique sweep, so all of it is discoverable on a phone.
+Ingest grows up — the native Trunk Recorder endpoint parses everything TR knows (emergency, encrypted, priority, duration, site, signal health, over-the-air aliases), reachable from any stock TR via a shipped `uploadScript` and a first-party plugin; **channel merge** lets one Talkgroup own many member Refs (and Units own UIDs and Ranges) so patch churn and per-site duplicates collapse into one channel; **keep-best dedup** recognizes the same transmission arriving under different TGIDs and stores the best copy once. Listening grows teeth — a queue you can see, reorder by Priority, and drain with Catch-up; what the signal proves is marked on the Call (emergency flags, tone-out matches — never speech, per ADR-0013) and forwarded to Webhooks. The Archive becomes a place — everything URL-addressable, calls shareable by expiring public links, ranges exportable, activity charted and scrubbable, and a **DVR** that replays any talkgroup's night gaplessly. Units become people and apparatus, not numbers. Operators get a full admin surface, a status page, Prometheus metrics, a live recorder dashboard, access codes, per-entity retention, built-in TLS, Dirwatch, the Delay policy, an embeddable player, and a Station stream. The client ships the full UI-critique sweep, so all of it is discoverable on a phone.
 
 ## User Stories
 
@@ -25,7 +25,7 @@ Ingest grows up — the native Trunk Recorder endpoint parses everything TR know
 1. As an operator, I want Radio-Scout to forward matching Calls to my rdio-compatible Downstream peers (URL + key, scoped per System/Talkgroup), so that cutting my instance over doesn't cut my peers off.
 2. As an operator, I want the Downstream sender to queue durably and retry with backoff through a peer outage, so that a peer's downtime costs delay, not Calls.
 3. As an operator, I want a configurable cap on concurrent live-feed listeners with a clear "instance full" response, so that a busy moment degrades predictably on a Pi.
-4. As an operator, I want to name and brand my Instance (title, header, push notifications), so that listeners know whose scanner they're hearing.
+4. As an operator, I want to name and brand my Instance (title, header), so that listeners know whose scanner they're hearing.
 
 ### Ingest enrichment & correctness
 5. As an operator, I want the Trunk Recorder native endpoint to parse emergency, encrypted, priority, audio type, precise duration, per-frequency signal/error data, site, and over-the-air unit aliases, so that nothing my recorder knows is discarded.
@@ -45,11 +45,11 @@ Ingest grows up — the native Trunk Recorder endpoint parses everything TR know
 17. As an operator, I want merges curated in admin and CSV — including folding an already-auto-populated Ref into an existing Talkgroup, re-pointing its archived Calls — so that discovering churn after the fact is recoverable.
 18. As a listener, I want selection, search, dedup, blacklists, and the archive to treat merged Refs as one channel, so that a merge is invisible everywhere except the curation screen.
 
-### Alerts
-19. As a listener, I want a push notification when a Call carries the emergency flag on a talkgroup I've selected, so that an emergency button press finds me.
-20. As an operator, I want per-Talkgroup Tone profiles matched by tone-out detection (two-tone/Quick Call, pure DSP), so that a station's page-out triggers an Alert without any speech recognition.
-21. As an operator, I want Alerts delivered to configured Webhooks (with a Discord-compatible payload option) as well as Web Push, so that my community's automations hear what my listeners hear.
-22. As a listener, I want alert notifications to respect the existing rules — never pushed while I'm demonstrably listening, coalesced per talkgroup — so that alerting doesn't storm my phone.
+### Signal marks
+19. *Removed (#107); see [ADR-0014](../adr/0014-no-notifications.md). Was: a push notification when a Call carries the emergency flag on a talkgroup I've selected.*
+20. As an operator, I want per-Talkgroup Tone profiles matched by tone-out detection (two-tone/Quick Call, pure DSP), so that a station's page-out **marks** the Call it happened on, without any speech recognition.
+21. As an operator, I want marked Calls delivered to configured Webhooks (with a Discord-compatible payload option), so that my community's automations can act on what my listeners hear.
+22. *Removed (#107); see [ADR-0014](../adr/0014-no-notifications.md). Was: alert notifications respecting the suppression-while-listening and coalescing rules.*
 
 ### Listening
 23. As a listener, I want Catch-up — queued Calls played with silence trimmed at raised speed until I'm live — so that a 40-call backlog takes minutes, not an hour.
@@ -93,7 +93,7 @@ Ingest grows up — the native Trunk Recorder endpoint parses everything TR know
 53. As an operator, I want per-System and per-Talkgroup Retention overrides (unset inherits the global policy), so that Fire keeps 90 days while everything else keeps 14.
 
 ### Platform & polish
-54. As a listener, I want the full UI-critique sweep: truthful feed state everywhere (a mini-player on every tab, an explicit banner when the live feed is off), a persistent last-call card with live controls, patch provenance chips, a pre-permission push explainer, a working push deep link that plays the Call I was notified about, an install path in Settings, county-scale panel ergonomics (sticky controls, collapsible systems, virtualization, activity signals on rows), phone-grade touch targets, and screen-reader announcements of each call — so that the product's truth is visible on every screen.
+54. As a listener, I want the full UI-critique sweep: truthful feed state everywhere (a mini-player on every tab, an explicit banner when the live feed is off), a persistent last-call card with live controls, patch provenance chips, an install path in Settings, county-scale panel ergonomics (sticky controls, collapsible systems, virtualization, activity signals on rows), phone-grade touch targets, and screen-reader announcements of each call — so that the product's truth is visible on every screen.
 55. As a listener, I want hotkeys for skip, pause, avoid, hold, and replay, so that desktop listening is button-driven — and Stream Deck users get transport control through the existing media-key support, documented.
 56. As an operator, I want sixteen curated LED colors (still an enum, still test-pinned), so that color collides half as often on big systems.
 57. As an operator, I want the identity option cluster — listener count display, 12/24-hour time, talkgroup sort, playback-goes-live, display dimmer, help link — so that the instance feels like mine.
@@ -117,7 +117,7 @@ Ingest grows up — the native Trunk Recorder endpoint parses everything TR know
 
 **Downstream sender.** An rdio-dialect upload client with per-System/Talkgroup scoping, a durable on-disk queue, retry with backoff, and health surfaced on the status page. Improves on rdio's forwarder by surviving peer outages without loss. Receiving needs nothing: a peer's downstream is an uploader with an API key.
 
-**Alerts.** Evaluated on the live-feed fanout path (the push precedent — never on ingest). Emergency alerts fire from the enriched flag; tone-out detection runs in the off-path audio worker against per-Talkgroup Tone profiles and marks the Call, which then alerts. Delivery reuses Web Push (existing suppression-while-listening and coalescing rules apply, with alert-class topics) and adds Webhooks: operator-configured URLs, JSON payload with an optional Discord-compatible shape, retried with backoff, never blocking. No speech-derived triggers of any kind (ADR-0013).
+**Signal marks and Webhooks.** **Radio-Scout does not notify** ([ADR-0014](../adr/0014-no-notifications.md), #107): there is no Web Push, no device notification, and "Alert" is not a concept — what a Recorder proves about a transmission is a **mark on a Call**, shown, filtered and searched on. The emergency flag arrives enriched at ingest and is already a mark; tone-out detection runs in the off-path audio worker against per-Talkgroup Tone profiles and marks the Call the same way. **Webhooks** are the one delivery path, and they are Operator-facing rather than Listener-facing — configured URLs receiving marked Calls as JSON with an optional Discord-compatible shape, retried with backoff, never blocking, on the **Downstream** sender's durable-queue shape. No speech-derived triggers of any kind (ADR-0013).
 
 **Listening.** Priority is a queue-insert sort key. Catch-up raises playback rate and skips silence using per-Call silence maps produced by the audio worker (with a header-level fallback when absent); it engages from the queue sheet and disengages at live. Avoids and Holds join the persisted state alongside the Selection. The session log is client-side.
 
@@ -144,7 +144,7 @@ Tests assert external, observable behavior at the highest existing seam — the 
 - **Dual-dialect and real-S3** runs cover the new queries (aggregates, merges, retention passes) and the new object flows (Event freezing, exports, share links) exactly as v1's harness tests do.
 - **DSP unit seam** (the enhancement pipeline's pattern): tone-out detection against audio fixtures — synthesized tone sequences, real page-outs, and near-miss negatives; silence-map extraction likewise.
 - **Property-based and parametrized coverage** where the input space is adversarial: merge resolution (member Ref sets, ranges, overlaps), the widened dedup predicate, playlist generation, mask parsing for dirwatch.
-- **Frontend:** Vitest + RTL with MSW at the network boundary for every screen change; Vitest Browser Mode (landing with v1.0) for the DVR/gapless player and Media Session wiring; Playwright only where the worker or a standalone page is involved (embed page, share-link preview, push deep-link open).
+- **Frontend:** Vitest + RTL with MSW at the network boundary for every screen change; Vitest Browser Mode (landing with v1.0) for the DVR/gapless player and Media Session wiring; Playwright only where the worker or a standalone page is involved (embed page, share-link preview).
 - **New seam, deliberately one:** built-in TLS tests against a local ACME directory stub in its own CI job — autocert cannot be honestly tested through the harness alone. The TR plugin's build gets a CI job compiling it; its behavior is already pinned by fixtures.
 - **The iOS real-device manual gate re-runs** for the DVR player and catch-up work — any change to media-source behavior re-opens ADR-0005's checklist.
 

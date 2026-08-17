@@ -71,10 +71,9 @@ Two things follow from it being a real off:
 - **Turning it back on starts from now.** The traffic you missed is not replayed — that silence
   was the point. Whatever is happening when you switch back on is what you hear, and the archive
   under **Search** still has the rest.
-- **If you have notifications turned on, they start arriving.** Radio-Scout does not notify you
-  about Calls while your feed is open, because you are already hearing them. With the feed off
-  you are not, so your phone takes over — which makes the toggle the way to put Radio-Scout in
-  your pocket without missing the Talkgroups you care about.
+- **Nothing reaches you while it is off.** Radio-Scout does not send notifications of any kind,
+  so switching the feed back on is the only way back in. What happened meanwhile is in
+  **Search**.
 
 Your choice is remembered per **Profile** (the `?id=` in the URL), so reloading the page does
 not blast you with audio you switched off. Anyone who never touches the toggle gets the feed
@@ -130,8 +129,7 @@ Three ways to pick, and they compose:
 **ALL ON** / **ALL OFF** at the bottom, and a per-System **ALL OFF**, are the fastest way to
 start from nothing and add just what you want.
 
-Your selection is saved in this browser and survives a reload. It is also what push
-notifications use, so turning a Talkgroup off here stops notifying you about it too.
+Your selection is saved in this browser and survives a reload.
 
 ### Two independent setups in one browser
 
@@ -207,18 +205,15 @@ suspended by iOS the moment you put the phone away.
 If audio stops when you lock the phone, the usual cause is that you are running from the
 browser rather than the installed app.
 
-### Notifications
+### No notifications
 
-**Settings → Notifications** turns on Web Push. You get notified about Calls on the Talkgroups
-you selected — but **only when you are not already listening**, since a device with the live
-feed open already has the Call.
+**Radio-Scout does not notify you.** It never asks for notification permission and never wakes
+your device — there is nothing to switch on. Earlier releases (0.1.x) had Web Push and it was
+removed in 0.2.0; if your phone used to buzz for a Talkgroup and has stopped, that is why, not
+a fault. The reasoning is in [ADR-0014](adr/0014-no-notifications.md).
 
-Notifications are deliberately bounded: at most one per Talkgroup per device per window (five
-minutes by default), and each carries a count of the Calls it stands for. A system that goes
-busy can't turn into two hundred buzzes, and nothing is silently thrown away to achieve that —
-the count tells you what happened while you were away.
-
-Turning it off unsubscribes this device. Each browser and each Profile subscribes separately.
+What this means in practice: hearing a Call means having the app open with the feed on. What
+you missed while you were away is in **Search**, which is where it always was.
 
 ---
 
@@ -226,7 +221,7 @@ Turning it off unsubscribes this device. Each browser and each Profile subscribe
 
 <img src="images/settings.png" alt="The Settings screen" width="620">
 
-Currently: whether the server is reachable, and the notifications switch.
+Currently: whether the server is reachable.
 
 **Audio enhancement**, **Theme** and **Admin** are listed but not built yet — they read "soon"
 because that is honest. Enhancement *works*, but it is configured on the server rather than per

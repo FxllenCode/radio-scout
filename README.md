@@ -50,10 +50,6 @@ and backing the whole thing up stays "copy one folder".
 **A connection that notices when it dies.** Its own live-feed protocol with a heartbeat, so a
 half-open connection is detected and reconnected rather than silently delivering nothing.
 
-**Notifications that don't storm you.** Web Push to an installed phone app, coalesced to at
-most one notification per Talkgroup per device per window — each carrying a count of the calls
-it stands for, so a busy system never turns into 200 buzzes and nothing is silently dropped.
-
 **Nothing your recorder knows is thrown away.** Trunk Recorder writes the emergency and
 encrypted flags, the exact call length, priority, per-frequency decode and spike counts, and
 the aliases radios broadcast about themselves. rdio-scanner's parser reads past nearly all of
@@ -157,8 +153,9 @@ run two independent setups — a "truck" and a "desk" that share nothing.
 playable in place or downloadable. Range requests are served properly, which is what lets iOS
 seek without re-downloading.
 
-**On your phone.** Installable to the home screen, works offline for the app shell, and Web
-Push notifies you about Talkgroups you care about when you're *not* already listening.
+**On your phone.** Installable to the home screen, and works offline for the app shell.
+Radio-Scout does not send notifications — it never asks for the permission and never wakes
+your device ([ADR-0014](docs/adr/0014-no-notifications.md)).
 
 **Audio enhancement** *(off by default)*. Reprocesses stored audio so Talkgroups sit at a
 consistent loudness instead of swinging between painful and inaudible — voice band-pass plus
@@ -214,9 +211,8 @@ to change it. Two tests hold it to being complete, so a setting cannot be added 
 appearing there. An unknown key or an unparseable value **refuses to boot** and says which
 layer it came from, rather than being silently ignored.
 
-Three credentials never live in the TOML, because first run *writes* them: the ingest API key,
-the admin password, and the Web Push identity. They go to `.env`, created `0600`, with only
-the path logged.
+Two credentials never live in the TOML, because first run *writes* them: the ingest API key
+and the admin password. They go to `.env`, created `0600`, with only the path logged.
 
 ## Documentation
 
@@ -225,7 +221,7 @@ the path logged.
 | [docs/deploy.md](docs/deploy.md) | Installing: the installer, prebuilt binaries, running at boot, Docker, building from source |
 | [docs/recorders.md](docs/recorders.md) | Pointing Trunk Recorder and SDRTrunk at it |
 | [docs/operating.md](docs/operating.md) | Running it: storage, database, retention, enhancement, admin, logging, reverse proxies |
-| [docs/using.md](docs/using.md) | Using the app: selection, hold, avoid, search, notifications, installing on a phone |
+| [docs/using.md](docs/using.md) | Using the app: selection, hold, avoid, search, installing on a phone |
 | [docs/migrating-from-rdio-scanner.md](docs/migrating-from-rdio-scanner.md) | Switching over |
 | [CONTEXT.md](CONTEXT.md) | The project's vocabulary — Call, Talkgroup, Selection, Instance |
 | [docs/adr/](docs/adr/) | Why it is built the way it is |

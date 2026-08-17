@@ -22,13 +22,13 @@ Directional brief to feed into Claude Design for full mockups. Captures the desi
 1. **Live scanner (home)** — the hero. Status/LED indicator (color by system/talkgroup); LIVE + queue (`Q`) indicators; connection status; system label + talkgroup tag; talkgroup name/label; **live waveform**; frequency + TGID; unit ID; (de-emphasized) decode/spike error counts; **controls**: Hold System, Hold Talkgroup, Skip, Avoid (with timed 30/60/120m cycle), Replay, Pause; **recent history** (last 5 calls). Double-tap display → fullscreen.
 2. **Talkgroups (select)** — group/tag **category toggles** (3-state: on/off/partial), per-system talkgroup lists with on/off toggles, all-on/all-off, and a blink state for temporarily-avoided talkgroups. Drives the live-feed selection.
 3. **Search (archive)** — filters (date range, system, talkgroup, group, tag, sort); results list with play / download; playback mode; pagination. Filters cascade (system narrows talkgroup, etc.).
-4. **Settings** — connection/server status; audio-enhancement toggle; **notifications (Web Push) opt-in**; theme; access-code entry; admin/password.
-5. **First run / empty state** — friendly zero-config state ("waiting for the first call…"), and an **install-to-home-screen** prompt (important for iOS PWA + background audio + push).
+4. **Settings** — connection/server status; audio-enhancement toggle; theme; access-code entry; admin/password.
+5. **First run / empty state** — friendly zero-config state ("waiting for the first call…"), and an **install-to-home-screen** prompt (important for iOS PWA + background audio).
 
 ## Mobile/PWA specifics to reflect in mockups
 
 - **Lock-screen media controls** (Media Session): now-playing metadata (system · talkgroup) + artwork; play/pause/next/prev.
-- **Install-to-home-screen** promotion and **notification-permission** flow (both required for the iOS background/push experience).
+- **Install-to-home-screen** promotion (required for the iOS background-audio experience).
 
 ## Explicit non-goals for the visual language
 
@@ -41,7 +41,7 @@ Directional brief to feed into Claude Design for full mockups. Captures the desi
 1. **Live scanner (home)** — the hero.
 2. **Talkgroups (Select)** — the live-feed selection surface.
 3. **Search (Archive)** — browse/replay stored Calls.
-4. **Settings** — connection, audio, notifications, admin, about (may be a list → detail on mobile).
+4. **Settings** — connection, audio, admin, about (may be a list → detail on mobile).
 
 ### B. Live-scanner states/variants (each needs a visual treatment)
 5. Playing · 6. Paused (LED blinks) · 7. Idle / "listening…" (feed on, nothing playing) · 8. Live-feed OFF · 9. Playback-mode (playing from archive) · 10. Fullscreen display (double-tap) · 11. Dimmed (after inactivity) · 12. Reconnecting / "NO LINK".
@@ -52,7 +52,7 @@ Directional brief to feed into Claude Design for full mockups. Captures the desi
 15. **Admin login** — password gate for the config surface.
 16. **Talkgroup CSV import** — file picker → preview → apply.
 17. **First-run / zero-config welcome** — "waiting for the first Call…", plus the recorder-setup helper (shows API key + upload URL for Trunk Recorder/SDRTrunk).
-18. **Notification-permission explainer** — in-app rationale before the OS Web-Push prompt.
+18. *Removed (#107); see [ADR-0014](../adr/0014-no-notifications.md). Was: a notification-permission explainer.*
 19. **Install-to-home-screen (A2HS) prompt** — custom banner + iOS "Add to Home Screen" instructions.
 20. **(Optional) Queue peek** — a glance at what's queued.
 
@@ -61,7 +61,7 @@ Directional brief to feed into Claude Design for full mockups. Captures the desi
 
 ### E. OS / PWA surfaces (design specs + assets, not in-app pages)
 26. **Lock-screen / Media Session now-playing** — metadata + artwork + transport controls (iOS/Android/Bluetooth/CarPlay).
-27. **Push notification content** — the coalesced "activity on <Talkgroup>" format.
+27. *Removed (#107); see [ADR-0014](../adr/0014-no-notifications.md). Was: push notification content.*
 28. **App icon (incl. maskable), splash screen, manifest theme colors.**
 
 ### F. Responsive
@@ -70,8 +70,8 @@ Directional brief to feed into Claude Design for full mockups. Captures the desi
 ### Deferred to v2 (design later, not now)
 - Full **admin dashboard**: Systems / Talkgroups / Groups+Tags / Units / API-keys CRUD; Options; Logs viewer; import/export tools.
 - **Access-code unlock overlay** (multi-user listener PIN) + access-code management.
-- Dirwatch config, Downstreams, Alerts config.
+- Dirwatch config, Downstreams, Webhooks config.
 - **Light theme** variants.
 
 ### Suggested design order
-1 (Live) → 2 (Talkgroups) → 3 (Search) → 13 (Call detail) → 4 (Settings) → 17 (First-run) → the A2HS/notification/admin overlays → global states → OS surfaces → desktop.
+1 (Live) → 2 (Talkgroups) → 3 (Search) → 13 (Call detail) → 4 (Settings) → 17 (First-run) → the A2HS/admin overlays → global states → OS surfaces → desktop.

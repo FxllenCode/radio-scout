@@ -1,5 +1,13 @@
 # Robust Background Audio for an Installed iOS PWA — Research
 
+> **Partly superseded (#107, 2026-08-16).** Product target (3) below — Web Push to re-engage a
+> suspended app — no longer exists: notifications were removed from Radio-Scout permanently, see
+> [ADR-0014](../adr/0014-no-notifications.md). §6 (Q4), the push rows of the confidence table and
+> every "hands off to Web Push" is therefore research into a mechanism the product does not ship.
+> It is left exactly as written — this is dated primary-source research, not a claim about what
+> Radio-Scout does — and targets (1) and (2), which are what the file is mostly about, are
+> unaffected and still current.
+
 **Scope:** What is actually achievable on **current (2026) iOS Safari / installed home‑screen PWA** for Radio‑Scout's three product targets: (1) continuous call‑to‑call queue playback in the background with working lock‑screen transport; (2) an inaudible keep‑alive so playback survives quiet gaps between calls; (3) Web Push to re‑engage the user when the app is fully suspended.
 
 **Date of research:** 2026‑07‑04. iOS in the field at this date is on the **iOS 26.x** train (caniuse shows iOS Safari 26.5 as current).
