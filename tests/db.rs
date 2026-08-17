@@ -78,6 +78,81 @@ async fn connect_puts_sqlite_in_wal_with_foreign_keys_on() {
     );
 }
 
+/// **A removed feature's table is actually dropped** (#107, [ADR-0014]) — on
+/// both dialects, and on both histories it has to be right for.
+///
+/// `m0005` created `push_subscriptions` and `m0014` drops it, which means a
+/// fresh database creates the table and removes it moments later, while an
+/// 0.1.x database has held real rows in it for months. Both must end with no
+/// table, and the *upgrade* half is the one worth proving: it is the only one
+/// where the `DROP` has anything to do, and a migration that silently did
+/// nothing would look identical from a fresh install.
+///
+/// Asserted through `SchemaManager::has_table` rather than by querying the
+/// table and expecting an error, because "no such table" is spelled differently
+/// by each driver and matching on a driver's wording is what
+/// `docs/agents/dual-dialect.md` exists to warn about.
+async fn run_dropped_table_suite(url: &str) {
+    use sea_orm_migration::{MigratorTrait, SchemaManager};
+
+    const TABLE: &str = "push_subscriptions";
+
+    /// Does this database have `TABLE`? Over a plain connection, because that is
+    /// what `SchemaManager` takes — the app's own `Db` handle is a decorated
+    /// trait object (#97) and has no reason to expose the driver underneath.
+    async fn holds_the_table(url: &str) -> bool {
+        let conn = sea_orm::Database::connect(url).await.expect("connect");
+        let has = SchemaManager::new(&conn)
+            .has_table(TABLE)
+            .await
+            .expect("ask the schema");
+        conn.close().await.expect("close");
+        has
+    }
+
+    // The 0.1.x history: migrate only as far as the release that created it.
+    let old = sea_orm::Database::connect(url).await.expect("connect");
+    radio_scout::db::migration::Migrator::up(&old, Some(5))
+        .await
+        .expect("an 0.1.x schema");
+    old.close().await.expect("close");
+    assert!(
+        holds_the_table(url).await,
+        "m0005 is supposed to have created {TABLE} — without that this test \
+         proves nothing about the drop"
+    );
+
+    // ...and the upgrade an operator actually runs takes it away.
+    db::connect(url)
+        .await
+        .expect("connect + migrate")
+        .close()
+        .await
+        .expect("close");
+    assert!(!holds_the_table(url).await, "{TABLE} survived the upgrade");
+}
+
+#[tokio::test]
+async fn a_removed_features_table_is_dropped_on_sqlite() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+    run_dropped_table_suite(&url).await;
+}
+
+#[tokio::test]
+async fn a_removed_features_table_is_dropped_on_postgres_when_available() {
+    let Some(server) = common::postgres_server() else {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!(
+                "skipping Postgres dual-dialect test: TEST_POSTGRES_URL unset (needs Docker/CI)"
+            );
+        }
+        return;
+    };
+    run_dropped_table_suite(&common::create_test_database(&server).await).await;
+}
+
 #[tokio::test]
 async fn migrations_apply_and_tables_are_queryable() {
     let (db, _dir) = sqlite().await;
