@@ -29,7 +29,7 @@ pub struct Model {
     /// note.
     pub api_key: String,
     /// Which Calls reach this peer, as the same [`crate::selection::Selection`]
-    /// JSON the live feed and Web Push are scoped by. An empty document selects
+    /// JSON the live feed is scoped by. An empty document selects
     /// nothing, which is what a peer nobody has scoped yet should receive.
     pub scope: String,
     /// Forwarding is off for this peer, and nothing is queued for it.

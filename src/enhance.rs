@@ -591,7 +591,7 @@ fn encode_wav(samples: &[f32], rate: u32) -> Vec<u8> {
 
 // -- The enhancement queue and its worker ------------------------------------
 
-/// The enhancement surface, cloned into every handler — the shape [`crate::push::Push`]
+/// The enhancement surface, cloned into every handler — the shape [`crate::downstream::Downstreams`]
 /// uses, for the same reason: `None` is an instance where the feature is off,
 /// and nothing else in the app behaves differently.
 #[derive(Clone, Default)]

@@ -132,9 +132,7 @@ impl LiveFeed {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// A receiver on the fanout. Every live-feed connection takes one, and so
-    /// does the Web Push sender (#16) — a notification is decided from the same
-    /// broadcast a socket is served from.
+    /// A receiver on the fanout. Every live-feed connection takes one.
     pub fn subscribe(&self) -> broadcast::Receiver<Emitted> {
         self.tx.subscribe()
     }
@@ -143,11 +141,11 @@ impl LiveFeed {
     /// receivers is not an error — it just means nobody is connected.
     ///
     /// Deliberately **not public**: [`crate::AppState::publish`] is the way in,
-    /// because the Web Push sender follows this fanout and has to take on the
-    /// Call as work owed *before* it is handed out (#93). Reaching the fanout
-    /// directly would publish a Call the sender is never recorded as owing, and
-    /// the only symptom would be a test that asserts "nothing was notified"
-    /// passing whether or not that was true.
+    /// because a Call becomes **emitted** there (#94) — the emission is
+    /// allocated and written down at the moment it goes out, which is what makes
+    /// a **Backfill** replayable in the order Listeners actually heard things.
+    /// Reaching the fanout directly would deliver a Call that no Listener's
+    /// cursor can ever name.
     pub(crate) fn publish(&self, emitted: Emitted) {
         let _ = self.tx.send(emitted);
     }

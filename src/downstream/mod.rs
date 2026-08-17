@@ -310,7 +310,7 @@ impl std::fmt::Display for Failed {
 
 /// The forwarding subsystem, cloned into every handler.
 ///
-/// Unlike [`crate::push::Push`] and [`crate::enhance::Enhancer`] there is no
+/// Unlike [`crate::enhance::Enhancer`] there is no
 /// disabled form: a Downstream is a **row**, so an Instance with no peers is one
 /// whose roster is empty rather than one whose feature is off. The Worker it
 /// spawns sleeps until something is enqueued and costs nothing until then.

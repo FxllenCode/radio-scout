@@ -81,7 +81,8 @@ const transportSlice = createSlice({
     },
 
     /** The lull outlasted the keep-alive's budget: stop fighting the OS. What
-     *  reaches the listener after this is a Web Push (#16), not audio. */
+     *  follows is silence until the listener comes back — nothing reaches them
+     *  (ADR-0014). */
     keepAliveExpired(state) {
       state.keepAliveSpent = true
     },
@@ -155,7 +156,9 @@ export const selectIsPaused = (state: TransportRoot): boolean =>
  * rdio on a phone: it blocks exactly the process suspension iOS performs to
  * save power (research §9). Five minutes covers the lull between Calls on any
  * system worth monitoring; past that the listener has stopped listening in all
- * but name, and Web Push (#16) is the right way to reach them.
+ * but name. Past it they hear nothing until they open the app again: there is
+ * no notification to bring them back (ADR-0014), which is the cost of the
+ * budget and is recorded rather than hidden.
  */
 export const KEEP_ALIVE_LIMIT_MS = 5 * 60_000
 

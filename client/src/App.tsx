@@ -17,7 +17,7 @@ import { UnitsScreen } from '@/routes/admin/UnitsScreen'
 
 /** The app shell + the four bottom-tab destinations (docs/design/brief.md).
  *  Live (#11), Search (#13) and Talkgroups (#12) are built; Settings carries
- *  the server status, the notifications switch (#16), the operator log (#30)
+ *  the server status, the operator log (#30)
  *  and — since #49 — the admin section, which is where an Instance is run from
  *  a browser instead of over SSH. */
 export default function App() {

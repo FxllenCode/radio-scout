@@ -337,9 +337,9 @@ const liveSlice = createSlice({
      * A **hard** off, per CONTEXT.md: the Call playing stops, the queue clears,
      * and the cursor goes so that coming back starts from now rather than
      * replaying the silence. Closing the socket is `LiveFeedLink`'s half — that
-     * is what drops bandwidth and battery to zero, and what hands the listener
-     * back to Web Push, whose "an open socket means someone is listening" rule
-     * now tells the truth.
+     * is what drops bandwidth and battery to zero. Nothing takes over —
+     * Radio-Scout does not notify (ADR-0014) — so switching the feed back on is
+     * the only way back in.
      *
      * `missed` is untouched on purpose. It admits traffic the listener *wanted*
      * and did not get; silence they chose is not a gap they missed.

@@ -430,7 +430,7 @@ describe('CallPlayer', () => {
     })
     // Holding the audio session open forever is the one thing that would make
     // us worse than rdio on a phone: it blocks the suspension that exists to
-    // save power. After a long enough lull we stop, and Web Push (#16) takes
+    // save power. After a long enough lull we stop, and nothing takes
     // over the job of saying something happened.
     it('gives up the session after a long enough lull', () => {
       vi.useFakeTimers()

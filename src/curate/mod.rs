@@ -197,7 +197,7 @@ impl What {
 /// Closed, and each arm decides its own slug and status — composed into the four
 /// decisions every refusal owes by the single [`crate::failure::Reason::Curation`]
 /// arm, the way [`crate::import::ParseError`] and
-/// [`crate::webpush::InvalidSubscription`] already do. The body is JSON because
+/// [`crate::import::ParseError`] already does. The body is JSON because
 /// the client renders it **inline beside the field that caused it**, which is
 /// the acceptance criterion this type exists for: an error an Operator has to go
 /// and find in a log is one they will not find.

@@ -33,7 +33,7 @@ interface EditableRow {
  * Which Calls a **Downstream** peer gets (#52).
  *
  * The stored value is the live feed's own **Selection** matrix, so one predicate
- * scopes the feed, Web Push and forwarding alike — and a patched Call reaches a
+ * scopes the feed and forwarding alike — and a patched Call reaches a
  * peer subscribed to the channel it was patched onto, which is the bug rdio has
  * from scoping forwarding with a rule of its own.
  *

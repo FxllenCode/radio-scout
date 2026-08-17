@@ -11,7 +11,7 @@ import { StatusLed } from './StatusLed'
  *
  * Installing isn't a nicety on this app — it is the gate. iOS gives a
  * home-screen web app the standalone display mode background audio needs, and
- * Web Push (#16) is offered to nothing else. rdio-scanner's answer to that was
+ * offers it to nothing else. rdio-scanner's answer to that was
  * to ship separate native apps; ours is to ask, once, in the place a phone
  * expects to be asked: docked above the tab bar, dismissible, and remembered.
  */

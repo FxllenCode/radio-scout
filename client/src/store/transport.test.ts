@@ -271,7 +271,7 @@ describe('transport', () => {
 
     // Holding the session open forever is the one thing that would make us
     // worse than rdio on a phone. After a long enough lull we stop fighting
-    // the OS and let it suspend us; Web Push (#16) covers what follows.
+    // the OS and let it suspend us; nothing covers what follows (ADR-0014).
     it('stops bridging once the lull has gone on too long', () => {
       const store = inTheGap()
 

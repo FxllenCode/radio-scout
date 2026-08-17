@@ -245,7 +245,7 @@ pub fn now_ms() -> i64 {
 ///
 /// An Instance is wired with one and everything it assembles reads it: ingest
 /// stamps a Call with it, the Retention sweeper decides what has aged out by
-/// it, Web Push coalesces on it. That is what makes those decisions testable —
+/// it, sessions expire on it. That is what makes those decisions testable —
 /// "this Call is one hour old" is a fact a test can arrange, where "this Call
 /// is one hour old *right now*" is a sleep.
 ///

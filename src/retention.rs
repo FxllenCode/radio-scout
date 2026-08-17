@@ -377,7 +377,7 @@ pub const WORKER: &str = "retention";
 /// a second sweeper racing the first over the same archive is a compile error
 /// rather than a thing to remember not to do. That is what "double-spawn is
 /// structurally impossible" means for a worker whose owner is not `Clone`;
-/// [`crate::push`] and [`crate::enhance`] live behind a `Clone` surface and buy
+/// [`crate::enhance`] and [`crate::downstream`] live behind a `Clone` surface and buy
 /// the same guarantee at runtime instead.
 pub struct Sweeper {
     db: Db,

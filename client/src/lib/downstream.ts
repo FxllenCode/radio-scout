@@ -2,8 +2,8 @@
  * The **Downstream** screen's pure half (#52): a peer's scope as a form can edit
  * it, and its health as one line.
  *
- * The stored shape is a full [`Selection`] — the same matrix the live feed and
- * Web Push are scoped by, so one predicate decides all three and a patched Call
+ * The stored shape is a full [`Selection`] — the same matrix the live feed is
+ * scoped by, so one predicate decides both and a patched Call
  * reaches a peer subscribed to the patched channel. That matrix can express more
  * than a form should ask for, though: `all` with per-System and per-Talkgroup
  * *exceptions* is exactly right for a Listener holding a Talkgroups panel, and

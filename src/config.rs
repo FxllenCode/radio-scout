@@ -1723,7 +1723,7 @@ pub fn resolve(
 /// ([`crate::blob::S3Config`] and [`Database`]), for the same reason and by
 /// intention — a value this list will not echo out of a parse error is one no
 /// `{:?}` should hand out either. Other types redact under their own hand-written
-/// impls (`instance::Credentials`, `startup::Vapid`); they hold secrets nobody
+/// impls (`instance::Credentials`, `startup::AdminPassword`); they hold secrets nobody
 /// writes into a file, so they are not this list's business.
 const SECRET_KEYS: &[&str] = &["secret_access_key", "url"];
 

@@ -3,10 +3,12 @@
 //!
 //! It lives here rather than inside the live feed because two surfaces now ask
 //! the same question of it — the live-feed socket ([`crate::live`], #9/#11) and
-//! Web Push ([`crate::push`], #16) — and a listener who is notified about a
-//! Talkgroup the feed would not have played them is a bug that only shows up on
-//! someone's phone. The client holds the same algebra in
-//! `client/src/lib/selection.ts`, deliberately in the same shape.
+//! a **Downstream** peer's scope ([`crate::downstream`], #52) — and a peer sent
+//! traffic the feed would not have played is the same rule applied twice and
+//! getting two answers. (A third consumer, Web Push, was why this module was
+//! extracted in the first place; it went with #107, and the extraction outlived
+//! it.) The client holds the same algebra in `client/src/lib/selection.ts`,
+//! deliberately in the same shape.
 //!
 //! The wire form is the stored form (ADR-0004): `all` plus exceptions under
 //! `sel[system][talkgroup | "*"]`, so nothing is rebuilt between the socket, the
@@ -69,7 +71,8 @@ impl Selection {
     /// Yes when some Talkgroup the Call reaches — its own, or any patched one
     /// within the Call's System — is both selected and permitted. Mirrors rdio's
     /// `IsEnabled` (primary OR patch); the gate is the live feed's access scope
-    /// (ADR-0008), which Web Push has no equivalent of and passes open.
+    /// (ADR-0008), which a **Downstream** scope has no equivalent of and passes
+    /// open.
     pub fn reaches(&self, call: &StoredCall, permits: impl Fn(i64, i64) -> bool) -> bool {
         self.reaches_channels(call.system_ref, call.talkgroups(), permits)
     }

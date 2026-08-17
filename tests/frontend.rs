@@ -111,7 +111,8 @@ async fn serves_the_pwa_manifest_and_service_worker() {
     let body = manifest.text().await.expect("manifest body");
     assert!(
         body.contains("\"display\":\"standalone\""),
-        "standalone is what iOS requires for Web Push and background audio"
+        "standalone is what takes the app out of a browser tab, which is what iOS \
+         requires before it will give it background audio (ADR-0005)"
     );
 
     let worker = app.get("/sw.js").await;

@@ -282,7 +282,7 @@ pub struct StoredCall {
 impl StoredCall {
     /// Every Talkgroup this Call reaches: its own, then the ones it is patched
     /// to. What "does this listener hear it?" is asked over, on the live feed
-    /// (#9) and in Web Push (#16) alike.
+    /// (#9) and in a **Downstream** peer's scope (#52) alike.
     pub fn talkgroups(&self) -> impl Iterator<Item = i64> + '_ {
         std::iter::once(self.talkgroup_ref).chain(self.patches.iter().copied())
     }

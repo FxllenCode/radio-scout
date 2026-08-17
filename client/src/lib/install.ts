@@ -3,7 +3,7 @@
  *
  * Installing is what unlocks the rest of the mobile story: iOS gives a
  * home-screen web app the standalone display mode background audio needs, and
- * Web Push (#16) is available to *nothing else* (research §6). So the app has
+ * offers it to *nothing else* (research §6). So the app has
  * to ask — and ask well.
  */
 
@@ -54,8 +54,8 @@ function isInstalled(): boolean {
  * presence identifies the browser and its value says whether it already did —
  * a feature check, not a user-agent sniff.
  *
- * Exported because it is also the answer to "why can't I turn notifications
- * on?" (#16): iOS offers Web Push to home-screen apps and to nothing else.
+ * Exported for the banner's own copy, which has to tell an iPhone listener that
+ * the Share-sheet route is the only one there is.
  */
 export function needsHomeScreen(): boolean {
   return navigator.standalone === false

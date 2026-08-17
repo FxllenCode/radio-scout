@@ -152,7 +152,7 @@ Tests assert external, observable behavior at the highest existing seam — the 
 
 - **Transcription — banned, not deferred** (ADR-0013). No speech-to-text, and no feature that assumes transcripts exist.
 - **CarPlay / Android Auto native shell** — documented wontfix for v2; revisit only on demonstrated post-cutover demand.
-- **Alert-tones parity and keypad beeps** (rdio's nine assignable UI sounds) — backlog, demoted from cutover relevance.
+- **UI sound parity and keypad beeps** (rdio's nine assignable UI sounds — rdio calls these "alert tones"; they are audio feedback inside the app, and nothing to do with notifying anybody, which Radio-Scout does not do at all) — backlog, demoted from cutover relevance.
 - **A persistent, subscribable Patch Group entity** — keep-best dedup plus channel merge dissolve the problem; patches stay per-Call properties.
 - **Smart Playback conversation grouping** — deferred; the DVR serves the intent.
 - **Surge/activity alert rules, keyword rules, silent-system watchdog** — alerting in v2 is event-quality only (emergency, tone-out).

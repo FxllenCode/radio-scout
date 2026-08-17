@@ -317,7 +317,7 @@ pub struct PresignedUrl {
 /// can read the object until it expires. ADR-0011 rule 2 forbids a secret in a
 /// log line at any level, and a derived `Debug` would put one there the first
 /// time somebody wrote `?signed` in a `tracing` call. Same reason
-/// `webpush::Recipient` redacts an endpoint and [`S3Config`] redacts a key.
+/// [`S3Config`] redacts a key, and `instance::Credentials` redacts both of its.
 impl std::fmt::Debug for PresignedUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PresignedUrl")

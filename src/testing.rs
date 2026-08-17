@@ -41,14 +41,13 @@ pub(crate) fn sqlite_url(dir: &tempfile::TempDir) -> String {
 /// purpose (#101).
 ///
 /// **This covers two types, and it is worth knowing which two it cannot.** The
-/// crate hand-writes `Debug` nine times and most of those redact something —
-/// `instance::Credentials` holds three plaintext secrets, and
-/// `startup::AdminPassword`, `startup::Vapid`, `webpush::VapidKey`,
-/// `webpush::Recipient` and `blob::PresignedUrl` each hold one. The two this
+/// crate hand-writes `Debug` six times and most of those redact something —
+/// `instance::Credentials` holds two plaintext secrets, and
+/// `startup::AdminPassword` and `blob::PresignedUrl` each hold one. The two this
 /// gates are [`crate::config::Database`] and [`crate::blob::S3Config`], and what
 /// makes them reachable is that they *are* their TOML section (#87), so they
 /// derive `Serialize` — which is the reflection Rust does not otherwise have,
-/// and the reason this needs no macro of its own. The other seven are runtime
+/// and the reason this needs no macro of its own. The other four are runtime
 /// types with nothing to reflect over; extending the gate to them means giving
 /// them a field list by some other means, and no ticket has asked for that yet.
 ///

@@ -543,7 +543,7 @@ impl Deliveries for AppState {
             .await
             .map(|response| response.status().as_u16())
             .map_err(|error| {
-                // `without_url`, the rule [`crate::push`] follows: reqwest
+                // `without_url`, the rule ADR-0011 rule 5 sets: reqwest
                 // renders as "error sending request for url (…)", and a peer's
                 // URL is an Operator-supplied string that may carry a query
                 // parameter.
