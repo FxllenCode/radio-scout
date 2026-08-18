@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod config;
 pub mod curate;
 pub mod db;
+pub mod delivery;
 pub mod downstream;
 pub mod enhance;
 pub mod failure;

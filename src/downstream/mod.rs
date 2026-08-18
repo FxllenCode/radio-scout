@@ -8,15 +8,20 @@
 //! # The shape
 //!
 //! - [`Downstream`] is a configured peer as the sender uses it. Its scope is a
-//!   [`Selection`] — **the same type and the same rule** the live feed and Web
-//!   Push are scoped by ([`Selection::reaches_channels`]) — and [`routed_to`] is
-//!   the routing decision, purely.
+//!   [`Selection`] — **the same type and the same rule** the live feed is scoped
+//!   by ([`Selection::reaches_channels`]) — and [`routed_to`] is the routing
+//!   decision, purely.
 //! - A delivery is **enqueued inside the transaction that stores the Call**
 //!   ([`crate::db::repo::queue_deliveries`]), so "the Call exists" and "the
 //!   Call is owed to this peer" are one fact a crash cannot separate.
 //! - [`sender`] drains that queue: per peer, head first, one attempt in flight,
-//!   with [`backoff`] between tries.
+//!   with a backoff between tries.
 //! - [`dialect`] builds the rdio multipart body, and is pure.
+//!
+//! **The queue itself is [`crate::delivery`]**, shared with [`crate::webhook`]
+//! (#54): the retry policy, the ordering rule, the accounting and the loop are
+//! one implementation, and what belongs to this module is the errand — the rdio
+//! dialect, the audio object, and what a peer's scope means.
 //!
 //! # Improving on rdio-scanner
 //!
@@ -44,6 +49,10 @@
 //! neither survives a forward, to us or to rdio. An **Encrypted Call** is
 //! therefore never queued at all: it has no audio object, and the dialect
 //! requires one.
+//!
+//! That gap is also why a **Webhook** (#54) is not a Downstream with a different
+//! body: the one fact a Webhook exists to carry is the very fact this dialect
+//! has no field for.
 
 pub mod dialect;
 pub mod sender;
@@ -53,8 +62,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::delivery::{Dispatcher, Retry};
 use crate::selection::Selection;
-use crate::worker::Meter;
 
 /// What this Worker is called on a status surface (#93, #70).
 pub const WORKER: &str = "downstream";
@@ -106,31 +115,14 @@ impl Default for DownstreamConfig {
 }
 
 impl DownstreamConfig {
-    /// How long after `attempts` failures the next try is due.
-    ///
-    /// Exponential from [`DownstreamConfig::retry_initial`], capped at
-    /// [`DownstreamConfig::retry_max`]. Pure, and separated from the sender for
-    /// the reason every policy here is: the interesting cases are the extremes —
-    /// the first retry, the hundredth, and a configuration whose initial delay
-    /// is already above its own cap — and none of them is reachable by leaving a
-    /// peer down for an afternoon.
-    pub fn backoff(&self, attempts: i32) -> Duration {
-        let initial = self.retry_initial;
-        if initial.is_zero() {
-            return Duration::ZERO;
+    /// How hard a peer is tried again — this section's two retry settings as
+    /// the shared queue reads them ([`Retry`], where the doubling itself lives
+    /// and is tested).
+    pub fn retry(&self) -> Retry {
+        Retry {
+            initial: self.retry_initial,
+            max: self.retry_max,
         }
-        // `attempts` is the count *including* the one that just failed, so the
-        // first retry waits exactly `retry_initial`. Shifting is bounded before
-        // it is applied: a peer down for a week reaches attempt counts that
-        // would overflow a doubling long before they reach the cap by
-        // arithmetic.
-        // 31, not 32: the shift below is on a `u32`, and `1u32 << 32` is not a
-        // large number, it is a panic. A peer down for a week reaches attempt
-        // counts far past either bound, and nothing on this path may be the
-        // thing that brings a scanner down.
-        let doublings = attempts.saturating_sub(1).clamp(0, 31) as u32;
-        let scaled = initial.saturating_mul(1u32 << doublings);
-        scaled.min(self.retry_max.max(initial))
     }
 }
 
@@ -162,6 +154,12 @@ pub struct Downstream {
     pub url: String,
     pub api_key: String,
     pub scope: Selection,
+}
+
+impl crate::delivery::Sink for Downstream {
+    fn id(&self) -> i64 {
+        self.id
+    }
 }
 
 impl Downstream {
@@ -208,142 +206,22 @@ pub fn routed_to(peers: &[Downstream], system_ref: i64, talkgroups: &[i64]) -> V
         .collect()
 }
 
-/// What a peer's answer means for the delivery that produced it — **the whole
-/// retry policy**, as one closed decision.
-///
-/// The split that matters is not "did it work" but **"will the same bytes ever
-/// be accepted?"**. A peer answering `401` has an Operator who mistyped a key
-/// and will fix it, so the backlog must survive; a peer answering `417
-/// Incomplete call data` is telling us this Call is unacceptable and will say so
-/// forever, and retrying it blocks every Call behind it for as long as the peer
-/// exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    /// The peer took it. The queue row goes.
-    Delivered,
-    /// Not now. The row stays and is tried again after [`DownstreamConfig::backoff`].
-    Retry,
-    /// Not ever. The row goes, with a line saying why — because unlike a
-    /// retry, this one loses a Call, and nothing else would record it.
-    Abandon,
-}
-
-impl Verdict {
-    /// What an HTTP status from a peer means.
-    pub fn of_status(status: u16) -> Verdict {
-        match status {
-            200..=299 => Verdict::Delivered,
-            // The body is the problem, and it will not change: rdio answers 417
-            // `Incomplete call data` for a Call it cannot use, and 400/413/415/422
-            // are the standard spellings of the same thing. Retrying wedges the
-            // queue behind a Call the peer has already judged.
-            400 | 413 | 415 | 417 | 422 => Verdict::Abandon,
-            // Everything else is the peer or the path *right now* — a wrong key
-            // (401/403), a wrong URL (404), a restart (502/503), a rate limit
-            // (429). All of them are things an Operator fixes, and the backlog
-            // is what makes fixing them worth doing.
-            _ => Verdict::Retry,
-        }
-    }
-}
-
-/// Why a delivery ended, as one word — the slug a log line carries and the
-/// admin screen shows, so the two cannot describe the same event differently.
-///
-/// A closed vocabulary rather than a formatted sentence, for ADR-0011 rule 6:
-/// `reason=peer-refused` greps and `"the peer refused it"` does not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Failed {
-    /// The peer answered, unhappily. Carries the status, because "which 4xx" is
-    /// the whole diagnostic and an Operator has to see it beside the slug.
-    Status(u16),
-    /// The request never got an answer — DNS, connection refused, TLS, timeout.
-    Unreachable,
-    /// The Call is no longer in the Archive, or its audio object is not there.
-    /// Retention is entitled to prune a Call a peer has been down longer than.
-    Vanished,
-    /// The Archive could not be read at all. Distinct from [`Failed::Vanished`]
-    /// because one is a Call that is gone and the other is a database that is
-    /// not answering, and only the second is worth waking anybody for.
-    Unreadable,
-}
-
-impl Failed {
-    /// The machine-readable slug.
-    pub fn slug(&self) -> &'static str {
-        match self {
-            Failed::Status(_) => "peer-refused",
-            Failed::Unreachable => "peer-unreachable",
-            Failed::Vanished => "call-gone",
-            Failed::Unreadable => "archive-unreadable",
-        }
-    }
-
-    /// What this failure does to the delivery.
-    pub fn verdict(&self) -> Verdict {
-        match self {
-            Failed::Status(status) => Verdict::of_status(*status),
-            Failed::Unreachable | Failed::Unreadable => Verdict::Retry,
-            // There is nothing left to send and nothing that will bring it
-            // back.
-            Failed::Vanished => Verdict::Abandon,
-        }
-    }
-}
-
-impl std::fmt::Display for Failed {
-    /// What gets stored on the row and shown to an Operator — the slug, plus
-    /// the status where there is one.
-    ///
-    /// **Never the transport error.** reqwest's own `Display` renders as "error
-    /// sending request for url (…)", and while a peer's host is not a listener's
-    /// address, its URL is an Operator-supplied string that may carry a query
-    /// parameter. The slug says everything actionable: a peer that cannot be
-    /// reached is a peer that cannot be reached.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Failed::Status(status) => write!(f, "{} ({status})", self.slug()),
-            other => f.write_str(other.slug()),
-        }
-    }
-}
-
 /// The forwarding subsystem, cloned into every handler.
 ///
-/// Unlike [`crate::enhance::Enhancer`] there is no
-/// disabled form: a Downstream is a **row**, so an Instance with no peers is one
-/// whose roster is empty rather than one whose feature is off. The Worker it
-/// spawns sleeps until something is enqueued and costs nothing until then.
+/// Unlike [`crate::enhance::Enhancer`] there is no disabled form: a Downstream
+/// is a **row**, so an Instance with no peers is one whose roster is empty
+/// rather than one whose feature is off. The Worker it spawns sleeps until
+/// something is enqueued and costs nothing until then.
 ///
-/// It does share their double-spawn guard, though — see [`Inner::start`].
+/// It is this section's configuration wrapped around a [`Dispatcher`] — the
+/// accounting, the wake-up, the shared HTTP client and the double-spawn guard,
+/// all of which [`crate::webhook::Webhooks`] is the same thing wrapped around
+/// (#54). Those are the parts with the most ways to be subtly wrong, so they are
+/// wrong or right in exactly one place.
 #[derive(Clone)]
-pub struct Downstreams(Arc<Inner>);
-
-struct Inner {
+pub struct Downstreams {
     config: DownstreamConfig,
-    /// Attempts owed — see [`Downstreams::owes`] for what one unit of this
-    /// Worker's work is.
-    meter: Arc<Meter>,
-    /// Poked when something is enqueued, so a Call is forwarded the moment it
-    /// is stored rather than on the next timer.
-    wake: tokio::sync::Notify,
-    /// One client for the life of the Instance, so a peer's TLS session and
-    /// connection are reused across deliveries rather than renegotiated per
-    /// Call — which on a Pi forwarding a Call a second is most of the cost.
-    client: reqwest::Client,
-    /// Deliveries that have left the queue since this Instance started — see
-    /// [`Downstreams::deliveries_settled`].
-    settled: tokio::sync::watch::Sender<u64>,
-    /// The right to be the sender, taken once by [`sender::spawn`] (#93).
-    ///
-    /// `Downstreams` is `Clone` and hangs off `AppState`, so `self`-by-value
-    /// cannot be the guard here the way it is for `retention::Sweeper`. What
-    /// this holds is the right to *drain*, and two holders would be worse than
-    /// merely wasteful: they would each attempt the same head, so a peer would
-    /// receive one Call twice and the in-order promise would stop being one —
-    /// and [`Downstreams::woken`] is a `notify_one`, so a wake-up would go to
-    /// one of them rather than to both.
-    start: crate::worker::Handoff<()>,
+    dispatch: Arc<Dispatcher>,
 }
 
 impl Default for Downstreams {
@@ -354,178 +232,34 @@ impl Default for Downstreams {
 
 impl Downstreams {
     pub fn new(config: DownstreamConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()
-            // A builder carrying nothing but a timeout has no failure mode of
-            // its own — `build` reports a TLS backend that will not initialise
-            // or a malformed proxy setting, and this configures neither.
-            .expect("an HTTP client with only a timeout configured");
-        Downstreams(Arc::new(Inner {
-            config,
-            meter: Meter::new(),
-            wake: tokio::sync::Notify::new(),
-            client,
-            settled: tokio::sync::watch::Sender::new(0),
-            start: crate::worker::Handoff::new(()),
-        }))
+        let dispatch = Dispatcher::new(config.timeout);
+        Downstreams { config, dispatch }
     }
 
-    /// What the sender owes, for the Worker envelope and the status registry.
-    pub fn meter(&self) -> Arc<Meter> {
-        self.0.meter.clone()
-    }
-
-    /// Claim the right to be the sender. `None` means one is already running.
-    pub(crate) fn claim(&self) -> Option<()> {
-        self.0.start.take()
-    }
-
-    /// The client every delivery is sent with.
-    pub fn client(&self) -> &reqwest::Client {
-        &self.0.client
-    }
-
-    /// Resolves the next time something is queued.
-    ///
-    /// `notify_one` **stores a permit** when nobody is waiting, so a Call queued
-    /// while the sender was mid-attempt still wakes it on the next pass rather
-    /// than waiting for a backoff that may be minutes away. That is the whole
-    /// reason this is a `Notify` and not a channel the sender might have been
-    /// looking away from.
-    pub async fn woken(&self) {
-        self.0.wake.notified().await;
+    /// The queue's accounting, its wake-up and its client.
+    pub fn dispatch(&self) -> Arc<Dispatcher> {
+        self.dispatch.clone()
     }
 
     /// Note that `count` deliveries have been queued, and wake the sender.
     ///
-    /// **One unit of this Worker's work is "the sender has caught up with what
-    /// was handed to it"** — not one delivery, and not one attempt. Getting this
-    /// right took two wrong answers, and both are worth writing down because
-    /// both look obviously correct:
-    ///
-    /// - *One admission per delivery, settled when it lands.* A peer that is
-    ///   down never lands anything, so the Worker never goes idle and
-    ///   `app.settle()` (#93) hangs for **every** test in the suite the moment
-    ///   one peer is unreachable.
-    /// - *One admission per delivery, settled when it has been attempted.* Only
-    ///   the **head** of a peer's queue is ever attempted — that is what makes
-    ///   in-order draining true — so three queued Calls behind a stuck head hold
-    ///   two admissions that nothing will ever settle. Same hang, harder to see.
-    ///
-    /// So an admission means "there is something new for you to look at", and
-    /// the sender discharges it by *looking*: [`sender`] settles everything
-    /// outstanding at the end of any pass that leaves nothing in flight. On a
-    /// working peer that is after the queue has drained, because a pass with an
-    /// attempt running never settles; on a peer that is down it is after one
-    /// attempt has failed, which is exactly the honest answer — the sender has
-    /// caught up, and what it caught up to is a backlog.
-    ///
-    /// A **retry** is therefore deliberately outside this accounting: nobody
-    /// handed it over, and counting it is the first wrong answer above. What a
-    /// test waits on to watch a recovery is
-    /// [`Downstreams::deliveries_settled`].
-    ///
-    /// The Operator-facing **queue depth** is a different number entirely:
-    /// `COUNT(*)` on the queue table, per peer, which is what the admin screen
-    /// shows and what survives a restart.
-    ///
-    /// Called **after** the storing transaction has committed, never inside it:
-    /// an admission for a delivery that then rolled back would be a debt nothing
-    /// could ever settle, and every later `settle()` in the process would wait
-    /// on it forever.
+    /// [`Dispatcher::owes`] is where *what one unit of this Worker's work is*
+    /// is written down, along with the two obvious readings that both hang the
+    /// suite.
     pub fn owes(&self, count: usize) {
-        for _ in 0..count {
-            self.0.meter.admit_untracked();
-        }
-        if count > 0 {
-            self.0.wake.notify_one();
-        }
-    }
-
-    /// Take on the sender's **first pass**, before its task is spawned.
-    ///
-    /// Without this a freshly started Instance reads idle before the sender has
-    /// looked at anything, because a meter that has admitted nothing is idle by
-    /// definition — so `settle()` would return while the roster read was still
-    /// to come, and *any* statement-count assertion anywhere in the suite would
-    /// be a race with it. That is not hypothetical: it is how
-    /// `tests/mining.rs::mining_one_stored_call_costs_a_fixed_number_of_statements`
-    /// began failing on Postgres and not on SQLite, which is the worst way to
-    /// find out.
-    ///
-    /// It is also just the #93 rule applied honestly — work is owed from where
-    /// it is handed over, and a boot hands the sender a pass.
-    pub(crate) fn owes_a_first_pass(&self) {
-        self.0.meter.admit_untracked();
-    }
-
-    /// What the sender is owed **right now** — read at the top of a pass, before
-    /// it looks at anything.
-    pub(crate) fn outstanding(&self) -> u64 {
-        self.0.meter.load().depth
-    }
-
-    /// Discharge the `owed` items the sender had been handed *before* it looked.
-    ///
-    /// **The count has to be the one read before the pass, and that is the whole
-    /// of this method's correctness.** Settling the depth as it stands *after* a
-    /// pass discharges anything admitted while the pass was running — an upload
-    /// that committed its delivery row a microsecond after the queue was read —
-    /// so `settle()` returns having promised that a Call was considered when it
-    /// was not, and the delivery goes out some time later.
-    ///
-    /// It is a check-then-act race and it reads as a flake: it failed
-    /// `tests/downstream.rs::re_scoping_a_peer_keeps_the_key_it_already_had` on
-    /// Postgres in CI and never once locally on SQLite, because the window is
-    /// exactly as wide as a database round trip.
-    ///
-    /// Work admitted *during* a pass is simply left outstanding — the wake-up
-    /// that came with it guarantees another pass, which will discharge it.
-    pub(crate) fn caught_up(&self, owed: u64) {
-        self.0.meter.settle_n(owed);
-    }
-
-    /// Note that one delivery has left the queue — taken by the peer, or
-    /// abandoned.
-    ///
-    /// **This Worker's `done` count, in the only place it can live.**
-    /// [`crate::worker::Load::done`] is "work settled", and for every other
-    /// Worker that is the same thing as "items completed" — but this one's unit
-    /// of work is *"I have caught up"* ([`Downstreams::owes`]), so its meter
-    /// cannot also answer "how many Calls have gone out". A peer's own
-    /// `last_success_ms` and `consecutive_failures` are the readings an Operator
-    /// acts on, and this is the process-lifetime total beside them.
-    ///
-    /// Published **after** the row is gone, which is also what makes it the
-    /// signal a recovery is asserted on: the peer having answered is a moment
-    /// earlier than the queue having shrunk, and a test that read the depth on
-    /// the former would race the delete on the latter.
-    pub(crate) fn delivery_settled(&self) {
-        self.0.settled.send_modify(|settled| *settled += 1);
+        self.dispatch.owes(count);
     }
 
     /// Wait until `n` deliveries have left the queue since this Instance
-    /// started.
-    ///
-    /// The wait a **retry** needs, and the reason it is not an *attempt* count:
-    /// only the head of a peer's queue is attempted per pass, so how many
-    /// failures happen before a peer comes back is a matter of timing, while how
-    /// many Calls end up leaving the queue is not.
+    /// started — the wait a **retry** needs, as opposed to an attempt count
+    /// ([`Dispatcher::deliveries_settled`]).
     pub async fn deliveries_settled(&self, n: u64) {
-        // `Err` is a dropped sender, which cannot happen: it lives in the `Arc`
-        // this borrow is holding.
-        let _ = self
-            .0
-            .settled
-            .subscribe()
-            .wait_for(|settled| *settled >= n)
-            .await;
+        self.dispatch.deliveries_settled(n).await;
     }
 
     /// The policy this Instance forwards under.
     pub fn config(&self) -> &DownstreamConfig {
-        &self.0.config
+        &self.config
     }
 }
 
@@ -548,42 +282,6 @@ mod tests {
             consecutive_failures: 0,
             created_at_ms: 0,
         })
-    }
-
-    /// **A pass discharges only what it was handed before it looked** — the
-    /// check-then-act race that broke
-    /// `tests/downstream.rs::re_scoping_a_peer_keeps_the_key_it_already_had` on
-    /// Postgres in CI and never once on SQLite.
-    ///
-    /// The sender reads what it is owed, reads the queue, then discharges.
-    /// Discharging the depth *as it stands afterwards* also discharges the
-    /// upload that committed its delivery row while that read was in flight — so
-    /// `settle()` returns having claimed the Call was considered, and the
-    /// delivery goes out some time later, by which point the test has already
-    /// asserted the peer received nothing. The window is exactly one database
-    /// round trip wide, which is why a slower dialect finds it and a faster one
-    /// does not.
-    #[test]
-    fn a_pass_discharges_only_what_it_was_handed_before_it_looked() {
-        let downstreams = Downstreams::default();
-        assert_eq!(
-            downstreams.outstanding(),
-            0,
-            "a sender nobody has handed anything owes nothing"
-        );
-        downstreams.owes(1);
-
-        // The pass begins: it reads what it is owed, and *then* reads the queue.
-        let owed = downstreams.outstanding();
-        // ...and an upload commits while it is doing so.
-        downstreams.owes(1);
-        downstreams.caught_up(owed);
-
-        assert_eq!(
-            downstreams.outstanding(),
-            1,
-            "the Call that arrived mid-pass is still owed a look"
-        );
     }
 
     /// The one that matters, and the one rdio gets wrong: a **Patch** puts a
@@ -653,107 +351,22 @@ mod tests {
         assert_eq!(peer.upload_url(), "https://peer.example/api/call-upload");
     }
 
-    /// **Will these same bytes ever be accepted?** — the question the whole
-    /// retry policy turns on. A mistyped key is fixed by an Operator and the
-    /// backlog is what makes fixing it worthwhile; a Call the peer calls
-    /// incomplete would block every Call behind it forever.
-    #[rstest]
-    #[case(200, Verdict::Delivered)]
-    #[case(204, Verdict::Delivered)]
-    #[case(400, Verdict::Abandon)]
-    #[case(413, Verdict::Abandon)]
-    #[case(415, Verdict::Abandon)]
-    #[case(417, Verdict::Abandon)]
-    #[case(422, Verdict::Abandon)]
-    #[case(401, Verdict::Retry)]
-    #[case(403, Verdict::Retry)]
-    #[case(404, Verdict::Retry)]
-    #[case(429, Verdict::Retry)]
-    #[case(500, Verdict::Retry)]
-    #[case(503, Verdict::Retry)]
-    fn a_peers_answer_decides_whether_it_is_worth_asking_again(
-        #[case] status: u16,
-        #[case] expected: Verdict,
-    ) {
-        assert_eq!(Verdict::of_status(status), expected, "status {status}");
-    }
-
-    /// Every way a delivery can fail says one word, and that word decides
-    /// whether the Call survives.
-    #[rstest]
-    #[case(Failed::Unreachable, "peer-unreachable", Verdict::Retry)]
-    #[case(Failed::Unreadable, "archive-unreadable", Verdict::Retry)]
-    #[case(Failed::Vanished, "call-gone", Verdict::Abandon)]
-    #[case(Failed::Status(503), "peer-refused", Verdict::Retry)]
-    #[case(Failed::Status(417), "peer-refused", Verdict::Abandon)]
-    fn a_failure_carries_its_slug_and_its_consequence(
-        #[case] failed: Failed,
-        #[case] slug: &str,
-        #[case] verdict: Verdict,
-    ) {
-        assert_eq!(failed.slug(), slug);
-        assert_eq!(failed.verdict(), verdict);
-    }
-
-    /// What gets written down names the status, because "the peer refused it"
-    /// without a number sends an Operator nowhere — and never renders the
-    /// transport error, which would carry the peer's URL.
+    /// The section's own two settings are the ones the shared backoff applies —
+    /// the only thing about a retry this configuration still decides.
     #[test]
-    fn a_stored_failure_names_the_status_and_nothing_else() {
-        assert_eq!(Failed::Status(401).to_string(), "peer-refused (401)");
-        assert_eq!(Failed::Unreachable.to_string(), "peer-unreachable");
-    }
-
-    /// The first retry waits the configured delay and each one after it doubles,
-    /// up to the cap — so a peer restarting is not hammered and a peer down
-    /// overnight is polled twice a minute rather than a thousand times.
-    #[test]
-    fn backoff_doubles_up_to_its_ceiling() {
+    fn the_sections_retry_settings_are_the_ones_applied() {
         let config = DownstreamConfig {
-            retry_initial: Duration::from_secs(5),
-            retry_max: Duration::from_secs(60),
+            retry_initial: Duration::from_secs(7),
+            retry_max: Duration::from_secs(70),
             ..DownstreamConfig::default()
         };
 
-        assert_eq!(config.backoff(1), Duration::from_secs(5));
-        assert_eq!(config.backoff(2), Duration::from_secs(10));
-        assert_eq!(config.backoff(3), Duration::from_secs(20));
-        assert_eq!(config.backoff(4), Duration::from_secs(40));
-        assert_eq!(config.backoff(5), Duration::from_secs(60), "capped");
-        // A peer down for a week reaches attempt counts whose doubling would
-        // overflow long before the arithmetic reaches the cap. Nothing on this
-        // path may be the thing that panics.
-        assert_eq!(config.backoff(i32::MAX), Duration::from_secs(60));
-    }
-
-    /// Two settings an Operator can legitimately write, and neither may divide
-    /// by anything or return something absurd: no wait at all, and a first
-    /// delay already above the ceiling meant to bound it.
-    #[rstest]
-    #[case(
-        Duration::ZERO,
-        Duration::from_secs(60),
-        Duration::ZERO,
-        "no wait at all"
-    )]
-    #[case(
-        Duration::from_secs(90),
-        Duration::from_secs(60),
-        Duration::from_secs(90),
-        "an initial delay above its own cap is honoured, not shortened"
-    )]
-    fn backoff_survives_the_settings_that_look_wrong(
-        #[case] retry_initial: Duration,
-        #[case] retry_max: Duration,
-        #[case] expected: Duration,
-        #[case] what: &str,
-    ) {
-        let config = DownstreamConfig {
-            retry_initial,
-            retry_max,
-            ..DownstreamConfig::default()
-        };
-
-        assert_eq!(config.backoff(1), expected, "{what}");
+        assert_eq!(
+            config.retry(),
+            Retry {
+                initial: Duration::from_secs(7),
+                max: Duration::from_secs(70),
+            }
+        );
     }
 }

@@ -306,7 +306,7 @@ async fn a_peer_that_answers_too_late_is_given_up_on_and_retried() {
     );
     let (_, body) = app.admin_get("/api/admin/downstreams").await;
     assert_eq!(
-        body["results"][0]["lastFailure"], "peer-unreachable",
+        body["results"][0]["lastFailure"], "sink-unreachable",
         "and it reads as unreachable, which is what a timeout is from here"
     );
 }
@@ -620,7 +620,7 @@ async fn a_peers_key_never_reaches_a_log_line() {
     assert!(!logged.contains("s3cret-peer-key"), "{logged}");
     // ...and the failure an Operator does need is there, so this is not passing
     // by having logged nothing at all.
-    assert!(logged.contains("peer-refused"), "{logged}");
+    assert!(logged.contains("sink-refused"), "{logged}");
 }
 
 // ---------------------------------------------------------------------------
@@ -644,7 +644,7 @@ async fn the_admin_listing_shows_a_peers_health() {
     assert_eq!(row["id"], id);
     assert_eq!(row["queued"], 1, "the durable depth, not the meter's");
     assert!(row["consecutiveFailures"].as_i64().unwrap_or_default() >= 1);
-    assert_eq!(row["lastFailure"], "peer-refused (503)");
+    assert_eq!(row["lastFailure"], "sink-refused (503)");
     assert!(row["lastSuccessMs"].is_null(), "it has never worked");
     assert_eq!(row["hasKey"], true);
 
@@ -656,6 +656,34 @@ async fn the_admin_listing_shows_a_peers_health() {
     assert_eq!(row["queued"], 0);
     assert_eq!(row["consecutiveFailures"], 0, "reset by a success");
     assert!(row["lastSuccessMs"].as_i64().is_some());
+}
+
+/// **Each peer drains its own queue**, keyed on its own row id.
+///
+/// The shared draining loop looks a sink up by
+/// [`radio_scout::delivery::Sink::id`] — which queue to read, and which sink is
+/// already attempting — so an id that answered the same number for every row
+/// would have every peer draining the first one's backlog. That is invisible to
+/// any test with one peer in it, and invisible even to two peers *scoped alike*:
+/// both would still receive a Call they were entitled to. It takes two scoped
+/// **differently**, each holding a Call the other must never see.
+#[tokio::test]
+async fn two_peers_each_drain_their_own_queue() {
+    let app = TestApp::with_key("k").await;
+    let fire = Peer::start().await;
+    let police = Peer::start().await;
+    app.login().await;
+    app.add_downstream(&fire.url(), json!({ "sel": { "11": { "100": true } } }))
+        .await;
+    app.add_downstream(&police.url(), json!({ "sel": { "11": { "200": true } } }))
+        .await;
+
+    app.upload_ok(CallUpload::new().set("talkgroup", 100)).await;
+    app.upload_ok(CallUpload::new().set("talkgroup", 200)).await;
+    app.settle().await;
+
+    assert_eq!(fire.talkgroups(), vec![100]);
+    assert_eq!(police.talkgroups(), vec![200]);
 }
 
 /// **The peer's key never leaves.** Asserted over the whole serialized listing
