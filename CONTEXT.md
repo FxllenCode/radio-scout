@@ -58,8 +58,14 @@ _Avoid_: length (the recorder's word — TR's `call_length` — reserve it for t
 **Emergency**:
 The bit a radio sets on a transmission when its emergency button is pressed. A property of a **Call**, and separately of each **Unit** heard within one — the Call says somebody keyed it, the per-source flag says which radio did. Absent means no, never unknown.
 
-**A mark is all it is.** An Emergency is shown, filtered and searched on, and nothing is delivered for it: Radio-Scout does not notify ([ADR-0014](docs/adr/0014-no-notifications.md)). "Alert" was the word for what an emergency used to produce, and it is no longer a word this project uses.
+**A mark is all it is.** An Emergency is shown, filtered and searched on, and **no Listener is told**: Radio-Scout does not notify ([ADR-0014](docs/adr/0014-no-notifications.md)). "Alert" was the word for what an emergency used to produce, and it is no longer a word this project uses. A **Webhook** an Operator configured may carry one to an address *they* chose, which is that Operator arranging their own inbox rather than this Instance waking anybody.
 _Avoid_: alert, notification, panic, priority (the recorder's own unrelated field).
+
+**Mark**:
+What a **Recorder** or this Instance's own signal processing proved about a transmission, kept on the **Call**. There are two: the **Emergency** bit (#42) and a **Tone profile** match (#55). A closed vocabulary rather than a free-form tag — a Mark is something *proved*, where a **Group** or a **Tag** is something an Operator decided.
+
+Marks are shown, filtered and searched on, and are the only thing a **Webhook** fires on. Nothing derived from speech is or will be one ([ADR-0013](docs/adr/0013-no-transcription.md)).
+_Avoid_: flag (fine in prose about one bit, wrong for the set), alert, trigger, event.
 
 **Tone profile**:
 The per-talkgroup definition of a paging tone sequence (two-tone/Quick Call) that tone-out detection matches against a call's audio. Signal processing, not speech recognition — transcription is banned ([ADR-0013](docs/adr/0013-no-transcription.md)). A match **marks** the Call, the way an **Emergency** does, and like an Emergency it is shown rather than delivered.
@@ -215,8 +221,18 @@ Another instance this **Instance** forwards matching **Calls** to, speaking the 
 **A peer's outage costs delay, not Calls.** A matching Call is written to a durable queue inside the same transaction that stores it, so "the Call exists" and "the Call is owed to this peer" are one fact a crash cannot separate; the queue drains **in order, per peer**, one attempt at a time, and survives a restart of either end. The scope is a **Selection** — the live feed's own — so a **Patch** reaches a peer subscribed to the channel it was patched onto.
 _Avoid_: relay, mirror, federation, upstream.
 
+**Sink**:
+Somewhere an **Instance** delivers **Calls** to, over a durable queue it drains in order. There are two — a **Downstream** and a **Webhook** — and the word exists because everything *about the queue* is the same for both: a delivery row written inside the transaction that stores the Call, one attempt in flight per sink, head-first draining, an exponential backoff, and one question deciding a retry (*will these same bytes ever be accepted?*). What differs is the errand: one POSTs a Call's audio in the rdio dialect, the other POSTs a marked Call's facts as JSON.
+
+So a failure reads `sink-refused (404)` whichever it was, and a log line carries `sink=downstream` or `sink=webhook` beside it. Deliberately **not** *peer*, which this glossary spends on a Downstream alone: a Discord channel is not a peer of anything.
+_Avoid_: peer (a **Downstream** specifically), target, destination, subscriber, endpoint (the far end's own word for its URL, not ours for the relationship).
+
 **Webhook**:
 An **Operator**-configured URL that receives the **Calls** they asked to hear about — one carrying an **Emergency**, or a **Tone profile** match — as JSON, optionally Discord-shaped. The automation escape hatch, and a sibling of **Downstream** rather than of anything listener-facing: an Operator wiring up their own inbox is a different act from this Instance waking a **Listener**, which it does not do ([ADR-0014](docs/adr/0014-no-notifications.md)). Delivery is retried and never blocks anything; the URL is a secret and is never logged.
+
+**A Webhook fires on a Mark *and* a scope**, and both halves are the point: an Emergency on a channel this Webhook was never given is somebody else's Emergency, and a Webhook asking for no Mark at all fires for nothing, which is the safe direction. There is deliberately no "every Call" trigger — that is what a **Downstream** is for, and a county's routine traffic posted into a chat room would exceed the far end's rate limit within a minute.
+
+**The URL *is* the credential**, which is the one way this differs from a Downstream (whose URL is public and whose key is the secret). So it is never returned, never logged, and — alone among curated entities — **never exported** in the configuration document, because a backup that carries it stops being a file an Operator can email. What the admin listing shows instead is the URL's *host*.
 _Avoid_: integration, callback, alert, notification.
 
 **Dirwatch**:
@@ -271,9 +287,9 @@ One running Radio-Scout: a process, its **Archive**, its configuration and its *
 _Avoid_: scanner, server, deployment, node, site (Site is a tower).
 
 **Worker**:
-A background task an **Instance** owns and can account for. There are five — the **Retention** sweeper, the **enhancement** worker, the **Mining** backfill, the **Downstream** sender, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
+A background task an **Instance** owns and can account for. There are six — the **Retention** sweeper, the **enhancement** worker, the **Mining** backfill, the **Downstream** sender, the **Webhook** sender, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
 
-What one *unit* of that work is belongs to the Worker, and is not always one item: the Downstream sender's is "I have caught up with what was handed to me", because a delivery waiting out a retry is owed by nobody — and a Worker that stayed non-idle through a peer's outage would make "this Instance has settled" unanswerable for as long as the outage lasted.
+What one *unit* of that work is belongs to the Worker, and is not always one item: the Downstream sender's is "I have caught up with what was handed to me", because a delivery waiting out a retry is owed by nobody — and a Worker that stayed non-idle through a peer's outage would make "this Instance has settled" unanswerable for as long as the outage lasted. The **Webhook** sender is the same Worker shape drained by the same code (`crate::delivery`): the two differ in what one delivery *is*, not in how a queue is drained.
 _Avoid_: job, task, background thread, daemon (a **Service** is the operating system's).
 
 **Service**:

@@ -185,6 +185,7 @@ needs SSH:
 | **Groups** / **Tags** | the two category vocabularies, with a count of what is behind each |
 | **API keys** | issue (shown once), label, scope to a System, disable, revoke |
 | **Downstreams** | the other instances you forward calls to — see [below](#forwarding-to-other-instances) |
+| **Webhooks** | addresses that receive your flagged calls — see [below](#webhooks) |
 
 Four things are worth knowing before you start:
 
@@ -234,6 +235,88 @@ Three things behave the way they do on purpose:
 How hard we try is `[downstream]` in `radio-scout.toml`: `timeout_secs`, and the retry wait,
 which doubles from `retry_initial_secs` up to `retry_max_secs`. The peers themselves are never in
 the TOML — they are entities, and they live in the browser with everything else you curate.
+
+## Webhooks
+
+**Settings → Admin → Webhooks.** An address that receives the calls you flag — one carrying an
+**emergency** — as JSON, or as a message Discord renders. Each one is an address, which marks you
+want, which systems and talkgroups it covers, and which shape to send.
+
+This is the automation escape hatch, and it is **yours**, not your listeners': Radio-Scout does
+not wake anybody's device, has no push notifications and asks nobody for permission
+([ADR-0014](adr/0014-no-notifications.md)). Wiring your own channel up to your own flagged calls
+is a different thing, and it is what this screen is for.
+
+**A call has to carry the mark *and* be in the scope.** An emergency on a talkgroup you did not
+give this webhook is somebody else's emergency. A webhook watching *no* marks never fires at all,
+and the row says **watching nothing** so it does not look configured when it is inert.
+
+**An outage costs you delay, not calls** — the same durable queue the downstream sender drains,
+so a Discord outage or a script that was down for an hour delivers an hour late rather than not
+at all. The row shows how many calls are **queued**, when it **last delivered**, and the failures
+since.
+
+Four things behave the way they do on purpose:
+
+- **The address is a password.** A Discord webhook URL ends in a token, so it is treated exactly
+  the way an API key is, and then some: it goes in once, is never shown again, never returned by
+  the API, never written to a log, and **never exported in a backup**. The listing shows only the
+  host — `discord.com` — so you can still tell two of them apart. Editing a webhook's scope does
+  not mean going back to Discord for the URL: leave the address field blank and the stored one is
+  kept.
+- **A backup does not carry your webhooks.** That is the price of the rule above; a configuration
+  document is a file you email and commit, and it stays one. Restoring an instance means re-adding
+  them, which is a couple of pastes.
+- **Disabling one empties its queue**, so switching a webhook off for a week and back on does not
+  post a week of emergencies into a chat room at once.
+- **A body the far end refuses outright is dropped rather than retried forever** — a `400`, `413`,
+  `415`, `417` or `422`. Everything else keeps the backlog, including Discord's `429` rate limit
+  and the `404` a deleted webhook answers, because those are things you fix.
+
+**Links need `[server] public_url`.** A payload carries a link to the call's audio, and this
+instance cannot know its own public address — it may be behind a proxy, a tunnel, or three. Set
+`public_url` to what you type into a browser and the link appears; leave it unset and the payload
+still carries every fact about the call and simply has no link. A *guessed* URL in somebody's chat
+room would be worse than none, and a malformed one is a `400` Discord would make us drop the call
+over — which is why the setting is checked at boot and the instance refuses to start on one that
+is not an absolute `http://` or `https://` address.
+
+How hard we try is `[webhook]` in `radio-scout.toml`: `timeout_secs` (shorter than a downstream's
+— this is a few hundred bytes of JSON, not a minute of audio) and the retry wait, which doubles
+from `retry_initial_secs` up to `retry_max_secs`.
+
+### The payload
+
+Radio-Scout's own shape is the call exactly as `GET /api/calls` describes it, plus the marks that
+fired — so anything you have already written against the search API parses this without a second
+parser:
+
+```json
+{
+  "marks": ["emergency"],
+  "call": {
+    "id": 42,
+    "systemRef": 11,
+    "systemLabel": "Fulton County",
+    "talkgroupRef": 54241,
+    "talkgroupLabel": "Fire Dispatch",
+    "unitRef": 1234,
+    "unitLabel": "Engine 1",
+    "timestamp": 1700000000000,
+    "durationMs": 7400,
+    "emergency": true,
+    "audioUrl": "https://scanner.example/api/call/42/audio"
+  }
+}
+```
+
+`audioUrl` is absent when `public_url` is unset, and when the call is **encrypted** — an encrypted
+call is stored as metadata with no audio at all, and it is still delivered, because an encrypted
+emergency is exactly the thing you want to be told about.
+
+The Discord shape is one embed with the talkgroup as its title, the marks as its description, and
+system, unit and duration as fields, linked to the audio. Discord renders it; nothing needs
+configuring at its end beyond pasting the webhook URL Discord gave you.
 
 ### Tidying up talkgroup names
 
