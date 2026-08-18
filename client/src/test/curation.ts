@@ -3,6 +3,7 @@ import { http, HttpResponse } from 'msw'
 import type {
   AdminApiKey,
   AdminDownstream,
+  AdminWebhook,
   AdminLabel,
   AdminSystem,
   AdminTalkgroup,
@@ -35,6 +36,7 @@ export class FakeInstance {
   units: AdminUnit[] = []
   keys: AdminApiKey[] = []
   downstreams: AdminDownstream[] = []
+  webhooks: AdminWebhook[] = []
   /** Member Refs, by owning Talkgroup id (#50). Kept beside the rows rather
    *  than on them because the server deliberately keeps them off the listing —
    *  a query per row on a page of five hundred, for a column it cannot edit. */
@@ -137,6 +139,31 @@ export class FakeInstance {
       ...row,
     }
     this.downstreams.push(created)
+    return created
+  }
+
+  /** A **Webhook** as the listing carries one — **no `url`**, which is the whole
+   *  point of the shape: the fake answers with exactly the fields the real one
+   *  does, so a screen that tried to read the credential back reads `undefined`
+   *  here too. */
+  webhook(row: Partial<AdminWebhook> = {}): AdminWebhook {
+    const created: AdminWebhook = {
+      id: this.id(),
+      label: 'dispatch channel',
+      host: 'discord.com',
+      format: 'radio-scout',
+      marks: ['emergency'],
+      scope: { all: false, sel: { 11: { '*': true } } },
+      disabled: false,
+      queued: 0,
+      lastSuccessMs: null,
+      lastFailureMs: null,
+      lastFailure: null,
+      consecutiveFailures: 0,
+      createdAtMs: 1_700_000_000_000,
+      ...row,
+    }
+    this.webhooks.push(created)
     return created
   }
 
@@ -588,6 +615,68 @@ export function curationHandlers(instance: FakeInstance) {
         body: undefined,
       })
       instance.downstreams = instance.downstreams.filter(
+        (it) => String(it.id) !== params.id,
+      )
+      return new HttpResponse(null, { status: 204 })
+    }),
+
+    // **Webhooks** (#54). The URL never comes back — see `FakeInstance.webhook`
+    // — and the refusals modelled here are the two a form has to render beside
+    // an input: an unusable address, and a mark this release does not know.
+    http.get(`${ORIGIN}/api/admin/webhooks`, () =>
+      HttpResponse.json({ results: instance.webhooks }),
+    ),
+    http.post(`${ORIGIN}/api/admin/webhooks`, async ({ request }) => {
+      const body = await record('POST', request, '/api/admin/webhooks')
+      const url = String(body.url ?? '').trim()
+      if (url === '') return refusal(400, 'field-required', 'url is required')
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        return refusal(
+          400,
+          'unusable-webhook-url',
+          'a webhook URL has to be absolute and start with https://',
+        )
+      }
+      const marks = (body.marks as string[] | undefined) ?? []
+      const unknown = marks.find((mark) => mark !== 'emergency')
+      if (unknown != null) {
+        return refusal(
+          400,
+          'unknown-mark',
+          `"${unknown}" is not a mark a Call can carry: choose one of emergency`,
+        )
+      }
+      const row = instance.webhook({
+        label: (body.label as string) ?? null,
+        host: url.split('://')[1]?.split(/[/?#]/)[0] ?? null,
+        format: (body.format as AdminWebhook['format']) ?? 'radio-scout',
+        marks: marks as AdminWebhook['marks'],
+        scope: body.scope as AdminWebhook['scope'],
+        disabled: (body.disabled as boolean) ?? false,
+      })
+      return HttpResponse.json(row, { status: 201 })
+    }),
+    http.patch(`${ORIGIN}/api/admin/webhooks/:id`, async ({ request, params }) => {
+      const body = await record('PATCH', request, `/api/admin/webhooks/${params.id}`)
+      const row = instance.webhooks.find((it) => String(it.id) === params.id)
+      if (!row) return refusal(404, 'webhook-not-found', 'no such webhook')
+      // The URL is write-only on the real surface: it goes in and never comes
+      // back, so the fake keeps only the host it implies.
+      const { url, ...rest } = body as Record<string, unknown>
+      if (typeof url === 'string') {
+        row.host = url.split('://')[1]?.split(/[/?#]/)[0] ?? null
+      }
+      Object.assign(row, rest)
+      if (row.disabled) row.queued = 0
+      return HttpResponse.json(row)
+    }),
+    http.delete(`${ORIGIN}/api/admin/webhooks/:id`, ({ params }) => {
+      instance.wrote.push({
+        method: 'DELETE',
+        path: `/api/admin/webhooks/${params.id}`,
+        body: undefined,
+      })
+      instance.webhooks = instance.webhooks.filter(
         (it) => String(it.id) !== params.id,
       )
       return new HttpResponse(null, { status: 204 })

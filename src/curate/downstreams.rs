@@ -54,7 +54,7 @@ pub struct DownstreamRow {
     pub queued: i64,
     pub last_success_ms: Option<i64>,
     pub last_failure_ms: Option<i64>,
-    /// The last failure as a slug plus its status — `peer-refused (401)`.
+    /// The last failure as a slug plus its status — `sink-refused (401)`.
     pub last_failure: Option<String>,
     pub consecutive_failures: i32,
     pub created_at_ms: i64,

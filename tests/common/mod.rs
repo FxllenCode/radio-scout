@@ -65,6 +65,7 @@ mod faults;
 pub mod logs;
 mod peer;
 pub mod s3;
+mod sink;
 mod upload;
 mod ws;
 
@@ -77,6 +78,8 @@ pub use audio::{SdrTrunkMp3, silence_ms, wav};
 pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faults_over_store, faulty_store};
 #[allow(unused_imports)]
 pub use peer::{Peer, Received, unreachable_url};
+#[allow(unused_imports)]
+pub use sink::{Sink, unreachable_hook_url};
 #[allow(unused_imports)]
 pub use upload::CallUpload;
 #[allow(unused_imports)]
@@ -1168,6 +1171,71 @@ impl TestApp {
     /// and it is a wait rather than a sleep.
     pub async fn deliveries_settled(&self, n: u64) {
         self.instance.state.downstreams.deliveries_settled(n).await;
+    }
+
+    // -- Webhooks (#54) ------------------------------------------------------
+
+    /// Register a **Webhook** through the admin surface, and answer with its Id.
+    ///
+    /// Through the real routes rather than by seeding a row, for
+    /// [`TestApp::add_downstream`]'s reason — and here there is a second one: a
+    /// seeded row could carry a URL the surface would have refused, so every
+    /// test would be about a webhook an Operator could not have created.
+    pub async fn add_webhook(&self, url: &str, marks: &[&str], scope: serde_json::Value) -> i64 {
+        self.add_webhook_shaped(url, "radio-scout", marks, scope)
+            .await
+    }
+
+    /// [`TestApp::add_webhook`] with the body shape named.
+    pub async fn add_webhook_shaped(
+        &self,
+        url: &str,
+        format: &str,
+        marks: &[&str],
+        scope: serde_json::Value,
+    ) -> i64 {
+        let (status, body) = self
+            .admin_post(
+                "/api/admin/webhooks",
+                serde_json::json!({
+                    "url": url,
+                    "format": format,
+                    "marks": marks,
+                    "scope": scope,
+                }),
+            )
+            .await;
+        assert_eq!(status, 201, "creating a webhook: {body}");
+        body["id"].as_i64().expect("the new webhook's id")
+    }
+
+    /// How many Calls are queued for `webhook_id` — the **durable** depth, read
+    /// from the table rather than from the sender's meter.
+    pub async fn queued_for_webhook(&self, webhook_id: i64) -> i64 {
+        radio_scout::db::repo::webhook_depths(&self.db)
+            .await
+            .expect("webhook depths")
+            .get(&webhook_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The delivery at the head of `webhook_id`'s queue — the row the sender
+    /// will attempt next, and the only place the configured backoff is
+    /// observable as a value rather than as a wait.
+    pub async fn head_webhook_delivery(
+        &self,
+        webhook_id: i64,
+    ) -> Option<radio_scout::db::entities::webhook_delivery::Model> {
+        radio_scout::db::repo::next_webhook_delivery(&self.db, webhook_id)
+            .await
+            .expect("read the head of the queue")
+    }
+
+    /// Wait until `n` webhook deliveries have left this Instance's queue — taken
+    /// by a sink, or abandoned ([`TestApp::deliveries_settled`]'s reason).
+    pub async fn webhooks_settled(&self, n: u64) {
+        self.instance.state.webhooks.deliveries_settled(n).await;
     }
 
     /// Refuse every statement this app issues that names `table` (#97).

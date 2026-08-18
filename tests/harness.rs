@@ -903,8 +903,11 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // from the browser must be forwarded to without a restart. It sleeps
             // on its wake-up until something is queued.
             radio_scout::downstream::WORKER,
+            // ...and the same again for **Webhooks** (#54), for the same
+            // reason: a Webhook is a row too.
+            radio_scout::webhook::WORKER,
         ],
-        "the shipped default runs four: enhancement is off, the rest are on"
+        "the shipped default runs five: enhancement is off, the rest are on"
     );
 
     let mut app = app;
@@ -923,6 +926,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::enhance::WORKER,
             radio_scout::mining::sweep::WORKER,
             radio_scout::downstream::WORKER,
+            radio_scout::webhook::WORKER,
         ],
     );
 }

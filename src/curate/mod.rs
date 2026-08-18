@@ -43,6 +43,7 @@ pub mod members;
 pub mod systems;
 pub mod talkgroups;
 pub mod units;
+pub mod webhooks;
 
 use axum::Router;
 use axum::http::StatusCode;
@@ -117,6 +118,14 @@ pub fn routes() -> Router<AppState> {
             "/api/admin/downstreams/{id}",
             patch(downstreams::update).delete(downstreams::remove),
         )
+        .route(
+            "/api/admin/webhooks",
+            get(webhooks::list).post(webhooks::create),
+        )
+        .route(
+            "/api/admin/webhooks/{id}",
+            patch(webhooks::update).delete(webhooks::remove),
+        )
         .route("/api/admin/api-keys", get(keys::list).post(keys::create))
         .route(
             "/api/admin/api-keys/{id}",
@@ -139,6 +148,7 @@ pub enum What {
     Unit,
     ApiKey,
     Downstream,
+    Webhook,
 }
 
 impl What {
@@ -152,6 +162,7 @@ impl What {
             What::Unit => "unit",
             What::ApiKey => "API key",
             What::Downstream => "downstream",
+            What::Webhook => "webhook",
         }
     }
 
@@ -167,6 +178,7 @@ impl What {
             What::Unit => "unit-not-found",
             What::ApiKey => "api-key-not-found",
             What::Downstream => "downstream-not-found",
+            What::Webhook => "webhook-not-found",
         }
     }
 
@@ -178,7 +190,9 @@ impl What {
             What::System => "system-ref-taken",
             What::Talkgroup => "talkgroup-ref-taken",
             What::Unit => "unit-ref-taken",
-            What::Group | What::Tag | What::ApiKey | What::Downstream => "ref-taken",
+            What::Group | What::Tag | What::ApiKey | What::Downstream | What::Webhook => {
+                "ref-taken"
+            }
         }
     }
 
@@ -187,7 +201,12 @@ impl What {
         match self {
             What::System => "system-has-calls",
             What::Talkgroup => "talkgroup-has-calls",
-            What::Group | What::Tag | What::Unit | What::ApiKey | What::Downstream => "has-calls",
+            What::Group
+            | What::Tag
+            | What::Unit
+            | What::ApiKey
+            | What::Downstream
+            | What::Webhook => "has-calls",
         }
     }
 }
@@ -248,6 +267,25 @@ pub enum Rejected {
         wanted: crate::merge::Range,
         held: crate::merge::Range,
     },
+    /// A **Webhook** URL that could never be posted to (#54).
+    ///
+    /// **Carries nothing**, alone among these arms, and that is the point: a
+    /// webhook's URL is its credential, a refusal is rendered into a form and
+    /// logged as a 400, and what is being refused may be a live Discord token
+    /// with a typo in front of it. Every other arm quotes what it was given
+    /// because doing so is what makes the message useful; here the useful thing
+    /// is the *rule*, which is fixed.
+    UnusableWebhookUrl,
+    /// A **Webhook** body shape this Instance cannot render (#54).
+    UnknownFormat { format: String },
+    /// A **mark** this release does not know (#54).
+    ///
+    /// Refused rather than dropped, which is the opposite of what a *stored*
+    /// unknown mark costs — see [`crate::webhook::marks_of`]. In a form it is a
+    /// typo an Operator can fix now; in the database it is a newer release's
+    /// row, and taking the known marks down with it would silence a webhook that
+    /// was working.
+    UnknownMark { mark: String },
     /// A delete that would take Calls with it, and nobody asked it to.
     ///
     /// Retention owns removing Calls end to end — the row, the audio object and
@@ -270,6 +308,9 @@ impl Rejected {
             Rejected::UnknownDocumentVersion { .. } => "unknown-document-version",
             Rejected::MalformedDocument { .. } => "malformed-document",
             Rejected::UnknownLed { .. } => "unknown-led",
+            Rejected::UnusableWebhookUrl => "unusable-webhook-url",
+            Rejected::UnknownFormat { .. } => "unknown-format",
+            Rejected::UnknownMark { .. } => "unknown-mark",
             Rejected::HasCalls { what, .. } => what.has_calls(),
         }
     }
@@ -281,7 +322,10 @@ impl Rejected {
             | Rejected::NoSuchSystem { .. }
             | Rejected::UnknownDocumentVersion { .. }
             | Rejected::MalformedDocument { .. }
-            | Rejected::UnknownLed { .. } => StatusCode::BAD_REQUEST,
+            | Rejected::UnknownLed { .. }
+            | Rejected::UnusableWebhookUrl
+            | Rejected::UnknownFormat { .. }
+            | Rejected::UnknownMark { .. } => StatusCode::BAD_REQUEST,
             Rejected::NotFound(_) => StatusCode::NOT_FOUND,
             Rejected::NameTaken { .. }
             | Rejected::RefTaken { .. }
@@ -339,6 +383,24 @@ impl std::fmt::Display for Rejected {
                 f,
                 "{led:?} is not an LED colour: choose one of {}",
                 crate::import::LED_PALETTE.join(", ")
+            ),
+            // Deliberately says nothing about what was sent — see the arm.
+            Rejected::UnusableWebhookUrl => f.write_str(
+                "a webhook URL has to be absolute and start with https:// (or http:// on your own network)",
+            ),
+            Rejected::UnknownFormat { format } => write!(
+                f,
+                "{format:?} is not a webhook format: choose one of {}",
+                crate::webhook::FORMATS
+                    .map(crate::webhook::Format::slug)
+                    .join(", ")
+            ),
+            Rejected::UnknownMark { mark } => write!(
+                f,
+                "{mark:?} is not a mark a Call can carry: choose one of {}",
+                crate::webhook::MARKS
+                    .map(crate::webhook::Mark::slug)
+                    .join(", ")
             ),
             Rejected::HasCalls { what, calls } => write!(
                 f,
@@ -555,7 +617,7 @@ mod tests {
     use rstest::rstest;
 
     /// Every kind there is, so the tables below cannot go stale by omission.
-    const KINDS: [What; 7] = [
+    const KINDS: [What; 8] = [
         What::System,
         What::Talkgroup,
         What::Group,
@@ -563,6 +625,7 @@ mod tests {
         What::Unit,
         What::ApiKey,
         What::Downstream,
+        What::Webhook,
     ];
 
     /// Every kind gets its **own** not-found slug — a shared one would make two

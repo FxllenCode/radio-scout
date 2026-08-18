@@ -22,3 +22,5 @@ pub mod talkgroup_group;
 pub mod talkgroup_ref;
 pub mod unit;
 pub mod unit_ref;
+pub mod webhook;
+pub mod webhook_delivery;

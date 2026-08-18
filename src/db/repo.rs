@@ -29,6 +29,7 @@ use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, downstream, downstream_delivery, group,
     log_event, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
+    webhook, webhook_delivery,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -3501,6 +3502,198 @@ pub async fn delivery_depths<C: ConnectionTrait>(db: &C) -> Result<HashMap<i64, 
 pub async fn clear_deliveries<C: ConnectionTrait>(db: &C, downstream_id: i64) -> Result<(), DbErr> {
     downstream_delivery::Entity::delete_many()
         .filter(downstream_delivery::Column::DownstreamId.eq(downstream_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks (#54)
+// ---------------------------------------------------------------------------
+//
+// The Downstream half above, for the other outbound sink. Deliberately its own
+// set of functions over its own tables rather than a generic one parameterised
+// by entity: sea-orm's `Entity`/`Column` types are per-table and abstracting
+// over them costs more in trait bounds than the twelve short functions save —
+// and the *decisions* (what a retry means, what one unit of work is, how the
+// queue drains) are already written once in `crate::delivery`, which is where a
+// second copy would actually have hurt.
+
+/// Every Webhook currently accepting deliveries, ready for routing.
+///
+/// **Read only when the Call carries a mark** ([`crate::webhook::Marks::is_empty`]
+/// gates the call site), which is the difference from
+/// [`forwarding_downstreams`]: any Call may reach a peer, but a Call with no
+/// mark can reach no webhook. So this feature's steady-state cost at ingest is
+/// zero statements rather than one.
+pub async fn delivering_webhooks<C: ConnectionTrait>(
+    db: &C,
+) -> Result<Vec<crate::webhook::Webhook>, DbErr> {
+    Ok(webhook::Entity::find()
+        .filter(webhook::Column::Disabled.eq(false))
+        .order_by_asc(webhook::Column::Id)
+        .all(db)
+        .await?
+        .iter()
+        .map(crate::webhook::Webhook::from_row)
+        .collect())
+}
+
+/// Queue `call_id` for each of `webhook_ids`, and say how many rows that was.
+///
+/// [`queue_deliveries`]'s rules, whole: **called inside the transaction that
+/// stores the Call**, so "this Call exists" and "this Call is owed to these
+/// webhooks" commit or roll back together; **which** webhooks is decided by
+/// [`crate::webhook::routed_to`] and never here; and an already-queued Call is
+/// left alone rather than duplicated, because a **Replacement** re-enqueues and
+/// the sender reads the Call's current state at send time.
+pub async fn queue_webhook_deliveries<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+    webhook_ids: &[i64],
+    now_ms: i64,
+) -> Result<usize, DbErr> {
+    let mut queued = 0;
+    for webhook_id in webhook_ids {
+        let inserted = webhook_delivery::Entity::insert(webhook_delivery::ActiveModel {
+            webhook_id: Set(*webhook_id),
+            call_id: Set(call_id),
+            attempts: Set(0),
+            next_attempt_ms: Set(now_ms),
+            queued_at_ms: Set(now_ms),
+            ..Default::default()
+        })
+        // The unique index on (webhook_id, call_id) is what makes a re-enqueue
+        // idempotent; `do_nothing` is how both dialects spell "leave the one
+        // that is there".
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::columns([
+                webhook_delivery::Column::WebhookId,
+                webhook_delivery::Column::CallId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(db)
+        .await;
+        match inserted {
+            Ok(_) => queued += 1,
+            // `do_nothing` reports the conflict as "nothing was inserted" rather
+            // than as an error on both dialects, and that is a delivery already
+            // owed — not a new one, and not a failure. Here it is also the thing
+            // that keeps one transmission to one message: a **Replacement**
+            // re-enqueues a Call whose first copy may still be queued, and
+            // unlike a Downstream there is no dedup at the far end to hide a
+            // second one.
+            Err(DbErr::RecordNotInserted) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(queued)
+}
+
+/// The next delivery owed to this Webhook — **the head of its queue**, due or
+/// not ([`next_delivery`]'s rule, for its reason).
+pub async fn next_webhook_delivery<C: ConnectionTrait>(
+    db: &C,
+    webhook_id: i64,
+) -> Result<Option<webhook_delivery::Model>, DbErr> {
+    webhook_delivery::Entity::find()
+        .filter(webhook_delivery::Column::WebhookId.eq(webhook_id))
+        .order_by_asc(webhook_delivery::Column::Id)
+        .one(db)
+        .await
+}
+
+/// Forget a webhook delivery — it landed, or it never will.
+pub async fn drop_webhook_delivery<C: ConnectionTrait>(db: &C, id: i64) -> Result<(), DbErr> {
+    webhook_delivery::Entity::delete_by_id(id).exec(db).await?;
+    Ok(())
+}
+
+/// Leave a webhook delivery at the head of its queue, due again later.
+pub async fn defer_webhook_delivery<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    attempts: i32,
+    next_attempt_ms: i64,
+    failure: &str,
+) -> Result<(), DbErr> {
+    webhook_delivery::Entity::update_many()
+        .col_expr(webhook_delivery::Column::Attempts, Expr::value(attempts))
+        .col_expr(
+            webhook_delivery::Column::NextAttemptMs,
+            Expr::value(next_attempt_ms),
+        )
+        .col_expr(webhook_delivery::Column::LastFailure, Expr::value(failure))
+        .filter(webhook_delivery::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Record that this Webhook took a Call.
+pub async fn webhook_succeeded<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    now_ms: i64,
+) -> Result<(), DbErr> {
+    webhook::Entity::update_many()
+        .col_expr(webhook::Column::LastSuccessMs, Expr::value(now_ms))
+        .col_expr(webhook::Column::ConsecutiveFailures, Expr::value(0))
+        .filter(webhook::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Record that an attempt on this Webhook failed, and why — incremented in the
+/// database rather than read-modify-written, [`downstream_failed`]'s reason.
+pub async fn webhook_failed<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    now_ms: i64,
+    failure: &str,
+) -> Result<(), DbErr> {
+    webhook::Entity::update_many()
+        .col_expr(webhook::Column::LastFailureMs, Expr::value(now_ms))
+        .col_expr(webhook::Column::LastFailure, Expr::value(failure))
+        .col_expr(
+            webhook::Column::ConsecutiveFailures,
+            Expr::col(webhook::Column::ConsecutiveFailures).add(1),
+        )
+        .filter(webhook::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// How many Calls each Webhook is owed, by Webhook Id — the durable depth an
+/// Operator is shown ([`delivery_depths`]'s note).
+pub async fn webhook_depths<C: ConnectionTrait>(db: &C) -> Result<HashMap<i64, i64>, DbErr> {
+    Ok(webhook_delivery::Entity::find()
+        .select_only()
+        .column(webhook_delivery::Column::WebhookId)
+        .column_as(webhook_delivery::Column::Id.count(), "depth")
+        .group_by(webhook_delivery::Column::WebhookId)
+        .into_tuple::<(i64, i64)>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect())
+}
+
+/// Forget everything queued for a Webhook that is being deleted or switched off.
+///
+/// [`clear_deliveries`]'s reason, and it bites harder here: a webhook switched
+/// off for a week and back on would post a week of Emergencies into somebody's
+/// chat room at once.
+pub async fn clear_webhook_deliveries<C: ConnectionTrait>(
+    db: &C,
+    webhook_id: i64,
+) -> Result<(), DbErr> {
+    webhook_delivery::Entity::delete_many()
+        .filter(webhook_delivery::Column::WebhookId.eq(webhook_id))
         .exec(db)
         .await?;
     Ok(())

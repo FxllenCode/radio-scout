@@ -368,7 +368,7 @@ export interface AdminDownstream {
   queued: number
   lastSuccessMs?: number | null
   lastFailureMs?: number | null
-  /** The last failure as a slug plus its status — `peer-refused (401)`. */
+  /** The last failure as a slug plus its status — `sink-refused (401)`. */
   lastFailure?: string | null
   consecutiveFailures: number
   createdAtMs: number
@@ -382,6 +382,67 @@ export interface NewDownstream {
   label?: string | null
   url: string
   apiKey: string
+  scope: SelectionMatrix
+  disabled?: boolean
+}
+
+/** A **mark** a Call can carry, as the wire spells it (#54).
+ *
+ *  One today. #55 adds `'tone'`, and the whole client is written against the
+ *  list rather than against the member — `MARKS` below is the only place that
+ *  has to grow. */
+export type Mark = 'emergency'
+
+/** Every mark this release knows, in the order a form offers them. */
+export const MARKS: readonly Mark[] = ['emergency']
+
+/** Which shape a **Webhook**'s body takes (#54). */
+export type WebhookFormat = 'radio-scout' | 'discord'
+
+/** Every format, in the order a form offers them. */
+export const WEBHOOK_FORMATS: readonly WebhookFormat[] = [
+  'radio-scout',
+  'discord',
+]
+
+/** A configured **Webhook** as the admin listing carries one (#54).
+ *
+ *  **There is no `url`**, and the omission is the point: a webhook's URL *is*
+ *  its credential (a Discord one ends in a token), so it goes up once and never
+ *  comes back — the `AdminDownstream.apiKey` rule, one notch stricter, because
+ *  here there is no separate public half. `host` is what replaces it: enough to
+ *  tell two rows apart, and not a secret. */
+export interface AdminWebhook {
+  id: number
+  label?: string | null
+  /** The URL's host — `discord.com`. Absent when the stored value is not a URL
+   *  at all, which is a webhook that will never deliver. */
+  host?: string | null
+  format: WebhookFormat
+  /** Which marks it asked for. Empty fires for nothing, which the screen shows
+   *  rather than hides. */
+  marks: Mark[]
+  /** Which Calls can reach it — the live feed's own **Selection**. */
+  scope: SelectionMatrix
+  disabled: boolean
+  /** **The durable queue depth**: Calls written down and not yet posted. */
+  queued: number
+  lastSuccessMs?: number | null
+  lastFailureMs?: number | null
+  /** The last failure as a slug plus its status — `sink-refused (404)`. */
+  lastFailure?: string | null
+  consecutiveFailures: number
+  createdAtMs: number
+}
+
+/** What a new webhook needs. `url` is write-only, for [`AdminWebhook`]'s
+ *  reason — and a `PATCH` that omits it leaves the stored one alone, which is
+ *  the only thing that makes re-scoping possible at all. */
+export interface NewWebhook {
+  label?: string | null
+  url: string
+  format: WebhookFormat
+  marks: Mark[]
   scope: SelectionMatrix
   disabled?: boolean
 }

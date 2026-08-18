@@ -11,6 +11,7 @@ import { AdminScreen } from '@/routes/admin/AdminScreen'
 import { AdminTalkgroupsScreen } from '@/routes/admin/AdminTalkgroupsScreen'
 import { ApiKeysScreen } from '@/routes/admin/ApiKeysScreen'
 import { DownstreamsScreen } from '@/routes/admin/DownstreamsScreen'
+import { WebhooksScreen } from '@/routes/admin/WebhooksScreen'
 import { GroupsScreen, TagsScreen } from '@/routes/admin/LabelsScreen'
 import { SystemsScreen } from '@/routes/admin/SystemsScreen'
 import { UnitsScreen } from '@/routes/admin/UnitsScreen'
@@ -51,6 +52,7 @@ export default function App() {
           path="settings/admin/downstreams"
           element={<DownstreamsScreen />}
         />
+        <Route path="settings/admin/webhooks" element={<WebhooksScreen />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

@@ -66,6 +66,7 @@ use crate::logsink;
 use crate::mining::MiningConfig;
 use crate::observability::{self, LogConfig};
 use crate::retention::{self, RetentionConfig};
+use crate::webhook::WebhookConfig;
 
 /// Radio-Scout's command line. Every flag here overrides the same setting from
 /// the environment, the file, and the default, in that order.
@@ -403,6 +404,7 @@ pub struct Config {
     pub enhancement: EnhancementConfig,
     pub mining: MiningConfig,
     pub downstream: DownstreamConfig,
+    pub webhook: WebhookConfig,
     pub log: LogConfig,
 }
 
@@ -522,6 +524,21 @@ impl Config {
                 "enhancement.output",
                 &self.enhancement.output.to_string(),
                 "\"wav\" — \"opus\" needs libopus, which lands with #100",
+            ));
+        }
+        // **A public URL that is not absolute is worse than none** (#54). Its
+        // whole job is to make a link that works from somewhere else, and a
+        // Discord webhook answers `400` for a malformed one — which the delivery
+        // queue reads as permanent and *abandons*, so a typo here would silently
+        // drop the Emergency it was configured to carry. Refusing at boot is the
+        // only place this is cheap.
+        if let Some(public_url) = &self.server.public_url
+            && !crate::webhook::is_postable_url(public_url)
+        {
+            return Err(ConfigError::invalid_key(
+                "server.public_url",
+                public_url,
+                EXPECTED_PUBLIC_URL,
             ));
         }
         validate_directives("log.directives", &self.log.directives)?;
@@ -666,6 +683,22 @@ pub const SETTINGS: &[Setting] = &[
                 .filter(|entry| !entry.is_empty())
                 .map(|entry| entry.parse().map_err(|_| setting.invalid(entry)))
                 .collect::<Result<_, _>>()?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "server.public_url",
+        var: "RADIO_SCOUT_PUBLIC_URL",
+        expected: EXPECTED_PUBLIC_URL,
+        example: "https://scanner.example",
+        set: |setting, config, value| {
+            // Refused here as well as in `validate`, so the refusal names the
+            // *variable* an operator wrote it in rather than the key they
+            // didn't — the `ProxyNet` precedent.
+            if !crate::webhook::is_postable_url(value) {
+                return Err(setting.invalid(value));
+            }
+            config.server.public_url = Some(value.to_string());
             Ok(())
         },
     },
@@ -1019,6 +1052,36 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "webhook.timeout_secs",
+        var: "RADIO_SCOUT_WEBHOOK_TIMEOUT_SECS",
+        expected: "a number of seconds",
+        example: "20",
+        set: |setting, config, value| {
+            config.webhook.timeout = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "webhook.retry_initial_secs",
+        var: "RADIO_SCOUT_WEBHOOK_RETRY_INITIAL_SECS",
+        expected: "a number of seconds",
+        example: "10",
+        set: |setting, config, value| {
+            config.webhook.retry_initial = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "webhook.retry_max_secs",
+        var: "RADIO_SCOUT_WEBHOOK_RETRY_MAX_SECS",
+        expected: "a number of seconds",
+        example: "300",
+        set: |setting, config, value| {
+            config.webhook.retry_max = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
         key: "log.directives",
         // Not a `RADIO_SCOUT_`-prefixed name: it is the variable every Rust
         // operator already reaches for, and ADR-0011 documents it as the
@@ -1163,6 +1226,15 @@ pub struct Server {
     /// Addresses and CIDR blocks whose `X-Forwarded-For` may be believed.
     /// Empty — the shipped posture — means the header is never believed.
     pub trusted_proxies: Vec<ProxyNet>,
+    /// Where this Instance can be reached **from outside** — the base a
+    /// **Webhook**'s payload builds an absolute audio URL on (#54).
+    ///
+    /// Unset by default, and unset is a real answer rather than a broken one: an
+    /// Instance genuinely does not know its own address (it may be behind a
+    /// proxy, a tunnel, or three), and a *guessed* URL in somebody's chat room
+    /// is worse than no link at all. What ships is therefore a payload carrying
+    /// every fact and no link, until an Operator says.
+    pub public_url: Option<String>,
 }
 
 impl Default for Server {
@@ -1171,9 +1243,14 @@ impl Default for Server {
             port: 3000,
             base_dir: PathBuf::from("./radio-scout-data"),
             trusted_proxies: Vec::new(),
+            public_url: None,
         }
     }
 }
+
+/// What a public URL has to look like. One string, so the file and the
+/// environment cannot describe it differently.
+const EXPECTED_PUBLIC_URL: &str = "an absolute URL, e.g. https://scanner.example";
 
 /// One entry of `[server] trusted_proxies`: a bare address (`10.0.0.1`) or a
 /// CIDR block (`172.17.0.0/16`).
@@ -1348,6 +1425,13 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # recorder's address into your log.
 #   trusted_proxies = ["127.0.0.1", "172.17.0.0/16"]
 # trusted_proxies = []
+
+# Where this scanner can be reached from outside — used to build the audio link
+# in a Webhook's payload (Settings -> Webhooks). Unset, a webhook still carries
+# every fact about the Call and simply has no link: a guessed URL in somebody's
+# chat room is worse than none, and this instance genuinely cannot know its own
+# address if it sits behind a proxy or a tunnel.
+#   public_url = "https://scanner.example"
 
 [database]
 # A SeaORM connection URL. Unset means SQLite at <base_dir>/radio-scout.db,
@@ -1527,6 +1611,33 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # poked once a minute, and its backlog starts moving within a minute of it
 # coming back. Raising the ceiling saves a poll an hour and costs every queued
 # call that much more delay on recovery.
+# retry_initial_secs = 5
+# retry_max_secs = 60
+
+[webhook]
+# Posting marked Calls to your own URLs (#54) — a Discord channel, or whatever
+# your automation listens on. The webhooks themselves are not configured here:
+# you add them in Settings -> Webhooks, with a URL, which marks you want
+# (emergency), which Systems and Talkgroups, and whether to send Radio-Scout's
+# own JSON or a Discord-shaped message. This section is only the policy for how
+# hard we try.
+#
+# A webhook URL is a *credential* — a Discord one ends in a token — which is why
+# it lives in the database and never in this file, is never shown again after you
+# save it, never appears in a log line, and is left out of the exported
+# configuration document.
+#
+# Nothing is lost when your endpoint is down: matching Calls are written to a
+# durable queue as they are stored, and drained in order once it comes back.
+
+# How long a webhook has to answer one delivery. Shorter than the downstream
+# timeout on purpose — this is a few hundred bytes of JSON, not a minute of
+# audio, so an endpoint that has not answered in ten seconds is down rather than
+# slow.
+# timeout_secs = 10
+
+# How long to wait before retrying a failed delivery, and the ceiling that wait
+# doubles up to.
 # retry_initial_secs = 5
 # retry_max_secs = 60
 
@@ -2525,6 +2636,63 @@ mod tests {
             resolve(&cli(&[]), no_env, Some(&file(text))).expect_err("an impossible policy");
 
         assert!(error.to_string().contains(key), "{error}");
+    }
+
+    /// **A public URL that is not absolute refuses to boot, from either
+    /// layer** (#54).
+    ///
+    /// Its whole job is to make a link that works from somewhere else, and a
+    /// Discord webhook answers `400` for a malformed one — which the delivery
+    /// queue reads as permanent and *abandons*, so a typo here would silently
+    /// drop the Emergency it was configured to carry. Refused in the
+    /// environment layer as well as in `validate`, the `ProxyNet` precedent, so
+    /// the message names the variable an operator wrote it in rather than the
+    /// key they didn't.
+    ///
+    /// Unset stays perfectly valid: an Instance genuinely may not know its own
+    /// address, and a payload with every fact and no link is the honest answer.
+    #[rstest]
+    #[case::relative_in_the_file("[server]\npublic_url = \"/scanner\"\n", &[])]
+    #[case::no_scheme_in_the_file("[server]\npublic_url = \"scanner.example\"\n", &[])]
+    // A scheme that parses as a URL and is not one Discord will take — the case
+    // a "does it have a host?" check would have let through.
+    #[case::wrong_scheme_in_the_file("[server]\npublic_url = \"ftp://scanner.example\"\n", &[])]
+    #[case::no_host_in_the_file("[server]\npublic_url = \"https:///x\"\n", &[])]
+    // What an operator pastes out of a document that wrapped the line.
+    #[case::whitespace_in_the_file("[server]\npublic_url = \"https://scanner example\"\n", &[])]
+    #[case::relative_in_the_environment("", &[("RADIO_SCOUT_PUBLIC_URL", "/scanner")])]
+    #[case::wrong_scheme_in_the_environment("", &[("RADIO_SCOUT_PUBLIC_URL", "ftp://x.example")])]
+    fn a_public_url_that_is_not_absolute_refuses_to_boot(
+        #[case] text: &str,
+        #[case] vars: &[(&str, &str)],
+    ) {
+        let error =
+            resolve(&cli(&[]), env(vars), Some(&file(text))).expect_err("not an absolute URL");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("public_url") || message.contains("PUBLIC_URL"),
+            "{message}"
+        );
+        assert!(message.contains("https://scanner.example"), "{message}");
+    }
+
+    /// ...and an absolute one is taken as written, from either layer.
+    #[rstest]
+    #[case::in_the_file("[server]\npublic_url = \"https://scan.example\"\n", &[])]
+    #[case::in_the_environment("", &[("RADIO_SCOUT_PUBLIC_URL", "https://scan.example")])]
+    fn an_absolute_public_url_is_kept(#[case] text: &str, #[case] vars: &[(&str, &str)]) {
+        let config = resolve(&cli(&[]), env(vars), Some(&file(text))).expect("resolve");
+
+        assert_eq!(
+            config.server.public_url.as_deref(),
+            Some("https://scan.example")
+        );
+        assert_eq!(
+            Config::default().server.public_url,
+            None,
+            "and not knowing is the shipped answer"
+        );
     }
 
     /// An output that parses but is not built must **refuse to boot**, from

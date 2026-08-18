@@ -1,0 +1,36 @@
+---
+source: src/webhook/payload.rs
+assertion_line: 402
+expression: rendered(&body)
+---
+{
+  "embeds": [
+    {
+      "color": 15548997,
+      "description": "Emergency",
+      "fields": [
+        {
+          "inline": true,
+          "name": "System",
+          "value": "Fulton County"
+        },
+        {
+          "inline": true,
+          "name": "Unit",
+          "value": "Engine 1"
+        },
+        {
+          "inline": true,
+          "name": "Duration",
+          "value": "7s"
+        }
+      ],
+      "footer": {
+        "text": "Radio-Scout"
+      },
+      "timestamp": "2023-11-14T22:13:20Z",
+      "title": "Fire Dispatch",
+      "url": "https://scan.example/api/call/42/audio"
+    }
+  ]
+}

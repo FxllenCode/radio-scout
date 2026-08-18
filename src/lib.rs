@@ -35,6 +35,7 @@ pub mod serve;
 pub mod service;
 pub mod startup;
 pub mod web;
+pub mod webhook;
 pub mod worker;
 
 #[cfg(test)]
@@ -80,6 +81,11 @@ pub struct AppState {
     /// so an Instance with none has an empty roster rather than a feature
     /// switched off.
     pub downstreams: crate::downstream::Downstreams,
+    /// Posting marked Calls to an Operator's own URLs (#54) — the policy, the
+    /// sender's wake-up, and where this Instance can be reached from outside.
+    /// A Webhook is a **row**, so an Instance with none has an empty roster
+    /// rather than a feature switched off.
+    pub webhooks: crate::webhook::Webhooks,
     /// What time it is, for everything a handler stamps or expires (#90).
     pub clock: Clock,
     /// What every background Worker owes right now (#93) — the reading half, so
@@ -103,6 +109,7 @@ impl AppState {
             enhancer: Enhancer::disabled(),
             mining: crate::mining::MiningConfig::default(),
             downstreams: crate::downstream::Downstreams::default(),
+            webhooks: crate::webhook::Webhooks::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
         }

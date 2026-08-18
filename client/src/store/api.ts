@@ -6,6 +6,7 @@ import type {
   AdminApiKey,
   AdminAssignment,
   AdminDownstream,
+  AdminWebhook,
   AdminLabel,
   AdminSession,
   AdminSystem,
@@ -25,6 +26,7 @@ import type {
   MemberRef,
   MergeReport,
   NewDownstream,
+  NewWebhook,
   RangeDelta,
   RangeReport,
   SearchPage,
@@ -71,6 +73,7 @@ export const api = createApi({
     'Unit',
     'ApiKey',
     'Downstream',
+    'Webhook',
   ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
@@ -420,6 +423,34 @@ export const api = createApi({
       query: (id) => ({ url: `api/admin/downstreams/${id}`, method: 'DELETE' }),
       invalidatesTags: ['Downstream'],
     }),
+
+    /** **Webhooks** (#54), with their health beside them, on the Downstream
+     *  listing's terms. The URL never comes back — see [`AdminWebhook`]. */
+    getWebhooks: builder.query<Listing<AdminWebhook>, void>({
+      query: () => ({ url: 'api/admin/webhooks' }),
+      providesTags: ['Webhook'],
+    }),
+    createWebhook: builder.mutation<AdminWebhook, NewWebhook>({
+      query: (body) => ({ url: 'api/admin/webhooks', method: 'POST', body }),
+      invalidatesTags: ['Webhook'],
+    }),
+    /** An edit that omits `url` leaves the stored credential alone — the screen
+     *  can never show it again, so re-scoping must not require re-pasting it. */
+    updateWebhook: builder.mutation<
+      AdminWebhook,
+      { id: number; patch: Partial<NewWebhook> }
+    >({
+      query: ({ id, patch }) => ({
+        url: `api/admin/webhooks/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['Webhook'],
+    }),
+    deleteWebhook: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/webhooks/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Webhook'],
+    }),
     // Live-feed hydration etc. are added by later tickets.
   }),
 })
@@ -430,6 +461,7 @@ export const {
   useAssignTalkgroupsMutation,
   useCreateApiKeyMutation,
   useCreateDownstreamMutation,
+  useCreateWebhookMutation,
   useCreateGroupMutation,
   useCreateSystemMutation,
   useCreateTagMutation,
@@ -437,6 +469,7 @@ export const {
   useCreateUnitMutation,
   useDeleteApiKeyMutation,
   useDeleteDownstreamMutation,
+  useDeleteWebhookMutation,
   useDeleteGroupMutation,
   useDeleteSystemMutation,
   useDeleteTagMutation,
@@ -449,6 +482,7 @@ export const {
   useGetApiKeysQuery,
   useGetCatalogQuery,
   useGetDownstreamsQuery,
+  useGetWebhooksQuery,
   useGetFilterOptionsQuery,
   useGetGroupsQuery,
   useGetHealthQuery,
@@ -465,6 +499,7 @@ export const {
   useSetRangesMutation,
   useUpdateApiKeyMutation,
   useUpdateDownstreamMutation,
+  useUpdateWebhookMutation,
   useUpdateGroupMutation,
   useUpdateSystemMutation,
   useUpdateTagMutation,

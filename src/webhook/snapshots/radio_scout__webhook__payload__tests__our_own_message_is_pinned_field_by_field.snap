@@ -1,0 +1,30 @@
+---
+source: src/webhook/payload.rs
+assertion_line: 415
+expression: rendered(&body)
+---
+{
+  "call": {
+    "audioMime": "audio/wav",
+    "audioUrl": "https://scan.example/api/call/42/audio",
+    "durationMs": 7400,
+    "emergency": true,
+    "frequency": 853500000,
+    "id": 42,
+    "led": "red",
+    "siteLabel": "North Tower",
+    "siteRef": 3,
+    "systemLabel": "Fulton County",
+    "systemRef": 11,
+    "talkgroupGroup": "Fire",
+    "talkgroupLabel": "Fire Dispatch",
+    "talkgroupRef": 54241,
+    "talkgroupTag": "Fire Dispatch",
+    "timestamp": 1700000000000,
+    "unitLabel": "Engine 1",
+    "unitRef": 1234
+  },
+  "marks": [
+    "emergency"
+  ]
+}

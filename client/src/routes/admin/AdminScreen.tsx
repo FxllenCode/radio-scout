@@ -39,6 +39,11 @@ const SECTIONS = [
     hint: 'instances you forward calls to',
   },
   {
+    to: '/settings/admin/webhooks',
+    label: 'Webhooks',
+    hint: 'addresses that get your flagged calls',
+  },
+  {
     to: '/settings/logs',
     label: 'Logs',
     hint: 'what the server has been doing',
@@ -49,7 +54,7 @@ const SECTIONS = [
  * Settings → Admin (#49, spec US 45) — the hub for running the Instance from a
  * browser, so that doing so never requires SSH.
  *
- * A hub rather than one long page, because these are seven unrelated jobs and a
+ * A hub rather than one long page, because these are eight unrelated jobs and a
  * phone can show one of them. rdio-scanner puts all of its configuration behind
  * a single tabbed page backed by one `PUT` of the whole document; splitting them
  * is what lets each screen write only its own rows.

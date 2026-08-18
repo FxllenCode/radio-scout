@@ -655,6 +655,34 @@ pub struct Download {
     pub filename: String,
 }
 
+/// One Call as a **Webhook** is about to be told about it (#54).
+///
+/// Deliberately the [`StoredCall`] a **Listener** would see rather than
+/// [`forwardable`]'s recorder-facing view, and the difference is the whole
+/// distinction between the two sinks: a peer stores the Call as if it were the
+/// recorder, so it needs the recorder's own words; a webhook is read by a person
+/// in a chat room or by a script, so it gets what the app shows — curated
+/// labels, the resolved **Unit**, the audio URL.
+///
+/// Which means this is [`stored_calls`] over one row, plus the marks, and
+/// nothing else. It lives here because the Archive is read by one module (#98).
+pub async fn deliverable<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<crate::webhook::sender::Deliverable>, DbErr> {
+    let Some(row) = call::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+    // **The marks are read off the row now, not remembered from when it was
+    // queued.** A Call that has been replaced by a better copy (#46) since is
+    // sent as it now stands, which is the same rule the forwarding path follows
+    // and the reason neither queue stores a rendered payload.
+    let marks = crate::webhook::Marks::on_call(row.emergency);
+    Ok(one_view(db, &row)
+        .await?
+        .map(|call| crate::webhook::sender::Deliverable { call, marks }))
+}
+
 /// One Call as a **Downstream** peer is about to be told about it (#52).
 ///
 /// A third single-Call read rather than a reuse of [`call_detail`], and the

@@ -9,6 +9,7 @@ use sea_orm_migration::prelude::*;
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_unit, downstream, downstream_delivery, group,
     log_event, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
+    webhook, webhook_delivery,
 };
 
 pub struct Migrator;
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0012_mining_leaves_a_mark::Migration),
             Box::new(m0013_downstream_peers::Migration),
             Box::new(m0014_drop_push_subscriptions::Migration),
+            Box::new(m0015_webhooks::Migration),
         ]
     }
 }
@@ -1430,6 +1432,104 @@ mod m0013_downstream_peers {
                         .if_exists()
                         .to_owned(),
                 )
+                .await
+        }
+    }
+}
+
+/// **Webhooks, and the queue that keeps them honest** (#54, spec US 21).
+///
+/// [`m0013_downstream_peers`]'s two tables again, for the other outbound sink:
+/// `webhooks` is **Curation** — an Operator's URLs, edited from the browser like
+/// every other entity — and `webhook_deliveries` is the durable queue behind
+/// them, so a Discord outage costs delay rather than the Emergency it was there
+/// to carry.
+///
+/// A **second pair of tables rather than a `kind` column on m0013's**, and the
+/// reason is the queue-head index: `WHERE sink_id = ? ORDER BY id` is the query
+/// that runs forever, and the two queues fill at completely different rates —
+/// every stored Call reaches a Downstream's, only a *marked* Call reaches a
+/// webhook's. Sharing would put a peer's overnight backlog in the index the
+/// Emergency path reads, and buy nothing for it.
+///
+/// Neither table needs the probe-before-create guard m0003 and m0004 pay:
+/// nothing already exists to diverge from, which is the m0005 and m0013
+/// precedent.
+mod m0015_webhooks {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0015_webhooks"
+        }
+    }
+
+    const QUEUE_HEAD: &str = "idx_webhook_deliveries_head";
+    const ONE_PER_CALL: &str = "idx_webhook_deliveries_hook_call";
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            if !manager.has_table("webhooks").await? {
+                manager
+                    .create_table(schema.create_table_from_entity(webhook::Entity))
+                    .await?;
+            }
+            if !manager.has_table("webhook_deliveries").await? {
+                manager
+                    .create_table(schema.create_table_from_entity(webhook_delivery::Entity))
+                    .await?;
+            }
+            if !manager.has_index("webhook_deliveries", QUEUE_HEAD).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(QUEUE_HEAD)
+                            .table(webhook_delivery::Entity)
+                            .col(webhook_delivery::Column::WebhookId)
+                            .col(webhook_delivery::Column::Id)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // The **Replacement** rule (#46), same as m0013's: a better copy of
+            // a Call re-enqueues one that may still be queued from its first
+            // copy, and one row per (webhook, Call) is exactly right — the
+            // sender reads the Call's *current* state when it sends, so the
+            // queued row already means "whatever this Call is now".
+            if !manager
+                .has_index("webhook_deliveries", ONE_PER_CALL)
+                .await?
+            {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(ONE_PER_CALL)
+                            .table(webhook_delivery::Entity)
+                            .col(webhook_delivery::Column::WebhookId)
+                            .col(webhook_delivery::Column::CallId)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(webhook_delivery::Entity)
+                        .if_exists()
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .drop_table(Table::drop().table(webhook::Entity).if_exists().to_owned())
                 .await
         }
     }

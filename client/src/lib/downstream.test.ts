@@ -146,13 +146,13 @@ describe("a peer's health, in one line", () => {
       peer({
         queued: 12,
         consecutiveFailures: 4,
-        lastFailure: 'peer-refused (503)',
+        lastFailure: 'sink-refused (503)',
         lastSuccessMs: null,
       }),
     )
 
     expect(line).toContain('12 queued')
-    expect(line).toContain('4 failed · peer-refused (503)')
+    expect(line).toContain('4 failed · sink-refused (503)')
     expect(line).toContain('never delivered')
   })
 

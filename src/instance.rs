@@ -583,6 +583,8 @@ async fn assemble(
     state.enhancer = Enhancer::from_config(config.enhancement.clone());
     state.mining = config.mining.clone();
     state.downstreams = crate::downstream::Downstreams::new(config.downstream.clone());
+    state.webhooks =
+        crate::webhook::Webhooks::new(config.webhook.clone(), config.server.public_url.clone());
     state.clock = parts.clock;
     // Enhancement (#20) runs off its own queue, behind ingest rather than in
     // it. With `[enhancement] mode = "off"` — what ships — this spawns nothing,
@@ -602,6 +604,11 @@ async fn assemble(
     running.extend(
         crate::downstream::sender::spawn(state.clone()).map(|worker| workers.adopt(worker)),
     );
+    // Posting marked Calls to an Operator's own URLs (#54), on the same terms
+    // and for the same reason: a Webhook is a row, so this starts whatever the
+    // roster says and costs nothing while that roster is empty.
+    running
+        .extend(crate::webhook::sender::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     let app = build_app(state.clone());
 
     let bind = parts

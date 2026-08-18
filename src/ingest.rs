@@ -900,8 +900,25 @@ async fn replace(
     )
     .await
     .map_err(Stage::ReplaceCall.failed())?;
+    // **And posted again** (#54), for a different reason than the forward: a
+    // **Replacement** can turn an encrypted Call into a decoded one, or a
+    // truncated copy into a whole one, and a webhook that fired on the worse
+    // copy would otherwise link an Operator to audio this Instance has since
+    // improved on. The unique index means the *usual* case — a replacement
+    // arriving before the first copy was sent — is a no-op rather than a second
+    // message.
+    let posting = enqueue_webhooks(
+        &txn,
+        &new_call,
+        resolved,
+        replacement.call().id,
+        state.clock.now_ms(),
+    )
+    .await
+    .map_err(Stage::ReplaceCall.failed())?;
     txn.commit().await.map_err(Stage::ReplaceCall.failed())?;
     state.downstreams.owes(forwarding);
+    state.webhooks.owes(posting);
 
     let call = match replacement {
         repo::Replacement::Replaced(call) => call,
@@ -947,7 +964,11 @@ async fn perform(
     // Insert the row (+ children) atomically, into the channel already resolved
     // for this Call rather than one looked up a second time (#96) — and, in the
     // same transaction, queue it for every **Downstream** it reaches (#52).
-    let Stored { call, forwarding } = insert_in_txn(
+    let Stored {
+        call,
+        forwarding,
+        posting,
+    } = insert_in_txn(
         &state.db,
         &new_call,
         stored,
@@ -962,6 +983,7 @@ async fn perform(
     // After the commit, never inside it: an attempt admitted for a delivery
     // that then rolled back would be a debt nothing could settle.
     state.downstreams.owes(forwarding);
+    state.webhooks.owes(posting);
 
     publish(state, &call).await?;
     offer_for_enhancement(state, &call).await;
@@ -1214,19 +1236,25 @@ async fn insert_in_txn(
     let txn = db.begin().await?;
     let call = repo::insert_call(&txn, new_call, audio, resolved, auto_populate, now_ms).await?;
     let forwarding = enqueue_forwarding(&txn, new_call, resolved, call.id, now_ms).await?;
+    let posting = enqueue_webhooks(&txn, new_call, resolved, call.id, now_ms).await?;
     txn.commit().await?;
-    Ok(Stored { call, forwarding })
+    Ok(Stored {
+        call,
+        forwarding,
+        posting,
+    })
 }
 
-/// A Call that is now a row, and how many **Downstream** peers are owed it.
+/// A Call that is now a row, and how many outbound sinks are owed it.
 ///
-/// Two facts from one transaction, because the second is only true if the first
-/// committed — and the count has to leave the transaction to be admitted to the
-/// sender's meter afterwards. See [`crate::downstream::Downstreams::owes`] for
-/// why it cannot be admitted inside.
+/// Facts from one transaction, because the counts are only true if the insert
+/// committed — and they have to leave the transaction to be admitted to their
+/// senders' meters afterwards. See [`crate::delivery::Dispatcher::owes`] for why
+/// they cannot be admitted inside.
 struct Stored {
     call: crate::db::entities::call::Model,
     forwarding: usize,
+    posting: usize,
 }
 
 /// Queue this Call for every **Downstream** whose scope it reaches (#52).
@@ -1255,26 +1283,67 @@ async fn enqueue_forwarding<C: sea_orm::ConnectionTrait>(
     if new_call.encrypted {
         return Ok(0);
     }
-    // The channel this Call resolved to, then everything it is patched to — the
-    // same set the live feed routes on, which is the half rdio's own forwarder
-    // omits. Both come from the [`repo::Resolved`] the pipeline already read
-    // (#96), so scoping costs no lookup of its own: the only statement this
-    // whole feature adds to ingest is the roster read below.
-    //
-    // The canonical Ref falls back to the one the recorder sent, which is the
-    // auto-populate case — `insert_call` has just created that Talkgroup under
-    // exactly this Ref, and it was `None` here only because nothing had
-    // resolved it beforehand.
+    let talkgroups = reached_channels(new_call, resolved);
+    let roster = repo::forwarding_downstreams(db).await?;
+    let owed = crate::downstream::routed_to(&roster, new_call.system_ref, &talkgroups);
+    repo::queue_deliveries(db, call_id, &owed, now_ms).await
+}
+
+/// Queue this Call for every **Webhook** that asked for one of its marks (#54).
+///
+/// [`enqueue_forwarding`]'s rules, with two differences that are the whole
+/// shape of this feature:
+///
+/// **It costs nothing at all unless the Call carries a mark.** Any Call may
+/// reach a Downstream, so that roster is read on every upload; a Call carrying
+/// no mark can reach no Webhook, so the roster read is behind
+/// [`crate::webhook::Marks::is_empty`] and an ordinary Call issues **no
+/// statement here**. On a Pi taking a Call a second with Emergencies a few times
+/// a day, that is the difference between one extra statement per Call and one
+/// per Emergency.
+///
+/// **An Encrypted Call is queued.** Forwarding refuses one because the rdio
+/// dialect needs an audio object it does not have; a webhook carries facts, and
+/// an encrypted Emergency is exactly the fact an Operator most wants to be told
+/// about.
+async fn enqueue_webhooks<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    new_call: &NewCall,
+    resolved: &repo::Resolved,
+    call_id: CallId,
+    now_ms: i64,
+) -> Result<usize, sea_orm::DbErr> {
+    let marks = crate::webhook::Marks::on_call(new_call.emergency);
+    if marks.is_empty() {
+        return Ok(0);
+    }
+    let talkgroups = reached_channels(new_call, resolved);
+    let roster = repo::delivering_webhooks(db).await?;
+    let owed = crate::webhook::routed_to(&roster, &marks, new_call.system_ref, &talkgroups);
+    repo::queue_webhook_deliveries(db, call_id, &owed, now_ms).await
+}
+
+/// Every Talkgroup this Call reaches: the channel it resolved to, then
+/// everything it is patched to.
+///
+/// The same set the live feed routes on, which is the half rdio's own forwarder
+/// omits — and written once because both outbound sinks scope on it and a set
+/// that differed between them would mean a **Patch** reaching a peer and not a
+/// webhook, or the reverse.
+///
+/// It costs no lookup of its own: both halves come from the [`repo::Resolved`]
+/// the pipeline already read (#96). The canonical Ref falls back to the one the
+/// recorder sent, which is the auto-populate case — `insert_call` has just
+/// created that Talkgroup under exactly this Ref, and it was `None` here only
+/// because nothing had resolved it beforehand.
+fn reached_channels(new_call: &NewCall, resolved: &repo::Resolved) -> Vec<i64> {
     let mut talkgroups = vec![resolved.talkgroup_ref().unwrap_or(new_call.talkgroup_ref)];
     for patched in resolved.patches.as_deref().unwrap_or_default() {
         if !talkgroups.contains(patched) {
             talkgroups.push(*patched);
         }
     }
-
-    let roster = repo::forwarding_downstreams(db).await?;
-    let owed = crate::downstream::routed_to(&roster, new_call.system_ref, &talkgroups);
-    repo::queue_deliveries(db, call_id, &owed, now_ms).await
+    talkgroups
 }
 
 /// `POST /api/trunk-recorder-call-upload` — Trunk Recorder's native

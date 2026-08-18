@@ -15,6 +15,7 @@ import { DownstreamsScreen } from './DownstreamsScreen'
 import { GroupsScreen, TagsScreen } from './LabelsScreen'
 import { SystemsScreen } from './SystemsScreen'
 import { UnitsScreen } from './UnitsScreen'
+import { WebhooksScreen } from './WebhooksScreen'
 
 /** The instance every test in this file drives. Rebuilt per test, so one test's
  *  edits are never another's starting state. */
@@ -54,6 +55,7 @@ describe('the admin gate', () => {
     ['units', () => <UnitsScreen />],
     ['api keys', () => <ApiKeysScreen />],
     ['downstreams', () => <DownstreamsScreen />],
+    ['webhooks', () => <WebhooksScreen />],
   ])('asks for the password on the %s screen', async (_name, ui) => {
     // The default handlers answer `/api/admin/session` with a 401.
     renderWithProviders(ui())
@@ -105,6 +107,7 @@ describe('the admin gate', () => {
       '/settings/admin/tags',
       '/settings/admin/api-keys',
       '/settings/admin/downstreams',
+      '/settings/admin/webhooks',
       '/settings/logs',
     ])
   })
@@ -2501,7 +2504,7 @@ describe('downstreams', () => {
       label: 'county mirror',
       queued: 12,
       consecutiveFailures: 4,
-      lastFailure: 'peer-refused (503)',
+      lastFailure: 'sink-refused (503)',
       lastSuccessMs: null,
     })
     signedIn(<DownstreamsScreen />)
@@ -2510,7 +2513,7 @@ describe('downstreams', () => {
     expect(within(list).getByText(/12 queued/)).toBeInTheDocument()
     expect(within(list).getByText(/4 failed/)).toBeInTheDocument()
     expect(
-      within(list).getByText(/peer-refused \(503\)/),
+      within(list).getByText(/sink-refused \(503\)/),
     ).toBeInTheDocument()
     expect(within(list).getByText(/never delivered/)).toBeInTheDocument()
   })
@@ -2692,5 +2695,316 @@ describe('downstreams', () => {
     const key = within(form).getByLabelText(/Replace the key/)
     expect(key).toHaveValue('')
     expect(key).toHaveAttribute('type', 'password')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Webhooks (#54)
+// ---------------------------------------------------------------------------
+
+describe('webhooks', () => {
+  /** Adding one: where it posts, in what shape, on what mark, and about which
+   *  Calls.
+   *
+   *  The address is typed into a masked field and posted once. This is the only
+   *  moment it is on screen — a Discord webhook URL ends in a token, so the
+   *  listing can never show it back, which is a notch stricter than the
+   *  Downstream key beside it (there the URL is public and only the key is
+   *  guarded). */
+  it('adds a webhook watching for emergencies on one system', async () => {
+    signedIn(<WebhooksScreen />)
+    await screen.findByLabelText(/^Address/)
+
+    await userEvent.type(screen.getByLabelText('What is it'), 'dispatch')
+    await userEvent.type(
+      screen.getByLabelText(/^Address/),
+      'https://discord.com/api/webhooks/1/t0ken',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Add a system' }))
+    await userEvent.type(screen.getByLabelText('System ref'), '11')
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0]).toEqual({
+      method: 'POST',
+      path: '/api/admin/webhooks',
+      body: {
+        label: 'dispatch',
+        url: 'https://discord.com/api/webhooks/1/t0ken',
+        format: 'radio-scout',
+        // Ticked by default: it is the only mark there is, and a webhook
+        // watching nothing is silently inert.
+        marks: ['emergency'],
+        scope: { all: false, sel: { 11: { '*': true } } },
+      },
+    })
+  })
+
+  /** The Discord shape is a choice on the same form, because "which shape" is
+   *  the one thing an Operator has to decide that a Downstream never asks. */
+  it('sends the discord shape when it is chosen', async () => {
+    signedIn(<WebhooksScreen />)
+    await screen.findByLabelText(/^Address/)
+
+    await userEvent.type(screen.getByLabelText(/^Address/), 'https://hooks.test/x')
+    await userEvent.selectOptions(
+      screen.getByLabelText('Send it as'),
+      'discord',
+    )
+    await userEvent.click(screen.getByLabelText('Forward everything'))
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect((wrote()[0].body as { format: unknown }).format).toBe('discord')
+  })
+
+  /** **An unusable address never leaves the browser**, and that is the point of
+   *  checking it here as well as on the server: submitting is the last moment
+   *  the Operator can see what they pasted, so being told before it disappears
+   *  is the difference between fixing a typo and going back to Discord for the
+   *  whole URL. */
+  it('refuses an address it could never post to, without sending it', async () => {
+    signedIn(<WebhooksScreen />)
+    await screen.findByLabelText(/^Address/)
+
+    await userEvent.type(screen.getByLabelText(/^Address/), 'discord.com/api/x')
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/https:\/\//)
+    expect(wrote()).toHaveLength(0)
+  })
+
+  /** ...and the server's own refusal is rendered from the server's sentence,
+   *  because a mark this release does not know is something only it can name. */
+  it('renders the server refusal for a mark it does not know', async () => {
+    server.use(...curationHandlers(instance))
+    server.use(
+      http.post(`${ORIGIN}/api/admin/webhooks`, () =>
+        refusal(400, 'unknown-mark', '"tone" is not a mark a Call can carry'),
+      ),
+    )
+    renderWithProviders(<WebhooksScreen />)
+    await screen.findByLabelText(/^Address/)
+
+    await userEvent.type(screen.getByLabelText(/^Address/), 'https://hooks.test/x')
+    await userEvent.click(screen.getByLabelText('Forward everything'))
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    expect(await screen.findByText(/not a mark/)).toBeInTheDocument()
+  })
+
+  /** The listing carries the **host** and never the URL, plus the health an
+   *  Operator acts on — and a webhook watching nothing is called out, because
+   *  it is the one misconfiguration here that produces no error anywhere. */
+  it('shows a host, the marks, and what is queued', async () => {
+    instance.webhook({
+      label: 'dispatch',
+      host: 'discord.com',
+      format: 'discord',
+      queued: 4,
+      consecutiveFailures: 2,
+      lastFailure: 'sink-refused (429)',
+    })
+    instance.webhook({ label: 'inert', marks: [] })
+    signedIn(<WebhooksScreen />)
+
+    const rows = await screen.findAllByRole('listitem')
+
+    expect(rows[0]).toHaveTextContent('discord.com')
+    expect(rows[0]).toHaveTextContent('Discord message')
+    expect(rows[0]).toHaveTextContent('4 queued')
+    expect(rows[0]).toHaveTextContent('sink-refused (429)')
+    expect(rows[1]).toHaveTextContent('watching nothing')
+  })
+
+  /** **Editing leaves the address alone**, which is the only thing that makes
+   *  re-scoping possible at all: the screen can never show the credential
+   *  again, so a blank field has to mean keep. */
+  it('re-scopes a webhook without re-pasting its address', async () => {
+    const hook = instance.webhook({ label: 'dispatch' })
+    signedIn(<WebhooksScreen />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+
+    // Scoped to the edit form: the add form above it has a scope editor of its
+    // own, and both spell the checkbox the same way.
+    const form = screen.getByRole('form', { name: /^Edit / })
+    await userEvent.click(within(form).getByLabelText('Forward everything'))
+    await userEvent.click(within(form).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].path).toBe(`/api/admin/webhooks/${hook.id}`)
+    expect(wrote()[0].body).not.toHaveProperty('url')
+    expect((wrote()[0].body as { scope: unknown }).scope).toEqual({
+      all: true,
+      sel: {},
+    })
+  })
+
+  /** Switching one off empties its queue, which is what "disabled" has to mean:
+   *  a webhook off for a week and switched back on must not post a week of
+   *  emergencies into somebody's chat room at once. */
+  it('disables a webhook and drops what was queued for it', async () => {
+    const hook = instance.webhook({ queued: 9 })
+    signedIn(<WebhooksScreen />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Disable' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].body).toEqual({ disabled: true })
+    expect(await screen.findByText(/disabled/)).toBeInTheDocument()
+    expect(instance.webhooks.find((it) => it.id === hook.id)?.queued).toBe(0)
+  })
+
+  /** Removing one, through the same road every other row takes. */
+  it('removes a webhook', async () => {
+    const hook = instance.webhook({})
+    signedIn(<WebhooksScreen />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0]).toEqual({
+      method: 'DELETE',
+      path: `/api/admin/webhooks/${hook.id}`,
+      body: undefined,
+    })
+  })
+
+  /** A refused delete is shown rather than swallowed — the row is still there,
+   *  and an Operator who pressed Remove and saw nothing happen would press it
+   *  again. */
+  it('shows a refused delete', async () => {
+    instance.webhook({ label: 'dispatch' })
+    server.use(...curationHandlers(instance))
+    server.use(
+      http.delete(`${ORIGIN}/api/admin/webhooks/:id`, () =>
+        refusal(404, 'webhook-not-found', 'no such webhook'),
+      ),
+    )
+    renderWithProviders(<WebhooksScreen />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+
+    expect(await screen.findByText(/no such webhook/)).toBeInTheDocument()
+  })
+
+  /** A listing that cannot be read says so rather than reading as "none". */
+  it('says so when the webhooks cannot be read', async () => {
+    server.use(...curationHandlers(instance))
+    server.use(
+      http.get(`${ORIGIN}/api/admin/webhooks`, () =>
+        HttpResponse.json({ error: 'nope' }, { status: 500 }),
+      ),
+    )
+    renderWithProviders(<WebhooksScreen />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /could not be read/,
+    )
+  })
+
+  /** **Unticking the last mark leaves a webhook watching nothing**, which the
+   *  server accepts and the listing calls out — so the form must be able to
+   *  reach that state rather than silently keeping the last one. */
+  it('lets a mark be unticked', async () => {
+    signedIn(<WebhooksScreen />)
+    await screen.findByLabelText(/^Address/)
+    await userEvent.type(screen.getByLabelText(/^Address/), 'https://hooks.test/x')
+    await userEvent.click(screen.getByLabelText('Forward everything'))
+
+    const emergency = screen.getByLabelText('Emergency')
+    await userEvent.click(emergency)
+    expect(emergency).not.toBeChecked()
+
+    // ...and ticked again, because a checkbox that only goes one way is worse
+    // than no checkbox at all.
+    await userEvent.click(emergency)
+    expect(emergency).toBeChecked()
+
+    await userEvent.click(emergency)
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect((wrote()[0].body as { marks: unknown }).marks).toEqual([])
+  })
+
+  /** Replacing the address is the other half of "blank means keep": when one
+   *  *is* typed, it goes — and it is checked first, on the edit form as well as
+   *  the add form. */
+  it('replaces the address when a new one is typed, and refuses a bad one', async () => {
+    const hook = instance.webhook({ label: 'dispatch' })
+    signedIn(<WebhooksScreen />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    const form = screen.getByRole('form', { name: /^Edit / })
+
+    await userEvent.type(within(form).getByLabelText(/^Replace/), 'not-a-url')
+    await userEvent.click(within(form).getByRole('button', { name: 'Save' }))
+
+    expect(within(form).getByRole('alert')).toHaveTextContent(/https:\/\//)
+    expect(wrote()).toHaveLength(0)
+
+    await userEvent.clear(within(form).getByLabelText(/^Replace/))
+    await userEvent.type(
+      within(form).getByLabelText(/^Replace/),
+      'https://hooks.test/new',
+    )
+    await userEvent.clear(within(form).getByLabelText('What is it'))
+    await userEvent.click(within(form).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].body).toMatchObject({
+      url: 'https://hooks.test/new',
+      // Cleared on purpose: a blank label is an explicit `null`, which is how
+      // one is removed at all.
+      label: null,
+    })
+    expect(instance.webhooks.find((it) => it.id === hook.id)?.host).toBe(
+      'hooks.test',
+    )
+  })
+
+  /** The editor closes again, and a refused save is rendered under the form
+   *  rather than swallowed. */
+  it('closes the editor, and shows a refused save', async () => {
+    instance.webhook({ label: 'dispatch' })
+    server.use(...curationHandlers(instance))
+    server.use(
+      http.patch(`${ORIGIN}/api/admin/webhooks/:id`, () =>
+        refusal(400, 'unknown-format', '"slack" is not a webhook format'),
+      ),
+    )
+    renderWithProviders(<WebhooksScreen />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    const form = screen.getByRole('form', { name: /^Edit / })
+
+    await userEvent.click(within(form).getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText(/not a webhook format/)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('form', { name: /^Edit / })).not.toBeInTheDocument()
+  })
+
+  /** A webhook with no label is titled by its **host**, and one whose stored
+   *  address is not a URL at all falls back to its id — because a row with no
+   *  title at all is one an Operator cannot act on, and this is exactly the
+   *  webhook that most needs acting on. */
+  it('titles a row by its host, then by its id', async () => {
+    instance.webhook({ label: null, host: 'hooks.test' })
+    instance.webhook({ label: null, host: null })
+    signedIn(<WebhooksScreen />)
+
+    const rows = await screen.findAllByRole('listitem')
+
+    expect(rows[0]).toHaveTextContent('hooks.test')
+    expect(rows[1]).toHaveTextContent(/Webhook \d+/)
+
+    // ...and the editor names itself the same way, so an unlabelled row is
+    // still something a screen reader can announce.
+    await userEvent.click(
+      within(rows[1]).getByRole('button', { name: 'Edit' }),
+    )
+    expect(
+      screen.getByRole('form', { name: /^Edit webhook \d+$/ }),
+    ).toBeInTheDocument()
   })
 })
