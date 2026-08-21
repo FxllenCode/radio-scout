@@ -66,6 +66,35 @@ seconds. A bare `cargo clean` reclaims a little more and costs a full cold rebui
 `target/llvm-cov-target` and `target/debug/incremental` are both rebuilt on demand: deleting them
 costs one slower run of the thing that needs them, once.
 
+## Docker
+
+**The largest single leak found, by two orders of magnitude: 373 GB in 50 orphaned volumes.**
+
+`docker rm -f <container>` removes the container and **keeps its anonymous volumes**. The `postgres`
+image declares a `VOLUME` for its data directory, so every `docker run` of it creates one — and the
+teardown line this repo documented for years (`docker rm -f rs-pg`) left it behind. Fifty
+dual-dialect sessions since July 2026 meant fifty abandoned Postgres data directories, none attached
+to any container, none named, invisible to `docker ps -a`.
+
+Each was ~7.5 GB rather than the ~50 MB a fresh one would be, because the suite creates a database
+per test (`rs_test_<uuid>`, one per each of ~2 200 tests) and [deliberately never drops
+them](dual-dialect.md): the server is a throwaway, so the databases do not matter. They stop not
+mattering the moment the volume outlives the server.
+
+**The fix is one letter, and it is now in every documented teardown**: `docker rm -fv`. To check the
+damage on any machine:
+
+```bash
+docker system df                       # "Local Volumes … RECLAIMABLE" is the number
+docker volume ls -qf dangling=true     # every one of these is unattached
+docker volume prune -af                # and this is the cure
+docker builder prune -af               # build cache, separately
+```
+
+Docker Desktop TRIMs its VM disk after a prune, so the host really does get the space back — the
+image went 363 GB → 20 GB immediately. Images were left alone: 7 GB of `postgres:17-alpine` and
+friends is cheap to keep and tedious to re-pull.
+
 ## Why this is not a hook
 
 Both halves are cheap to do and easy to forget, which is an argument for automating them — and the

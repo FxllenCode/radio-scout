@@ -24,7 +24,7 @@ TEST_S3_ACCESS_KEY_ID=minioadmin \
 TEST_S3_SECRET_ACCESS_KEY=minioadmin \
   cargo nextest run --test s3
 
-docker rm -f rs-minio
+docker rm -fv rs-minio
 ```
 
 `TEST_S3_REGION` is the fourth variable and defaults to `us-east-1`. MinIO accepts any region;
@@ -43,7 +43,7 @@ uses works locally too, and is the shortest path to one:
 GITHUB_ENV=/tmp/s3.env .github/scripts/object-store-up.sh garage
 set -a; . /tmp/s3.env; set +a          # the four TEST_S3_* variables it wrote
 cargo nextest run --test s3
-docker rm -f rs-garage
+docker rm -fv rs-garage
 ```
 
 It also takes `minio`, which is what the `Backend` job runs.
@@ -62,7 +62,9 @@ an S3 SDK in the dependency tree.
 
 Those buckets are **not** emptied afterwards, for the reason the Postgres databases are not dropped:
 `Drop` cannot await, and the store is a throwaway. That is also why the commands above end in
-`docker rm -f`.
+`docker rm -fv` — **with the `-v`**, which is what removes the anonymous volume the container's own
+`VOLUME` created. Without it the objects outlive every store you thought you had thrown away; see
+[machine-hygiene.md](machine-hygiene.md).
 
 ## Why this switch does not move the whole suite
 

@@ -259,7 +259,7 @@ docker run -d --name rs-pg --shm-size=1g \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres \
   -e POSTGRES_DB=postgres -p 55432:5432 postgres:17-alpine
 TEST_POSTGRES_URL='postgres://postgres:postgres@localhost:55432/postgres' cargo nextest run
-docker rm -f rs-pg          # the per-test databases are not dropped; the server is
+docker rm -fv rs-pg         # -v, or the data outlives the server: see machine-hygiene.md
 ```
 
 `cargo-nextest`, `cargo-llvm-cov`, and `cargo-mutants` are external binaries (`cargo install …`); `proptest`/`rstest`/`insta` are dev-deps. The dual-dialect run needs only a Postgres to point `TEST_POSTGRES_URL` at ([`docs/agents/dual-dialect.md`](docs/agents/dual-dialect.md)), and the real-S3 run only a MinIO/Garage to point `TEST_S3_ENDPOINT` at ([`docs/agents/real-s3.md`](docs/agents/real-s3.md)). See [Testing & coverage policy](#testing--coverage-policy).

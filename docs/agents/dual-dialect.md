@@ -19,7 +19,7 @@ docker run -d --name rs-pg --shm-size=1g \
 
 TEST_POSTGRES_URL='postgres://postgres:postgres@localhost:55432/postgres' cargo nextest run
 
-docker rm -f rs-pg
+docker rm -fv rs-pg
 ```
 
 **`--shm-size=1g` is not optional, and leaving it off wastes an afternoon.** Docker gives a
@@ -46,8 +46,15 @@ each; Postgres buys it here, because one shared database would put every concurr
 rows in the same tables — and nextest runs tests in parallel, in separate processes.
 
 Those databases are **not** dropped afterwards: `Drop` cannot await, and the server is a throwaway.
-That is also why the command above ends in `docker rm -f`. A run against a long-lived Postgres will
+That is also why the command above ends in `docker rm -fv`. A run against a long-lived Postgres will
 accumulate them; `psql -c "\l"` will show you, and dropping the container is the cure.
+
+**The `-v` is not decoration.** `postgres` declares a `VOLUME`, so every `docker run` of it creates
+an *anonymous* volume, and a plain `docker rm -f` removes the container and leaves that volume
+behind holding every `rs_test_<uuid>` the run created. Fifty of them were found on one laptop in
+2026-08, totalling **373 GB** — one per dual-dialect session since July, each carrying a Postgres
+data directory with thousands of undropped databases. See
+[machine-hygiene.md](machine-hygiene.md).
 
 Postgres' default 100-connection ceiling is ample for a laptop or a 4-core runner. If you run the
 suite against a server with a much lower limit, that is what "too many clients already" means.
