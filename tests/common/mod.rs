@@ -98,7 +98,8 @@ use radio_scout::blob::{AudioStore, StoredAudio};
 use radio_scout::config::{Cli, Config};
 use radio_scout::db::Db;
 use radio_scout::db::entities::{
-    call, call_frequency, call_patch, call_unit, site, system, tag, talkgroup, talkgroup_ref, unit,
+    call, call_frequency, call_patch, call_tone, call_unit, site, system, tag, talkgroup,
+    talkgroup_ref, unit,
 };
 use radio_scout::db::repo::{self, NewCall, NewLogEvent};
 use radio_scout::enhance::EnhancementConfig;
@@ -860,6 +861,21 @@ impl TestApp {
         .insert(&self.db)
         .await
         .expect("seed talkgroup");
+    }
+
+    /// The **Tone profile** matches recorded on a Call (#55).
+    ///
+    /// Read from the table rather than from the wire, because the wire shows
+    /// what a page is *called* and this is what it points *at* — the profile
+    /// that fired, which is the only thing that makes a page traceable to the
+    /// configuration that caught it.
+    pub async fn tone_matches(&self, call_id: i64) -> Vec<call_tone::Model> {
+        call_tone::Entity::find()
+            .filter(call_tone::Column::CallId.eq(call_id))
+            .order_by_asc(call_tone::Column::Id)
+            .all(&self.db)
+            .await
+            .expect("read tone matches")
     }
 
     /// Give an existing Talkgroup another Ref to answer to (#45).

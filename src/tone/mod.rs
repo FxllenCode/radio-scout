@@ -119,11 +119,18 @@ pub const MAX_STEPS: usize = 8;
 
 /// The shortest tone worth asserting on.
 ///
-/// Below one analysis window there is nothing to measure, and a step this short
-/// would match essentially any transient — a squelch tail, a click, the leading
-/// edge of a word. 100 ms is several windows and still well under the shortest
-/// real page.
-pub const MIN_STEP_MS: i64 = 100;
+/// **250 ms, and the number was measured rather than chosen.** It began at 100,
+/// which is several analysis windows and looked comfortably short — until
+/// `detect`'s own speech negative was tightened and a synthesized vowel turned
+/// out to hold a pitch for exactly 100 ms as it swept through one. A floor that
+/// admits something speech produces is a floor that admits false pages, and
+/// this feature's whole promise is that a page-out means a page-out.
+///
+/// There is no real paging tone anywhere near this short — Quick Call II's
+/// shortest is a second — so the room costs an Operator nothing, and
+/// `a_voice_never_holds_a_pitch_long_enough_to_page_anything` is what would
+/// notice if it were lowered again.
+pub const MIN_STEP_MS: i64 = 250;
 
 /// The widest tolerance that still means anything.
 ///

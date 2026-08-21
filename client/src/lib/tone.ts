@@ -24,7 +24,7 @@ export const BAND_HIGH_HZ = 3300
 
 /** Matching `tone::MIN_STEP_MS`, `MAX_STEPS`, `MAX_TOLERANCE_PCT`,
  *  `MAX_GAP_MS`. */
-export const MIN_STEP_MS = 100
+export const MIN_STEP_MS = 250
 export const MAX_STEPS = 8
 export const MAX_TOLERANCE_PCT = 25
 export const MAX_GAP_MS = 10_000

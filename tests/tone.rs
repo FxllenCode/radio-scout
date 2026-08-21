@@ -20,6 +20,7 @@ mod common;
 
 use common::{CallUpload, Sink, TestApp, page_out, routine_traffic};
 use radio_scout::db::entities::call::ToneState;
+use rstest::rstest;
 use serde_json::json;
 
 /// The two tones the fixture pages with — a real Motorola Quick Call II pair.
@@ -111,7 +112,7 @@ async fn newest(app: &TestApp) -> radio_scout::db::entities::call::Model {
 #[tokio::test]
 async fn a_page_out_marks_the_call_and_names_the_station() {
     let app = an_instance().await;
-    write_profile(&app, "Station 12", quick_call()).await;
+    let profile = write_profile(&app, "Station 12", quick_call()).await;
 
     let id = upload(&app, &page_out(A_HZ, B_HZ)).await;
 
@@ -123,6 +124,15 @@ async fn a_page_out_marks_the_call_and_names_the_station() {
         "the page is at the top of this Call: {call}"
     );
     assert_eq!(call["tones"][1], serde_json::Value::Null, "one page, once");
+
+    // **The row points back at the profile that fired**, beside the label it
+    // snapshotted. The label is what is *shown*; this is what makes a page
+    // traceable to the configuration that caught it — an Operator asking "why
+    // did this fire?" has nothing else to follow.
+    let paged = app.tone_matches(id).await;
+    assert_eq!(paged.len(), 1, "{paged:?}");
+    assert_eq!(paged[0].profile_id, Some(profile), "{paged:?}");
+    assert_eq!(paged[0].label, "Station 12", "{paged:?}");
 }
 
 /// The other half, and the one that decides whether an Operator can trust the
@@ -548,6 +558,28 @@ async fn renaming_a_profile_leaves_the_pages_it_already_caught_alone() {
     assert_eq!(now["tones"][0]["label"], "Station 14", "{now}");
 }
 
+/// A profile written against a channel that is not there is a **404**, not a
+/// row hanging off nothing. The path names the Talkgroup, so this is the one
+/// check that has to happen before anything else in the handler.
+#[tokio::test]
+async fn a_profile_cannot_be_written_against_a_channel_that_is_not_there() {
+    let app = an_instance().await;
+
+    let (status, refused) = app
+        .admin_post(
+            "/api/admin/talkgroups/9999/tones",
+            json!({ "label": "Station 12", "steps": quick_call() }),
+        )
+        .await;
+
+    assert_eq!(status, 404, "{refused}");
+    assert_eq!(refused["error"], "talkgroup-not-found", "{refused}");
+    // ...and the same for reading, which would otherwise answer an empty list
+    // and read as "this channel pages nobody".
+    let (status, listed) = app.admin_get("/api/admin/talkgroups/9999/tones").await;
+    assert_eq!(status, 404, "{listed}");
+}
+
 /// A rename to nothing is refused by name, like every other required field.
 #[tokio::test]
 async fn a_profile_cannot_be_renamed_to_nothing() {
@@ -656,10 +688,52 @@ async fn a_backup_carries_the_profiles_to_another_instance() {
     // ...and restoring the same file again changes nothing, which is what makes
     // a backup something an Operator can apply without thinking about it.
     let (_, again) = target
-        .admin_post("/api/admin/config/import", document)
+        .admin_post("/api/admin/config/import", document.clone())
         .await;
     assert_eq!(again["tones"]["unchanged"], 1, "{again}");
     assert_eq!(again["tones"]["created"], 0, "{again}");
+    assert_eq!(again["tones"]["updated"], 0, "{again}");
+}
+
+/// **A document that differs in any one field updates rather than being called
+/// unchanged**, field by field.
+///
+/// The report is what an Operator reads to know whether a restore did anything,
+/// so "unchanged" has to mean it — a comparison that skipped a field would
+/// report a no-op while quietly leaving the old value in place, which is the
+/// one way a restore can lie about itself.
+#[rstest]
+#[case(json!({ "steps": [{ "hz": 979.9, "minMs": 800 }] }), "the tones")]
+#[case(json!({ "tolerancePct": 3.5 }), "the tolerance")]
+#[case(json!({ "gapMaxMs": 500 }), "the gap")]
+#[case(json!({ "disabled": true }), "the switch")]
+#[tokio::test]
+async fn a_document_that_differs_in_any_field_updates(
+    #[case] change: serde_json::Value,
+    #[case] what: &str,
+) {
+    let app = an_instance().await;
+    write_profile(&app, "Station 12", quick_call()).await;
+    let (_, mut document) = app.admin_get("/api/admin/config").await;
+
+    let entry = &mut document["systems"][0]["talkgroups"][0]["tones"][0];
+    for (key, value) in change.as_object().expect("an object") {
+        entry[key] = value.clone();
+    }
+    let (status, report) = app
+        .admin_post("/api/admin/config/import", document.clone())
+        .await;
+
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["tones"]["updated"], 1, "{what}: {report}");
+    assert_eq!(report["tones"]["unchanged"], 0, "{what}: {report}");
+    // ...and it really landed, rather than only being counted.
+    let (_, after) = app.admin_get("/api/admin/config").await;
+    assert_eq!(
+        after["systems"][0]["talkgroups"][0]["tones"][0],
+        document["systems"][0]["talkgroups"][0]["tones"][0],
+        "{what}"
+    );
 }
 
 /// A profile in a document that could never fire is **reported** rather than

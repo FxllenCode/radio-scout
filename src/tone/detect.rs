@@ -453,23 +453,55 @@ mod tests {
         assert!(found[0].start_ms.abs_diff(1500) < 100, "{:?}", found[0]);
     }
 
-    /// Nothing that isn't a held tone is one. Each of these is a real thing a
-    /// scanner records, and every one of them used to be somebody's false page.
+    /// **Nothing that isn't a held tone is one at all.** Each of these is a real
+    /// thing a scanner records, and every one of them used to be somebody's
+    /// false page.
+    ///
+    /// Asserted as *no runs at all* rather than *no long runs*, which is what
+    /// makes the silence floor and the purity threshold provable: a looser form
+    /// let either be mutated away without a test noticing, because anything that
+    /// got as far as being called tonal was still broken up by the run-length
+    /// check and the negatives stayed green.
     #[rstest]
     #[case(silence(4000), "digital silence")]
     #[case(noise(4000, 0.3), "squelch hiss")]
-    #[case(vowel(4000, 220.0), "a voice holding a note")]
     #[case(tone(1122.5, 40, 0.5), "a kerchunk shorter than one window")]
-    fn nothing_that_is_not_a_held_tone_becomes_a_long_run(
-        #[case] audio: Vec<f32>,
-        #[case] what: &str,
-    ) {
+    fn nothing_that_is_not_a_held_tone_is_a_tone(#[case] audio: Vec<f32>, #[case] what: &str) {
+        assert_eq!(runs(&audio, RATE), Vec::new(), "{what}");
+    }
+
+    /// **Speech is the one negative that is not asserted as silence**, and the
+    /// honest claim about it is narrower: a vowel really does look like a tone
+    /// for the fifty milliseconds its pitch takes to sweep through one, so the
+    /// promise is not "never tonal" but "never held".
+    ///
+    /// The bound is [`super::MIN_STEP_MS`] — the shortest tone a **Tone
+    /// profile** is allowed to name — because that is exactly the threshold
+    /// that matters: a run shorter than the shortest configurable step cannot
+    /// satisfy any profile, whatever an Operator types.
+    #[test]
+    fn a_voice_never_holds_a_pitch_long_enough_to_page_anything() {
+        let found = runs(&vowel(6000, 220.0), RATE);
+
+        let longest = found.iter().map(|run| run.duration_ms).max().unwrap_or(0);
+        assert!(
+            longest < super::super::MIN_STEP_MS,
+            "the longest thing speech held was {longest} ms: {found:?}"
+        );
+    }
+
+    /// **The silence floor is relative to this Call**, so the gap after a
+    /// transmission is not a tone however pure its noise happens to look — and
+    /// a quiet recording is still read, which is the other direction and the
+    /// reason the floor is not an absolute number.
+    #[test]
+    fn the_quiet_after_a_transmission_is_not_a_tone() {
+        let audio = [tone(1122.5, 1500, 0.6), noise(4000, 0.004)].concat();
+
         let found = runs(&audio, RATE);
 
-        assert!(
-            found.iter().all(|run| run.duration_ms < 300),
-            "{what}: {found:?}"
-        );
+        assert_eq!(found.len(), 1, "the tone, and nothing after it: {found:?}");
+        assert!(found[0].end_ms() < 1700, "{found:?}");
     }
 
     /// A page-out is recorded off the air, not off a signal generator. It has
@@ -530,6 +562,28 @@ mod tests {
 
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found[1].start_ms - found[0].end_ms() > 100, "{found:?}");
+    }
+
+    /// **The grace is bounded**, and this is the case that says so: two bursts
+    /// of the *same* tone with a real silence between them are two
+    /// transmissions, not one long tone.
+    ///
+    /// The pair above cannot prove it — the second tone is a different
+    /// frequency, so the run closes on the frequency change whatever the grace
+    /// does. Only the same tone twice can tell an unbounded grace from a
+    /// three-frame one, which is exactly the difference between honouring a
+    /// station's `min_ms` and inventing it.
+    #[test]
+    fn the_same_tone_twice_with_a_gap_between_is_two_runs() {
+        let audio = [tone(1122.5, 800, 0.5), silence(300), tone(1122.5, 800, 0.5)].concat();
+
+        let found = runs(&audio, RATE);
+
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found[0].duration_ms < 1000,
+            "neither is the whole: {found:?}"
+        );
     }
 
     /// Two frequencies close enough that a bin index could not tell them apart
