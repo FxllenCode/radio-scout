@@ -126,6 +126,8 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 
 **Enforcement** — the tooling is stood up (and high-risk gaps backfilled) by the **"Test hardening + coverage baseline"** ticket; **CI runs it (#22)**, `.github/workflows/ci.yml`. The same ritual still runs locally before a commit lands, because a red gate is cheaper to find here: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo nextest run` (+ `cargo test --doc`), `cargo llvm-cov` over the floor, and the client `tsc`/`oxlint`/`vitest --coverage` gates.
 
+**That ritual leaves a mess, and clearing it is part of it** — [`docs/agents/machine-hygiene.md`](docs/agents/machine-hygiene.md). `cargo` never garbage-collects `target/`, `cargo llvm-cov` builds a *second* full tree, and `cargo mutants` leaves a copied worktree behind whenever it is killed rather than allowed to finish; together they reached **55 GB** from this one repository. `cargo clean -p radio-scout` (never a bare `cargo clean` — it discards every compiled dependency for nothing) plus the three directories that doc names took it back to 2.5 GB, with the next build 21 seconds rather than minutes. Background shells are the same story: the harness re-invokes you when a backgrounded command exits, so **a polling loop waiting on one is a process nobody will ever stop** — and killing the job it watched makes its condition unreachable rather than ending it.
+
 **What CI gates on** — **hard** (blocks merge): `cargo fmt --check`, `clippy -D warnings`, the full suite on **both dialects**, doctests, the backend floor (`--fail-under-lines`) and the frontend Vitest `thresholds`, and **100% patch coverage** on every changed line, backend and frontend separately. **Advisory** (annotates, never blocks): `cargo mutants --in-diff` on PRs, the Playwright PWA suite until it has a track record here, and the sharded nightly mutation sweep (`.github/workflows/nightly.yml`).
 
 **`master` is protected**: `Client`, `Backend`, `Workflows`, the four `Build …` jobs, **`Backend on arm64`** and **`Object store on Garage`** are **required status checks** — nine — strict (a branch must be up to date to merge), with force-pushes and deletion off. The patch-coverage gate runs *inside* `Client` and `Backend`, so requiring those requires it. The last two were promoted once they had a track record (2026-07-31); the four advisory jobs deliberately stay out, because a slow, browser-dependent or third-party-source-dependent signal makes a bad merge blocker. **Requiring a check is a promise it keeps reporting on pull requests** — a job skipped by an `if:` still reports and counts as passing, but a whole workflow skipped by a path or branch filter stays *pending* and blocks every merge. That is the failure mode that kept patch coverage on in-repo `diff-cover` instead of Codecov. `enforce_admins` is off, so the maintainer can still land an emergency fix — the gate is there to stop accidents, not to lock anyone out of their own repository.
@@ -349,6 +351,10 @@ Issues are tracked in this repo's GitHub Issues via the `gh` CLI. External PRs a
 ### Triage labels
 
 Canonical label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Machine hygiene
+
+The ritual's leftovers: background shells that outlive what they watched, and `target/` trees that grow without bound. Check both before calling a ticket finished. See `docs/agents/machine-hygiene.md`.
 
 ### Domain docs
 
