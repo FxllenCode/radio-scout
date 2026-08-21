@@ -3008,3 +3008,253 @@ describe('webhooks', () => {
     ).toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Tone profiles (#55, spec US 20)
+// ---------------------------------------------------------------------------
+
+describe("a channel's tone profiles", () => {
+  /** Open the Tones panel on the first Talkgroup row. */
+  async function openTones() {
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getByRole('button', { name: 'Tones' }))
+  }
+
+  /** The headline: a station's paging sequence, written down where an Operator
+   *  can see what is being listened for on a channel. */
+  it('lists the stations paged on a channel, and what pages them', async () => {
+    const channel = instance.talkgroup({ ref: 54241, label: 'Fire Dispatch' })
+    instance.tones.set(channel.id, [
+      {
+        id: 900,
+        talkgroupId: channel.id,
+        label: 'Station 12',
+        steps: [
+          { hz: 1122.5, minMs: 800 },
+          { hz: 1465.6, minMs: 2000 },
+        ],
+        tolerancePct: 2,
+        gapMaxMs: 300,
+        disabled: false,
+        createdAtMs: 0,
+      },
+    ])
+
+    await openTones()
+
+    const listed = within(await screen.findByRole('list', { name: 'Profiles' }))
+    expect(listed.getByRole('listitem')).toHaveTextContent(
+      'Station 12 — 1122.5 Hz for 0.8s → 1465.6 Hz for 2.0s · ±2%',
+    )
+  })
+
+  /** Adding one is a *sequence* an Operator builds up, which is what lets the
+   *  same form spell a single long group tone and Quick Call II's two. */
+  it('adds a profile as an ordered sequence of tones', async () => {
+    const channel = instance.talkgroup({ ref: 54241 })
+    await openTones()
+    await screen.findByRole('form', { name: 'Add a tone profile' })
+
+    await userEvent.type(screen.getByLabelText('Station'), 'Station 12')
+    await userEvent.type(screen.getByLabelText('Tone (Hz)'), '1122.5')
+    await userEvent.clear(screen.getByLabelText('Held for (s)'))
+    await userEvent.type(screen.getByLabelText('Held for (s)'), '0.8')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tone' }))
+    await userEvent.type(screen.getByLabelText('Tone (Hz)'), '1465.6')
+    await userEvent.clear(screen.getByLabelText('Held for (s)'))
+    await userEvent.type(screen.getByLabelText('Held for (s)'), '2')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tone' }))
+
+    const sequence = within(screen.getByRole('list', { name: 'Sequence' }))
+    expect(sequence.getByText('1. 1122.5 Hz for 0.8s')).toBeInTheDocument()
+    expect(sequence.getByText('2. 1465.6 Hz for 2.0s')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add profile' }))
+
+    await waitFor(() =>
+      expect(instance.tones.get(channel.id)?.[0]?.label).toBe('Station 12'),
+    )
+    expect(wrote().at(-1)?.body).toEqual({
+      label: 'Station 12',
+      steps: [
+        { hz: 1122.5, minMs: 800 },
+        { hz: 1465.6, minMs: 2000 },
+      ],
+      tolerancePct: 2,
+      gapMaxMs: 300,
+    })
+  })
+
+  /** **The check that matters most on this screen.** A profile outside the band
+   *  detection listens to would be stored, never fire, and produce no error
+   *  anywhere — a pager that is not being watched looks exactly like a pager
+   *  that has not gone off. So the browser says so before it is sent. */
+  it('refuses a profile that could never fire, before it is sent', async () => {
+    const channel = instance.talkgroup({ ref: 54241 })
+    await openTones()
+    await screen.findByRole('form', { name: 'Add a tone profile' })
+
+    await userEvent.type(screen.getByLabelText('Station'), 'Station 12')
+    await userEvent.type(screen.getByLabelText('Tone (Hz)'), '40')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tone' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /outside the 200-3300 Hz range/,
+    )
+    expect(screen.getByRole('button', { name: 'Add profile' })).toBeDisabled()
+    expect(instance.tones.get(channel.id)).toBeUndefined()
+  })
+
+  /** The slack is editable too, and it is the setting most likely to need
+   *  changing after the fact: an ageing console drifts, and widening the
+   *  tolerance is what an Operator reaches for when a station stops being
+   *  caught. */
+  it('sends the tolerance and gap an Operator chose', async () => {
+    const channel = instance.talkgroup({ ref: 54241 })
+    await openTones()
+    await screen.findByRole('form', { name: 'Add a tone profile' })
+
+    await userEvent.type(screen.getByLabelText('Station'), 'Station 12')
+    await userEvent.type(screen.getByLabelText('Tone (Hz)'), '1122.5')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tone' }))
+    await userEvent.clear(screen.getByLabelText('Tolerance (%)'))
+    await userEvent.type(screen.getByLabelText('Tolerance (%)'), '3.5')
+    await userEvent.clear(screen.getByLabelText('Max gap (ms)'))
+    await userEvent.type(screen.getByLabelText('Max gap (ms)'), '500')
+    await userEvent.click(screen.getByRole('button', { name: 'Add profile' }))
+
+    await waitFor(() =>
+      expect(instance.tones.get(channel.id)?.[0]?.tolerancePct).toBe(3.5),
+    )
+    expect(wrote().at(-1)?.body).toMatchObject({
+      tolerancePct: 3.5,
+      gapMaxMs: 500,
+    })
+  })
+
+  /** A tolerance wide enough to page the neighbouring station is refused here
+   *  too — the same rule, applied to a field the tone list does not carry. */
+  it('refuses a tolerance wide enough to page somebody else', async () => {
+    instance.talkgroup({ ref: 54241 })
+    await openTones()
+    await screen.findByRole('form', { name: 'Add a tone profile' })
+
+    await userEvent.type(screen.getByLabelText('Tone (Hz)'), '1122.5')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tone' }))
+    await userEvent.clear(screen.getByLabelText('Tolerance (%)'))
+    await userEvent.type(screen.getByLabelText('Tolerance (%)'), '90')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/tolerance/)
+  })
+
+  /** A tone added by mistake comes back off without starting over. */
+  it('takes a tone back out of the sequence', async () => {
+    instance.talkgroup({ ref: 54241 })
+    await openTones()
+    await screen.findByRole('form', { name: 'Add a tone profile' })
+
+    await userEvent.type(screen.getByLabelText('Tone (Hz)'), '1122.5')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tone' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Remove tone 1' }))
+
+    expect(
+      screen.queryByRole('list', { name: 'Sequence' }),
+    ).not.toBeInTheDocument()
+  })
+
+  /** **Disable before delete.** A profile paging on somebody else's tones is
+   *  something an Operator wants stopped now and worked out later, and deleting
+   *  it would lose the frequencies they measured off a recording. */
+  it('switches a profile off without losing what was measured', async () => {
+    const channel = instance.talkgroup({ ref: 54241 })
+    instance.tones.set(channel.id, [
+      {
+        id: 900,
+        talkgroupId: channel.id,
+        label: 'Station 12',
+        steps: [{ hz: 1122.5, minMs: 800 }],
+        tolerancePct: 2,
+        gapMaxMs: 300,
+        disabled: false,
+        createdAtMs: 0,
+      },
+    ])
+    await openTones()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Disable' }))
+
+    await waitFor(() =>
+      expect(instance.tones.get(channel.id)?.[0]?.disabled).toBe(true),
+    )
+    expect(wrote().at(-1)?.body).toEqual({ disabled: true })
+    // Still there, and it says so — a disabled profile is otherwise
+    // indistinguishable from one that simply has not been paged.
+    expect(
+      await screen.findByRole('button', { name: 'Enable' }),
+    ).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('list', { name: 'Profiles' })).getByRole(
+        'listitem',
+      ),
+    ).toHaveTextContent(/disabled/)
+  })
+
+  it('deletes a profile', async () => {
+    const channel = instance.talkgroup({ ref: 54241 })
+    instance.tones.set(channel.id, [
+      {
+        id: 900,
+        talkgroupId: channel.id,
+        label: 'Station 12',
+        steps: [{ hz: 1122.5, minMs: 800 }],
+        tolerancePct: 2,
+        gapMaxMs: 300,
+        disabled: false,
+        createdAtMs: 0,
+      },
+    ])
+    await openTones()
+
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Delete Station 12' }),
+    )
+
+    await waitFor(() => expect(instance.tones.get(channel.id)).toEqual([]))
+  })
+
+  /** A channel with nothing listened for says so, rather than showing an empty
+   *  box an Operator has to interpret. */
+  it('says when nothing is being listened for', async () => {
+    instance.talkgroup({ ref: 54241 })
+    await openTones()
+
+    expect(
+      await screen.findByText(/Nothing is being listened for/),
+    ).toBeInTheDocument()
+  })
+
+  /** The server's refusal is rendered, not re-derived — it is the side that
+   *  knows what an older release can read and what a newer one wrote. */
+  it('shows the server’s own refusal', async () => {
+    instance.talkgroup({ ref: 54241 })
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    server.use(
+      http.post(`${ORIGIN}/api/admin/talkgroups/:id/tones`, () =>
+        refusal(400, 'unusable-tone-profile', 'a tone profile needs at least one tone'),
+      ),
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Tones' }))
+    await screen.findByRole('form', { name: 'Add a tone profile' })
+
+    await userEvent.type(screen.getByLabelText('Station'), 'Station 12')
+    await userEvent.type(screen.getByLabelText('Tone (Hz)'), '1122.5')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tone' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Add profile' }))
+
+    expect(
+      await screen.findByText(/a tone profile needs at least one tone/),
+    ).toBeInTheDocument()
+  })
+})

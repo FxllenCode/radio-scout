@@ -373,7 +373,13 @@ pub fn enhance(audio: &[u8], config: &EnhancementConfig) -> Result<Enhanced, Enh
 /// Channels are averaged rather than dropped: a recorder that duplicates a mono
 /// source across two channels is common, and taking one would throw away 3 dB
 /// for no reason.
-fn decode(audio: &[u8]) -> Result<(Vec<f32>, u32), EnhanceError> {
+///
+/// **Public because tone-out detection shares it** (#55). There is one decoder
+/// in this process, and it lives here because enhancement is what needed it
+/// first — a second one, written against the same `symphonia` and differing in
+/// how it averages channels or how it treats a truncated frame, would mean the
+/// audio a page was looked for in was not the audio that was levelled.
+pub fn decode(audio: &[u8]) -> Result<(Vec<f32>, u32), EnhanceError> {
     let source = MediaSourceStream::new(
         Box::new(std::io::Cursor::new(audio.to_vec())),
         <_>::default(),

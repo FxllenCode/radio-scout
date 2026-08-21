@@ -18,9 +18,10 @@
 //!
 //! # The shape
 //!
-//! - [`Mark`] is what a Recorder proved — **Emergency** today (#42), a **Tone
-//!   profile** match once #55 lands. [`Marks`] is a set of them, and the trigger
-//!   is *any* overlap between what a Call carries and what a Webhook asked for.
+//! - [`Mark`] is what a Recorder proved, or what this Instance's own signal
+//!   processing did — the **Emergency** bit (#42) and a **Tone profile** match
+//!   (#55). [`Marks`] is a set of them, and the trigger is *any* overlap between
+//!   what a Call carries and what a Webhook asked for.
 //! - [`Webhook`] is a configured URL as the sender uses one, scoped by a
 //!   [`Selection`] — the live feed's own type, so a **Patch** reaches a webhook
 //!   subscribed to the channel it was patched onto, which is the bug rdio's
@@ -39,6 +40,21 @@
 //! [`Marks::is_empty`] is checked before a statement is issued. On a Pi taking a
 //! Call a second, an Emergency happens a few times a day, so this feature's
 //! steady-state cost at ingest is **zero statements** rather than one.
+//!
+//! #55's mark does not change that, because it is not known at ingest: a page is
+//! found by [`crate::tone::worker`] afterwards, and the roster read that follows
+//! it happens on that worker rather than on the upload. So the queue is written
+//! to from two places — [`crate::ingest::enqueue_webhooks`] for what the wire
+//! said, and [`crate::ingest::enqueue_tone_webhooks`] for what the audio proved.
+//!
+//! **A Call carrying both marks may therefore be delivered twice**, and that is
+//! the honest reading rather than a gap. The unique index collapses the two only
+//! while the first row is still queued; delivery is normally near-instant and
+//! detection takes seconds, so the usual ordering is that the Emergency has been
+//! sent and its row deleted before the page is found. Which is right: the second
+//! message carries a mark the first one could not have, and a webhook that asked
+//! for both asked to be told about both. What it must not do is send the *same*
+//! mark twice, and it does not — each write names only what it proved.
 //!
 //! # Improving on rdio-scanner
 //!
@@ -75,21 +91,27 @@ pub const WORKER: &str = "webhook";
 /// being switched on. An Operator who wants every Call has [`crate::downstream`],
 /// which is built for exactly that.
 ///
-/// **#55 adds one variant here, and the compiler names the rest.** The roster
+/// **#55 added the second variant, and the compiler named the rest.** The roster
 /// read, the routing, the queue, the scoping and the admin form are all written
-/// against the *set* rather than against Emergency, so none of them changes. The
+/// against the *set* rather than against Emergency, so none of them changed. The
 /// three places that match a `Mark` exhaustively — [`Mark::slug`], the payload's
-/// own sentence, and `markName` on the client — are each a compile error until
-/// the new mark is given a word, which is the point: a mark nobody has named
+/// own sentence, and `markName` on the client — were each a compile error until
+/// the new mark was given a word, which is the point: a mark nobody has named
 /// would otherwise render as its slug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mark {
     /// The radio set the emergency bit (#42, spec US 5).
     Emergency,
+    /// A **Tone profile** on this Call's Talkgroup was paged (#55, spec US 20).
+    ///
+    /// Unlike Emergency, this one is **not known at ingest**: it is decided by
+    /// [`crate::tone::worker`] a moment later, off the upload path, which is why
+    /// the webhook queue is written to from two places rather than one.
+    Tone,
 }
 
 /// Every mark there is, so a table cannot go stale by omission.
-pub const MARKS: [Mark; 1] = [Mark::Emergency];
+pub const MARKS: [Mark; 2] = [Mark::Emergency, Mark::Tone];
 
 impl Mark {
     /// The wire spelling — what the row stores, what the form sends, and what
@@ -97,6 +119,7 @@ impl Mark {
     pub fn slug(self) -> &'static str {
         match self {
             Mark::Emergency => "emergency",
+            Mark::Tone => "tone",
         }
     }
 
@@ -122,17 +145,29 @@ impl FromIterator<Mark> for Marks {
 }
 
 impl Marks {
-    /// What a Call carries, from the facts a Recorder sent.
+    /// What a Call carries — the **Emergency** bit its Recorder sent, and
+    /// whether tone-out detection found a page in its audio.
     ///
-    /// One function rather than a bool threaded through routing, because #55's
-    /// tone match is decided somewhere else entirely and has to arrive here
-    /// looking like this one does.
-    pub fn on_call(emergency: bool) -> Marks {
+    /// One function rather than two bools threaded through routing, and it is
+    /// what made #55 a variant rather than a second path: the two facts are
+    /// decided in completely different places — one on the ingest path from the
+    /// wire, one on a worker minutes later from the audio — and arrive here
+    /// looking identical.
+    pub fn on_call(emergency: bool, tone: bool) -> Marks {
         let mut marks = BTreeSet::new();
         if emergency {
             marks.insert(Mark::Emergency);
         }
+        if tone {
+            marks.insert(Mark::Tone);
+        }
         Marks(marks)
+    }
+
+    /// A set holding exactly one mark — what a worker that has just proved one
+    /// fact hands to routing.
+    pub fn just(mark: Mark) -> Marks {
+        Marks(BTreeSet::from([mark]))
     }
 
     /// Whether this Call is of interest to *anything* — the gate that keeps the
@@ -145,8 +180,7 @@ impl Marks {
     ///
     /// **What a webhook is told about**, and deliberately not the Call's whole
     /// set: one watching only for tone-outs should never have to work out why it
-    /// was sent an Emergency, and once #55 lands that stops being a distinction
-    /// without a difference.
+    /// was sent an Emergency.
     pub fn wanted_by(&self, wanted: &Marks) -> Marks {
         Marks(self.0.intersection(&wanted.0).copied().collect())
     }
@@ -187,9 +221,9 @@ impl Serialize for Marks {
 /// channel.
 ///
 /// A slug this release does not know is **dropped rather than fatal**, which is
-/// the downgrade case: a row written by a version that has #55's `tone` mark,
-/// read by one that does not, keeps firing on `emergency` instead of falling
-/// silent altogether.
+/// the downgrade case: a row written by a version that has a mark this one has
+/// never heard of keeps firing on the ones it does understand, instead of
+/// falling silent altogether.
 pub fn marks_of(stored: &str) -> Marks {
     serde_json::from_str::<Vec<String>>(stored)
         .map(|slugs| {
@@ -553,7 +587,11 @@ mod tests {
         );
 
         assert_eq!(
-            hook.admits(&Marks::on_call(emergency), system_ref, std::iter::once(100)),
+            hook.admits(
+                &Marks::on_call(emergency, false),
+                system_ref,
+                std::iter::once(100)
+            ),
             expected,
             "{what}"
         );
@@ -568,7 +606,7 @@ mod tests {
             serde_json::json!(["emergency"]),
             serde_json::json!({ "sel": { "11": { "500": true } } }),
         );
-        let marks = Marks::on_call(true);
+        let marks = Marks::on_call(true, false);
 
         assert!(hook.admits(&marks, 11, [100, 500].into_iter()));
         assert!(!hook.admits(&marks, 11, [100].into_iter()));
@@ -588,21 +626,22 @@ mod tests {
         #[case] what: &str,
     ) {
         assert!(
-            !hook(marks, scope).admits(&Marks::on_call(true), 11, std::iter::once(100)),
+            !hook(marks, scope).admits(&Marks::on_call(true, false), 11, std::iter::once(100)),
             "{what}"
         );
     }
 
     /// **A mark this release does not know is dropped, not fatal.** A row
-    /// written by a version that has #55's tone mark and read by one that does
-    /// not must keep firing on Emergency, rather than parsing to nothing and
-    /// falling silent on the mark it *does* understand.
+    /// written by a version that has a mark this one has never heard of must
+    /// keep firing on the ones it does understand, rather than parsing to
+    /// nothing and falling silent altogether. This is the *downgrade* case, and
+    /// it is exactly what #55's `tone` looked like to the release before it.
     #[test]
     fn an_unknown_mark_does_not_take_the_known_ones_with_it() {
-        let marks = marks_of(r#"["emergency","tone"]"#);
+        let marks = marks_of(r#"["emergency","dtmf"]"#);
 
         assert_eq!(marks.slugs(), vec!["emergency"]);
-        assert!(Marks::on_call(true).overlaps(&marks));
+        assert!(Marks::on_call(true, false).overlaps(&marks));
     }
 
     /// The set round-trips through the column, so what an Operator ticked is
@@ -629,7 +668,7 @@ mod tests {
         for format in FORMATS {
             assert_eq!(Format::from_slug(format.slug()), Some(format));
         }
-        assert_eq!(Mark::from_slug("tone"), None, "not until #55");
+        assert_eq!(Mark::from_slug("page"), None);
         assert_eq!(Format::from_slug("slack"), None);
     }
 
@@ -673,8 +712,8 @@ mod tests {
     /// cost no statement at ingest.
     #[test]
     fn an_unmarked_call_carries_no_marks_at_all() {
-        assert!(Marks::on_call(false).is_empty());
-        assert!(!Marks::on_call(true).is_empty());
+        assert!(Marks::on_call(false, false).is_empty());
+        assert!(!Marks::on_call(true, false).is_empty());
     }
 
     /// Routing answers with ids, and only the webhooks that asked.
@@ -697,10 +736,10 @@ mod tests {
         let hooks = vec![wants_emergency, wants_nothing, elsewhere];
 
         assert_eq!(
-            routed_to(&hooks, &Marks::on_call(true), 11, &[100]),
+            routed_to(&hooks, &Marks::on_call(true, false), 11, &[100]),
             vec![1]
         );
-        assert!(routed_to(&hooks, &Marks::on_call(false), 11, &[100]).is_empty());
+        assert!(routed_to(&hooks, &Marks::on_call(false, false), 11, &[100]).is_empty());
     }
 
     /// The section's own two settings are the ones the shared backoff applies.

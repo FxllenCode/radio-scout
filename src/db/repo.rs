@@ -27,9 +27,9 @@ use sea_orm::{
 use crate::blob::StoredAudio;
 use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, downstream, downstream_delivery, group,
-    log_event, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
-    webhook, webhook_delivery,
+    api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
+    downstream_delivery, group, log_event, site, system, tag, talkgroup, talkgroup_group,
+    talkgroup_ref, tone_profile, unit, unit_ref, webhook, webhook_delivery,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -1097,6 +1097,12 @@ fn describe_transmission(row: &mut call::ActiveModel, new: &NewCall, audio: Opti
     // `m0001_init`, which carries no defaults — only an upgraded database goes
     // through `m0006`'s `ALTER`.
     row.enhancement = Set(call::EnhancementState::NONE.to_string());
+    // And likewise for tone-out detection (#55): a **Replacement** brings a
+    // different copy of the audio, so whatever was heard in the copy this one
+    // displaces says nothing about this one. Set explicitly for `enhancement`'s
+    // reason — `m0001_init`'s entity-derived DDL carries no column defaults, so
+    // only an *upgraded* database has m0016's.
+    row.tone = Set(call::ToneState::NONE.to_string());
 }
 
 /// The patch rows for a Call, given the canonical Refs [`resolve_patches`]
@@ -2797,6 +2803,14 @@ pub async fn total_audio_bytes<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr>
 /// Delete Calls and their child rows, returning how many Call rows went. Child
 /// rows go first — the schema's foreign keys are `RESTRICT`, and SQLite enforces
 /// them (`PRAGMA foreign_keys = ON`, see [`crate::db::connect`]).
+///
+/// **Every child table a Call has, and the list is not optional.** One left out
+/// does not fail a test that stores and reads: it fails the *retention sweep*,
+/// which walks oldest-first — so from the moment the oldest Call carrying that
+/// child row comes due, every sweep fails at the same row forever and an
+/// Operator's disk quietly stops being bounded. #55's `call_tones` was exactly
+/// that, and `tests/tone.rs::a_marked_call_is_still_prunable` is what would now
+/// notice.
 pub async fn delete_calls<C: ConnectionTrait>(db: &C, ids: &[CallId]) -> Result<u64, DbErr> {
     if ids.is_empty() {
         return Ok(0);
@@ -2811,6 +2825,10 @@ pub async fn delete_calls<C: ConnectionTrait>(db: &C, ids: &[CallId]) -> Result<
         .await?;
     call_patch::Entity::delete_many()
         .filter(call_patch::Column::CallId.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?;
+    call_tone::Entity::delete_many()
+        .filter(call_tone::Column::CallId.is_in(ids.iter().copied()))
         .exec(db)
         .await?;
     Ok(call::Entity::delete_many()
@@ -3697,6 +3715,191 @@ pub async fn clear_webhook_deliveries<C: ConnectionTrait>(
     Ok(())
 }
 
+// -- Tone-out detection (#55) -------------------------------------------------
+
+/// Does this Instance have any enabled **Tone profile** at all?
+///
+/// [`crate::tone::Tones::rearm`]'s question, and the reason it is a `COUNT`
+/// bounded to one row rather than a listing: the answer is a single bit, and on
+/// the Instances that will never have a profile it is asked once a boot.
+pub async fn any_tone_profiles<C: ConnectionTrait>(db: &C) -> Result<bool, DbErr> {
+    Ok(tone_profile::Entity::find()
+        .filter(tone_profile::Column::Disabled.eq(false))
+        .limit(1)
+        .one(db)
+        .await?
+        .is_some())
+}
+
+/// One Call's audio and the profiles to look for in it.
+///
+/// **Two statements and never more**, whatever a channel's profile count: the
+/// Call, then its Talkgroup's profiles. The alternative — asking per profile —
+/// is the N+1 #86 deleted, on the worker that runs once per Call forever.
+///
+/// A Call whose Talkgroup carries no profile comes back with an empty list
+/// rather than `None`, and [`crate::tone::worker::step`] settles it `clear`
+/// without reading the object. That is the common case on an Instance that
+/// pages one channel out of four hundred.
+pub async fn tone_subject<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<crate::tone::worker::Subject>, DbErr> {
+    let Some(call) = call::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::tone::worker::Subject {
+        object_key: call.object_key,
+        profiles: enabled_tone_profiles(db, call.talkgroup_id).await?,
+    }))
+}
+
+/// The enabled profiles on a Talkgroup, in the order they were written.
+async fn enabled_tone_profiles<C: ConnectionTrait>(
+    db: &C,
+    talkgroup_id: i64,
+) -> Result<Vec<crate::tone::Profile>, DbErr> {
+    Ok(tone_profile::Entity::find()
+        .filter(tone_profile::Column::TalkgroupId.eq(talkgroup_id))
+        .filter(tone_profile::Column::Disabled.eq(false))
+        .order_by_asc(tone_profile::Column::Id)
+        .all(db)
+        .await?
+        .iter()
+        .map(crate::tone::Profile::from_row)
+        .collect())
+}
+
+/// Calls a restart interrupted: queued or in flight when the process went away.
+///
+/// **Deliberately only `pending`**, which is [`calls_pending_enhancement`]'s
+/// rule and its reason: `none` is every Call ingested before a profile existed,
+/// and re-queueing those would make writing one re-read an Operator's whole
+/// Archive on the next boot.
+pub async fn calls_pending_tone<C: ConnectionTrait>(db: &C) -> Result<Vec<CallId>, DbErr> {
+    Ok(call::Entity::find()
+        .filter(call::Column::Tone.eq(call::ToneState::PENDING))
+        .order_by_asc(call::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|c| c.id)
+        .collect())
+}
+
+/// Where a Call has got to in detection.
+pub async fn mark_tone<C: ConnectionTrait>(db: &C, id: CallId, state: &str) -> Result<(), DbErr> {
+    call::Entity::update_many()
+        .col_expr(call::Column::Tone, Expr::value(state))
+        .filter(call::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Record the pages found in a Call, and mark it.
+///
+/// **One transaction**, because the rows and the mark are one fact: a Call left
+/// `matched` with no rows behind it is a mark that cannot say who was paged, and
+/// rows with the Call still `clear` are a page nothing will ever show. The old
+/// rows go first so a Call re-checked after a **Replacement** (#46) describes
+/// the copy it now holds rather than both.
+pub async fn record_tone_matches(
+    db: &crate::db::Db,
+    id: CallId,
+    found: &[crate::tone::ToneMatch],
+) -> Result<(), DbErr> {
+    let txn = db.begin().await?;
+    call_tone::Entity::delete_many()
+        .filter(call_tone::Column::CallId.eq(id))
+        .exec(&txn)
+        .await?;
+    for page in found {
+        call_tone::ActiveModel {
+            call_id: Set(id),
+            profile_id: Set(Some(page.profile_id)),
+            label: Set(page.label.clone()),
+            at_ms: Set(page.at_ms),
+            ..Default::default()
+        }
+        .insert(&txn)
+        .await?;
+    }
+    mark_tone(&txn, id, call::ToneState::MATCHED).await?;
+    txn.commit().await
+}
+
+/// The Refs a **stored** Call is scoped by — read off the row, for the surfaces
+/// that arrive at a Call long after it was stored.
+///
+/// **The facts, not the answer.** Which Talkgroups those Refs *reach* is
+/// [`crate::ingest::reached_channels`], which the caller applies — because that
+/// rule is shared with the ingest path, and a second copy of it here would be a
+/// **Patch** reaching a peer and not a webhook the day one of them changed. It
+/// is also what keeps the routing policy out of the data layer (#98).
+///
+/// `None` where the Call, its System or its Talkgroup is not there. Deliberately
+/// **not** a default Ref: a Call whose channel has gone is not a Call on channel
+/// zero, and inventing one would scope a delivery to whatever webhook happened
+/// to have been given that Ref.
+pub async fn stored_reach<C: ConnectionTrait>(db: &C, id: CallId) -> Result<Option<Reach>, DbErr> {
+    let Some((call, system)) = call::Entity::find_by_id(id)
+        .find_also_related(system::Entity)
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let (Some(system), Some(talkgroup)) = (
+        system,
+        talkgroup::Entity::find_by_id(call.talkgroup_id)
+            .one(db)
+            .await?,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(Reach {
+        system_ref: system.r#ref,
+        talkgroup_ref: talkgroup.r#ref,
+        patches: call_patch::Entity::find()
+            .filter(call_patch::Column::CallId.eq(id))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|patch| patch.talkgroup_ref)
+            .collect(),
+    }))
+}
+
+/// A stored Call's scoping Refs — its System, its canonical Talkgroup, and every
+/// Talkgroup it is patched to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reach {
+    pub system_ref: i64,
+    pub talkgroup_ref: i64,
+    pub patches: Vec<i64>,
+}
+
+/// The pages found across a page of Calls, oldest first within each — the
+/// detail behind the mark.
+///
+/// **Plural on purpose.** The one caller is [`crate::archive::stored_calls`],
+/// which denormalizes up to five hundred Calls at once, and a per-Call read
+/// there is the N+1 #86 deleted. The `ORDER BY` is what makes "the first page
+/// in this Call" mean the earliest one rather than whichever row came back
+/// first — which SQLite and Postgres need not agree about.
+pub async fn tone_matches_for<C: ConnectionTrait>(
+    db: &C,
+    ids: &[CallId],
+) -> Result<Vec<call_tone::Model>, DbErr> {
+    call_tone::Entity::find()
+        .filter(call_tone::Column::CallId.is_in(ids.iter().copied()))
+        .order_by_asc(call_tone::Column::AtMs)
+        .order_by_asc(call_tone::Column::Id)
+        .all(db)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3772,6 +3975,7 @@ mod tests {
                 emergency: Set(false),
                 encrypted: Set(false),
                 enhancement: Set(String::from(call::EnhancementState::NONE)),
+                tone: Set(String::from(call::ToneState::NONE)),
                 created_at_ms: Set(at_ms),
                 ..Default::default()
             }

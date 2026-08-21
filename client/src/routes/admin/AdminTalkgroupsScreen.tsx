@@ -14,6 +14,7 @@ import {
   MemberRefsEditor,
   MergeConfirmation,
 } from '@/components/admin/MergeEditor'
+import { ToneProfilesEditor } from '@/components/admin/ToneProfilesEditor'
 import { Screen } from '@/components/layout/Screen'
 import { useAdminSession } from '@/hooks/useAdminSession'
 import { useMerge } from '@/hooks/useMerge'
@@ -71,6 +72,10 @@ export function AdminTalkgroupsScreen() {
   // fields above are this channel's own, and a fold is about its relationship
   // to other channels — different work, and the destructive one.
   const [merging, setMerging] = useState<number | undefined>(undefined)
+  // ...and tone profiles on a third (#55), for the same reason again: what a
+  // channel *is* and what is listened for **in** it are different work, and the
+  // second is a list rather than a field.
+  const [toning, setToning] = useState<number | undefined>(undefined)
 
   const page = useGetAdminTalkgroupsQuery(
     {
@@ -257,6 +262,15 @@ export function AdminTalkgroupsScreen() {
                     <Button
                       variant="outline"
                       size="sm"
+                      onClick={() =>
+                        setToning(toning === row.id ? undefined : row.id)
+                      }
+                    >
+                      Tones
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => remove({ id: row.id })}
                     >
                       Delete
@@ -271,6 +285,7 @@ export function AdminTalkgroupsScreen() {
                   />
                 )}
                 {merging === row.id && <MemberRefsEditor row={row} />}
+                {toning === row.id && <ToneProfilesEditor row={row} />}
               </RowCard>
             ))}
           </RowList>

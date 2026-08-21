@@ -697,7 +697,7 @@ async fn a_url_that_could_never_be_posted_to_is_refused(#[case] url: &str, #[cas
 /// so it is refused by name rather than silently dropped into a webhook that
 /// never fires.
 #[rstest]
-#[case::mark(json!({"marks": ["tone"]}), "unknown-mark", "tone")]
+#[case::mark(json!({"marks": ["dtmf"]}), "unknown-mark", "dtmf")]
 #[case::format(json!({"format": "slack"}), "unknown-format", "slack")]
 #[tokio::test]
 async fn an_unknown_mark_or_format_is_refused_by_name(

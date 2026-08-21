@@ -68,7 +68,7 @@ Marks are shown, filtered and searched on, and are the only thing a **Webhook** 
 _Avoid_: flag (fine in prose about one bit, wrong for the set), alert, trigger, event.
 
 **Tone profile**:
-The per-talkgroup definition of a paging tone sequence (two-tone/Quick Call) that tone-out detection matches against a call's audio. Signal processing, not speech recognition — transcription is banned ([ADR-0013](docs/adr/0013-no-transcription.md)). A match **marks** the Call, the way an **Emergency** does, and like an Emergency it is shown rather than delivered.
+The per-talkgroup definition of a paging tone sequence that tone-out detection matches against a call's audio — an **ordered sequence** of tones rather than a fixed A/B pair, so one shape spells a single long group tone, Quick Call II's two, and an A-B-then-group run of three. Signal processing, not speech recognition — transcription is banned ([ADR-0013](docs/adr/0013-no-transcription.md)). A match **marks** the Call, the way an **Emergency** does, and like an Emergency it is shown rather than delivered. The mark records **which profile fired**, because an Operator with twelve stations on one dispatch channel is asking who was paged rather than whether somebody was.
 _Avoid_: tone set, page definition.
 
 **Encrypted Call**:

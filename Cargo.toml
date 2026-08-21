@@ -74,6 +74,11 @@ ebur128 = "0.1.10"
 biquad = "0.6.0"
 nnnoiseless = { version = "0.5.2", default-features = false }
 audioadapter-buffers = "4.0.0"
+# The spectrum tone-out detection reads (#55). **Already in the tree** — rubato
+# depends on it — so naming it directly adds no crate to the build and no
+# licence to the audit; what it adds is the right to call it, which beats
+# hand-rolling a DFT over a 3 kHz band on the hardware least able to afford one.
+realfft = "3.5.0"
 
 # What ships (#23, ADR-0007). Nothing had ever been built in release mode
 # before this ticket, so every value here is a deliberate choice rather than an

@@ -73,7 +73,7 @@ mod ws;
 // allow is scoped to the re-exports alone — the module's own `use` statements
 // below stay checked.
 #[allow(unused_imports)]
-pub use audio::{SdrTrunkMp3, silence_ms, wav};
+pub use audio::{SdrTrunkMp3, page_out, routine_traffic, silence_ms, wav};
 #[allow(unused_imports)]
 pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faults_over_store, faulty_store};
 #[allow(unused_imports)]

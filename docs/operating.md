@@ -315,8 +315,88 @@ call is stored as metadata with no audio at all, and it is still delivered, beca
 emergency is exactly the thing you want to be told about.
 
 The Discord shape is one embed with the talkgroup as its title, the marks as its description, and
-system, unit and duration as fields, linked to the audio. Discord renders it; nothing needs
-configuring at its end beyond pasting the webhook URL Discord gave you.
+the paged station, system, unit and duration as fields, linked to the audio. Discord renders it;
+nothing needs configuring at its end beyond pasting the webhook URL Discord gave you.
+
+## Tone-out detection
+
+A dispatch console pages a station by transmitting a short sequence of pure tones — Motorola
+Quick Call II's two, a single long group tone, or a two-tone page followed by a group tone.
+Radio-Scout listens for that sequence in the audio and **marks** the call it happened on, so you
+can find it, filter for it, and have it posted to a webhook.
+
+**This is signal processing, not speech recognition.** Radio-Scout does not transcribe anything,
+ever — no keyword alerts, no transcript search, nothing that depends on a transcript existing. A
+page-out is two sinusoids, and looking for them needs none of that.
+
+**Nothing wakes anybody.** A tone-out is shown, filtered and searched on, exactly like the
+emergency flag. There are no push notifications in Radio-Scout at all. A **webhook** you
+configured can carry a page to an address *you* chose, which is you arranging your own inbox.
+
+### Writing a profile
+
+Settings → Admin → Talkgroups, find the channel a station is paged on, and press **Tones**. A
+profile is a name — "Station 12", which is what you will see on the call — and the tones in order:
+
+| Field | What it means |
+| --- | --- |
+| **Tone (Hz)** | The frequency, from your tone-set chart. Between 200 and 3300 Hz. |
+| **Held for (s)** | The *shortest* it may be. Quick Call is nominally 1.0 s then 3.0 s; leave room, because a squelch opening late clips the front of the first tone. |
+| **Tolerance (%)** | How far off a tone may be, as a percentage of that tone. 2% is twice the ±1% the tone set is specified to and is what to leave it at. |
+| **Max gap (ms)** | How much silence may sit between two tones before it stops being one sequence. |
+
+A percentage rather than a fixed number of hertz because that is how tone sets are specified: 2%
+is ±6 Hz at 300 and ±49 Hz at 2468, and a window wide enough for the top of the band would merge
+neighbouring tones at the bottom of it.
+
+If you do not know the frequencies, record a page-out and read them off a spectrum analyser —
+Audacity's *Analyze → Plot Spectrum* is enough. A profile whose tones are outside the range
+detection listens to, or too short to measure, is **refused when you save it** rather than stored
+and silently never firing, because a pager that is not being watched looks exactly like a pager
+that has not gone off.
+
+**Disable before you delete.** If a profile is catching somebody else's pages, switch it off — it
+keeps the frequencies you measured, and you can widen or narrow it later. Deleting one does not
+touch the pages it already caught: each call recorded the station's name at the time it fired.
+
+### What it costs, and when it runs
+
+**Nothing at all until you write a profile.** With none configured, an upload does not spend a
+single extra query.
+
+Detection runs **behind** ingest, never inside it: the recorder is answered and the call is on the
+live feed before any audio is decoded, so a slow decode can never slow an upload. The page appears
+on the call a moment later.
+
+**A profile applies to the calls that follow it**, not to the archive that came before. Nothing
+goes back over stored audio when you write one — turning on a feature must not silently re-read a
+county's worth of objects — so if you want yesterday's pages, you needed the profile yesterday.
+
+`[tone] queue_depth` in `radio-scout.toml` is how many calls may be waiting to be looked at. Past
+that they keep the audio they arrived with and are not checked, which is logged. Detection is much
+cheaper than enhancement, so this rarely fills.
+
+### Finding the pages
+
+A marked call carries a badge everywhere it is shown — in the live feed, in RECENT and in the
+archive — and the badge **names the station**: hover it, or read it with a screen reader, and it
+says *Tone-out: Station 12*. The archive filter has a **Mark** control; pick *Tone-out* to see only
+the pages. `GET /api/calls` carries the same thing as a `tones` array, with the offset into the
+call each sequence started at.
+
+To have them posted somewhere, add a **webhook** (above) watching the `tone` mark. Its payload
+names the station:
+
+```json
+{
+  "marks": ["tone"],
+  "call": {
+    "...": "...",
+    "tone": true,
+    "tones": [{ "label": "Station 12", "atMs": 1840 }]
+  }
+}
+```
 
 ### Tidying up talkgroup names
 

@@ -6,14 +6,15 @@ import type {
   AdminApiKey,
   AdminAssignment,
   AdminDownstream,
-  AdminWebhook,
   AdminLabel,
   AdminSession,
   AdminSystem,
   AdminTalkgroup,
   AdminTalkgroupQuery,
+  AdminToneProfile,
   AdminUnit,
   AdminUnitQuery,
+  AdminWebhook,
   Catalog,
   CuratedPage,
   DocumentReport,
@@ -26,6 +27,7 @@ import type {
   MemberRef,
   MergeReport,
   NewDownstream,
+  NewToneProfile,
   NewWebhook,
   RangeDelta,
   RangeReport,
@@ -74,6 +76,7 @@ export const api = createApi({
     'ApiKey',
     'Downstream',
     'Webhook',
+    'ToneProfile',
   ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
@@ -451,6 +454,47 @@ export const api = createApi({
       query: (id) => ({ url: `api/admin/webhooks/${id}`, method: 'DELETE' }),
       invalidatesTags: ['Webhook'],
     }),
+
+    /** **Tone profiles** (#55, spec US 20) — a sub-resource of the Talkgroup
+     *  they are paged on, because a profile that named no channel would be
+     *  looked for in every Call this Instance takes.
+     *
+     *  One tag for the lot rather than one per channel: an Operator edits one
+     *  channel's profiles at a time, and a per-id tag would buy nothing but a
+     *  cache key nobody could invalidate correctly from a delete, whose route
+     *  does not name the Talkgroup. */
+    getToneProfiles: builder.query<Listing<AdminToneProfile>, number>({
+      query: (talkgroupId) => ({
+        url: `api/admin/talkgroups/${talkgroupId}/tones`,
+      }),
+      providesTags: ['ToneProfile'],
+    }),
+    createToneProfile: builder.mutation<
+      AdminToneProfile,
+      { talkgroupId: number; body: NewToneProfile }
+    >({
+      query: ({ talkgroupId, body }) => ({
+        url: `api/admin/talkgroups/${talkgroupId}/tones`,
+        method: 'POST',
+        body,
+      }),
+      invalidatesTags: ['ToneProfile'],
+    }),
+    updateToneProfile: builder.mutation<
+      AdminToneProfile,
+      { id: number; patch: Partial<NewToneProfile> }
+    >({
+      query: ({ id, patch }) => ({
+        url: `api/admin/tones/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['ToneProfile'],
+    }),
+    deleteToneProfile: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/tones/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['ToneProfile'],
+    }),
     // Live-feed hydration etc. are added by later tickets.
   }),
 })
@@ -461,6 +505,7 @@ export const {
   useAssignTalkgroupsMutation,
   useCreateApiKeyMutation,
   useCreateDownstreamMutation,
+  useCreateToneProfileMutation,
   useCreateWebhookMutation,
   useCreateGroupMutation,
   useCreateSystemMutation,
@@ -469,6 +514,7 @@ export const {
   useCreateUnitMutation,
   useDeleteApiKeyMutation,
   useDeleteDownstreamMutation,
+  useDeleteToneProfileMutation,
   useDeleteWebhookMutation,
   useDeleteGroupMutation,
   useDeleteSystemMutation,
@@ -482,6 +528,7 @@ export const {
   useGetApiKeysQuery,
   useGetCatalogQuery,
   useGetDownstreamsQuery,
+  useGetToneProfilesQuery,
   useGetWebhooksQuery,
   useGetFilterOptionsQuery,
   useGetGroupsQuery,
@@ -499,6 +546,7 @@ export const {
   useSetRangesMutation,
   useUpdateApiKeyMutation,
   useUpdateDownstreamMutation,
+  useUpdateToneProfileMutation,
   useUpdateWebhookMutation,
   useUpdateGroupMutation,
   useUpdateSystemMutation,

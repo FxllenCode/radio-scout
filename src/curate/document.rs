@@ -72,7 +72,8 @@ use super::systems::{blacklist_of, blacklist_text};
 use super::{Rejected, checked_led, optional_text};
 use crate::AppState;
 use crate::db::entities::{
-    api_key, group, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
+    api_key, group, system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit,
+    unit_ref,
 };
 use crate::db::repo;
 use crate::failure::{Failure, Stage};
@@ -89,7 +90,7 @@ pub const VERSION: u32 = 1;
 // -- The document ------------------------------------------------------------
 
 /// Everything an Operator curated, as one artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Document {
     pub version: u32,
@@ -114,7 +115,7 @@ pub struct Document {
     pub downstreams: Vec<DownstreamEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SystemEntry {
     pub r#ref: i64,
@@ -135,7 +136,7 @@ pub struct SystemEntry {
     pub units: Vec<UnitEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TalkgroupEntry {
     pub r#ref: i64,
@@ -156,6 +157,32 @@ pub struct TalkgroupEntry {
     /// Operator folded away.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_refs: Vec<i64>,
+    /// The **Tone profiles** paged on this channel (#55).
+    ///
+    /// Carried for `member_refs`' reason: a profile is something an Operator sat
+    /// down and worked out from a recording, and a restore that dropped it would
+    /// leave a station silently unwatched — which looks exactly like a station
+    /// that has not been paged. There is no secret in one, unlike a
+    /// [`crate::webhook`], so it belongs in a file an Operator can email.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tones: Vec<ToneEntry>,
+}
+
+/// One **Tone profile**, as a backup carries it (#55).
+///
+/// Keyed by `label` on the way back in — the way a Group and a Tag are — because
+/// a profile has no Ref and its *name* is what an Operator identifies it by. Two
+/// profiles on one channel with the same label are the same profile, which is
+/// also what makes a restore idempotent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToneEntry {
+    pub label: String,
+    pub steps: Vec<crate::tone::Step>,
+    pub tolerance_pct: f64,
+    pub gap_max_ms: i64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +267,9 @@ pub struct DocumentReport {
     pub systems: Applied,
     pub talkgroups: Applied,
     pub units: Applied,
+    /// **Tone profiles** (#55), counted like the rest: an Operator restoring a
+    /// county wants to know how many stations are being watched again.
+    pub tones: Applied,
     pub groups_created: u64,
     pub tags_created: u64,
     /// Keys issued by this import, each shown **once**. Empty on a dry run: a
@@ -296,6 +326,15 @@ pub async fn import(
         false => txn.commit().await,
     }
     .map_err(Stage::Curate.failed())?;
+
+    // A restored document may have brought this Instance its first **Tone
+    // profile** (#55), and the roster gate is a cached bit — so it is re-read
+    // here as it is on every other write that could change it, and a restored
+    // pager is watched from the next Call rather than from the next restart.
+    // After the commit, and skipped on a dry run, because nothing was written.
+    if !dry_run {
+        state.tones.rearm(&state.db).await;
+    }
 
     // Built before the macro rather than inside it, for the reason
     // `MergeChange::record` gives: a `tracing` field expression runs only when
@@ -426,6 +465,19 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
             .or_default()
             .push((member.position, member.r#ref));
     }
+    let mut tones_of: HashMap<i64, Vec<ToneEntry>> = HashMap::new();
+    for profile in tone_profile::Entity::find().all(db).await? {
+        tones_of
+            .entry(profile.talkgroup_id)
+            .or_default()
+            .push(ToneEntry {
+                label: profile.label,
+                steps: crate::tone::steps_of(&profile.steps),
+                tolerance_pct: profile.tolerance_pct,
+                gap_max_ms: profile.gap_max_ms,
+                disabled: profile.disabled,
+            });
+    }
     let mut ranges_of: HashMap<i64, Vec<(i32, Range)>> = HashMap::new();
     for span in unit_ref::Entity::find().all(db).await? {
         ranges_of
@@ -445,6 +497,11 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
                     groups.sort();
                     let mut members = members_of.get(&channel.id).cloned().unwrap_or_default();
                     members.sort();
+                    // By label, so two Instances with the same setup write the
+                    // same bytes — the document is a pure function of the
+                    // configuration, never of insertion order (#51).
+                    let mut tones = tones_of.get(&channel.id).cloned().unwrap_or_default();
+                    tones.sort_by(|a, b| a.label.cmp(&b.label));
                     TalkgroupEntry {
                         r#ref: channel.r#ref,
                         label: channel.label.clone(),
@@ -454,6 +511,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
                         led: channel.led.clone(),
                         enhancement: channel.enhancement,
                         member_refs: members.into_iter().map(|(_, r#ref)| r#ref).collect(),
+                        tones,
                     }
                 })
                 .collect();
@@ -556,6 +614,7 @@ async fn apply<C: ConnectionTrait>(
         systems: Applied::default(),
         talkgroups: Applied::default(),
         units: Applied::default(),
+        tones: Applied::default(),
         groups_created: 0,
         tags_created: 0,
         api_keys: Vec::new(),
@@ -707,6 +766,7 @@ async fn apply_system<C: ConnectionTrait>(
         };
         let at = format!("{at}.talkgroups[{index}]");
         apply_members(db, owner, channel, &at, now_ms, report).await?;
+        apply_tones(db, owner, channel, &at, now_ms, report).await?;
     }
 
     for (index, radio) in entry.units.iter().enumerate() {
@@ -843,6 +903,80 @@ async fn apply_members<C: ConnectionTrait>(
 
     let change = repo::set_member_refs(db, owner, &entry.member_refs, now_ms).await?;
     change.record(owner.id, owner.r#ref, report.dry_run);
+    Ok(())
+}
+
+/// Upsert this channel's **Tone profiles** (#55), keyed by label.
+///
+/// **Absence never deletes**, which is the document's own rule: a file written
+/// by a release that had no `tones` key must not silently unwatch every station
+/// on the channel it names.
+///
+/// A profile that could never fire is *reported* rather than refusing the
+/// document — the [`RejectedEntry`] convention — so a restore of four hundred
+/// channels is not lost to one typo, and the Operator is told which entry to fix
+/// by its path into the file.
+async fn apply_tones<C: ConnectionTrait>(
+    db: &C,
+    owner: &talkgroup::Model,
+    entry: &TalkgroupEntry,
+    at: &str,
+    now_ms: i64,
+    report: &mut DocumentReport,
+) -> Result<(), DbErr> {
+    for (index, profile) in entry.tones.iter().enumerate() {
+        let at = format!("{at}.tones[{index}]");
+        if let Some(detail) =
+            crate::tone::unusable(&profile.steps, profile.tolerance_pct, profile.gap_max_ms)
+        {
+            report.rejected.push(RejectedEntry {
+                at,
+                reason: "unusable-tone-profile",
+                detail,
+            });
+            continue;
+        }
+        let steps = crate::tone::steps_json(&profile.steps);
+        let existing = tone_profile::Entity::find()
+            .filter(tone_profile::Column::TalkgroupId.eq(owner.id))
+            .filter(tone_profile::Column::Label.eq(profile.label.clone()))
+            .one(db)
+            .await?;
+        match existing {
+            None => {
+                report.tones.created += 1;
+                tone_profile::ActiveModel {
+                    talkgroup_id: Set(owner.id),
+                    label: Set(profile.label.clone()),
+                    tolerance_pct: Set(profile.tolerance_pct),
+                    gap_max_ms: Set(profile.gap_max_ms),
+                    steps: Set(steps),
+                    disabled: Set(profile.disabled),
+                    created_at_ms: Set(now_ms),
+                    ..Default::default()
+                }
+                .insert(db)
+                .await?;
+            }
+            Some(found)
+                if found.steps == steps
+                    && found.tolerance_pct == profile.tolerance_pct
+                    && found.gap_max_ms == profile.gap_max_ms
+                    && found.disabled == profile.disabled =>
+            {
+                report.tones.unchanged += 1;
+            }
+            Some(found) => {
+                report.tones.updated += 1;
+                let mut row = found.into_active_model();
+                row.steps = Set(steps);
+                row.tolerance_pct = Set(profile.tolerance_pct);
+                row.gap_max_ms = Set(profile.gap_max_ms);
+                row.disabled = Set(profile.disabled);
+                row.update(db).await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1053,6 +1187,7 @@ mod tests {
                     led: Some(String::from("red")),
                     enhancement: None,
                     member_refs: vec![8123],
+                    tones: Vec::new(),
                 }],
                 units: vec![UnitEntry {
                     r#ref: 1200,

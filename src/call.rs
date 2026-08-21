@@ -13,7 +13,7 @@
 
 use std::cmp::Ordering;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Radio-Scout's internal primary key for a stored Call (matches the DB `i64`).
 pub type CallId = i64;
@@ -252,6 +252,33 @@ pub struct StoredCall {
     /// the way a player can act on.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub encrypted: bool,
+    /// A **Tone profile** on this channel was paged in this Call's audio (#55,
+    /// spec US 20) — omitted when it wasn't, [`StoredCall::emergency`]'s rule
+    /// and for its reason: a page is rare and every live frame pays for a key
+    /// that is present.
+    ///
+    /// Kept beside [`StoredCall::tones`] rather than derived from it, because it
+    /// is what the *row* says and the list is what the child table says: a Call
+    /// this Instance could not read the pages of still carries the mark.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tone: bool,
+    /// **Which** stations were paged, and where in the Call (#55).
+    ///
+    /// This is the array the `freqList`/`srcList` argument would seem to
+    /// forbid, and the difference is that those are on *every* Call: Trunk
+    /// Recorder sends both on every upload, so carrying them here would put
+    /// arrays on every frame a Pi pushes to every Listener. A page-out happens
+    /// a few times a day, so this key is absent from essentially every Call —
+    /// and [`crate::archive::stored_calls`] reads the child table only when
+    /// something in the page carries the mark, so an ordinary page and an
+    /// ordinary live frame still cost no statement.
+    ///
+    /// It is here rather than on [`CallDetail`] because "a station was paged"
+    /// is not the question an Operator is asking — *which* station is — and a
+    /// name that could only be reached by opening one Call at a time is one no
+    /// list, no live frame and no **Webhook** could show.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tones: Vec<TonePage>,
     /// The Site Ref this Call was heard on, for multi-site Systems (spec
     /// US 11). Absent unless a recorder named one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -332,6 +359,35 @@ pub struct CallDetail {
 // How one Call, and the cascading filter options beside it, reach a client —
 // decided beside the types rather than at the handlers (#92).
 crate::answers_json!(CallDetail, FilterOptions, UnitHistory);
+
+/// One **Tone profile** match on a Call (#55) — which station was paged, and
+/// how far into the Call.
+///
+/// One type wherever a Call is shown: a search row, a live frame, and the
+/// **Webhook** body an Operator's automation parses. Something that could only
+/// say "a page happened" would answer the wrong question — an Operator with
+/// twelve stations on one dispatch channel is asking *who*.
+///
+/// The label is the profile's **as it was when the page fired**, read off the
+/// stored row rather than joined: a profile renamed next year does not rewrite
+/// last year's pages, and one deleted does not erase them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TonePage {
+    pub label: String,
+    /// How far into the Call the sequence began, in milliseconds.
+    pub at_ms: i64,
+}
+
+impl TonePage {
+    /// Read a stored row.
+    pub fn from_row(row: &crate::db::entities::call_tone::Model) -> Self {
+        TonePage {
+            label: row.label.clone(),
+            at_ms: row.at_ms,
+        }
+    }
+}
 
 /// One frequency segment of a Call: where it sat and how badly it decoded.
 #[derive(Debug, Clone, Serialize)]
@@ -639,6 +695,8 @@ mod tests {
             duration_ms: Some(8250),
             emergency: true,
             encrypted: false,
+            tone: false,
+            tones: Vec::new(),
             site_ref: Some(3),
             site_label: Some("Downtown".into()),
             object_key: "ab/secret-internal-key.m4a".into(),
@@ -696,6 +754,8 @@ mod tests {
             duration_ms: None,
             emergency: false,
             encrypted: false,
+            tone: false,
+            tones: Vec::new(),
             site_ref: None,
             site_label: None,
             object_key: "internal".into(),

@@ -188,8 +188,8 @@ after switching:
   matters.
 - **The machine is still configured in a file.** Ports, storage, retention and the database
   live in `radio-scout.toml`, environment variables and flags. Everything *else* — systems,
-  talkgroups, groups, tags, units, API keys, downstream peers and webhooks — is edited in the
-  browser under Settings → Admin.
+  talkgroups, groups, tags, units, API keys, downstream peers, tone profiles and webhooks — is
+  edited in the browser under Settings → Admin.
 - **`/rdio-scanner` is not served.** Radio-Scout does not host the legacy app.
 - **A different UI.** It is a replacement, not a reskin — the screens are not where rdio put
   them.

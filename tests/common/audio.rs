@@ -45,6 +45,83 @@ pub fn silence_ms(millis: i64) -> Vec<u8> {
     wav(&vec![0.0; samples], RATE)
 }
 
+/// **A page-out, as a scanner records one** (#55) — a Quick Call II sequence at
+/// two real tone-set frequencies, followed by the dispatcher.
+///
+/// Not a signal generator's output, deliberately. Every departure from a clean
+/// sinusoid here is one a real recording has and a synthetic fixture would miss:
+///
+/// - **Attack and decay** on each tone, because a console keys through an audio
+///   path with a rise time, and a hard edge is a click whose energy smears
+///   across the whole band.
+/// - **Hiss**, at a signal-to-noise ratio a scanner on a rooftop antenna
+///   actually gets — deterministic, so a failure is a failure and not a Tuesday.
+/// - **Voice after the tones**, harmonically rich and pitch-moving, which is the
+///   part of a real page-out most likely to be mistaken for a third tone.
+///
+/// What it is honestly *not* is a recording of a real dispatch: there is none in
+/// this repository, and there should not be — an agency's traffic is not ours to
+/// commit. The near-miss negatives beside it in `src/tone/detect.rs` are what
+/// stand in for the false-positive half of that testing.
+pub fn page_out(a_hz: f64, b_hz: f64) -> Vec<u8> {
+    let mut samples = tone(a_hz, 1_000);
+    samples.extend(tone(b_hz, 3_000));
+    samples.extend(voice(2_000));
+    for (n, sample) in samples.iter_mut().enumerate() {
+        *sample = (*sample + hiss(n)).clamp(-1.0, 1.0);
+    }
+    wav(&samples, PAGE_RATE)
+}
+
+/// The rate a P25 recorder writes, which is what a page-out arrives at.
+pub const PAGE_RATE: u32 = 8_000;
+
+/// A Call with no page in it: the dispatcher and nothing else, at the same
+/// length and level, so a negative is a difference of *content* rather than of
+/// anything else the detector could be reacting to.
+pub fn routine_traffic() -> Vec<u8> {
+    let mut samples = voice(6_000);
+    for (n, sample) in samples.iter_mut().enumerate() {
+        *sample = (*sample + hiss(n)).clamp(-1.0, 1.0);
+    }
+    wav(&samples, PAGE_RATE)
+}
+
+fn tone(hz: f64, ms: usize) -> Vec<f32> {
+    let len = ms * PAGE_RATE as usize / 1000;
+    let ramp = PAGE_RATE as usize / 200;
+    (0..len)
+        .map(|n| {
+            let envelope = (n.min(len - n - 1) as f32 / ramp as f32).min(1.0);
+            let phase = std::f64::consts::TAU * hz * n as f64 / PAGE_RATE as f64;
+            0.5 * envelope * phase.sin() as f32
+        })
+        .collect()
+}
+
+/// Speech, near enough: a harmonic stack whose pitch moves, which is what a
+/// held paging tone never does.
+fn voice(ms: usize) -> Vec<f32> {
+    (0..ms * PAGE_RATE as usize / 1000)
+        .map(|n| {
+            let t = n as f64 / PAGE_RATE as f64;
+            let f0 = 130.0 * (1.0 + 0.25 * (std::f64::consts::TAU * 3.0 * t).sin());
+            (1..=12)
+                .map(|h| (std::f64::consts::TAU * f0 * h as f64 * t).sin() / h as f64)
+                .sum::<f64>() as f32
+                * 0.15
+        })
+        .collect()
+}
+
+/// Deterministic hiss at roughly 20 dB below the tones — a seeded LCG, so this
+/// fixture is the same bytes on every machine and every run.
+fn hiss(n: usize) -> f32 {
+    let mut state = (n as u64).wrapping_mul(6364136223846793005).wrapping_add(1);
+    state ^= state >> 33;
+    0.05 * ((state >> 40) as f32 / 8388608.0 - 1.0)
+}
+
 /// An MP3 shaped the way SDRTrunk uploads one (#48).
 ///
 /// `AudioSegmentRecorder.recordMP3` writes an ID3v2.4 tag and *then* the MPEG

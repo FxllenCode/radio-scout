@@ -42,6 +42,7 @@ pub mod labels;
 pub mod members;
 pub mod systems;
 pub mod talkgroups;
+pub mod tones;
 pub mod units;
 pub mod webhooks;
 
@@ -83,6 +84,13 @@ pub fn routes() -> Router<AppState> {
             "/api/admin/talkgroups/{id}/members",
             get(members::list_members).post(members::fold),
         )
+        // Tone profiles hang off the channel they are paged on (#55), which is
+        // why they are a sub-resource here rather than a roster of their own:
+        // a profile that named no Talkgroup would be looked for in every Call.
+        .route(
+            "/api/admin/talkgroups/{id}/tones",
+            get(tones::list).post(tones::create),
+        )
         .route(
             "/api/admin/groups",
             get(labels::list_groups).post(labels::create_group),
@@ -107,6 +115,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/admin/units/{id}/ranges",
             get(members::list_ranges).post(members::set_ranges),
+        )
+        .route(
+            "/api/admin/tones/{id}",
+            patch(tones::update).delete(tones::remove),
         )
         .route("/api/admin/config", get(document::export))
         .route("/api/admin/config/import", post(document::import))
@@ -149,6 +161,7 @@ pub enum What {
     ApiKey,
     Downstream,
     Webhook,
+    ToneProfile,
 }
 
 impl What {
@@ -163,6 +176,7 @@ impl What {
             What::ApiKey => "API key",
             What::Downstream => "downstream",
             What::Webhook => "webhook",
+            What::ToneProfile => "tone profile",
         }
     }
 
@@ -179,6 +193,7 @@ impl What {
             What::ApiKey => "api-key-not-found",
             What::Downstream => "downstream-not-found",
             What::Webhook => "webhook-not-found",
+            What::ToneProfile => "tone-profile-not-found",
         }
     }
 
@@ -190,9 +205,12 @@ impl What {
             What::System => "system-ref-taken",
             What::Talkgroup => "talkgroup-ref-taken",
             What::Unit => "unit-ref-taken",
-            What::Group | What::Tag | What::ApiKey | What::Downstream | What::Webhook => {
-                "ref-taken"
-            }
+            What::Group
+            | What::Tag
+            | What::ApiKey
+            | What::Downstream
+            | What::Webhook
+            | What::ToneProfile => "ref-taken",
         }
     }
 
@@ -205,6 +223,7 @@ impl What {
             | What::Tag
             | What::Unit
             | What::ApiKey
+            | What::ToneProfile
             | What::Downstream
             | What::Webhook => "has-calls",
         }
@@ -278,6 +297,15 @@ pub enum Rejected {
     UnusableWebhookUrl,
     /// A **Webhook** body shape this Instance cannot render (#54).
     UnknownFormat { format: String },
+    /// A **Tone profile** that could never page anything (#55).
+    ///
+    /// Carries [`crate::tone::unusable`]'s own sentence — a step outside the
+    /// band the detector listens to, a tone too short to measure, a tolerance so
+    /// wide it would match the neighbouring station. Refused rather than stored
+    /// and quietly never firing, which is the failure an Operator cannot see:
+    /// a pager that is not being watched looks exactly like a pager that has not
+    /// gone off.
+    UnusableToneProfile { detail: String },
     /// A **mark** this release does not know (#54).
     ///
     /// Refused rather than dropped, which is the opposite of what a *stored*
@@ -311,6 +339,7 @@ impl Rejected {
             Rejected::UnusableWebhookUrl => "unusable-webhook-url",
             Rejected::UnknownFormat { .. } => "unknown-format",
             Rejected::UnknownMark { .. } => "unknown-mark",
+            Rejected::UnusableToneProfile { .. } => "unusable-tone-profile",
             Rejected::HasCalls { what, .. } => what.has_calls(),
         }
     }
@@ -325,7 +354,8 @@ impl Rejected {
             | Rejected::UnknownLed { .. }
             | Rejected::UnusableWebhookUrl
             | Rejected::UnknownFormat { .. }
-            | Rejected::UnknownMark { .. } => StatusCode::BAD_REQUEST,
+            | Rejected::UnknownMark { .. }
+            | Rejected::UnusableToneProfile { .. } => StatusCode::BAD_REQUEST,
             Rejected::NotFound(_) => StatusCode::NOT_FOUND,
             Rejected::NameTaken { .. }
             | Rejected::RefTaken { .. }
@@ -395,6 +425,7 @@ impl std::fmt::Display for Rejected {
                     .map(crate::webhook::Format::slug)
                     .join(", ")
             ),
+            Rejected::UnusableToneProfile { detail } => write!(f, "{detail}"),
             Rejected::UnknownMark { mark } => write!(
                 f,
                 "{mark:?} is not a mark a Call can carry: choose one of {}",

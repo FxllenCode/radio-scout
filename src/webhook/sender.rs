@@ -465,6 +465,8 @@ mod tests {
             duration_ms: None,
             emergency: true,
             encrypted: false,
+            tone: false,
+            tones: Vec::new(),
             site_ref: None,
             site_label: None,
             object_key: String::from("calls/101.wav"),
@@ -477,7 +479,7 @@ mod tests {
         FakeWorld {
             call: Some(Deliverable {
                 call: a_call(),
-                marks: Marks::on_call(true),
+                marks: Marks::on_call(true, false),
             }),
             answer: Some(204),
             ..FakeWorld::default()
@@ -596,10 +598,12 @@ mod tests {
             call: Some(Deliverable {
                 call: StoredCall {
                     encrypted: true,
+                    tone: false,
+                    tones: Vec::new(),
                     audio_url: None,
                     ..a_call()
                 },
-                marks: Marks::on_call(true),
+                marks: Marks::on_call(true, false),
             }),
             ..working()
         };

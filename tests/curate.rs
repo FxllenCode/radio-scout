@@ -55,6 +55,10 @@ async fn no_session_reaches_no_curation_route() {
         // routes it would be worst to have mounted outside the layer.
         "/api/admin/talkgroups/1/members",
         "/api/admin/units/1/ranges",
+        // ...and #55's, which is a sub-resource of a Talkgroup and a roster of
+        // its own, so both spellings are here.
+        "/api/admin/talkgroups/1/tones",
+        "/api/admin/tones/1",
         // #51's document — the read is the whole configuration and the write
         // rewrites it, so this is the pair it would be worst to leave open.
         "/api/admin/config",

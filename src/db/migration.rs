@@ -7,9 +7,9 @@ use sea_orm::Schema;
 use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, downstream, downstream_delivery, group,
-    log_event, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
-    webhook, webhook_delivery,
+    api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
+    downstream_delivery, group, log_event, site, system, tag, talkgroup, talkgroup_group,
+    talkgroup_ref, tone_profile, unit, unit_ref, webhook, webhook_delivery,
 };
 
 pub struct Migrator;
@@ -33,6 +33,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0013_downstream_peers::Migration),
             Box::new(m0014_drop_push_subscriptions::Migration),
             Box::new(m0015_webhooks::Migration),
+            Box::new(m0016_tone_profiles::Migration),
         ]
     }
 }
@@ -1530,6 +1531,144 @@ mod m0015_webhooks {
                 .await?;
             manager
                 .drop_table(Table::drop().table(webhook::Entity).if_exists().to_owned())
+                .await
+        }
+    }
+}
+
+/// **Tone-out detection** (#55): the profiles an Operator writes down, the
+/// pages they caught, and where each Call has got to.
+///
+/// `calls.tone` defaults to [`call::ToneState::NONE`] for [`m0006_enhancement`]'s
+/// reason, said about a different feature: every Call that already exists was
+/// stored before any profile did, and marking them `pending` would mean adding
+/// the first profile re-read an Operator's whole Archive on the next boot.
+mod m0016_tone_profiles {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0016_tone_profiles"
+        }
+    }
+
+    const BY_TALKGROUP: &str = "idx_tone_profiles_talkgroup";
+    const BY_CALL: &str = "idx_call_tones_call";
+    const PENDING: &str = "idx_calls_tone";
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            if !manager.has_table("tone_profiles").await? {
+                manager
+                    .create_table(schema.create_table_from_entity(tone_profile::Entity))
+                    .await?;
+            }
+            if !manager.has_table("call_tones").await? {
+                manager
+                    .create_table(schema.create_table_from_entity(call_tone::Entity))
+                    .await?;
+            }
+            if !manager.has_column("calls", "tone").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(
+                                ColumnDef::new(call::Column::Tone)
+                                    .string()
+                                    .not_null()
+                                    .default(call::ToneState::NONE),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // The worker asks for a Talkgroup's profiles once per Call it looks
+            // at, which on a paging channel is once a second forever.
+            if !manager.has_index("tone_profiles", BY_TALKGROUP).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(BY_TALKGROUP)
+                            .table(tone_profile::Entity)
+                            .col(tone_profile::Column::TalkgroupId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_index("call_tones", BY_CALL).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(BY_CALL)
+                            .table(call_tone::Entity)
+                            .col(call_tone::Column::CallId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // Two questions, one index. A restart asks for `pending` — a
+            // handful of rows in an Archive of half a million — and the archive
+            // filter asks for `matched`, which is the whole point of the mark
+            // and is the rarest value in the column. Without it both are a scan
+            // of the Archive on the Pi.
+            //
+            // `id` rides along because both order by it, which is m0012's
+            // argument: on the filter's side the answer can be thousands of
+            // rows, and an index on the column alone would find them all and
+            // then sort them to take a page.
+            if !manager.has_index("calls", PENDING).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(PENDING)
+                            .table(call::Entity)
+                            .col(call::Column::Tone)
+                            .col(call::Column::Id)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // The index first: SQLite refuses to drop a column an index still
+            // names (m0012's lesson).
+            if manager.has_index("calls", PENDING).await? {
+                manager
+                    .drop_index(Index::drop().name(PENDING).table(call::Entity).to_owned())
+                    .await?;
+            }
+            if manager.has_column("calls", "tone").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .drop_column(call::Column::Tone)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(call_tone::Entity)
+                        .if_exists()
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(tone_profile::Entity)
+                        .if_exists()
+                        .to_owned(),
+                )
                 .await
         }
     }

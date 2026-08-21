@@ -108,6 +108,23 @@ pub struct CallSearch {
     /// unbounded list in every filter response. It is reached by tapping a unit
     /// label or typing a radio id, which is how somebody arrives at the question.
     pub unit_ref: Option<i64>,
+    /// Only Calls carrying this **Mark** (#42, #55, spec US 20) — the emergency
+    /// bit a radio set, or a **Tone profile** this Instance heard paged.
+    ///
+    /// One filter over the whole closed vocabulary rather than a boolean per
+    /// mark, because that is what a Mark *is*: `MARKS` is the list, so a mark
+    /// added later is filterable without a wire change or a migration. Single-
+    /// valued on purpose — every other filter here combines with AND, and a list
+    /// would have to mean OR, which is a second rule on one query string.
+    ///
+    /// Deliberately **not** a cascading dimension. The cascade exists to stop a
+    /// filter offering choices that would return nothing, which needs a query
+    /// per dimension per request; a vocabulary of two whose meaning does not
+    /// depend on the others is a toggle, and buying two more facet queries on
+    /// every filter request to tell an Operator that nothing was ever an
+    /// emergency would be paying a real price for that. `minDuration` and `unit`
+    /// are out for the same reason.
+    pub mark: Option<crate::webhook::Mark>,
     pub sort: CallSort,
     pub limit: u64,
     pub offset: u64,
@@ -296,6 +313,9 @@ impl CallQuery {
                 .join_group()
                 .and_where(group::Column::Name.eq(group_name.clone()));
         }
+        if let Some(mark) = search.mark {
+            self = self.and_where(carrying(mark));
+        }
         if let Some(scope) = &filters.unit {
             self = self.and_where(heard_by(scope));
         }
@@ -341,6 +361,23 @@ impl CallQuery {
     /// bookkeeping [`CallQuery`] exists to hold.
     fn grouped(self) -> Select<call::Entity> {
         self.select.select_only()
+    }
+}
+
+/// The Calls carrying one **Mark** (#42, #55).
+///
+/// Both arms are a column on the Call row, which is what makes this a filter and
+/// not a join: `calls.emergency` is what the recorder sent, and `calls.tone` is
+/// where detection got to — the denormalized answer #55 keeps beside the
+/// `call_tones` rows precisely so that reading it costs no statement here or in
+/// [`stored_calls`]. Adding a mark that is *not* a column would owe a subquery,
+/// on [`heard_by`]'s terms and never a join.
+fn carrying(mark: crate::webhook::Mark) -> sea_orm::sea_query::SimpleExpr {
+    use crate::webhook::Mark;
+
+    match mark {
+        Mark::Emergency => call::Column::Emergency.eq(true),
+        Mark::Tone => call::Column::Tone.eq(call::ToneState::MATCHED),
     }
 }
 
@@ -655,6 +692,36 @@ pub struct Download {
     pub filename: String,
 }
 
+/// Which **Tone profiles** each of these Calls paged (#55), by Call id.
+///
+/// **Two properties, and both are load-bearing.** It is *batched*, so a page of
+/// five hundred costs one statement rather than five hundred (#86); and it is
+/// **skipped entirely** when nothing in the page carries the mark, so the
+/// overwhelmingly common search page — and every live frame of an ordinary Call
+/// — costs no statement at all to be told there is nothing there. The Call row
+/// already knows, which is what `calls.tone` is for.
+async fn tone_pages<C: ConnectionTrait>(
+    db: &C,
+    calls: &[call::Model],
+) -> Result<HashMap<CallId, Vec<crate::call::TonePage>>, DbErr> {
+    let marked: Vec<CallId> = calls
+        .iter()
+        .filter(|call| call.tone_matched())
+        .map(|call| call.id)
+        .collect();
+    if marked.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut paged: HashMap<CallId, Vec<crate::call::TonePage>> = HashMap::new();
+    for row in crate::db::repo::tone_matches_for(db, &marked).await? {
+        paged
+            .entry(row.call_id)
+            .or_default()
+            .push(crate::call::TonePage::from_row(&row));
+    }
+    Ok(paged)
+}
+
 /// One Call as a **Webhook** is about to be told about it (#54).
 ///
 /// Deliberately the [`StoredCall`] a **Listener** would see rather than
@@ -677,7 +744,10 @@ pub async fn deliverable<C: ConnectionTrait>(
     // queued.** A Call that has been replaced by a better copy (#46) since is
     // sent as it now stands, which is the same rule the forwarding path follows
     // and the reason neither queue stores a rendered payload.
-    let marks = crate::webhook::Marks::on_call(row.emergency);
+    let marks = crate::webhook::Marks::on_call(row.emergency, row.tone_matched());
+    // Which stations were paged rides on the Call itself, so there is nothing
+    // extra to read and nothing to keep in step: what the webhook is told is
+    // exactly what a Listener would be shown.
     Ok(one_view(db, &row)
         .await?
         .map(|call| crate::webhook::sender::Deliverable { call, marks }))
@@ -852,6 +922,11 @@ pub async fn stored_calls<C: ConnectionTrait>(
         return Ok(Vec::new());
     }
 
+    // Skipped entirely unless something in this page carries the mark, which is
+    // what keeps an ordinary page — and every ordinary live frame — at exactly
+    // the statement count it had before #55.
+    let mut paged = tone_pages(db, calls).await?;
+
     let system_ids = distinct(calls.iter().map(|c| c.system_id));
     let systems: HashMap<i64, system::Model> = system::Entity::find()
         .filter(system::Column::Id.is_in(system_ids))
@@ -997,6 +1072,12 @@ pub async fn stored_calls<C: ConnectionTrait>(
                 duration_ms: call.duration_ms,
                 emergency: call.emergency,
                 encrypted: call.encrypted,
+                // The mark is read off the Call row, so an unmarked Call costs
+                // this denormalizer nothing at all; the stations are the child
+                // rows, read once for the whole page and only when one of them
+                // says there is something to read.
+                tone: call.tone_matched(),
+                tones: paged.remove(&call.id).unwrap_or_default(),
                 site_ref: call
                     .site_id
                     .and_then(|id| sites.get(&id))
@@ -1294,6 +1375,22 @@ fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
         }
     };
 
+    // Named rather than silently ignored, the way `sort` is: a client asking
+    // for a mark this release has never heard of is a client that will render an
+    // unfiltered page believing it filtered one, and a Listener reading it has
+    // no way to tell.
+    let mark = match params.raw("mark") {
+        None => None,
+        Some(raw) => Some(crate::webhook::Mark::from_slug(raw).ok_or_else(|| {
+            bad(format!(
+                "mark must be one of {} (got {raw:?})",
+                crate::webhook::MARKS
+                    .map(crate::webhook::Mark::slug)
+                    .join(", ")
+            ))
+        })?),
+    };
+
     Ok(CallSearch {
         after_ms: params.time("after")?,
         before_ms: params.time("before")?,
@@ -1316,6 +1413,7 @@ fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
             .map(seconds_to_ms)
             .transpose()?,
         unit_ref: params.number("unit")?,
+        mark,
         sort,
         limit: params.limit(DEFAULT_LIMIT, MAX_LIMIT)?,
         offset: params.offset()?,
@@ -1867,6 +1965,8 @@ mod tests {
             duration_ms: None,
             emergency: false,
             encrypted: false,
+            tone: false,
+            tones: Vec::new(),
             site_ref: None,
             site_label: None,
             object_key: "ab/opaque-key.m4a".into(),

@@ -998,6 +998,77 @@ describe('SearchScreen — what the recorder knew (#42)', () => {
     expect(within(rows[0]).queryByTitle('Emergency')).toBeNull()
   })
 
+  /** A **Tone profile** match is a Mark like the emergency bit (#55, spec
+   *  US 20), so it is badged the same way and in the same place — a Listener
+   *  scanning a page is asking one question of both. */
+  it('badges the call a station was paged on', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) =>
+        HttpResponse.json(
+          archivePage(new URL(request.url), [
+            {
+              ...ARCHIVE[0],
+              id: 91,
+              tone: true,
+              tones: [{ label: 'Station 12', atMs: 1840 }],
+            },
+            { ...ARCHIVE[0], id: 92 },
+          ]),
+        ),
+      ),
+    )
+    renderApp('/search')
+    const rows = await resultRows()
+
+    // **The station, not just the fact.** An operator with twelve stations on
+    // one dispatch channel is asking who was paged, and the badge's label is
+    // the only thing a listener — or a screen reader — actually reads.
+    expect(
+      within(rows[0]).getByTitle('Tone-out: Station 12'),
+    ).toBeInTheDocument()
+    expect(within(rows[1]).queryByTitle(/^Tone-out/)).toBeNull()
+  })
+
+  /** A Call marked by a profile whose pages could not be read back still says a
+   *  page happened, which is the true half of what is known. */
+  it('badges a page it cannot name', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) =>
+        HttpResponse.json(
+          archivePage(new URL(request.url), [
+            { ...ARCHIVE[0], id: 93, tone: true },
+          ]),
+        ),
+      ),
+    )
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(within(rows[0]).getByTitle('Tone-out')).toBeInTheDocument()
+  })
+
+  /** ...and it is **filterable**, over the same closed vocabulary a Webhook
+   *  fires on — one control rather than a checkbox per mark, so a mark added
+   *  later is an entry in `MARKS` and nothing else. */
+  it('filters the archive by mark', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    await resultRows()
+
+    await user.selectOptions(screen.getByLabelText('Mark'), 'Tone-out')
+    await waitFor(() => expect(lastSearch().get('mark')).toBe('tone'))
+
+    // Every mark in the vocabulary, over one control — and clearing it goes
+    // back to the unfiltered search, which is asserted on the *select* rather
+    // than on a request because that page is already in the cache and a cached
+    // page issues none (the `run.ts` note).
+    await user.selectOptions(screen.getByLabelText('Mark'), 'Emergency')
+    await waitFor(() => expect(lastSearch().get('mark')).toBe('emergency'))
+
+    await user.selectOptions(screen.getByLabelText('Mark'), 'Any call')
+    expect(screen.getByLabelText('Mark')).toHaveValue('')
+  })
+
   it('badges an encrypted call and offers no way to play or download it', async () => {
     server.use(
       http.get(`${ORIGIN}/api/calls`, ({ request }) =>

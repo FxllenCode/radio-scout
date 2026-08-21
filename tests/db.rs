@@ -2195,6 +2195,11 @@ async fn recorder_truth_migration_converges_on_databases_that_predate_the_column
         ("calls", "priority"),
         ("calls", "audio_type"),
         ("calls", "site_id"),
+        // m0001 derives its DDL from the *live* entity, so a fresh database
+        // gets #55's column at m0001 and this has to take it back off to
+        // reproduce what an upgrading operator's schema really looks like —
+        // the standing tax m0003 and m0004 already pay.
+        ("calls", "tone"),
         ("call_frequencies", "at_ms"),
         ("call_units", "tag_ota"),
         ("call_units", "emergency"),

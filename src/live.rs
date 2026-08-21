@@ -824,6 +824,8 @@ mod tests {
             duration_ms: None,
             emergency: false,
             encrypted: false,
+            tone: false,
+            tones: Vec::new(),
             site_ref: None,
             site_label: None,
             object_key: String::new(),

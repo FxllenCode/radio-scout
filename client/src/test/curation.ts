@@ -11,7 +11,10 @@ import type {
   MemberRef,
   MovedRef,
   Span,
+  AdminToneProfile,
+  ToneStep,
 } from '@/types'
+import { unusable } from '@/lib/tone'
 import { ORIGIN } from './handlers'
 
 /** An **in-memory instance** the curation screens can really be driven against
@@ -43,6 +46,9 @@ export class FakeInstance {
   members = new Map<number, MemberRef[]>()
   /** A Unit's Ranges, by owning Unit id. */
   ranges = new Map<number, Span[]>()
+  /** A channel's **Tone profiles** (#55), by owning Talkgroup id — beside the
+   *  rows for `members`' reason: the server keeps them off the listing. */
+  tones = new Map<number, AdminToneProfile[]>()
   /** Every request that changed something, in order — so a test can assert on
    *  *what was sent* as well as on what came back, which is the half that
    *  catches a form posting the wrong shape. */
@@ -433,6 +439,70 @@ export function curationHandlers(instance: FakeInstance) {
         )
       },
     ),
+
+    http.get(`${ORIGIN}/api/admin/talkgroups/:id/tones`, ({ params }) =>
+      HttpResponse.json({ results: instance.tones.get(Number(params.id)) ?? [] }),
+    ),
+    http.post(
+      `${ORIGIN}/api/admin/talkgroups/:id/tones`,
+      async ({ request, params }) => {
+        const body = await record(
+          'POST',
+          request,
+          `/api/admin/talkgroups/${params.id}/tones`,
+        )
+        const talkgroupId = Number(params.id)
+        const steps = (body.steps as ToneStep[]) ?? []
+        const tolerancePct = (body.tolerancePct as number) ?? 2
+        const gapMaxMs = (body.gapMaxMs as number) ?? 300
+        // The server's own rule, so a browser that let something through is a
+        // test failure here rather than a surprise in production.
+        const refused = unusable(steps, tolerancePct, gapMaxMs)
+        if (refused) return refusal(400, 'unusable-tone-profile', refused)
+
+        const created: AdminToneProfile = {
+          id: instance.id(),
+          talkgroupId,
+          label: body.label as string,
+          steps,
+          tolerancePct,
+          gapMaxMs,
+          disabled: (body.disabled as boolean) ?? false,
+          createdAtMs: 0,
+        }
+        instance.tones.set(talkgroupId, [
+          ...(instance.tones.get(talkgroupId) ?? []),
+          created,
+        ])
+        return HttpResponse.json(created, { status: 201 })
+      },
+    ),
+    http.patch(`${ORIGIN}/api/admin/tones/:id`, async ({ request, params }) => {
+      const body = await record('PATCH', request, `/api/admin/tones/${params.id}`)
+      for (const [talkgroupId, held] of instance.tones) {
+        const found = held.find((it) => String(it.id) === params.id)
+        if (!found) continue
+        const updated = { ...found, ...body } as AdminToneProfile
+        instance.tones.set(
+          talkgroupId,
+          held.map((it) => (it.id === found.id ? updated : it)),
+        )
+        return HttpResponse.json(updated)
+      }
+      return refusal(404, 'tone-profile-not-found', 'no such tone profile')
+    }),
+    http.delete(`${ORIGIN}/api/admin/tones/:id`, async ({ request, params }) => {
+      await record('DELETE', request, `/api/admin/tones/${params.id}`)
+      for (const [talkgroupId, held] of instance.tones) {
+        if (!held.some((it) => String(it.id) === params.id)) continue
+        instance.tones.set(
+          talkgroupId,
+          held.filter((it) => String(it.id) !== params.id),
+        )
+        return new HttpResponse(null, { status: 204 })
+      }
+      return refusal(404, 'tone-profile-not-found', 'no such tone profile')
+    }),
 
     http.get(`${ORIGIN}/api/admin/units/:id/ranges`, ({ params }) =>
       HttpResponse.json({ results: instance.ranges.get(Number(params.id)) ?? [] }),

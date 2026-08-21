@@ -34,6 +34,7 @@ pub mod selection;
 pub mod serve;
 pub mod service;
 pub mod startup;
+pub mod tone;
 pub mod web;
 pub mod webhook;
 pub mod worker;
@@ -86,6 +87,11 @@ pub struct AppState {
     /// A Webhook is a **row**, so an Instance with none has an empty roster
     /// rather than a feature switched off.
     pub webhooks: crate::webhook::Webhooks,
+    /// Looking at a Call's audio for a **Tone profile** page (#55) — the
+    /// detection queue and whether there is anything to look for. A profile is
+    /// a **row**, so like a Webhook and unlike enhancement there is no disabled
+    /// form: an Instance with none has an empty roster.
+    pub tones: crate::tone::Tones,
     /// What time it is, for everything a handler stamps or expires (#90).
     pub clock: Clock,
     /// What every background Worker owes right now (#93) — the reading half, so
@@ -110,6 +116,7 @@ impl AppState {
             mining: crate::mining::MiningConfig::default(),
             downstreams: crate::downstream::Downstreams::default(),
             webhooks: crate::webhook::Webhooks::default(),
+            tones: crate::tone::Tones::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
         }

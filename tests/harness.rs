@@ -906,8 +906,12 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // ...and the same again for **Webhooks** (#54), for the same
             // reason: a Webhook is a row too.
             radio_scout::webhook::WORKER,
+            // ...and once more for tone-out detection (#55): a **Tone profile**
+            // is a row as well, so this starts whatever the roster says and
+            // sleeps on an empty queue while there is nothing to look for.
+            radio_scout::tone::WORKER,
         ],
-        "the shipped default runs five: enhancement is off, the rest are on"
+        "the shipped default runs six: enhancement is off, the rest are on"
     );
 
     let mut app = app;
@@ -927,6 +931,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::mining::sweep::WORKER,
             radio_scout::downstream::WORKER,
             radio_scout::webhook::WORKER,
+            radio_scout::tone::WORKER,
         ],
     );
 }

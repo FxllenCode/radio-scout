@@ -32,12 +32,16 @@ On a multi-site system, the tag/group line also names the **Site** the Call was 
 simulcast coverage is legible. Single-site systems say nothing there, and neither do recorders
 that don't send one.
 
-Two badges appear beside a Talkgroup's name when the recorder said so:
+Badges appear beside a Talkgroup's name when there is something to say about the transmission:
 
 | Badge | What it means |
 | --- | --- |
 | ⚠ **Emergency** | The radio's emergency button was pressed on this transmission. |
+| 📡 **Tone-out** | A station was paged on this Call — your operator wrote down its paging tones, and they were heard in the audio. The badge names it: *Tone-out: Station 12*. |
 | 🔒 **Encrypted** | The Talkgroup is encrypted, so there is no audio to hear. |
+
+None of these notifies anybody. Radio-Scout does not send push notifications and never will —
+a badge is something you find, not something that wakes your phone.
 
 Encrypted Calls never play — there is genuinely nothing in them but the vocoder's noise — so
 they go straight to **RECENT** rather than into the queue. They are there so a mostly-encrypted
@@ -151,7 +155,8 @@ you get the default Profile.
 <img src="images/search.png" alt="The Search screen" width="620">
 
 The Archive: every Call the instance still holds, however you selected the live feed. Filter by
-time range, System, Talkgroup, Group and Tag, and sort newest or oldest first. *Archive spans*
+time range, System, Talkgroup, Group and Tag, and sort newest or oldest first. **MARK** narrows to
+the Calls something was said about — the emergencies, or the station page-outs. *Archive spans*
 tells you how far back the instance's history actually goes, which is decided by its retention
 policy.
 

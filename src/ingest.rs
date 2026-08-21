@@ -929,7 +929,7 @@ async fn replace(
         repo::Replacement::Stored(call) => {
             Span::current().record("call_id", call.id);
             publish(state, &call).await?;
-            offer_for_enhancement(state, &call).await;
+            offer_off_path(state, &call).await;
             return Ok(Admission::Stored {
                 call_id: call.id,
                 audio_bytes,
@@ -940,7 +940,7 @@ async fn replace(
 
     // The levelled audio a previous pass produced describes a copy nobody holds
     // any more, so the row went back to `none` and the Call is offered again.
-    offer_for_enhancement(state, &call).await;
+    offer_off_path(state, &call).await;
 
     Ok(Admission::Replaced {
         call_id: call.id,
@@ -986,7 +986,7 @@ async fn perform(
     state.webhooks.owes(posting);
 
     publish(state, &call).await?;
-    offer_for_enhancement(state, &call).await;
+    offer_off_path(state, &call).await;
 
     Ok(Admission::Stored {
         call_id: call.id,
@@ -1030,10 +1030,89 @@ async fn publish(state: &AppState, call: &call::Model) -> Result<(), Failure> {
 /// field on every Call would be a per-Call field about a feature nobody turned
 /// on. The outcome exists so the arms are assertable (#96) and for #70's status
 /// surface to read.
-async fn offer_for_enhancement(state: &AppState, call: &call::Model) {
+async fn offer_off_path(state: &AppState, call: &call::Model) {
     if call.has_audio() {
         let _queued = queue_for_enhancement(state, call.id).await;
+        queue_for_tone_detection(state, call.id).await;
     }
+}
+
+/// Offer a stored Call to the tone-out queue, if there is anything to look for
+/// (#55).
+///
+/// [`queue_for_enhancement`]'s shape and its bargain — the Call is stored,
+/// answered and on the live feed, so everything from here is best-effort and
+/// costs a Listener nothing.
+///
+/// **The armed check comes first, and buys no I/O.** On an Instance with no Tone
+/// profile — every Instance until an Operator writes one — this is one atomic
+/// load and nothing else, where marking the row `pending` would put a statement
+/// on every upload for a feature nobody has configured.
+///
+/// Deliberately *marked before it is offered*, which is the enhancement rule and
+/// its reason: a process that dies between the two finds the Call again at the
+/// next boot, where the reverse order would leave it queued in memory and `none`
+/// on disk.
+async fn queue_for_tone_detection(state: &AppState, call_id: CallId) {
+    if !state.tones.is_armed() {
+        return;
+    }
+    if let Err(error) = repo::mark_tone(&state.db, call_id, call::ToneState::PENDING).await {
+        warn!(
+            reason = %"mark-pending-failed",
+            %error,
+            "could not mark a Call for tone-out detection"
+        );
+        return;
+    }
+    state.tones.submit(call_id);
+}
+
+/// Queue a **page** for every Webhook that asked for one (#55, #54).
+///
+/// [`enqueue_webhooks`]'s errand from the other side of the clock. It lives here
+/// rather than in [`crate::tone::worker`] because the rule about what reaches a
+/// sink — which Talkgroups a Call counts as reaching, and therefore whether a
+/// **Patch** carries it — is written once, in this module, and a second copy on
+/// the worker would be a Patch reaching a peer and not a webhook.
+///
+/// Everything about it is best-effort: the page is already recorded and already
+/// shown, and a roster that will not answer costs the delivery rather than the
+/// mark.
+pub async fn enqueue_tone_webhooks(state: &AppState, call_id: CallId) {
+    let now_ms = state.clock.now_ms();
+    match queue_tone_deliveries(state, call_id, now_ms).await {
+        Ok(0) => {}
+        Ok(owed) => state.webhooks.owes(owed),
+        Err(error) => warn!(
+            reason = %"webhook-queue-failed",
+            %error,
+            "a tone-out was detected but could not be queued for the webhooks watching for one"
+        ),
+    }
+}
+
+async fn queue_tone_deliveries(
+    state: &AppState,
+    call_id: CallId,
+    now_ms: i64,
+) -> Result<usize, sea_orm::DbErr> {
+    // `None` is a Call whose System or Talkgroup is not there — which is not a
+    // scope to guess at. Answering "Talkgroup 0" would be a delivery to whatever
+    // webhook happened to be scoped to Ref 0, which is a page sent to the wrong
+    // Operator rather than a page not sent.
+    let Some(reach) = repo::stored_reach(&state.db, call_id).await? else {
+        return Ok(0);
+    };
+    let talkgroups = reached_channels(reach.talkgroup_ref, &reach.patches);
+    let roster = repo::delivering_webhooks(&state.db).await?;
+    let owed = crate::webhook::routed_to(
+        &roster,
+        &crate::webhook::Marks::just(crate::webhook::Mark::Tone),
+        reach.system_ref,
+        &talkgroups,
+    );
+    repo::queue_webhook_deliveries(&state.db, call_id, &owed, now_ms).await
 }
 
 /// **What Ingest decided about one Call** (CONTEXT.md's *Admission*).
@@ -1283,7 +1362,10 @@ async fn enqueue_forwarding<C: sea_orm::ConnectionTrait>(
     if new_call.encrypted {
         return Ok(0);
     }
-    let talkgroups = reached_channels(new_call, resolved);
+    let talkgroups = reached_channels(
+        resolved.talkgroup_ref().unwrap_or(new_call.talkgroup_ref),
+        resolved.patches.as_deref().unwrap_or_default(),
+    );
     let roster = repo::forwarding_downstreams(db).await?;
     let owed = crate::downstream::routed_to(&roster, new_call.system_ref, &talkgroups);
     repo::queue_deliveries(db, call_id, &owed, now_ms).await
@@ -1313,34 +1395,47 @@ async fn enqueue_webhooks<C: sea_orm::ConnectionTrait>(
     call_id: CallId,
     now_ms: i64,
 ) -> Result<usize, sea_orm::DbErr> {
-    let marks = crate::webhook::Marks::on_call(new_call.emergency);
+    // `false` for the tone mark, and not because it is unknown: at this moment
+    // it is not merely unknown, it is **not yet true** — the audio has not been
+    // looked at (#55). A page found later queues its own deliveries through
+    // [`enqueue_tone_webhooks`], on the worker that found it.
+    let marks = crate::webhook::Marks::on_call(new_call.emergency, false);
     if marks.is_empty() {
         return Ok(0);
     }
-    let talkgroups = reached_channels(new_call, resolved);
+    let talkgroups = reached_channels(
+        resolved.talkgroup_ref().unwrap_or(new_call.talkgroup_ref),
+        resolved.patches.as_deref().unwrap_or_default(),
+    );
     let roster = repo::delivering_webhooks(db).await?;
     let owed = crate::webhook::routed_to(&roster, &marks, new_call.system_ref, &talkgroups);
     repo::queue_webhook_deliveries(db, call_id, &owed, now_ms).await
 }
 
-/// Every Talkgroup this Call reaches: the channel it resolved to, then
-/// everything it is patched to.
+/// Every Talkgroup a Call reaches: the channel it is on, then everything it is
+/// patched to.
 ///
 /// The same set the live feed routes on, which is the half rdio's own forwarder
-/// omits — and written once because both outbound sinks scope on it and a set
-/// that differed between them would mean a **Patch** reaching a peer and not a
-/// webhook, or the reverse.
+/// omits — and **written once**, because both outbound sinks scope on it and a
+/// set that differed between them would mean a **Patch** reaching a peer and not
+/// a webhook, or the reverse.
 ///
-/// It costs no lookup of its own: both halves come from the [`repo::Resolved`]
-/// the pipeline already read (#96). The canonical Ref falls back to the one the
-/// recorder sent, which is the auto-populate case — `insert_call` has just
-/// created that Talkgroup under exactly this Ref, and it was `None` here only
-/// because nothing had resolved it beforehand.
-fn reached_channels(new_call: &NewCall, resolved: &repo::Resolved) -> Vec<i64> {
-    let mut talkgroups = vec![resolved.talkgroup_ref().unwrap_or(new_call.talkgroup_ref)];
-    for patched in resolved.patches.as_deref().unwrap_or_default() {
-        if !talkgroups.contains(patched) {
-            talkgroups.push(*patched);
+/// Pure, over the two facts and nothing else, because its two callers hold them
+/// in completely different shapes: [`enqueue_webhooks`] has the upload in hand
+/// and reads them off the [`repo::Resolved`] the pipeline already fetched (#96),
+/// while [`enqueue_tone_webhooks`] arrives at a Call minutes later and reads
+/// them off the row. Taking a `NewCall` here would have forced the second one to
+/// re-implement the rule, which is precisely what "written once" is about.
+///
+/// On the ingest side the canonical Ref falls back to the one the recorder sent,
+/// which is the auto-populate case: `insert_call` has just created that
+/// Talkgroup under exactly this Ref, and it was `None` only because nothing had
+/// resolved it beforehand.
+fn reached_channels(canonical: i64, patched: &[i64]) -> Vec<i64> {
+    let mut talkgroups = vec![canonical];
+    for patch in patched {
+        if !talkgroups.contains(patch) {
+            talkgroups.push(*patch);
         }
     }
     talkgroups

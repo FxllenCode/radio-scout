@@ -419,7 +419,9 @@ mod tests {
     #[case(vec!["emergency"], Ok(vec!["emergency"]))]
     #[case(vec![" emergency "], Ok(vec!["emergency"]))]
     #[case(vec!["emergency", "emergency"], Ok(vec!["emergency"]))]
-    #[case(vec!["tone"], Err("tone"))]
+    #[case(vec!["tone"], Ok(vec!["tone"]))]
+    #[case(vec!["tone", "emergency"], Ok(vec!["emergency", "tone"]))]
+    #[case(vec!["dtmf"], Err("dtmf"))]
     #[case(vec!["emergency", "EMERGENCY"], Err("EMERGENCY"))]
     fn a_mark_this_release_does_not_know_is_refused_by_name(
         #[case] raw: Vec<&str>,

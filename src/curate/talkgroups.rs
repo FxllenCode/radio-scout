@@ -44,7 +44,9 @@ use super::{
     optional_text,
 };
 use crate::AppState;
-use crate::db::entities::{call, group, system, tag, talkgroup, talkgroup_group, talkgroup_ref};
+use crate::db::entities::{
+    call, group, system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile,
+};
 use crate::db::repo;
 use crate::failure::{Failure, Stage};
 use crate::query::{Filtered, Page, Params};
@@ -427,6 +429,15 @@ pub async fn remove(
             .await,
         talkgroup_ref::Entity::delete_many()
             .filter(talkgroup_ref::Column::TalkgroupId.eq(id))
+            .exec(&txn)
+            .await,
+        // The **Tone profiles** paged on this channel (#55). A profile is a
+        // fact about a channel and cannot outlive it — and, like the two above,
+        // its foreign key is `RESTRICT`, so leaving it here is not an orphan
+        // row but a delete that fails with a 500. The pages it already caught
+        // are on Calls, which this delete has already taken.
+        tone_profile::Entity::delete_many()
+            .filter(tone_profile::Column::TalkgroupId.eq(id))
             .exec(&txn)
             .await,
         talkgroup::Entity::delete_by_id(id).exec(&txn).await,

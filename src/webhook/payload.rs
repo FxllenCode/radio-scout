@@ -47,8 +47,7 @@ pub struct Body {
 struct Marked<'a> {
     /// Which marks this Call carries **that this webhook asked for** — not every
     /// mark on the Call. A webhook watching only for tone-outs should not have
-    /// to work out why it was sent something, and #55 is where that stops being
-    /// a distinction without a difference.
+    /// to work out why it was sent something.
     marks: &'a Marks,
     call: &'a StoredCall,
 }
@@ -162,6 +161,12 @@ fn audio_url(path: &str, public_url: Option<&str>) -> Option<String> {
 /// The Discord message for one marked Call.
 fn discord(call: &StoredCall, marks: &Marks, public_url: Option<&str>) -> DiscordMessage {
     let mut fields = Vec::new();
+    // **First**, because on a paging channel it is the whole message: an
+    // Operator reading a chat room wants "Station 12", and everything below is
+    // context for it.
+    if let Some(paged) = paged_stations(call) {
+        fields.push(field("Paged", paged));
+    }
     if let Some(system) = system_name(call) {
         fields.push(field("System", system));
     }
@@ -217,11 +222,16 @@ fn system_name(call: &StoredCall) -> Option<String> {
 /// belt to that braces: a label can also arrive from a CSV, a configuration
 /// document, or **Mining**.
 fn said(label: &Option<String>) -> Option<String> {
-    label
-        .as_deref()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
+    label.as_deref().and_then(named)
+}
+
+/// [`said`] over a string that is always there — same rule, one fewer `Option`
+/// to build in order to ask it.
+fn named(label: &str) -> Option<String> {
+    match label.trim() {
+        "" => None,
+        text => Some(text.to_owned()),
+    }
 }
 
 /// The radio, named the way every other surface names it — the curated alias if
@@ -245,11 +255,31 @@ fn marks_sentence(marks: &Marks) -> Option<String> {
         .iter()
         .map(|mark| match mark {
             super::Mark::Emergency => "Emergency",
+            super::Mark::Tone => "Tone-out",
         })
         .collect();
     match words.is_empty() {
         true => None,
         false => Some(words.join(", ")),
+    }
+}
+
+/// Which stations were paged, as a human reads them.
+///
+/// A blank profile label is dropped for [`said`]'s reason — Discord refuses an
+/// empty field value with a `400`, which this queue abandons — and a set that is
+/// *entirely* blank yields no field at all rather than an empty one. The mark
+/// itself still rides in the description, so the message never silently loses
+/// the fact that a page happened.
+fn paged_stations(call: &StoredCall) -> Option<String> {
+    let named: Vec<String> = call
+        .tones
+        .iter()
+        .filter_map(|page| named(&page.label))
+        .collect();
+    match named.is_empty() {
+        true => None,
+        false => Some(named.join(", ")),
     }
 }
 
@@ -326,6 +356,8 @@ mod tests {
             duration_ms: Some(7_400),
             emergency: true,
             encrypted: false,
+            tone: false,
+            tones: Vec::new(),
             site_ref: Some(3),
             site_label: Some(String::from("North Tower")),
             object_key: String::from("calls/42.wav"),
@@ -344,7 +376,7 @@ mod tests {
         let body = body(
             Format::RadioScout,
             &a_call(),
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         );
 
@@ -378,13 +410,13 @@ mod tests {
         let ours = rendered(&body(
             Format::RadioScout,
             &a_call(),
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             public_url,
         ));
         let theirs = rendered(&body(
             Format::Discord,
             &a_call(),
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             public_url,
         ));
 
@@ -406,7 +438,7 @@ mod tests {
         let json = rendered(&body(
             Format::Discord,
             &call,
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         ));
 
@@ -420,7 +452,7 @@ mod tests {
         let body = body(
             Format::Discord,
             &a_call(),
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         );
 
@@ -434,7 +466,7 @@ mod tests {
         let body = body(
             Format::RadioScout,
             &a_call(),
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         );
 
@@ -459,7 +491,7 @@ mod tests {
         let json = rendered(&body(
             Format::Discord,
             &call,
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         ));
 
@@ -489,7 +521,7 @@ mod tests {
         let json = rendered(&body(
             Format::Discord,
             &call,
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         ));
 
@@ -513,7 +545,7 @@ mod tests {
         let json = rendered(&body(
             Format::Discord,
             &call,
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         ));
 
@@ -579,7 +611,7 @@ mod tests {
         let json = rendered(&body(
             Format::Discord,
             &call,
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         ));
 
@@ -596,7 +628,7 @@ mod tests {
         body(
             Format::RadioScout,
             &call,
-            &Marks::on_call(true),
+            &Marks::on_call(true, false),
             Some("https://scan.example"),
         );
 
@@ -610,7 +642,7 @@ mod tests {
     fn a_message_about_no_marks_omits_the_sentence_rather_than_emptying_it() {
         assert_eq!(marks_sentence(&Marks::default()), None);
         assert_eq!(
-            marks_sentence(&Marks::on_call(true)).as_deref(),
+            marks_sentence(&Marks::on_call(true, false)).as_deref(),
             Some("Emergency")
         );
     }

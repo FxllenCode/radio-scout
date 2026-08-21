@@ -585,6 +585,12 @@ async fn assemble(
     state.downstreams = crate::downstream::Downstreams::new(config.downstream.clone());
     state.webhooks =
         crate::webhook::Webhooks::new(config.webhook.clone(), config.server.public_url.clone());
+    state.tones = crate::tone::Tones::new(config.tone.clone());
+    // Read once at boot whether there is anything to look for (#55), so an
+    // Instance with no **Tone profile** — which is every Instance until an
+    // Operator writes one — spends nothing per upload rediscovering it. Every
+    // surface that writes a profile re-reads it on the same request.
+    state.tones.rearm(&db).await;
     state.clock = parts.clock;
     // Enhancement (#20) runs off its own queue, behind ingest rather than in
     // it. With `[enhancement] mode = "off"` — what ships — this spawns nothing,
@@ -609,6 +615,12 @@ async fn assemble(
     // roster says and costs nothing while that roster is empty.
     running
         .extend(crate::webhook::sender::spawn(state.clone()).map(|worker| workers.adopt(worker)));
+    // Tone-out detection (#55), on the same terms as the two senders and for the
+    // same reason: a **Tone profile** is a row, so this starts whatever the
+    // roster says. With none written, `Tones::submit` refuses everything and
+    // this sleeps on an empty queue. First it picks up whatever a previous
+    // process was part-way through.
+    running.extend(crate::tone::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     let app = build_app(state.clone());
 
     let bind = parts

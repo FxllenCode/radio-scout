@@ -66,6 +66,7 @@ use crate::logsink;
 use crate::mining::MiningConfig;
 use crate::observability::{self, LogConfig};
 use crate::retention::{self, RetentionConfig};
+use crate::tone::ToneConfig;
 use crate::webhook::WebhookConfig;
 
 /// Radio-Scout's command line. Every flag here overrides the same setting from
@@ -405,6 +406,7 @@ pub struct Config {
     pub mining: MiningConfig,
     pub downstream: DownstreamConfig,
     pub webhook: WebhookConfig,
+    pub tone: ToneConfig,
     pub log: LogConfig,
 }
 
@@ -501,6 +503,18 @@ impl Config {
                 "enhancement.queue_depth",
                 "0",
                 "a positive number of Calls — use mode = \"off\" to disable enhancement",
+            ));
+        }
+        // Zero admits nothing, so every Call would be marked `pending` and none
+        // of them ever looked at — `enhancement.queue_depth`'s reading, with no
+        // second one to guess at: tone-out detection has no master switch,
+        // because a **Tone profile** is a row and an Instance with none is
+        // already doing nothing.
+        if self.tone.queue_depth == 0 {
+            return Err(ConfigError::invalid_key(
+                "tone.queue_depth",
+                "0",
+                "a positive number of Calls — delete the tone profiles to stop detecting",
             ));
         }
         // LUFS is referenced to full scale, so a usable target is negative and
@@ -1048,6 +1062,16 @@ pub const SETTINGS: &[Setting] = &[
         example: "600",
         set: |setting, config, value| {
             config.downstream.retry_max = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "tone.queue_depth",
+        var: "RADIO_SCOUT_TONE_QUEUE_DEPTH",
+        expected: "a number of Calls",
+        example: "64",
+        set: |setting, config, value| {
+            config.tone.queue_depth = setting.parse(value)?;
             Ok(())
         },
     },
@@ -1640,6 +1664,27 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # doubles up to.
 # retry_initial_secs = 5
 # retry_max_secs = 60
+
+[tone]
+# Tone-out detection (#55): watching a channel's audio for a station's paging
+# sequence — two-tone/Quick Call, or a long group tone — and marking the Call it
+# happened on. It is pure signal processing, not speech recognition, and
+# Radio-Scout does not transcribe anything (ADR-0013).
+#
+# The tone profiles themselves are not configured here: you write them in
+# Settings -> Talkgroups, against the channel each station is paged on, as a list
+# of tones with a frequency and a minimum length. This section is only how much
+# work may be waiting.
+#
+# There is no on/off switch, because a profile is a row: with none written,
+# nothing is looked at and this costs nothing. Detection runs *behind* ingest —
+# an upload is answered before anything is decoded — and a profile written today
+# marks the Calls that follow it, not the archive that came before.
+
+# How many Calls may be waiting to be looked at. Past this they keep the audio
+# they arrived with and are not checked for a page, which is logged. Detection
+# is much cheaper than enhancement, so this rarely fills.
+# queue_depth = 512
 
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a

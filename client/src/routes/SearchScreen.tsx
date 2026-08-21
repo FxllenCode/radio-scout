@@ -15,6 +15,7 @@ import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
 import { callCategory, systemName, talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
+import { markName } from '@/lib/webhook'
 import type { RunSearch } from '@/lib/run'
 import {
   dateTimeLocalToMs,
@@ -43,7 +44,7 @@ import {
   stop,
 } from '@/store/playback'
 import { selectIsPaused, togglePause } from '@/store/transport'
-import type { Call, SearchPage, SearchQuery } from '@/types'
+import { MARKS, type Call, type Mark, type SearchPage, type SearchQuery } from '@/types'
 
 /** Results per page. Small enough to stay snappy on a Pi over a phone
  *  connection, large enough that scrolling beats paging. */
@@ -284,6 +285,32 @@ export function SearchScreen() {
             <option value="3">3s or longer</option>
             <option value="5">5s or longer</option>
             <option value="15">15s or longer</option>
+          </select>
+        </Field>
+
+        {/* The **Marks** filter (#42, #55). One control over the whole closed
+            vocabulary rather than a checkbox per mark, because they are
+            mutually exclusive as a *question* — "show me the emergencies" and
+            "show me the page-outs" are two searches, not one with two boxes
+            ticked — and because a mark added later is one entry in `MARKS`
+            rather than another control here. */}
+        <Field label="Mark" htmlFor="filter-mark">
+          <select
+            id="filter-mark"
+            className={controlClass}
+            value={filters.mark ?? ''}
+            onChange={(event) =>
+              updateFilters({
+                mark: (event.target.value || undefined) as Mark | undefined,
+              })
+            }
+          >
+            <option value="">Any call</option>
+            {MARKS.map((mark) => (
+              <option key={mark} value={mark}>
+                {markName(mark)}
+              </option>
+            ))}
           </select>
         </Field>
 

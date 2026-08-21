@@ -49,6 +49,21 @@ export interface Call {
   /** The talkgroup was encrypted, so this Call is metadata and nothing else
    *  (spec US 9) — there is no `audioUrl` on one. */
   encrypted?: boolean
+  /** A **Tone profile** on this channel was paged in this Call's audio (#55,
+   *  spec US 20). Absent when it wasn't, which is nearly always.
+   *
+   *  Kept beside `tones` rather than derived from it: this is what the row
+   *  says, where the list is what the pages say. */
+  tone?: boolean
+  /** **Which** stations were paged, and where in the Call (#55). Absent unless
+   *  one was, which is nearly always — a page-out happens a few times a day, so
+   *  this key is on essentially no Call.
+   *
+   *  The station's name rather than only the flag, because "a page happened" is
+   *  not the question: an operator with twelve stations on one dispatch channel
+   *  is asking *who*. The label is the profile's as it was when the page fired,
+   *  so a profile renamed later does not rewrite history. */
+  tones?: TonePage[]
   /** The Site (tower) this was heard on, for multi-site systems (spec US 11). */
   siteRef?: number
   /** What that tower is called (#48, spec US 13). Independent of `siteRef`:
@@ -82,6 +97,10 @@ export interface SearchQuery {
    *  owns that Ref, the search reaches every other Ref the apparatus answers
    *  to — its Ranges and its lone member Refs. */
   unit?: number
+  /** Only Calls carrying this **mark** (#42, #55) — an emergency, or a
+   *  tone-out. Single-valued because every other filter here combines with AND
+   *  and a list would have to mean OR. */
+  mark?: Mark
   /** `oldest` is what playback mode walks: forwards through history. */
   sort?: 'newest' | 'oldest'
   limit?: number
@@ -386,15 +405,17 @@ export interface NewDownstream {
   disabled?: boolean
 }
 
-/** A **mark** a Call can carry, as the wire spells it (#54).
+/** A **mark** a Call can carry, as the wire spells it (#54, #55).
  *
- *  One today. #55 adds `'tone'`, and the whole client is written against the
- *  list rather than against the member — `MARKS` below is the only place that
- *  has to grow. */
-export type Mark = 'emergency'
+ *  The whole client is written against the list rather than against the
+ *  members — `MARKS` below is the only place that has to grow — which is what
+ *  made #55's `tone` a one-line change everywhere but `markName`, where a
+ *  `Record<Mark, string>` turns it into a compile error until somebody gives it
+ *  a word. */
+export type Mark = 'emergency' | 'tone'
 
 /** Every mark this release knows, in the order a form offers them. */
-export const MARKS: readonly Mark[] = ['emergency']
+export const MARKS: readonly Mark[] = ['emergency', 'tone']
 
 /** Which shape a **Webhook**'s body takes (#54). */
 export type WebhookFormat = 'radio-scout' | 'discord'
@@ -583,4 +604,51 @@ export interface AdminAssignment {
   removeGroups?: string[]
   /** `null` clears the Tag; omitted leaves it alone. */
   tag?: string | null
+}
+
+/** One tone in a **Tone profile**'s sequence (#55) — a frequency, held for at
+ *  least this long. */
+export interface ToneStep {
+  hz: number
+  minMs: number
+}
+
+/** One **Tone profile** match on a Call (#55): which station was paged, and how
+ *  far into the Call.
+ *
+ *  The label is the profile's **as it was when the page fired** — a profile
+ *  renamed next year does not rewrite last year's pages, and one deleted does
+ *  not erase them. */
+export interface TonePage {
+  label: string
+  atMs: number
+}
+
+/** A station's paging sequence, as `GET /api/admin/talkgroups/{id}/tones`
+ *  lists one (#55, spec US 20).
+ *
+ *  An **ordered sequence** rather than a fixed A/B pair, which is what lets one
+ *  shape spell a single long group tone, Quick Call II's two, and an
+ *  A-B-then-group run of three. */
+export interface AdminToneProfile {
+  id: number
+  talkgroupId: number
+  label: string
+  steps: ToneStep[]
+  /** How far off a tone may be, as a percentage of the tone. */
+  tolerancePct: number
+  /** How long a silence between two tones may be before the sequence is
+   *  broken. */
+  gapMaxMs: number
+  disabled: boolean
+  createdAtMs: number
+}
+
+/** A new Tone profile, as the form posts one. */
+export interface NewToneProfile {
+  label: string
+  steps: ToneStep[]
+  tolerancePct?: number
+  gapMaxMs?: number
+  disabled?: boolean
 }

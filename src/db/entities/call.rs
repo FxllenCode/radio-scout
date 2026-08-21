@@ -107,6 +107,17 @@ pub struct Model {
     /// Call whose emission could not be recorded. Nothing backfills one, which
     /// is the right reading either way: it has not gone out yet.
     pub emitted_seq: Option<i64>,
+    /// Where this Call is in **tone-out detection** (#55) — one of
+    /// [`ToneState`]'s five values, and both halves of the answer in one
+    /// column: whether the audio has been looked at, and whether it held a
+    /// page.
+    ///
+    /// It is on the Call row rather than derived from `call_tones` because
+    /// [`crate::archive::stored_calls`] denormalizes it on every live frame and
+    /// every search row, and #86's rule is that a page costs a constant number
+    /// of statements. A child-table read there would be one more statement per
+    /// page for a fact that is one character wide.
+    pub tone: String,
     /// When this Call's audio was looked inside for the metadata its Recorder
     /// embedded there — **Mining** (#48, CONTEXT.md).
     ///
@@ -171,6 +182,48 @@ impl EnhancementState {
     pub const SKIPPED: &'static str = "skipped";
 }
 
+/// Where a Call has got to in **tone-out detection** (#55).
+///
+/// [`EnhancementState`]'s shape and, deliberately, one column carrying two
+/// questions — *was it looked at* and *did it hold a page* — because the states
+/// are mutually exclusive and total, and two columns would allow the fifth
+/// combination that means nothing.
+///
+/// Constants rather than a Rust enum for [`EnhancementState`]'s reason: the
+/// value crosses a database boundary in both directions, and a row written by a
+/// newer version must degrade to "not pending, not matched", which is the safe
+/// reading on every path that asks.
+pub struct ToneState;
+
+impl ToneState {
+    /// Never offered — every Call ingested while no Tone profile existed, and
+    /// every Call that predates this. **Deliberately never re-queued**, which
+    /// is [`EnhancementState::NONE`]'s rule: adding a profile marks the Calls
+    /// that follow it, and does not go back over an Operator's archive.
+    pub const NONE: &'static str = "none";
+    /// Queued or in flight. What a restart picks back up.
+    pub const PENDING: &'static str = "pending";
+    /// Looked at, and it held no page.
+    pub const CLEAR: &'static str = "clear";
+    /// Looked at, and it paged at least one profile — **the mark**. The rows
+    /// saying which are [`super::call_tone`].
+    pub const MATCHED: &'static str = "matched";
+    /// Could not be looked at: undecodable audio, an object that had gone, or a
+    /// queue that was full. The Call is untouched and stays playable.
+    pub const SKIPPED: &'static str = "skipped";
+}
+
+impl Model {
+    /// Does this Call carry the tone-out **Mark**?
+    ///
+    /// One method rather than a string comparison at each of the four places
+    /// that ask — the wire view, the detail view, the webhook's mark set and
+    /// the archive filter — so the vocabulary lives in one file.
+    pub fn tone_matched(&self) -> bool {
+        self.tone == ToneState::MATCHED
+    }
+}
+
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
@@ -191,6 +244,8 @@ pub enum Relation {
     CallUnit,
     #[sea_orm(has_many = "super::call_patch::Entity")]
     CallPatch,
+    #[sea_orm(has_many = "super::call_tone::Entity")]
+    CallTone,
 }
 
 impl Related<super::system::Entity> for Entity {
@@ -220,6 +275,12 @@ impl Related<super::call_unit::Entity> for Entity {
 impl Related<super::call_patch::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::CallPatch.def()
+    }
+}
+
+impl Related<super::call_tone::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::CallTone.def()
     }
 }
 

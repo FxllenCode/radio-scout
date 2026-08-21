@@ -12,9 +12,13 @@ import { formatCallTime } from './archive'
 
 /** What an Operator calls a mark. */
 export function markName(mark: Mark): string {
-  // A `Record` rather than a `switch`, so #55's `tone` is a compile error here
-  // until it is given a word rather than rendering as a slug.
-  const names: Record<Mark, string> = { emergency: 'Emergency' }
+  // A `Record` rather than a `switch`, so a mark added later is a compile error
+  // here until it is given a word rather than rendering as a slug — which is
+  // exactly what happened to #55's `tone`.
+  const names: Record<Mark, string> = {
+    emergency: 'Emergency',
+    tone: 'Tone-out',
+  }
   return names[mark]
 }
 

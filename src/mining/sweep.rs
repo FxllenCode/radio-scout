@@ -502,6 +502,7 @@ mod tests {
             audio_type: None,
             site_id: None,
             enhancement: call::EnhancementState::NONE.to_string(),
+            tone: call::ToneState::NONE.to_string(),
             emitted_seq: None,
             mined_at_ms: None,
             created_at_ms: 0,
