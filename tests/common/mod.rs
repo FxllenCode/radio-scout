@@ -1029,6 +1029,27 @@ impl TestApp {
 
     /// The member Refs a Talkgroup answers to, in the operator's order (#45) —
     /// what a fold leaves behind and an unfold takes away.
+    /// The **positions** a Talkgroup's member Refs hold, in that order.
+    ///
+    /// The one place a test looks at the join table's own column rather than at
+    /// what a screen shows, because "dense and no two the same" is not a claim
+    /// an ordered list can make: two rows sharing a position still render in
+    /// *some* order, and which one is the database's choice rather than ours.
+    pub async fn member_positions(&self, system_ref: i64, primary_ref: i64) -> Vec<i32> {
+        let Some(talkgroup) = self.talkgroup_by_ref(system_ref, primary_ref).await else {
+            return Vec::new();
+        };
+        talkgroup_ref::Entity::find()
+            .filter(talkgroup_ref::Column::TalkgroupId.eq(talkgroup.id))
+            .order_by_asc(talkgroup_ref::Column::Position)
+            .all(&self.db)
+            .await
+            .expect("read member refs")
+            .into_iter()
+            .map(|member| member.position)
+            .collect()
+    }
+
     pub async fn member_refs(&self, system_ref: i64, primary_ref: i64) -> Vec<i64> {
         let Some(talkgroup) = self.talkgroup_by_ref(system_ref, primary_ref).await else {
             return Vec::new();

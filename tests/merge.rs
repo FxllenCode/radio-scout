@@ -419,6 +419,105 @@ async fn unfolding_restores_the_channel_with_exactly_its_own_calls() {
     );
 }
 
+/// ...and the traffic that arrived *after* the fold goes home with it.
+///
+/// The test above cannot say this, and the difference is where the Ref comes
+/// from. A Call stored **before** its channel was folded is stamped by the fold
+/// itself, which backfills `talkgroup_ref` for the Calls it is about to move —
+/// so that path would keep working even if ingest recorded nothing. A Call that
+/// arrives **after** has only [`repo::insert_call`] to record what the recorder
+/// said, and if it does not, the Call is indistinguishable from one of the
+/// owner's own and stays behind forever.
+///
+/// Which is the case an Operator actually meets: a fold is applied precisely
+/// because the number keeps arriving, so most of the Calls under a member Ref
+/// are ones that came after it.
+#[tokio::test]
+async fn unfolding_takes_back_the_traffic_that_arrived_after_the_fold() {
+    let app = curating_app().await;
+    app.upload_ok(CallUpload::new().talkgroup(100).at(1000))
+        .await;
+    // Folded before the member Ref has ever been heard, so nothing exists for
+    // the fold to backfill — every Call below is stamped by ingest or not at
+    // all.
+    import(&app, "ref,memberRefs\n100,8123\n").await;
+
+    app.upload_ok(CallUpload::new().talkgroup(8123).at(2000))
+        .await;
+    assert_eq!(
+        searched_refs(&app).await,
+        vec![100, 100],
+        "both read as the owner while the fold stands"
+    );
+
+    import(&app, "ref,memberRefs\n100,-\n").await;
+
+    assert_eq!(
+        searched_refs(&app).await,
+        vec![100, 8123],
+        "the Call that arrived after the fold went home too"
+    );
+}
+
+/// **A chain fold puts the carried Refs in the order the Operator wrote**, and
+/// gives no two members the same place.
+///
+/// Folding a channel that is itself an owner carries its members across, and
+/// they arrive holding the positions they had on the channel they came from —
+/// which collide with the ones this fold is handing out. Two rows sharing a
+/// position leaves the rendered order to whatever the database returns first,
+/// and the two dialects need not agree (ADR-0003), so the list an Operator sees
+/// would depend on which one they run.
+///
+/// Driven through the **browser's** path rather than a CSV, because that is the
+/// only surface where a chain fold happens at all: `member-ref-owns-members`
+/// refuses one in a file, so that a file keeps describing what it made (#45).
+///
+/// `repo::renumber_members` is what makes the result dense and unique, and this
+/// is the assertion that says so — it is the only thing deciding the order
+/// here, which is why `fold_ref` writes no position of its own.
+#[tokio::test]
+async fn a_chain_fold_orders_the_carried_refs_the_way_the_operator_wrote_them() {
+    let app = curating_app().await;
+    app.seed_talkgroup(11, 100).await;
+    app.seed_talkgroup(11, 200).await;
+    app.seed_talkgroup(11, 8123).await;
+    let first = app.talkgroup_by_ref(11, 100).await.expect("100").id;
+    let second = app.talkgroup_by_ref(11, 200).await.expect("200").id;
+
+    // 100 takes 8123 as a member...
+    let (status, report) = app
+        .admin_post(
+            &format!("/api/admin/talkgroups/{first}/members"),
+            serde_json::json!({"fold": [8123]}),
+        )
+        .await;
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(app.member_refs(11, 100).await, vec![8123]);
+
+    // ...and is then folded into 200 itself, bringing 8123 with it — while the
+    // same request also names 8123, so it arrives twice over: once carried,
+    // once asked for.
+    let (status, report) = app
+        .admin_post(
+            &format!("/api/admin/talkgroups/{second}/members"),
+            serde_json::json!({"fold": [100, 8123]}),
+        )
+        .await;
+    assert_eq!(status, 200, "{report}");
+
+    assert_eq!(
+        app.member_refs(11, 200).await,
+        vec![100, 8123],
+        "the Operator's order"
+    );
+    assert_eq!(
+        app.member_positions(11, 200).await,
+        vec![0, 1],
+        "dense, and no two the same"
+    );
+}
+
 /// A fold is a curation decision, and an operator gets to see it before it
 /// happens: the importer's dry run walks the identical path and rolls back
 /// (#18), so a merge previews as exactly what it will do.

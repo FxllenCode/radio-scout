@@ -1883,24 +1883,22 @@ async fn fold_ref<C: ConnectionTrait>(
     // The Ref may already be a member — carried across a moment ago by the fold
     // of a channel that owned it (see the guard in `crate::import`, which is why
     // it is always one the caller also asked for). Then there is nothing to
-    // insert and only its place in the operator's order to settle.
+    // insert, and nothing to order either.
     //
-    // Written unconditionally rather than behind an `if it moved`: this runs
-    // once per Ref of one curation action, where `set_member_refs` compares
-    // before writing because it walks the whole set on every re-import.
-    if let Some(held) = talkgroup_ref::Entity::find()
+    // **[`renumber_members`] owns a member's position**, and this is precisely
+    // the path it runs on: a carry is the only way a Ref can be held here
+    // without having been in `current`, and a carry is what arms the renumber.
+    // A position written here as well would be a second author for one column
+    // whose value that pass immediately re-derives from the order the Operator
+    // wrote — which is the sort of write no assertion can ever distinguish, and
+    // so the sort that quietly stops being true.
+    if talkgroup_ref::Entity::find()
         .filter(talkgroup_ref::Column::TalkgroupId.eq(owner.id))
         .filter(talkgroup_ref::Column::Ref.eq(member_ref))
         .one(db)
         .await?
+        .is_some()
     {
-        talkgroup_ref::ActiveModel {
-            id: Set(held.id),
-            position: Set(position),
-            ..Default::default()
-        }
-        .update(db)
-        .await?;
         return Ok(change);
     }
 
