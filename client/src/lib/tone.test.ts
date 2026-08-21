@@ -90,6 +90,10 @@ describe('unusable', () => {
 
   // The boundaries are the numbers a form's own inputs offer, so an Operator
   // choosing the extreme of a control must not be told it is out of range.
+  // **Every bound is checked from both sides** — the refusals above sit one step
+  // outside, these sit exactly on it — because a ceiling written `>=` where it
+  // meant `>` refuses the last legal value, and a table that only ever tests the
+  // middle stays green through it.
   it.each([
     [BAND_LOW_HZ],
     [BAND_HIGH_HZ],
@@ -97,6 +101,15 @@ describe('unusable', () => {
     expect(
       unusable([{ hz, minMs: MIN_STEP_MS }], MAX_TOLERANCE_PCT, MAX_GAP_MS),
     ).toBeNull()
+  })
+
+  it('accepts a sequence of exactly the longest length allowed', () => {
+    const steps = Array.from({ length: MAX_STEPS }, () => ({
+      hz: 1122.5,
+      minMs: MIN_STEP_MS,
+    }))
+
+    expect(unusable(steps, DEFAULT_TOLERANCE_PCT, 0)).toBeNull()
   })
 })
 

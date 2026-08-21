@@ -618,7 +618,10 @@ mod tests {
     #[case(station_12().steps, DEFAULT_TOLERANCE_PCT, -1, Some("gap"))]
     #[case(station_12().steps, DEFAULT_TOLERANCE_PCT, MAX_GAP_MS + 1, Some("gap"))]
     // The edges of every control the form offers: an Operator choosing an
-    // extreme must not be told it is out of range.
+    // extreme must not be told it is out of range. **Each bound is checked from
+    // both sides** — the refusals above are one step outside, these are exactly
+    // on it — because a ceiling written `>=` where it meant `>` refuses the last
+    // legal value and nothing that only ever tests the middle would notice.
     #[case(
         vec![
             Step { hz: detect::BAND_LOW_HZ, min_ms: MIN_STEP_MS },
@@ -626,6 +629,12 @@ mod tests {
         ],
         MAX_TOLERANCE_PCT,
         MAX_GAP_MS,
+        None,
+    )]
+    #[case(
+        vec![Step { hz: 1122.5, min_ms: MIN_STEP_MS }; MAX_STEPS],
+        DEFAULT_TOLERANCE_PCT,
+        0,
         None,
     )]
     fn a_profile_that_could_never_fire_is_refused_with_a_reason(
