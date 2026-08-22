@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "description": "Rust toolchain bumps arrive as their own reviewable PR, because a Rust release is exactly the change that broke this branch for four days with no commit responsible (ADR-0015). Never grouped and never automerged: a new stable brings new clippy lints, and -D warnings turns those into a red CI that a human should read rather than a bot should land.",
+      "matchManagers": ["rust-toolchain"],
+      "matchDepTypes": ["toolchain"],
+      "rangeStrategy": "pin",
+      "automerge": false,
+      "commitMessageTopic": "the Rust toolchain",
+      "labels": ["area:testing"]
+    }
+  ]
+}

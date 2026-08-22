@@ -284,8 +284,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      # `targets:` is deliberately not given to the action above: it installs
+      # onto whatever `stable` is today, while `cargo` in this directory
+      # resolves through `rust-toolchain.toml` (ADR-0015) — so the target has to
+      # be added to *that* toolchain, which is what running rustup here does.
+      - run: rustup target add ${{ matrix.target }}
       - uses: taiki-e/setup-cross-toolchain-action@v1
         if: matrix.cross
         with:

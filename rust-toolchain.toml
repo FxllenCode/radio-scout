@@ -1,0 +1,17 @@
+# The one Rust this repository is built and linted with — CI, the release
+# containers, and whoever is reading this (ADR-0015).
+#
+# **The components are not optional.** `dtolnay/rust-toolchain@stable` installs
+# them onto whatever `stable` is today and then runs `rustup default`, which is
+# *lower* precedence than this file — so `cargo clippy` in this directory
+# resolves here, rustup auto-installs this toolchain, and it would arrive
+# without clippy if the list below did not ask for it. What looks like a
+# redundant duplicate of `ci.yml`'s `components:` input is the line that
+# actually takes effect.
+#
+# Targets are deliberately *not* listed. Every job would then pay to download
+# the standard library for all seven release targets; the cross-building jobs
+# add the one they need instead.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

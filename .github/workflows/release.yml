@@ -135,8 +135,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         if: '!matrix.alpine'
-        with:
-          targets: ${{ matrix.target }}
+      # See ci.yml's build matrix: the action would add the target to `stable`,
+      # and `cargo` here resolves through `rust-toolchain.toml` (ADR-0015).
+      - run: rustup target add ${{ matrix.target }}
+        if: '!matrix.alpine'
       - uses: Swatinem/rust-cache@v2
         if: '!matrix.alpine'
         with:
