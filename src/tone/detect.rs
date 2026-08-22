@@ -206,9 +206,20 @@ fn peak(
     }
     fft.process(scratch, spectrum).ok()?;
 
+    // **The peak is searched for across the whole spectrum, and only then asked
+    // whether it is in the band.** Searching a slice instead pegs an
+    // out-of-band peak to whichever edge of the slice it is nearest and reports
+    // *that* as the tone: 50 Hz mains hum came back as a 195 Hz tone and a
+    // 3600 Hz carrier as a 3254 Hz one, either of which a profile could match
+    // within tolerance. A false page is the one failure this feature cannot
+    // have, so the band is a verdict on the answer rather than a window on the
+    // search.
+    //
+    // DC and the top bin are excluded because the interpolation reads a
+    // neighbour on each side, and because neither is a frequency anything is
+    // paged at.
     let bin_hz = rate as f64 / fft_len as f64;
-    let low = (BAND_LOW_HZ / bin_hz).ceil() as usize;
-    let high = ((BAND_HIGH_HZ / bin_hz).floor() as usize).min(spectrum.len().saturating_sub(2));
+    let (low, high) = (1usize, spectrum.len().saturating_sub(2));
     if low + 1 >= high {
         return None;
     }
@@ -235,7 +246,12 @@ fn peak(
     if purity < MIN_PURITY {
         return None;
     }
-    Some((index as f64 + interpolate(&power, index)) * bin_hz)
+    // The band, as a verdict on the answer — see the note above the search.
+    let hz = (index as f64 + interpolate(&power, index)) * bin_hz;
+    match (BAND_LOW_HZ..=BAND_HIGH_HZ).contains(&hz) {
+        true => Some(hz),
+        false => None,
+    }
 }
 
 /// Where the true peak sits between bins — the vertex of the parabola through
@@ -527,23 +543,44 @@ mod tests {
         assert!((found[1].hz - 1465.6).abs() < 20.0, "{what}: {found:?}");
     }
 
-    /// **The grace frames earn their place here.** A packet lost mid-tone splits
-    /// a four-second page into two two-second halves, each of which fails a
-    /// profile asserting three seconds — which reads to an Operator as detection
-    /// being unreliable rather than as their audio having a hole in it.
-    #[test]
-    fn a_momentary_dropout_does_not_split_a_tone_in_two() {
+    /// **The grace frames earn their place here, and the numbers are not
+    /// arbitrary.** A packet lost mid-tone splits a four-second page into two
+    /// two-second halves, each of which fails a profile asserting three seconds
+    /// — which reads to an Operator as detection being unreliable rather than as
+    /// their audio having a hole in it. Too *much* grace is the opposite fault:
+    /// a real gap gets swallowed and a tone reads as longer than it was held.
+    ///
+    /// So the table brackets [`RUN_GRACE_FRAMES`] from both sides, on the
+    /// measured flip rather than an arithmetic one: a gap only starts producing
+    /// *fully* silent windows once it exceeds the 50 ms window, and the tone's
+    /// own attack and decay widen it further, so the run survives 50 ms and
+    /// breaks at 60. Both numbers were read off the detector rather than derived
+    /// — the derivation was wrong by two frames, which is exactly the sort of
+    /// thing a test written from arithmetic asserts confidently and falsely.
+    ///
+    /// **This is what the sweep caught.** The case here used to be a 20 ms gap,
+    /// which produces *no* silent window at all — every frame across it still
+    /// holds 30 ms of tone — so the run never broke, the grace never engaged,
+    /// and a test named after it proved nothing about it. Every mutation of the
+    /// guard survived, including deleting it outright.
+    #[rstest]
+    #[case(50, 1, "a dropout inside the grace")]
+    #[case(60, 2, "a gap past it")]
+    fn the_grace_spans_a_dropout_and_not_a_gap(
+        #[case] gap_ms: usize,
+        #[case] expected: usize,
+        #[case] what: &str,
+    ) {
         let audio = [
             tone(1465.6, 1500, 0.5),
-            silence(20),
+            silence(gap_ms),
             tone(1465.6, 1500, 0.5),
         ]
         .concat();
 
         let found = runs(&audio, RATE);
 
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].duration_ms > 2800, "{found:?}");
+        assert_eq!(found.len(), expected, "{what}: {found:?}");
     }
 
     /// A gap long enough to be a gap **is** one: this is what a profile's
@@ -601,16 +638,36 @@ mod tests {
         assert!((found[1].hz - 620.0).abs() < 6.0, "{found:?}");
     }
 
-    /// A rate so low that the band this looks in does not fit under Nyquist has
-    /// no tones rather than a panic — there is nothing there to find, and a
-    /// slice index is not the way to say so.
-    #[test]
-    fn a_rate_too_low_to_hold_the_band_has_no_tones() {
-        let samples: Vec<f32> = (0..400)
+    /// A rate so low that this cannot work has no tones rather than a panic, and
+    /// **each way it can be too low is its own case**.
+    ///
+    /// They are not the same condition wearing different hats: at 400 Hz there
+    /// is a window and a hop but the band does not fit under Nyquist; at 10 Hz
+    /// the window rounds to one sample and **the hop rounds to zero**, which is
+    /// a `step_by(0)` panic rather than a wrong answer. The guard reads as one
+    /// clause because the values usually move together, and that middle case is
+    /// the one that proves they do not have to.
+    #[rstest]
+    #[case(400, "a band that does not fit under Nyquist")]
+    #[case(10, "a hop that rounds to nothing")]
+    #[case(0, "no rate at all")]
+    fn a_rate_this_cannot_work_at_has_no_tones(#[case] rate: u32, #[case] what: &str) {
+        let samples: Vec<f32> = (0..4_000)
             .map(|n| 0.5 * (std::f64::consts::TAU * 100.0 * n as f64 / 400.0).sin() as f32)
             .collect();
 
-        assert!(runs(&samples, 400).is_empty());
+        assert!(runs(&samples, rate).is_empty(), "{what}");
+    }
+
+    /// Audio of **exactly** one window is one window's worth of audio, not none
+    /// — the boundary the length guard sits on, from the side that must be let
+    /// through.
+    #[test]
+    fn audio_exactly_one_window_long_is_still_looked_at() {
+        let found = runs(&tone(1122.5, 50, 0.5), RATE);
+
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!((found[0].hz - 1122.5).abs() < 30.0, "{found:?}");
     }
 
     /// Three equal bins have no parabola through them, so the peak is where the
@@ -650,6 +707,22 @@ mod tests {
     #[case(&[0.0; 10_000], 0)]
     fn audio_too_short_or_rateless_has_no_tones(#[case] samples: &[f32], #[case] rate: u32) {
         assert!(runs(samples, rate).is_empty());
+    }
+
+    /// **The band's edges mean something.** A tone above [`BAND_HIGH_HZ`] or
+    /// below [`BAND_LOW_HZ`] is not a paging tone and is not reported as one —
+    /// which is what stops mains hum and its harmonics at the bottom, and
+    /// whatever a recorder's anti-alias filter leaves at the top.
+    ///
+    /// Worth its own case because the band is *computed* from the bin width, so
+    /// an arithmetic slip there widens the search silently: every existing
+    /// fixture sits comfortably inside, and a band running to Nyquist would find
+    /// all of them exactly as it does now.
+    #[rstest]
+    #[case(3_600.0, "above the band")]
+    #[case(120.0, "below it — mains hum and its second harmonic")]
+    fn a_tone_outside_the_band_is_not_a_tone(#[case] hz: f64, #[case] what: &str) {
+        assert_eq!(runs(&tone(hz, 2_000, 0.6), RATE), Vec::new(), "{what}");
     }
 
     /// A recorder writes at whatever rate it likes — 8 kHz from Trunk Recorder,
