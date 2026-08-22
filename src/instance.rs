@@ -401,7 +401,7 @@ impl Instance {
         let _ = self.finish_serving().await;
         // The server first, so nothing new arrives while the workers wind down,
         // then the workers last-started-first — see [`worker::stop_all`].
-        crate::worker::stop_all(self.running.workers.drain(..).collect()).await;
+        crate::worker::stop_all(std::mem::take(&mut self.running.workers)).await;
     }
 
     /// Stop, then start again on the same configuration, the same database and

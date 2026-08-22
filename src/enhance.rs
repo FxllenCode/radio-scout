@@ -1205,8 +1205,10 @@ mod tests {
                 }
                 b"data" => {
                     samples = body
-                        .chunks_exact(2)
-                        .map(|p| i16::from_le_bytes([p[0], p[1]]) as f32 / i16::MAX as f32)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|p| i16::from_le_bytes(*p) as f32 / i16::MAX as f32)
                         .collect();
                 }
                 _ => {}
