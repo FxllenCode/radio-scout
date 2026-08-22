@@ -66,4 +66,16 @@ exclude_re = [
     # never built: there the two constants swap roles. Build the client first,
     # which is what CI does and what `cargo build` wants anyway.
     "replace spa_is_embedded -> bool with true",
+
+    # `peak` compares a computed `f64` ratio against `MIN_PURITY`, and the `<=`
+    # mutant differs from `<` on exactly one input: a frame whose purity is
+    # **bit-exactly** 0.5. No audio produces that — the ratio is a sum of three
+    # float bin powers over a sum of two hundred more — so killing it would mean
+    # fabricating the float rather than asserting about sound, which is asserting
+    # something true by construction.
+    #
+    # The `<` -> `==` mutant of the same comparison is deliberately NOT excluded:
+    # that one admits essentially every frame and is killed by
+    # `nothing_that_is_not_a_held_tone_is_a_tone`.
+    "replace < with <= in peak",
 ]

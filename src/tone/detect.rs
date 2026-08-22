@@ -131,9 +131,14 @@ const RUN_GRACE_FRAMES: usize = 3;
 /// no runs, which is the right answer rather than an error: a 30 ms Call is a
 /// kerchunk.
 pub fn runs(samples: &[f32], rate: u32) -> Vec<Run> {
+    // No `rate == 0` clause, deliberately: `window` is `round(rate * 0.05)`, so
+    // a rate of zero *is* a window of zero and the first clause below already
+    // says so. Spelling it as well would be a redundant term — true exactly
+    // when its neighbour is — which is a mutation nothing can kill, because
+    // there is no input that tells the two apart.
     let window = (rate as f64 * WINDOW_SECS).round() as usize;
     let hop = (rate as f64 * HOP_SECS).round() as usize;
-    if rate == 0 || window == 0 || hop == 0 || samples.len() < window {
+    if window == 0 || hop == 0 || samples.len() < window {
         return Vec::new();
     }
     let frames = analyse(samples, rate, window, hop);
