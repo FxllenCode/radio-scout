@@ -24,6 +24,8 @@
 import { X } from 'lucide-react'
 import { useEffect, useId, useRef, type ReactNode } from 'react'
 
+import { cn } from '@/lib/utils'
+
 export function Sheet({
   title,
   onClose,
@@ -87,5 +89,35 @@ export function Sheet({
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * A sheet's full-width action — *Jump to newest*, *Clear all*.
+ *
+ * Here rather than copied into each sheet because the two were the same string
+ * of a dozen utility classes twice over, which is how one of them comes to be a
+ * different size than the other after a tweak nobody re-read.
+ */
+export function SheetAction({
+  onClick,
+  className,
+  children,
+}: {
+  onClick: () => void
+  className?: string
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'flex w-full items-center justify-center gap-2 rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40',
+        className,
+      )}
+    >
+      {children}
+    </button>
   )
 }

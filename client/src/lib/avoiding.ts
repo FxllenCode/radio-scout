@@ -45,29 +45,57 @@ export function avoidedRows(
   avoided: Avoids,
   catalog: Catalog | undefined,
 ): AvoidedRow[] {
-  const named = new Map(
+  // Built once for the whole list rather than per row, which is the only reason
+  // the private [`named`] exists beside the public [`nameOf`].
+  const from = index(catalog)
+
+  return Object.entries(avoided)
+    .map(([key, until]) => ({ ...named(key, from), until }))
+    .sort(
+      (a, b) => a.systemLabel.localeCompare(b.systemLabel) || a.label.localeCompare(b.label),
+    )
+}
+
+/** A silenced Talkgroup's identity, without the deadline — [`AvoidedRow`] minus
+ *  the one field a caller naming a single key does not have. */
+export type AvoidedName = Omit<AvoidedRow, 'until'>
+
+/**
+ * What to call one silenced Talkgroup — the same answer [`avoidedRows`] gives,
+ * for a caller holding a single key rather than the map.
+ *
+ * The undo bar is that caller (#58): it names the Talkgroup an **Avoid** just
+ * took, and it has no deadline to report — the offer's own clock is a different
+ * number entirely. Asking `avoidedRows` for it would mean handing over a
+ * fabricated deadline in order to get a label back, which is a lie in the shape
+ * of a reuse.
+ */
+export function nameOf(key: string, catalog: Catalog | undefined): AvoidedName {
+  return named(key, index(catalog))
+}
+
+function named(key: string, from: NamedTalkgroups): AvoidedName {
+  const { systemRef, talkgroupRef } = parseTalkgroupKey(key)
+  const entry = from.get(key)
+
+  return {
+    key,
+    label: entry?.label ?? entry?.name ?? `Talkgroup ${talkgroupRef}`,
+    systemLabel: entry?.systemLabel ?? `System ${systemRef}`,
+    talkgroupRef,
+  }
+}
+
+/** The catalog keyed for lookup. */
+type NamedTalkgroups = Map<string, ReturnType<typeof talkgroupsOf>[number]>
+
+const index = (catalog: Catalog | undefined): NamedTalkgroups =>
+  new Map(
     (catalog ? talkgroupsOf(catalog) : []).map((entry) => [
       talkgroupKey(entry.systemRef, entry.talkgroupRef),
       entry,
     ]),
   )
-
-  return Object.entries(avoided)
-    .map(([key, until]) => {
-      const { systemRef, talkgroupRef } = parseTalkgroupKey(key)
-      const entry = named.get(key)
-      return {
-        key,
-        label: entry?.label ?? entry?.name ?? `Talkgroup ${talkgroupRef}`,
-        systemLabel: entry?.systemLabel ?? `System ${systemRef}`,
-        talkgroupRef,
-        until,
-      }
-    })
-    .sort(
-      (a, b) => a.systemLabel.localeCompare(b.systemLabel) || a.label.localeCompare(b.label),
-    )
-}
 
 /**
  * How many minutes a timed **Avoid** has left.

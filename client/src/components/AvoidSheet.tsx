@@ -21,7 +21,7 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { useGetCatalogQuery } from '@/store/api'
 import { clearAvoid, clearAvoids, selectAvoids } from '@/store/live'
 
-import { Sheet } from './Sheet'
+import { Sheet, SheetAction } from './Sheet'
 
 export function AvoidSheet({ onClose }: { onClose: () => void }) {
   const dispatch = useAppDispatch()
@@ -76,16 +76,15 @@ export function AvoidSheet({ onClose }: { onClose: () => void }) {
           {/* Still offered, below the list rather than instead of it: clearing
               the lot is a reasonable thing to want and a terrible thing to be
               the only option. */}
-          <button
-            type="button"
+          <SheetAction
+            className="mt-3"
             onClick={() => {
               dispatch(clearAvoids())
               onClose()
             }}
-            className="mt-3 w-full rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40"
           >
             Clear all
-          </button>
+          </SheetAction>
         </>
       )}
     </Sheet>

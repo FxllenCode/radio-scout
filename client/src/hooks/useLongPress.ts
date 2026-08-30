@@ -4,12 +4,15 @@
  *
  * # Why the subject is captured, and not read
  *
- * The two lists this serves both move under the thumb: the session log grows at
- * the top as Calls are heard, and the queue sheet re-orders whenever a
- * **Priority** Call arrives. So a press that read "which row is this?" when its
- * timer fired would open an *Avoid* menu over whichever Call had slid into that
- * place — a mis-tap that looks exactly like a deliberate one, on a control that
+ * The list this serves moves under the thumb: the session log grows at the top
+ * as Calls are heard. So a press that read "which row is this?" when its timer
+ * fired would open an *Avoid* menu over whichever Call had slid into that place
+ * — a mis-tap that looks exactly like a deliberate one, on a control that
  * silences a channel.
+ *
+ * The queue sheet has the same hazard and answers it without a gesture: its
+ * controls are ordinary buttons that each name a **Call id**, so re-ordering
+ * moves the button rather than changing what it means.
  *
  * The subject is therefore taken at `pointerdown` and held until the press
  * resolves. React's own key-based reconciliation is the other half: a row keyed
@@ -24,7 +27,7 @@
  * `click`. Without suppression, holding a row to reach *Avoid* would replay the
  * Call on the way there.
  */
-import { useCallback, useEffect, useRef, type PointerEvent, type SyntheticEvent } from 'react'
+import { useCallback, useEffect, useRef, type SyntheticEvent } from 'react'
 
 /**
  * How long a press has to last to be a hold.
@@ -39,8 +42,6 @@ export const LONG_PRESS_MS = 500
 export interface LongPressActions<T> {
   onTap: (subject: T) => void
   onHold: (subject: T) => void
-  /** Defaults to [`LONG_PRESS_MS`]. */
-  delay?: number
 }
 
 /** The handlers a row spreads onto the element that carries `subject`. */
@@ -48,7 +49,7 @@ export interface LongPressHandlers {
   onPointerDown: () => void
   onPointerUp: () => void
   onPointerLeave: () => void
-  onPointerCancel: (event: PointerEvent) => void
+  onPointerCancel: () => void
   onContextMenu: (event: SyntheticEvent) => void
   onClick: () => void
 }
@@ -63,7 +64,6 @@ export interface LongPressHandlers {
 export function useLongPress<T>({
   onTap,
   onHold,
-  delay = LONG_PRESS_MS,
 }: LongPressActions<T>): (subject: T) => LongPressHandlers {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   /** A hold has fired and the `click` that follows its `pointerup` is not a
@@ -91,7 +91,7 @@ export function useLongPress<T>({
           timer.current = undefined
           fired.current = true
           onHold(subject)
-        }, delay)
+        }, LONG_PRESS_MS)
       },
       onPointerUp: cancel,
       onPointerLeave: cancel,
@@ -107,6 +107,6 @@ export function useLongPress<T>({
         onTap(subject)
       },
     }),
-    [cancel, delay, onHold, onTap],
+    [cancel, onHold, onTap],
   )
 }

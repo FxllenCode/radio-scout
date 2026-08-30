@@ -63,12 +63,31 @@ describe('the queue sheet (#58, spec US 24)', () => {
   })
 
   /**
-   * A control that looks live and does nothing is the thing #88's tests exist
-   * to catch — and it is also what keeps this out of reach with the feed off,
-   * where the queue is emptied by construction.
+   * spec US 24 asks to "see... what's waiting", and *nothing is waiting* is an
+   * answer — so an empty queue opens the sheet and the sheet says so, rather
+   * than the counter going dead at exactly the moment a Listener wonders
+   * whether they are caught up.
    */
-  it('is out of reach with nothing waiting', () => {
+  it('opens on an empty queue and says the feed is caught up', async () => {
+    const user = userEvent.setup()
     listening(call(1))
+
+    await open(user)
+
+    expect(screen.getByText(/Nothing waiting/)).toBeInTheDocument()
+  })
+
+  /**
+   * What it *is* gated on is the feed. **Feed off** and **Playback mode** empty
+   * the queue by construction, so a counter offering to open one there would be
+   * a control that looks live and does nothing — the thing #88's own tests
+   * exist to catch.
+   */
+  it('is out of reach with the feed off', async () => {
+    const user = userEvent.setup()
+    listening(call(1), call(2, 100))
+
+    await user.click(screen.getByRole('button', { name: 'Live feed' }))
 
     expect(screen.getByRole('button', { name: /Queued calls/ })).toBeDisabled()
   })

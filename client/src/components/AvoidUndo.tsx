@@ -23,7 +23,7 @@ import { Undo2 } from 'lucide-react'
 import { useEffect } from 'react'
 
 import { DockedBanner } from '@/components/layout/DockedBanner'
-import { avoidedRows } from '@/lib/avoiding'
+import { nameOf } from '@/lib/avoiding'
 import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { dismissAvoidUndo, selectAvoidUndo, undoAvoid, type AvoidUndo } from '@/store/live'
@@ -40,9 +40,11 @@ export function AvoidUndoBar() {
 function Offer({ undo }: { undo: AvoidUndo }) {
   const dispatch = useAppDispatch()
   const { data: catalog } = useGetCatalogQuery()
-  // One row, named the way the Avoid sheet names them — so the sentence here
-  // and the list there call the same channel by the same name.
-  const [row] = avoidedRows({ [undo.key]: 0 }, catalog)
+  // Named the way the Avoid sheet names them, so the sentence here and the list
+  // there call the same channel by the same thing. Deliberately *not* through
+  // `avoidedRows`: that would mean inventing a deadline to get a label back,
+  // and this offer's clock is a different number from any Avoid's.
+  const talkgroup = nameOf(undo.key, catalog)
 
   useEffect(() => {
     const left = Math.max(0, undo.expiresAt - Date.now())
@@ -53,7 +55,7 @@ function Offer({ undo }: { undo: AvoidUndo }) {
   return (
     <DockedBanner label="Avoid undo">
       <p className="min-w-0 flex-1 truncate font-mono text-xs">
-        Avoiding <span className="font-semibold">{row.label}</span>
+        Avoiding <span className="font-semibold">{talkgroup.label}</span>
       </p>
       <button
         type="button"

@@ -201,8 +201,6 @@ export interface LiveState {
   inPlayback: boolean
 }
 
-/** The state a listener who has never touched anything starts from. Exported
- *  so the store can hydrate the persisted selection into it (#12). */
 /** An **Avoid** that can still be taken back, and everything it displaced. */
 export interface AvoidUndo {
   /** The Talkgroup that went quiet, by [`talkgroupKey`]. */
@@ -218,6 +216,8 @@ export interface AvoidUndo {
   expiresAt: number
 }
 
+/** The state a listener who has never touched anything starts from. Exported
+ *  so the store can hydrate the persisted selection into it (#12). */
 export const initialLiveState: LiveState = {
   status: 'offline',
   queue: [],
@@ -429,6 +429,18 @@ function applyAvoid(state: LiveState, key: string, until: number, at: number) {
   }
   purge(state)
 }
+
+/**
+ * Read the clock at the action creator rather than inside the reducer, so both
+ * ways of placing an **Avoid** stay pure and replay identically — and so a test
+ * can hand in the moment (`received`'s own convention).
+ *
+ * Written once because the two differ only in *which* Talkgroup they name, and
+ * a second copy is how one of them comes to stamp a different clock.
+ */
+const stamped = <P,>(payload: P & { at?: number }) => ({
+  payload: { at: Date.now(), ...payload },
+})
 
 /** Mark a Talkgroup **Priority**, or let it go, and re-order the queue in hand
  *  to match — written once, because two controls reach it: the panel row and
@@ -753,9 +765,7 @@ const liveSlice = createSlice({
      *  stop chattering is one a Listener silences a beat *after* it stops, not
      *  during. */
     avoid: {
-      prepare: (payload: { until: number; at?: number }) => ({
-        payload: { at: Date.now(), ...payload },
-      }),
+      prepare: stamped<{ until: number }>,
 
       reducer(state, action: PayloadAction<{ until: number; at: number }>) {
         const call = subjectOf(state)
@@ -773,9 +783,7 @@ const liveSlice = createSlice({
      *  the session log's quick action (#58, spec US 28). Same policy, same
      *  undo offer: [`applyAvoid`] is the only way either gets there. */
     avoidTalkgroup: {
-      prepare: (payload: TalkgroupKey & { until: number; at?: number }) => ({
-        payload: { at: Date.now(), ...payload },
-      }),
+      prepare: stamped<TalkgroupKey & { until: number }>,
 
       reducer(
         state,
@@ -807,7 +815,11 @@ const liveSlice = createSlice({
       } else {
         state.avoided[undo.key] = undo.previous
       }
-      state.hold = undo.hold
+      // Only put back a Hold that is *missing*. Within the grace window a
+      // Listener can place a new one — from the controls, or from the session
+      // log's own quick action — and an undo that overwrote it would revert a
+      // later choice rather than the mis-tap it exists for.
+      if (state.hold === null) state.hold = undo.hold
       state.avoidUndo = null
       purge(state)
     },

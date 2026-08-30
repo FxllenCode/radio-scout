@@ -1277,6 +1277,58 @@ describe('Priority (#58, spec US 27)', () => {
     expect(selectQueueDepth(rootState(state))).toBe(0)
   })
 
+  /**
+   * The ordering, enumerated **through the reducer** — #58's third criterion
+   * asks for it here and not only in `lib/queue`, which is where the algebra
+   * and its 81×81 oracle live.
+   *
+   * What this layer adds is the wiring the pure module cannot see: that the
+   * function the slice orders by really is built from the Talkgroups a Listener
+   * marked, that it is applied on arrival *and* re-applied when the set changes,
+   * and that the two agree. Every subset of three Talkgroups, each fed as four
+   * arrivals and then re-marked — so a slice that ordered correctly on the way
+   * in and forgot to re-order, or the reverse, fails on the subset that shows it.
+   */
+  const CHANNELS = [100, 200, 300] as const
+  const SUBSETS = Array.from({ length: 8 }, (_, mask) =>
+    CHANNELS.filter((_one, at) => (mask & (1 << at)) !== 0),
+  ).map((marked) => [marked] as const)
+
+  /** Highest Priority first, then arrival order — worked out independently of
+   *  the code under test. */
+  const expected = (calls: readonly Call[], marked: readonly number[]) =>
+    [...calls]
+      .sort(
+        (a, b) =>
+          Number(marked.includes(b.talkgroupRef)) -
+            Number(marked.includes(a.talkgroupRef)) || a.id - b.id,
+      )
+      .map((one) => one.id)
+
+  it.each(SUBSETS)('orders arrivals by the marked set: %j', (marked) => {
+    // Ids are arrival order, and the channels cycle — so every marked set has
+    // Calls on both sides of it, and the oracle can read staleness off the id.
+    const heard = Array.from({ length: 6 }, (_at, index) =>
+      call(index + 1, 11, CHANNELS[index % CHANNELS.length]),
+    )
+    const marks = marked.map((ref) => togglePriority(`11:${ref}`))
+
+    // Marked first, then heard: the ordering `enqueue` applied on arrival.
+    const onArrival = reduce(connected(), ...marks, ...arrive(...heard))
+    // Heard first, then marked: the ordering `reorder` applied afterwards.
+    const afterwards = reduce(connected(), ...arrive(...heard), ...marks)
+
+    // The Call that was playing is off the queue either way; the rest is the
+    // play order of what is left.
+    const waiting = heard.slice(1)
+    expect(selectQueue(rootState(onArrival)).map((one) => one.id)).toEqual(
+      expected(waiting, marked),
+    )
+    expect(selectQueue(rootState(afterwards)).map((one) => one.id)).toEqual(
+      expected(waiting, marked),
+    )
+  })
+
   /** A **Patch** reaches the channel it was patched onto, and Priority follows
    *  it — `lib/queue`'s rule, proven here to be the one the slice runs. */
   it('promotes a patched Call reaching a Priority Talkgroup', () => {
@@ -1346,6 +1398,26 @@ describe('undoing an Avoid (#58, spec US 25)', () => {
     )
 
     expect(selectAvoids(rootState(state))).toEqual({ '11:100': NOW + 60_000 })
+  })
+
+  /**
+   * The window is eight seconds, and a Listener can place a **Hold** inside it —
+   * from the Live controls, or from the session log's own quick action. Undo
+   * puts back what the *Avoid* took, so it must not overwrite a later choice:
+   * it fills a Hold that is missing and never replaces one that is there.
+   */
+  it('leaves a Hold placed since the Avoid alone', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1), call(2, 11, 200)),
+      toggleHoldTalkgroup(),
+      avoid({ until: 0, at: NOW }),
+      toggleHoldOn({ systemRef: 11, talkgroupRef: 200 }),
+      undoAvoid(),
+    )
+
+    expect(selectHold(rootState(state))).toEqual({ systemRef: 11, talkgroupRef: 200 })
+    expect(selectIsAvoided(rootState(state), 11, 100)).toBe(false)
   })
 
   it('is dismissable, which is what the grace window running out means', () => {

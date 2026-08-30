@@ -544,7 +544,6 @@ describe('what a row says about activity (#57)', () => {
   })
 })
 
-
 describe('Priority on a row (#58, spec US 27)', () => {
   it('is off for a Talkgroup nobody marked', () => {
     expect(rowsOf(draw()).every((row) => row.priority)).toBe(false)

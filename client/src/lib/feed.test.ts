@@ -68,6 +68,7 @@ const EVERY_CONTROL: (keyof Controls)[] = [
   'pause',
   'avoid',
   'priority',
+  'queue',
   'recent',
 ]
 
@@ -96,13 +97,16 @@ const CONTROL_CASES: {
       'pause',
       'avoid',
       'priority',
+      'queue',
     ),
   },
   {
+    // The queue counter is the one control here that needs no Call: US 24 asks
+    // to see what is waiting, and "nothing" is an answer a Listener can act on.
     what: 'a lull with nothing behind it',
     status: 'live',
     facts: NOTHING,
-    expected: only(),
+    expected: only('queue'),
   },
   {
     // The hold outlives the Call it was placed on, and releasing it is the only
@@ -111,13 +115,13 @@ const CONTROL_CASES: {
     what: 'a System hold outliving the Call it was placed on',
     status: 'live',
     facts: { ...NOTHING, systemHold: true },
-    expected: only('holdSystem'),
+    expected: only('holdSystem', 'queue'),
   },
   {
     what: 'a Talkgroup hold outliving the Call it was placed on',
     status: 'live',
     facts: { ...NOTHING, talkgroupHold: true },
-    expected: only('holdTalkgroup'),
+    expected: only('holdTalkgroup', 'queue'),
   },
   {
     // US 13: with nothing playing, Replay reaches back to the last Call.
@@ -137,6 +141,7 @@ const CONTROL_CASES: {
       'replay',
       'avoid',
       'priority',
+      'queue',
       'recent',
     ),
   },
@@ -149,7 +154,7 @@ const CONTROL_CASES: {
     what: 'a lull on a feed that has never carried a Call',
     status: 'live',
     facts: NOTHING,
-    expected: only(),
+    expected: only('queue'),
   },
   {
     // A dropped socket stops Calls arriving; it does not stop the one playing,

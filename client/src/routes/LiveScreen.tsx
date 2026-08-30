@@ -41,8 +41,8 @@ import {
   selectLiveCall,
   selectLiveControls,
   selectLiveStatus,
-  selectMissed,
   selectIsPriority,
+  selectMissed,
   selectQueueDepth,
   toggleHoldSystem,
   toggleHoldTalkgroup,
@@ -148,10 +148,12 @@ export function LiveScreen() {
               becomes a tool (#58, spec US 24): the same readout, now the way in
               to what is behind it.
 
-              Disabled at zero rather than opening an empty sheet — a control
-              that looks live and does nothing is the thing #88's own tests
-              exist to catch, and it is also what keeps this out of reach with
-              the feed off, where the queue is cleared by construction.
+              Reachable at zero, because US 24 asks to *see* what is waiting and
+              "nothing is waiting" is an answer — the sheet says so. What it is
+              gated on is the feed (`can.queue`): **Feed off** and **Playback
+              mode** empty the queue by construction, so offering it there would
+              be a control that looks live and does nothing, which is what #88's
+              own tests exist to catch.
 
               The live region is the wrapper, not the button, so a screen reader
               is still told the depth changed without being told a button
@@ -160,7 +162,7 @@ export function LiveScreen() {
             <button
               type="button"
               aria-label={`Queued calls: ${queued}`}
-              disabled={queued === 0}
+              disabled={!can.queue}
               onClick={() => setSheet('queue')}
               className="inline-flex items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground transition-colors hover:text-foreground disabled:hover:text-muted-foreground"
             >

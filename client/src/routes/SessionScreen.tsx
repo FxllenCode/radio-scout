@@ -39,6 +39,7 @@ import { downloadUrl, formatCallTime } from '@/lib/archive'
 import { systemName, talkgroupName } from '@/lib/call'
 import { feedPlays } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
+import { cn } from '@/lib/utils'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   avoidTalkgroup,
@@ -55,17 +56,21 @@ export function SessionScreen() {
   const calls = useAppSelector(selectSessionLog)
   const hold = useAppSelector(selectHold)
   // Replaying puts audio on the element, which is exactly what a Listener who
-  // chose silence did not ask for. `replay` already refuses in the reducer
-  // (#80, #88); this is what stops the rows *looking* tappable while it does.
+  // chose silence did not ask for (#80, #88) — `replay` refuses in the reducer
+  // too. Nothing else this screen offers is audio, which is the distinction the
+  // rows are built around.
   const plays = feedPlays(useAppSelector(selectFeedStatus))
   const [acting, setActing] = useState<Call | null>(null)
 
-  // No guard on `plays` here: the row is disabled when the feed is not the
-  // Listener's audio, and `replay` refuses in the reducer besides (#88). A
-  // third copy of the rule would be a branch nothing could reach and one more
-  // place for the three to disagree.
+  // **`aria-disabled`, never `disabled`.** A disabled button fires no pointer
+  // events, so gating the row that way would take *Hold*, *Avoid* and
+  // *Download* with it — none of which is audio, and all of which are exactly
+  // what a Listener browsing with the feed off is here for. So the row stays
+  // pressable, says it cannot replay, and the tap is what is refused.
   const press = useLongPress<Call>({
-    onTap: (call) => dispatch(replay(call.id)),
+    onTap: (call) => {
+      if (plays) dispatch(replay(call.id))
+    },
     onHold: setActing,
   })
 
@@ -79,8 +84,9 @@ export function SessionScreen() {
       }
     >
       <p className="mb-4 text-xs text-muted-foreground/70">
-        Everything heard since this app was opened. Tap to replay; press and hold
-        for hold, avoid and download.
+        Everything heard since this app was opened.{' '}
+        {plays ? 'Tap to replay; press' : 'Press'} and hold for hold, avoid and
+        download.
       </p>
 
       {calls.length === 0 ? (
@@ -104,9 +110,12 @@ export function SessionScreen() {
             <li key={call.id} className="flex items-center gap-3 px-3 py-2.5">
               <button
                 type="button"
-                disabled={!plays}
+                aria-disabled={!plays}
                 {...press(call)}
-                className="flex min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:bg-muted/40 disabled:opacity-40"
+                className={cn(
+                  'flex min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:bg-muted/40',
+                  !plays && 'opacity-40',
+                )}
               >
                 <StatusLed color={ledForCall(call)} size={10} />
                 <span className="flex min-w-0 flex-1 flex-col">

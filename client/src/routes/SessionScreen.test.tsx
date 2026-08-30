@@ -107,14 +107,50 @@ describe('the session log (#58, spec US 28)', () => {
     expect(selectLiveCall(store.getState())?.id).toBe(1)
   })
 
-  /** Replaying is audio, and a Listener with the feed off asked for none —
-   *  the rows say so rather than looking tappable and doing nothing (#88). */
-  it('puts its rows out of reach with the feed off', async () => {
-    const { store } = await heard(call(1))
+  describe('with the feed off', () => {
+    /** Replaying is audio, and a Listener who switched the feed off asked for
+     *  none — the row says so rather than looking tappable and doing nothing
+     *  (#88). */
+    it('says its rows cannot replay, and does not', async () => {
+      const { store } = await heard(call(1))
+      act(() => void store.dispatch(turnFeedOff()))
 
-    act(() => void store.dispatch(turnFeedOff()))
+      const row = rowFor('TG 1')
+      expect(row).toHaveAttribute('aria-disabled', 'true')
 
-    expect(rowFor('TG 1')).toBeDisabled()
+      fireEvent.click(row)
+      expect(selectLiveCall(store.getState())).toBeNull()
+    })
+
+    /**
+     * ...but the row stays *pressable*, which is the whole reason it is
+     * `aria-disabled` and not `disabled`: a disabled button fires no pointer
+     * events, so gating it that way would take **Hold**, **Avoid** and
+     * **Download** with it — none of them audio, and all of them what a
+     * Listener browsing a silent feed came here for.
+     */
+    it('still opens the quick actions, which are not audio', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const { store } = await heard(call(1))
+      act(() => void store.dispatch(turnFeedOff()))
+
+      hold('TG 1')
+      fireEvent.click(screen.getByRole('button', { name: 'Avoid this talkgroup' }))
+
+      expect(selectIsAvoided(store.getState(), 100, 1)).toBe(true)
+    })
+
+    it('keeps the download reachable', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const { store } = await heard(call(1))
+      act(() => void store.dispatch(turnFeedOff()))
+
+      hold('TG 1')
+
+      expect(screen.getByRole('link', { name: 'Download' })).toBeInTheDocument()
+      // Replay is the one that goes, because it is the one that is audio.
+      expect(screen.getByRole('button', { name: 'Replay' })).toBeDisabled()
+    })
   })
 
   describe('the actions behind a long press', () => {

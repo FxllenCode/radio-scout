@@ -98,6 +98,13 @@ export interface Controls {
   /** Mark the shown Call's Talkgroup **Priority** (#58, spec US 27) — one of
    *  the controls that act on the Call being *shown*. */
   priority: boolean
+  /** The `Q` counter, which opens the listening queue (#58, spec US 24).
+   *
+   *  Gated on the feed rather than on the queue being non-empty: US 24 asks to
+   *  "see... what's waiting", and "nothing is waiting" is an answer. What it
+   *  must not do is offer a queue in a state that has none by construction —
+   *  **Feed off** and **Playback mode** both empty it. */
+  queue: boolean
   /** The RECENT rows, which replay the Call they name. */
   recent: boolean
 }
@@ -136,6 +143,7 @@ export function controlsFor(status: FeedStatus, facts: ControlFacts): Controls {
     pause: plays && onAir,
     avoid: plays && showing,
     priority: plays && showing,
+    queue: plays,
     recent: plays && hasRecent,
   }
 }

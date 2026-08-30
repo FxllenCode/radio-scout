@@ -33,7 +33,7 @@ import { ledForCall } from '@/lib/led'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { dropQueued, jumpToNewest, playQueued, selectQueue } from '@/store/live'
 
-import { Sheet } from './Sheet'
+import { Sheet, SheetAction } from './Sheet'
 import { StatusLed } from './StatusLed'
 import { UnitLink } from './UnitLink'
 
@@ -56,13 +56,12 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
         <>
           {/* The way out of a backlog, at the top where a Listener who opened
               this sheet *because* it said 40 will look first. */}
-          <button
-            type="button"
+          <SheetAction
+            className="mb-3"
             onClick={() => {
               dispatch(jumpToNewest())
               onClose()
             }}
-            className="mb-3 flex w-full items-center justify-center gap-2 rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40"
           >
             <SkipForward className="size-3.5" aria-hidden />
             Jump to newest
@@ -71,7 +70,7 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
                 — {queue.length - 1} counted missed
               </span>
             )}
-          </button>
+          </SheetAction>
 
           <ul
             aria-label="Queued calls"
