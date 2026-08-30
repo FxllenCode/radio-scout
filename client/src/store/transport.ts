@@ -1,10 +1,11 @@
-import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
+import { createSelector, createSlice, type PayloadAction } from '@reduxjs/toolkit'
 
 import type { Call } from '@/types'
 
-import type { Subscription } from '@/lib/liveFeed'
+import type { LiveStatus, Subscription } from '@/lib/liveFeed'
 
 import { feedPlays } from '@/lib/feed'
+import { stripView, type Strip, type StripReturn } from '@/lib/strip'
 
 import {
   advance,
@@ -14,15 +15,20 @@ import {
   selectHistory,
   selectLiveCall,
   selectLiveMatrix,
+  selectLiveStatus,
   selectQueue,
+  turnFeedOn,
   type LiveState,
 } from './live'
 import {
+  enterLiveFeed,
   next,
   previous,
   selectCurrentCall,
+  selectIsInterrupting,
   selectNextCall,
   selectPlaybackMode,
+  selectPlaybackPosition,
   type PlaybackState,
 } from './playback'
 import type { AppDispatch } from './store'
@@ -239,6 +245,62 @@ const NOTHING: Subscription = { all: false, sel: {} }
  */
 export const selectSubscription = (state: TransportRoot): Subscription =>
   selectPlaybackMode(state) === 'playback' ? NOTHING : selectLiveMatrix(state)
+
+/**
+ * What the global strip says (#56) — the whole of what a Listener who is not on
+ * the Live screen can see about the transport.
+ *
+ * Assembled here because this is the module that already knows *who owns the
+ * audio*: the answer spans the live slice, the playback slice and the feed's
+ * derived standing, and a component gathering those six facts for itself would
+ * be the fourth place in the app deciding what "playing" means.
+ *
+ * Memoized, and the reason is that the answer is an *object*: the strip is
+ * mounted on every tab and the store is dispatched several times a second while
+ * a Call plays, so an unmemoized version would hand React a fresh value — and a
+ * re-render — on every `progressed`.
+ */
+export const selectStrip: (state: TransportRoot) => Strip | null = createSelector(
+  [
+    selectFeedStatus,
+    selectLiveStatus,
+    selectNowPlaying,
+    selectCurrentCall,
+    selectIsInterrupting,
+    selectPlaybackPosition,
+  ],
+  (
+    status,
+    link: LiveStatus,
+    playing,
+    archived,
+    interrupting,
+    position,
+  ): Strip | null =>
+    stripView({
+      status,
+      link,
+      playing,
+      fromArchive: archived !== null,
+      interrupting,
+      position,
+    }),
+)
+
+/**
+ * What each way back out of a chosen silence actually dispatches (#56).
+ *
+ * Here rather than in the component that draws the button, because the Live
+ * screen offers the same two exits from its own controls and the mini-player
+ * offers them from the shell — one mapping, so the two cannot come to disagree
+ * about what "back to live" does. `satisfies` rather than an annotation, so the
+ * record stays exhaustive over [`StripReturn`] *and* keeps each action
+ * creator's own type.
+ */
+export const wayBackAction = {
+  'feed-on': turnFeedOn,
+  'leave-playback': enterLiveFeed,
+} satisfies Record<StripReturn, unknown>
 
 /** Skip forward: the next archive result, or the next Call in the queue. */
 export const nextCall =

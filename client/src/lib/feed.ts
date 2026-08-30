@@ -110,20 +110,28 @@ export interface Controls {
  *   Call — a button that pressed and did nothing, because the reducer needs a
  *   Call to place a System hold on. A hold can always release itself; it can
  *   only be *placed* on a Call.
- * - **Replay reaches further than the others.** With nothing on the air it
- *   plays the last Call instead (spec US 13), so RECENT alone is enough.
+ * - **Four controls act on the Call being *shown*, not the one on the air**
+ *   (#56). The display keeps the last Call up between transmissions, dimmed, so
+ *   Hold, Avoid and Replay go on meaning something after it ends — which is
+ *   exactly when a Listener reaches for them, a chatty Talkgroup having just
+ *   stopped keying. Skip and Pause do not join them: those act on audio, and
+ *   there is none.
  */
 export function controlsFor(status: FeedStatus, facts: ControlFacts): Controls {
   const plays = feedPlays(status)
   const { onAir, systemHold, talkgroupHold, hasRecent } = facts
+  // The Call on the card. `hasRecent` is the whole of "there is a last Call",
+  // because switching a Call off the air files it at the head of RECENT — so
+  // this is not two sources agreeing, it is one fact asked from two angles.
+  const showing = onAir || hasRecent
 
   return {
-    holdSystem: plays && (onAir || systemHold),
-    holdTalkgroup: plays && (onAir || talkgroupHold),
+    holdSystem: plays && (showing || systemHold),
+    holdTalkgroup: plays && (showing || talkgroupHold),
     skip: plays && onAir,
-    replay: plays && (onAir || hasRecent),
+    replay: plays && showing,
     pause: plays && onAir,
-    avoid: plays && onAir,
+    avoid: plays && showing,
     recent: plays && hasRecent,
   }
 }
@@ -204,7 +212,7 @@ export function feedReadout(status: FeedStatus, link: LiveStatus): FeedReadout {
         empty: {
           headline: 'Playing from the archive.',
           detail:
-            'The live feed and playback mode are mutually exclusive, so nothing is arriving here. Leave playback mode from Search and the feed picks up from whatever is happening then.',
+            'The live feed and playback mode are mutually exclusive, so nothing is arriving here. Go back to the live feed and it picks up from whatever is happening then.',
         },
       }
     case 'down':

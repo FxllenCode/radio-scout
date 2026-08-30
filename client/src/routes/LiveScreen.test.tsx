@@ -7,10 +7,17 @@ import {
   gapped,
   lagged,
   received,
+  selectHold,
+  selectIsAvoided,
+  selectLiveCall,
   selectLiveMatrix,
   selectQueueDepth,
 } from '@/store/live'
-import { enterPlaybackMode, startRun } from '@/store/playback'
+import {
+  enterPlaybackMode,
+  selectPlaybackMode,
+  startRun,
+} from '@/store/playback'
 import { progressed, selectProgress } from '@/store/transport'
 import { makeStore, type AppStore } from '@/store/store'
 import { liveFeed, searchPage } from '@/test/handlers'
@@ -541,7 +548,135 @@ describe('LiveScreen', () => {
 
       act(() => void store.dispatch(enterPlaybackMode()))
 
-      expect(reachable()).toEqual(ALWAYS_REACHABLE)
+      // …except the way back, which #56 adds beside the master switch: with
+      // every other control dead, a screen offering no way out of the state it
+      // is describing is the gap this ticket closes.
+      expect(reachable()).toEqual([...ALWAYS_REACHABLE, 'Back to live'])
+    })
+
+    /**
+     * **One tap back** (#56). The way out is its own control rather than the
+     * LIVE FEED switch: that switch reads *on* here and is right to — the feed
+     * was never switched off, playback borrowed the audio — so overloading it
+     * would trade one lie for another. #88 pinned that reading; this closes the
+     * gap it left.
+     */
+    it('offers one tap back to the live feed', async () => {
+      const user = userEvent.setup()
+      const store = playArchive()
+
+      await user.click(screen.getByRole('button', { name: 'Back to live' }))
+
+      expect(selectPlaybackMode(store.getState())).toBe('live')
+      expect(await screen.findByText(/^connected$/i)).toBeInTheDocument()
+    })
+
+    /** It belongs to playback mode alone — a feed the Listener switched off has
+     *  its own way back, and one that is merely live has nothing to return
+     *  from. */
+    it('offers it nowhere else', async () => {
+      const user = userEvent.setup()
+      listening(call())
+      expect(
+        screen.queryByRole('button', { name: 'Back to live' }),
+      ).toBeNull()
+
+      await user.click(toggle())
+
+      expect(
+        screen.queryByRole('button', { name: 'Back to live' }),
+      ).toBeNull()
+    })
+  })
+
+  /**
+   * **The card outlives the transmission** (#56, spec US 54).
+   *
+   * A scanner's readout does not go blank the instant a Talkgroup unkeys, and
+   * neither should this one: what was just said is what a Listener is still
+   * reading, and — the reason this ticket exists — *the moment they reach for
+   * Avoid*. Before this the display fell back to "waiting for the first call",
+   * which was a lie about an archive with Calls in it and left Hold and Avoid
+   * pointing at nothing.
+   */
+  describe('the last Call, after it has ended (#56)', () => {
+    /** Skip with an empty queue: nothing is on the air, and the feed is fine. */
+    const fallenQuiet = async (user: ReturnType<typeof userEvent.setup>) => {
+      const store = listening(call())
+      await user.click(screen.getByRole('button', { name: 'Skip' }))
+      return store
+    }
+
+    it('stays on the display rather than blanking the screen', async () => {
+      const user = userEvent.setup()
+      await fallenQuiet(user)
+
+      expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
+      expect(screen.queryByText(/waiting for the first call/i)).toBeNull()
+    })
+
+    /** Dimmed, and *said* — a card that looks identical to a Call in progress
+     *  would be the same lie in the other direction. The word is what a screen
+     *  reader gets, since the dimming is not something it can see. */
+    it('says the transmission has ended', async () => {
+      const user = userEvent.setup()
+      await fallenQuiet(user)
+
+      expect(within(display()).getByText(/^ended$/i)).toBeInTheDocument()
+    })
+
+    it('says no such thing while a Call is actually playing', () => {
+      listening(call())
+
+      expect(within(display()).queryByText(/^ended$/i)).toBeNull()
+    })
+
+    /** The whole point: a chatty Talkgroup stops keying, and *that* is when
+     *  somebody reaches for the mute. */
+    it('lets Avoid act on it, which is when a Listener reaches for Avoid', async () => {
+      const user = userEvent.setup()
+      const store = await fallenQuiet(user)
+
+      await user.click(screen.getByRole('button', { name: 'Avoid' }))
+
+      expect(selectIsAvoided(store.getState(), 11, 54241)).toBe(true)
+    })
+
+    it('lets Hold act on it too', async () => {
+      const user = userEvent.setup()
+      const store = await fallenQuiet(user)
+
+      await user.click(screen.getByRole('button', { name: 'Hold talkgroup' }))
+
+      expect(selectHold(store.getState())).toEqual({
+        systemRef: 11,
+        talkgroupRef: 54241,
+      })
+    })
+
+    /** Nothing is on the air, so the two controls that act on *audio* stay out
+     *  of reach — a card that re-enabled everything would be a different lie. */
+    it('leaves Skip and Pause out of reach, because there is no audio', async () => {
+      const user = userEvent.setup()
+      await fallenQuiet(user)
+
+      expect(screen.getByRole('button', { name: 'Skip' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Pause' })).toBeDisabled()
+    })
+
+    /** The two silences the Listener chose keep #88's own words: there is
+     *  nothing to act on there, so a card with every control dead would say
+     *  less than the sentence that tells them how to get the feed back. */
+    it('gives way to the reason when the feed is one the Listener switched off', async () => {
+      const user = userEvent.setup()
+      listening(call())
+
+      await user.click(toggle())
+
+      expect(
+        screen.queryByRole('region', { name: 'Scanner display' }),
+      ).toBeNull()
+      expect(screen.getByText(/switched off/i)).toBeInTheDocument()
     })
   })
 
@@ -564,11 +699,14 @@ describe('LiveScreen', () => {
       const user = userEvent.setup()
       listening(call())
       await user.click(screen.getByRole('button', { name: 'Skip' }))
-      expect(screen.getByText(/waiting for the first call/i)).toBeInTheDocument()
+      // Still on the card, dimmed and marked over (#56) — which is what makes
+      // Replay's target the thing the Listener is looking at.
+      expect(within(display()).getByText(/^ended$/i)).toBeInTheDocument()
 
       await user.click(screen.getByRole('button', { name: 'Replay' }))
 
       expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
+      expect(within(display()).queryByText(/^ended$/i)).toBeNull()
     })
 
     it('lists the recent Calls and replays a chosen one', async () => {
@@ -648,15 +786,74 @@ describe('LiveScreen — what the recorder knew (#42)', () => {
     expect(within(display()).queryByTitle('Encrypted')).toBeNull()
   })
 
-  it('shows encrypted activity in RECENT without ever playing it', () => {
+  /**
+   * An encrypted Call is activity, not audio (#42, spec US 9) — it never plays.
+   * Since #56 it is still *shown*: it goes straight to the head of RECENT, and
+   * the card shows the last Call there is, dimmed and marked over. That is the
+   * honest reading — the channel was busy and this Listener heard nothing — and
+   * it is the only thing that keeps the card and the controls in step, because
+   * Hold and Avoid resolve the same Call whether or not it is drawn. An
+   * encrypted Talkgroup that will not stop keying is a prime candidate for
+   * Avoid, and before this there was no way to reach one from the Live screen
+   * at all.
+   */
+  it('shows encrypted activity without ever playing it', () => {
     const { audioUrl: _none, ...metadataOnly } = call({ id: 7 })
-    listening({ ...metadataOnly, encrypted: true })
+    const store = listening({ ...metadataOnly, encrypted: true })
 
-    // Nothing is playing: an encrypted Call has no audio, and the display would
-    // otherwise sit on it forever with no `src` to end.
-    expect(screen.queryByRole('region', { name: 'Scanner display' })).toBeNull()
+    // Nothing is playing: an encrypted Call has no audio, and the transport
+    // would otherwise sit on it forever with no `src` to end.
+    expect(selectLiveCall(store.getState())).toBeNull()
+    expect(within(display()).getByText(/^ended$/i)).toBeInTheDocument()
+    expect(within(display()).getByTitle('Encrypted')).toBeInTheDocument()
     const recent = screen.getByRole('list', { name: 'Recent calls' })
     expect(within(recent).getByTitle('Encrypted')).toBeInTheDocument()
+  })
+
+  /** …and it can be silenced from the card it is drawn on. */
+  it('lets an encrypted Talkgroup be avoided from the display', async () => {
+    const user = userEvent.setup()
+    const { audioUrl: _none, ...metadataOnly } = call({ id: 7 })
+    const store = listening({ ...metadataOnly, encrypted: true })
+
+    await user.click(screen.getByRole('button', { name: 'Avoid' }))
+
+    expect(selectIsAvoided(store.getState(), 11, 54241)).toBe(true)
+  })
+
+  /**
+   * **Patch provenance, on the display and in RECENT** (#56, spec US 54).
+   *
+   * The criterion names the display first, and this is the surface where it
+   * matters most: a Listener hearing traffic on a channel they did not select
+   * is owed the reason, and a **Patch** is the reason (CONTEXT.md — the server
+   * delivers a Call that reaches any selected member). rdio-scanner routes
+   * patched traffic correctly and then tells a Listener nothing at all.
+   */
+  it('badges a patched call on the display and in RECENT alike', async () => {
+    const user = userEvent.setup()
+    listening(call({ patches: [54242, 54255] }))
+
+    expect(
+      within(display()).getByTitle('Patched to 54242, 54255'),
+    ).toBeInTheDocument()
+
+    // …and it survives the Call ending, because the badge belongs to the Call
+    // rather than to it being on the air.
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+    const recent = screen.getByRole('list', { name: 'Recent calls' })
+    expect(
+      within(recent).getByTitle('Patched to 54242, 54255'),
+    ).toBeInTheDocument()
+    expect(
+      within(display()).getByTitle('Patched to 54242, 54255'),
+    ).toBeInTheDocument()
+  })
+
+  it('leaves an unpatched call unadorned', () => {
+    listening(call())
+
+    expect(within(display()).queryByTitle(/^Patched/)).toBeNull()
   })
 
   it('badges an encrypted call in RECENT while another one plays', () => {

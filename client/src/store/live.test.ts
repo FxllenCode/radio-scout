@@ -583,6 +583,48 @@ describe('live slice', () => {
 
       expect(selectHold(rootState(state))).toBeNull()
     })
+
+    /**
+     * **The Call being shown, not the one on the air** (#56).
+     *
+     * The display keeps the last Call up between transmissions, so a Listener
+     * pressing *Hold TG* a second after a Talkgroup stops keying is pressing it
+     * at the Call in front of them. Before this, the reducer read `current`,
+     * found it null, and did nothing — while the button was still lit, because
+     * a Hold is exactly the case #88's control gate could not refuse.
+     */
+    it('holds the last Call once it has finished, which is what the screen shows', () => {
+      const state = reduce(...arrive(call(1, 11, 100)), advance(), toggleHoldTalkgroup())
+
+      expect(selectHold(rootState(state))).toEqual({
+        systemRef: 11,
+        talkgroupRef: 100,
+      })
+    })
+
+    it('holds the last Call’s System too', () => {
+      const state = reduce(...arrive(call(1, 11, 100)), advance(), toggleHoldSystem())
+
+      expect(selectHold(rootState(state))).toEqual({
+        systemRef: 11,
+        talkgroupRef: null,
+      })
+    })
+
+    /** A Call on the air outranks the one behind it: the display is showing the
+     *  new one, and that is what the button means. */
+    it('holds what is playing rather than what was, when both exist', () => {
+      const state = reduce(
+        ...arrive(call(1, 11, 100), call(2, 11, 200)),
+        advance(),
+        toggleHoldTalkgroup(),
+      )
+
+      expect(selectHold(rootState(state))).toEqual({
+        systemRef: 11,
+        talkgroupRef: 200,
+      })
+    })
   })
 
   describe('avoid (spec US 14)', () => {
@@ -670,6 +712,15 @@ describe('live slice', () => {
       const idle = reduce(connected())
 
       expect(liveReducer(idle, avoid({ until: 0 }))).toEqual(idle)
+    })
+
+    /** The reason this ticket exists, in one line: a chatty Talkgroup stops
+     *  keying and *that* is the moment a Listener reaches for Avoid. It acts on
+     *  the Call the display is still showing (#56). */
+    it('avoids the last Call once it has finished, which is what the screen shows', () => {
+      const state = reduce(...arrive(call(1, 11, 100)), advance(), avoid({ until: 0 }))
+
+      expect(selectIsAvoided(rootState(state), 11, 100)).toBe(true)
     })
 
     /** An indefinite avoid has no deadline to lapse, so there has to be a way

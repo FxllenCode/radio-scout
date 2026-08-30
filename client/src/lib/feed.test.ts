@@ -112,10 +112,26 @@ const CONTROL_CASES: {
   },
   {
     // US 13: with nothing playing, Replay reaches back to the last Call.
+    //
+    // …and so do **Hold and Avoid** (#56). The Call the display is showing
+    // outlives the transmission — the card stays up, dimmed — and a Listener
+    // reaching for "mute that" the second a chatty Talkgroup stops keying is
+    // reaching for the thing on the screen in front of them. Skip and Pause do
+    // not follow: there is genuinely nothing on the air to skip or hold.
     what: 'a lull with something in RECENT',
     status: 'live',
     facts: { ...NOTHING, hasRecent: true },
-    expected: only('replay', 'recent'),
+    expected: only('holdSystem', 'holdTalkgroup', 'replay', 'avoid', 'recent'),
+  },
+  {
+    // The other half of that: nothing on the air and nothing ever heard, so
+    // there is no displayed Call for Hold or Avoid to mean anything about.
+    // Pinned separately because it is what stops "reaches the last Call" from
+    // quietly becoming "is always reachable".
+    what: 'a lull on a feed that has never carried a Call',
+    status: 'live',
+    facts: NOTHING,
+    expected: only(),
   },
   {
     // A dropped socket stops Calls arriving; it does not stop the one playing,
@@ -188,7 +204,9 @@ const READOUT_CASES: {
     link: 'connected',
     badge: { label: 'PLAYBACK', color: 'orange', pulse: false },
     headline: 'Playing from the archive.',
-    says: 'Leave playback mode from Search',
+    // #56 put the way back on this very screen, so the sentence stopped
+    // sending a Listener to another tab to find it.
+    says: 'Go back to the live feed',
   },
   {
     status: 'down',

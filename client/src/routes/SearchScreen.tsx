@@ -17,6 +17,7 @@ import { callCategory, systemName, talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
 import { markName } from '@/lib/webhook'
 import type { RunSearch } from '@/lib/run'
+import { playingDetail } from '@/lib/strip'
 import {
   dateTimeLocalToMs,
   downloadUrl,
@@ -590,9 +591,10 @@ function NowPlaying({
       <div className="min-w-0 flex-1">
         <p className="truncate font-mono text-sm">{talkgroupName(call)}</p>
         <p className="font-mono text-[11px] text-muted-foreground">
-          {interrupting
-            ? 'Interrupting live feed'
-            : `${position.index + 1} of ${position.total}`}
+          {/* The same sentence the mini-player says about the same Run (#56):
+              two spellings would be two screens quietly disagreeing about
+              where a Listener is. */}
+          {playingDetail(interrupting ? 'interrupting' : 'archive', position)}
         </p>
       </div>
       <Button

@@ -54,6 +54,22 @@ function pagedArchive(total = 51) {
   return { rows }
 }
 
+/**
+ * Where the **Run** has got to, read off the Search screen's own bar.
+ *
+ * Scoped, because since #56 the docked mini-player says the same thing about
+ * the same Run from the shell — an unscoped query finds it twice. Retried
+ * rather than read once: rolling onto a page takes the bar down for a beat
+ * while the Run waits for it.
+ */
+async function runPosition(text: string) {
+  await waitFor(() =>
+    expect(
+      within(screen.getByRole('region', { name: 'Now playing' })).getByText(text),
+    ).toBeInTheDocument(),
+  )
+}
+
 /** The result rows, once the first page has landed. */
 async function resultRows() {
   const list = await screen.findByRole('list', { name: 'Search results' })
@@ -310,7 +326,7 @@ describe('SearchScreen', () => {
           '/api/call/2/audio',
         ),
       )
-      expect(screen.getByText('2 of 3')).toBeInTheDocument()
+      await runPosition('2 of 3')
     })
 
     /** Spec US 25: "plays sequentially through filtered archive results **with
@@ -347,12 +363,12 @@ describe('SearchScreen', () => {
       const rows = await resultRows()
       // Start on the last Call of page one.
       await user.click(within(rows[49]).getByRole('button', { name: /^Play / }))
-      expect(screen.getByText('50 of 51')).toBeInTheDocument()
+      await runPosition('50 of 51')
 
       screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
 
       // Page two loaded, and playback carried straight on into it.
-      expect(await screen.findByText('51 of 51')).toBeInTheDocument()
+      await runPosition('51 of 51')
       expect(screen.getByTestId('call-player')).toHaveAttribute(
         'src',
         '/api/call/1050/audio',
@@ -515,7 +531,7 @@ describe('SearchScreen', () => {
         screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
       }
 
-      expect(await screen.findByText('51 of 51')).toBeInTheDocument()
+      await runPosition('51 of 51')
       expect(
         searches.filter((search) => search.includes('offset=50')),
       ).toHaveLength(1)
@@ -545,13 +561,13 @@ describe('SearchScreen', () => {
       for (let step = 0; step < 3; step += 1) {
         screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
       }
-      expect(await screen.findByText('51 of 101')).toBeInTheDocument()
+      await runPosition('51 of 101')
 
       // Walk page two down to its last two Calls.
       for (let step = 0; step < 47; step += 1) {
         screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
       }
-      expect(await screen.findByText('98 of 101')).toBeInTheDocument()
+      await runPosition('98 of 101')
 
       // Page three was fetched, and its first Call warmed, exactly as page two
       // was — which only happens if rolling on re-armed the page-ahead.
@@ -719,12 +735,12 @@ describe('SearchScreen', () => {
       )
       const rows = await resultRows()
       await user.click(within(rows[49]).getByRole('button', { name: /^Play / }))
-      expect(screen.getByText('50 of 120')).toBeInTheDocument()
+      await runPosition('50 of 120')
 
       screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
 
       // The Run is on page two...
-      expect(await screen.findByText('51 of 120')).toBeInTheDocument()
+      await runPosition('51 of 120')
       // ...and the list is still showing page one.
       expect(screen.getByText('1–50 of 120')).toBeInTheDocument()
     })
@@ -743,7 +759,7 @@ describe('SearchScreen', () => {
       // already leaves fewer than two behind it.
       await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
 
-      await waitFor(() => expect(screen.getByText('1 of 3')).toBeInTheDocument())
+      await runPosition('1 of 3')
       expect(searches.filter((search) => search.includes('offset=3'))).toEqual(
         [],
       )
@@ -783,17 +799,17 @@ describe('SearchScreen', () => {
       )
       const rows = await resultRows()
       await user.click(within(rows[1]).getByRole('button', { name: /^Play / }))
-      expect(screen.getByText('2 of 3')).toBeInTheDocument()
+      await runPosition('2 of 3')
 
       await user.click(screen.getByRole('button', { name: 'Previous call' }))
-      expect(screen.getByText('1 of 3')).toBeInTheDocument()
+      await runPosition('1 of 3')
       expect(screen.getByTestId('call-player')).toHaveAttribute(
         'src',
         '/api/call/3/audio',
       )
 
       await user.click(screen.getByRole('button', { name: 'Next call' }))
-      expect(screen.getByText('2 of 3')).toBeInTheDocument()
+      await runPosition('2 of 3')
     })
 
     /** #14: pause is store state the `<audio>` element follows, so the lock
@@ -808,18 +824,20 @@ describe('SearchScreen', () => {
       const rows = await resultRows()
       await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
 
-      await user.click(screen.getByRole('button', { name: 'Pause' }))
+      // The Search screen's own bar, not the shell's mini-player (#56) — both
+      // pause the same transport, and this test is about this screen's.
+      const bar = () =>
+        within(screen.getByRole('region', { name: 'Now playing' }))
+      await user.click(bar().getByRole('button', { name: 'Pause' }))
       // Still the current Call, still on the same source — paused, not dropped.
-      expect(screen.getByText('1 of 3')).toBeInTheDocument()
+      await runPosition('1 of 3')
       expect(screen.getByTestId('call-player')).toHaveAttribute(
         'src',
         '/api/call/3/audio',
       )
 
-      await user.click(screen.getByRole('button', { name: 'Resume' }))
-      expect(
-        screen.getByRole('button', { name: 'Pause' }),
-      ).toBeInTheDocument()
+      await user.click(bar().getByRole('button', { name: 'Resume' }))
+      expect(bar().getByRole('button', { name: 'Pause' })).toBeInTheDocument()
     })
 
     it('stops playing on demand', async () => {
@@ -1096,6 +1114,56 @@ describe('SearchScreen — what the recorder knew (#42)', () => {
     // an encrypted Call, so offering a play button would offer a 404.
     expect(within(rows[0]).queryByRole('button', { name: /^Play/ })).toBeNull()
     expect(within(rows[0]).queryByRole('link', { name: /^Download/ })).toBeNull()
+  })
+
+  /**
+   * **Patch provenance** (#56, spec US 54). A **Patch** is a console-made union
+   * of Talkgroups (CONTEXT.md), and a transmission that arrived on one is a
+   * different fact about the same row: the channel it is filed under is not the
+   * only channel it was on.
+   *
+   * The chip says which — an Operator reading a page wants to know a Call on
+   * FD Dispatch also went out on TAC 3, not merely that *something* was
+   * patched. rdio-scanner parses `patches[]`, routes on it, and then shows a
+   * Listener nothing at all.
+   */
+  it('badges a call that arrived on a patch, naming the channels', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) =>
+        HttpResponse.json(
+          archivePage(new URL(request.url), [
+            { ...ARCHIVE[0], id: 95, patches: [54242, 54255] },
+            { ...ARCHIVE[0], id: 96 },
+          ]),
+        ),
+      ),
+    )
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(
+      within(rows[0]).getByTitle('Patched to 54242, 54255'),
+    ).toBeInTheDocument()
+    expect(within(rows[1]).queryByTitle(/^Patched/)).toBeNull()
+  })
+
+  /** An empty array is not a patch. The server omits the key when there is
+   *  none, but a Call that has been through a client that serializes an empty
+   *  one must not read as patched to nothing. */
+  it('does not badge a call whose patch list is empty', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) =>
+        HttpResponse.json(
+          archivePage(new URL(request.url), [
+            { ...ARCHIVE[0], id: 97, patches: [] },
+          ]),
+        ),
+      ),
+    )
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(within(rows[0]).queryByTitle(/^Patched/)).toBeNull()
   })
 
   /** Searching by radio (#47, spec US 44). A typed Ref rather than a dropdown:

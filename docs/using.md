@@ -39,6 +39,11 @@ Badges appear beside a Talkgroup's name when there is something to say about the
 | ⚠ **Emergency** | The radio's emergency button was pressed on this transmission. |
 | 📡 **Tone-out** | A station was paged on this Call — your operator wrote down its paging tones, and they were heard in the audio. The badge names it: *Tone-out: Station 12*. |
 | 🔒 **Encrypted** | The Talkgroup is encrypted, so there is no audio to hear. |
+| 🔗 **Patched** | A dispatcher patched this Talkgroup to others, so the transmission went out on all of them at once. The badge names the channels: *Patched to 54242, 54255*. |
+
+The first three are things *about the transmission*; the last is about how it was carried, and it
+is the one rdio-scanner throws away — it routes patched traffic correctly and then never tells you
+a Call arrived that way.
 
 None of these notifies anybody. Radio-Scout does not send push notifications and never will —
 a badge is something you find, not something that wakes your phone.
@@ -102,9 +107,29 @@ it.
 
 The Live screen's controls follow the dot: with the feed off or the archive playing, the
 per-Call controls are out of reach rather than present and inert. The **LIVE FEED** switch stays
-usable throughout — on **FEED OFF** it is the way back, and on **PLAYBACK** it still means what
-it says, so pressing it there switches the feed off rather than leaving playback. You leave
-playback mode from **Search**, where you entered it.
+usable throughout — on **FEED OFF** it is the way back, and on **PLAYBACK** it still reads *on*,
+because the feed was never switched off: playback has simply borrowed the audio. The way out of
+playback is its own button, **BACK TO LIVE**, which appears right under the switch.
+
+**The last Call stays on the display after it ends**, dimmed and marked `ENDED`, until the next
+one arrives. That is deliberate: a scanner's readout does not blank the moment a channel unkeys,
+and *after* the transmission is exactly when you reach for **Avoid** — so Hold, Avoid and Replay
+go on acting on the Call in front of you. Skip and Pause do not, because there is no audio left
+to skip or pause.
+
+### The strip above the tabs
+
+Every screen except **Live** carries a docked strip saying what the app is doing, because Live is
+the only one with a player on it and leaving that screen used to take the truth with it. It shows
+whichever of two things applies:
+
+- **What is playing** — the Talkgroup, whose audio it is (`Live`, `Interrupting live feed`, or
+  where you are in a playback run), and pause and skip. The full set of controls stays on Live.
+- **Why nothing is** — `FEED OFF` or `PLAYBACK`, with the one tap that undoes it.
+
+When the feed is simply quiet, or the connection has briefly dropped, the strip says nothing:
+neither is something you can act on, and a bar on every screen for a lull is a bar you learn to
+ignore.
 
 **Hold and Avoid are opposites, and both are temporary.** Hold means "only this"; Avoid means
 "anything but this". A timed Avoid is the one to reach for when a Talkgroup is having a busy
@@ -180,7 +205,8 @@ Each result plays in place, or downloads with the arrow. Encrypted Calls have ne
 they are metadata-only records, with a 🔒 badge and no audio behind them. **PLAYBACK MODE**, top right, switches
 from the live feed to playing the search results in sequence — for working through an incident
 after the fact rather than waiting on what arrives next. Live feed and playback mode are
-mutually exclusive: you are in one or the other.
+mutually exclusive: you are in one or the other, and either the strip above the tabs or the
+**BACK TO LIVE** button on the Live screen takes you back.
 
 ---
 

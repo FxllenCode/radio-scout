@@ -20,6 +20,7 @@ import { formatCallTime } from '@/lib/archive'
 import { feedReadout, type FeedBadge, type FeedEmpty } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
 import { isSystemHold, isTalkgroupHold } from '@/lib/selection'
+import { wayBack } from '@/lib/strip'
 import { cn } from '@/lib/utils'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
@@ -28,6 +29,7 @@ import {
   clearAvoids,
   replay,
   selectAvoidedCount,
+  selectDisplay,
   selectFeedStatus,
   selectHistory,
   selectHold,
@@ -48,6 +50,7 @@ import {
   selectIsPaused,
   selectProgress,
   togglePause,
+  wayBackAction,
 } from '@/store/transport'
 import type { Call } from '@/types'
 
@@ -97,6 +100,25 @@ export function LiveScreen() {
   // is quiet: in playback mode the feed is not delivering and the switch is
   // still on, so pressing it there is a request to switch it off.
   const off = feed === 'off'
+  // The one tap out of whichever silence this is, named once for the whole app.
+  const exit = wayBack(feed)
+  /**
+   * The Call the display is showing, which outlives the transmission (#56).
+   *
+   * A scanner's readout does not blank the instant a Talkgroup unkeys, and this
+   * one used to: the last Call went to RECENT and the screen fell back to
+   * "waiting for the first call", which is a lie about an archive with Calls in
+   * it — and it left *Hold* and *Avoid* pointing at nothing at exactly the
+   * moment a Listener reaches for them.
+   *
+   * Read from `@/store/live` rather than assembled here, because the reducers
+   * behind those controls resolve the very same Call: a second spelling of the
+   * precedence is how a lit button comes to act on something the card is not
+   * showing. The two silences a Listener *chose* are folded into that answer
+   * too, and keep #88's words instead — a card with every control dead says
+   * strictly less than the sentence explaining how to get the feed back.
+   */
+  const { call: showing, ended } = useAppSelector(selectDisplay)
   // The live feed's own progress — an archived Call interrupting it (US 26) is
   // on the element instead, and its position isn't this display's to draw.
   const progress = useAppSelector((state) =>
@@ -119,9 +141,10 @@ export function LiveScreen() {
         </span>
       }
     >
-      {call ? (
+      {showing ? (
         <Display
-          call={call}
+          call={showing}
+          ended={ended}
           progress={progress}
           paused={paused}
           missed={missed}
@@ -150,6 +173,28 @@ export function LiveScreen() {
           {off ? 'Feed off — turn on' : 'Live feed on'}
         </Control>
       </div>
+
+      {/* The way out of **Playback mode** (#56, spec US 54), and deliberately
+          *not* the switch above it: that switch reads on here and is right to —
+          the feed was never switched off, playback borrowed the audio — so
+          overloading it would trade one lie for another (#88). Its own row,
+          because with every control below it dead this is the only thing on the
+          screen worth pressing.
+          Only playback: **Feed off**'s way back is the switch itself, and
+          offering it twice would be two buttons for one action. The word and
+          the action are the mini-player's own ([`wayBack`]), so the two
+          surfaces cannot come to call it different things. */}
+      {feed === 'playback' && exit && (
+        <div className="mt-2">
+          <Control
+            label={exit.label}
+            onClick={() => dispatch(wayBackAction[exit.does]())}
+            icon={<Radio className="size-3.5" aria-hidden />}
+          >
+            {exit.label}
+          </Control>
+        </div>
+      )}
 
       <div className="mt-2 grid grid-cols-3 gap-2">
         <Control
@@ -248,15 +293,22 @@ export function LiveScreen() {
   )
 }
 
-/** The scanner readout: who is talking, on what, and where in the Call we are. */
+/** The scanner readout: who is talking — or who just was — on what, and where
+ *  in the Call we are. */
 function Display({
   call,
+  ended,
   progress,
   paused,
   missed,
   gap,
 }: {
   call: Call
+  /** The transmission is over and this is the card it left behind (#56). Dimmed
+   *  and said, because a finished Call that looked identical to one in progress
+   *  would be the same lie in the other direction — and *said*, because the
+   *  dimming is not something a screen reader can see. */
+  ended: boolean
   progress: number
   paused: boolean
   missed: number
@@ -267,11 +319,20 @@ function Display({
   return (
     <section
       aria-label="Scanner display"
-      className="rounded-xl border border-border bg-card px-4 py-4"
+      className={cn(
+        'rounded-xl border border-border bg-card px-4 py-4 transition-opacity',
+        ended && 'opacity-60',
+      )}
     >
       <div className="flex items-start gap-3">
-        {/* docs/design/brief.md state 6: paused blinks, playing is steady. */}
-        <StatusLed color={color} size={16} pulse={paused} className="mt-1.5" />
+        {/* docs/design/brief.md state 6: paused blinks, playing is steady —
+            and an ended Call is neither, so it does not blink either. */}
+        <StatusLed
+          color={color}
+          size={16}
+          pulse={paused && !ended}
+          className="mt-1.5"
+        />
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-2 truncate font-mono text-lg leading-tight">
             <span className="truncate">{talkgroupName(call)}</span>
@@ -288,18 +349,20 @@ function Display({
             </p>
           )}
         </div>
-        {paused && (
+        {(ended || paused) && (
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            Paused
+            {ended ? 'Ended' : 'Paused'}
           </span>
         )}
       </div>
 
+      {/* Still, and back at the start: a waveform walking through a Call that
+          has finished would be drawing audio nobody is hearing. */}
       <Waveform
         seed={call.id}
         color={color}
-        progress={progress}
-        live={!paused}
+        progress={ended ? 0 : progress}
+        live={!paused && !ended}
         className="mt-4"
       />
 

@@ -1,18 +1,38 @@
 import type { ReactNode } from 'react'
 
+import { cn } from '@/lib/utils'
+
 /**
- * The one banner slot, docked above the tab bar (design brief 19A).
+ * One card in the docked column above the tab bar (design brief 19A).
  *
- * There is exactly one of these on screen at a time — the shell decides what
- * goes in it — so its geometry lives here rather than being copied into each
- * thing that wants the spot.
+ * The shell decides what goes in that column and in what order — since #56 it
+ * can hold a mini-player under the banner — so what lives here is the *card*:
+ * the geometry every docked thing shares, rather than being copied into each
+ * one that wants the spot.
+ *
+ * `label` names it for a screen reader, which is also what makes it a region:
+ * a `<section>` without an accessible name is exposed as nothing at all, so the
+ * two banners stay unnamed generic boxes and only the mini-player becomes
+ * something a screen reader can jump to.
  */
-export function DockedBanner({ children }: { children: ReactNode }) {
+export function DockedBanner({
+  label,
+  className,
+  children,
+}: {
+  label?: string
+  className?: string
+  children: ReactNode
+}) {
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-16 z-40 flex justify-center px-3">
-      <div className="pointer-events-auto flex w-full max-w-2xl items-center gap-3 rounded-xl border border-border bg-card px-4 py-3.5 shadow-lg">
-        {children}
-      </div>
-    </div>
+    <section
+      aria-label={label}
+      className={cn(
+        'pointer-events-auto flex w-full items-center gap-3 rounded-xl border border-border bg-card px-4 py-3.5 shadow-lg',
+        className,
+      )}
+    >
+      {children}
+    </section>
   )
 }

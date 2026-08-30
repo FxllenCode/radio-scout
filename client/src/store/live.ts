@@ -207,6 +207,57 @@ function next(state: LiveState) {
   play(state, taken.next)
 }
 
+/** What the scanner display is showing, and whether the transmission is over. */
+export interface Displayed {
+  /** The Call on the card, or `null` when the screen is showing a reason
+   *  instead of a Call. */
+  call: Call | null
+  /** It has finished: the card is up, dimmed, and nothing is on the air. */
+  ended: boolean
+}
+
+/**
+ * The Call the screen is showing, which outlives the transmission (#56).
+ *
+ * The scanner display keeps the last Call up between transmissions, dimmed,
+ * with its controls live — so *Hold* and *Avoid* mean the Call in front of the
+ * Listener, not the one on the air. That distinction only exists because there
+ * usually is no Call on the air: a chatty Talkgroup stopping is precisely the
+ * moment somebody reaches for Avoid, and before this the reducer read
+ * [`LiveState.current`], found `null`, and silently did nothing under a lit
+ * button.
+ *
+ * **Written once, and read from three places that must not disagree** — the
+ * reducers below through [`subjectOf`], the screen through [`selectDisplay`],
+ * and [`controlsFor`], which gates those same controls on `onAir || hasRecent`.
+ * Three spellings of one precedence is how a reachable button comes to act on a
+ * Call the card is not showing.
+ *
+ * Two clauses carry it. `history[0]` is the whole of "the last Call", because
+ * [`play`] files the Call it displaces at the head of that list. And
+ * [`feedPlays`] is the gate: the two silences a Listener *chose* show them why
+ * instead, and without it here the Call `turnFeedOff` had just filed would
+ * still be reachable by *Avoid* with the feed shut.
+ *
+ * Written over the three fields rather than the slice so [`selectDisplay`] can
+ * memoize on them — the [`matrixFrom`] precedent, and for the same reason: a
+ * memoized selector over an Immer draft caches against a proxy that dies with
+ * the reducer.
+ */
+function displayedIn(
+  status: FeedStatus,
+  current: Call | null,
+  history: Call[],
+): Displayed {
+  const call = feedPlays(status) ? (current ?? history[0] ?? null) : null
+  return { call, ended: call !== null && current === null }
+}
+
+/** [`displayedIn`] over a whole slice — what the reducers act on. */
+function subjectOf(state: LiveState): Call | null {
+  return displayedIn(statusOf(state), state.current, state.history).call
+}
+
 /**
  * Let every **Avoid** whose deadline has passed lapse (spec US 14's
  * auto-reactivate).
@@ -469,35 +520,43 @@ const liveSlice = createSlice({
       play(state, again)
     },
 
-    /** Narrow to the System that's talking, or let it go again. */
+    /** Narrow to the System on the display, or let it go again — see
+     *  [`displayedIn`] for why that is not always the System that is
+     *  talking. */
     toggleHoldSystem(state) {
       if (isSystemHold(state.hold)) {
         state.hold = null
         return
       }
-      if (!state.current) return
-      state.hold = { systemRef: state.current.systemRef, talkgroupRef: null }
+      const on = subjectOf(state)
+      if (!on) return
+      state.hold = { systemRef: on.systemRef, talkgroupRef: null }
       purge(state)
     },
 
-    /** Narrow to the Talkgroup that's talking, or let it go again. */
+    /** Narrow to the Talkgroup on the display, or let it go again. */
     toggleHoldTalkgroup(state) {
       if (isTalkgroupHold(state.hold)) {
         state.hold = null
         return
       }
-      if (!state.current) return
+      const on = subjectOf(state)
+      if (!on) return
       state.hold = {
-        systemRef: state.current.systemRef,
-        talkgroupRef: state.current.talkgroupRef,
+        systemRef: on.systemRef,
+        talkgroupRef: on.talkgroupRef,
       }
       purge(state)
     },
 
-    /** Mute the Talkgroup that's talking until `until` (0 = until released).
-     *  The moment is computed by the caller so this stays a pure reducer. */
+    /** Mute the Talkgroup on the display until `until` (0 = until released).
+     *  The moment is computed by the caller so this stays a pure reducer.
+     *
+     *  This is the control [`displayedIn`] exists for: a Talkgroup that will not
+     *  stop chattering is one a Listener silences a beat *after* it stops, not
+     *  during. */
     avoid(state, action: PayloadAction<{ until: number }>) {
-      const call = state.current
+      const call = subjectOf(state)
       if (!call) return
 
       state.avoided[avoidKey(call.systemRef, call.talkgroupRef)] =
@@ -660,6 +719,25 @@ export const selectLiveControls: (state: WithLive) => Controls = createSelector(
       talkgroupHold: isTalkgroupHold(hold),
       hasRecent: history.length > 0,
     }),
+)
+
+/**
+ * What the scanner display is showing (#56) — the Call, and whether it is over.
+ *
+ * The same [`displayedIn`] the reducers resolve *Hold* and *Avoid* against, so
+ * the card and the controls under it can never be about two different Calls.
+ *
+ * Memoized for [`selectLiveControls`]'s reason: the Live screen re-renders
+ * several times a second while a Call plays, and a fresh object each time would
+ * defeat every comparison downstream of it.
+ */
+export const selectDisplay: (state: WithLive) => Displayed = createSelector(
+  [
+    selectFeedStatus,
+    (state: WithLive) => state.live.current,
+    (state: WithLive) => state.live.history,
+  ],
+  displayedIn,
 )
 
 /** Is this Talkgroup silenced right now? *When* it lapses is on the deadline

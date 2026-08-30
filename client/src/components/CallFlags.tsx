@@ -1,14 +1,15 @@
-import { Lock, RadioTower, TriangleAlert } from 'lucide-react'
+import { Lock, RadioTower, TriangleAlert, Waypoints } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 import type { Call } from '@/types'
 
 /**
- * The three things known about a transmission that change how a listener should
+ * The four things known about a transmission that change how a listener should
  * read it: the **Emergency** bit the radio set (#42, spec US 5), that the
- * talkgroup was encrypted (spec US 9), and that a **Tone profile** on this
- * channel was paged in the audio (#55, spec US 20).
+ * talkgroup was encrypted (spec US 9), that a **Tone profile** on this channel
+ * was paged in the audio (#55, spec US 20), and that it arrived on a **Patch**
+ * (#56, spec US 54).
  *
  * The first and the third are **Marks** (CONTEXT.md) and are shown identically
  * here on purpose — one is proved by the wire and the other by this Instance's
@@ -21,6 +22,12 @@ import type { Call } from '@/types'
  * nothing at all when the flag is unset, which is nearly always — a badge that
  * is usually present is a badge nobody sees.
  *
+ * The **Patch** chip is the odd one out and deliberately kept here anyway: it
+ * is provenance rather than a **Mark**, so it never fires a Webhook and is not
+ * in `MARKS`. But a Listener reading a row is asking the same *kind* of
+ * question of it — "is there something about this one?" — and putting it
+ * anywhere else would be a second badge strip beside this one.
+ *
  * **The icon carries the meaning, not the colour.** Red-on-amber is not a
  * distinction every listener can make, so each badge is a shape *and* a
  * `title`, and the title is what the tests and a screen reader read.
@@ -29,10 +36,12 @@ export function CallFlags({
   call,
   className,
 }: {
-  call: Pick<Call, 'emergency' | 'encrypted' | 'tone' | 'tones'>
+  call: Pick<Call, 'emergency' | 'encrypted' | 'tone' | 'tones' | 'patches'>
   className?: string
 }) {
-  if (!call.emergency && !call.encrypted && !call.tone) return null
+  const patches = call.patches ?? []
+  if (!call.emergency && !call.encrypted && !call.tone && patches.length === 0)
+    return null
   return (
     <span className={cn('flex shrink-0 items-center gap-1', className)}>
       {call.emergency && (
@@ -54,8 +63,32 @@ export function CallFlags({
           <Lock className="size-3.5" aria-hidden />
         </Flag>
       )}
+      {/* Muted, like the encryption lock and unlike the two Marks above: a
+          patch is a fact about *routing*, not a thing to look at or act on.
+          Last in the strip for the same reason. */}
+      {patches.length > 0 && (
+        <Flag label={patchedLabel(patches)} className="text-muted-foreground">
+          <Waypoints className="size-3.5" aria-hidden />
+        </Flag>
+      )}
     </span>
   )
+}
+
+/** Which channels this transmission was also on.
+ *
+ *  Named rather than counted, because "patched" alone leaves a Listener with a
+ *  question they have no way to answer: a Call filed under FD Dispatch that also
+ *  went out on TAC 3 is a different thing from one patched to a neighbouring
+ *  county, and only the Refs say which. Refs rather than labels because a
+ *  patch's members are Refs on the wire (CONTEXT.md) — some of them minted for
+ *  the patch event itself, so there is frequently no Talkgroup to have a label.
+ *
+ *  Takes the resolved list rather than the Call, because the caller has already
+ *  had to decide whether there is a patch at all — the same answer gates the
+ *  whole strip — and re-asking here would be a branch nothing can reach. */
+function patchedLabel(patches: number[]): string {
+  return `Patched to ${patches.join(', ')}`
 }
 
 /** What the tone-out badge is *called*, which is where the station name lives.
