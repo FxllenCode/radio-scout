@@ -7,11 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { EVERYTHING } from '@/lib/selection'
 import { avoid, received, selectSelection } from '@/store/live'
+import { selectPinned, showSystem } from '@/store/panel'
 import { makeStore, type AppStore } from '@/store/store'
 import { progressed } from '@/store/transport'
 
 import { TalkgroupsScreen } from './TalkgroupsScreen'
-import { ORIGIN } from '@/test/handlers'
+import { countyCatalog, ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderApp, renderWithProviders } from '@/test/utils'
 
@@ -47,6 +48,18 @@ const talkgroupRow = (label: string) =>
   screen.findByRole('switch', { name: new RegExp(`^${label}`) })
 
 const summary = () => screen.getByTestId('selection-summary')
+
+/** Tell every windowed list it sits `top` pixels from the top of the viewport,
+ *  and let it notice. jsdom lays nothing out — every rect is zeros — so a
+ *  scroll position is something a test states rather than performs. */
+function scrolledTo(top: number) {
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+    top,
+  } as DOMRect)
+  act(() => {
+    window.dispatchEvent(new Event('scroll'))
+  })
+}
 
 /** A store with Talkgroup 1 of System 100 avoided until `until`. */
 function withAvoided(until: number): AppStore {
@@ -309,6 +322,7 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
     server.use(
       http.get(`${ORIGIN}/api/catalog`, () =>
         HttpResponse.json({
+          activityWindowMs: 24 * 60 * 60 * 1_000,
           systems: [{ ref: 42, talkgroups: [{ ref: 7, groups: [] }] }],
         }),
       ),
@@ -323,7 +337,7 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
 
   it('invites a recorder when there is nothing to select yet', async () => {
     server.use(
-      http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json({ systems: [] })),
+      http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json({ systems: [], activityWindowMs: 24 * 60 * 60 * 1_000 })),
     )
     showPanel()
 
@@ -351,16 +365,20 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
    * true of whatever the panel is made of later: a future inline object
    * anywhere in this subtree fails here.
    */
-  it('does not redraw because audio is playing', async () => {
+  it('does not redraw a 400-row panel because audio is playing', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(countyCatalog(400))),
+    )
     let commits = 0
     const store = scannerStore()
+    store.dispatch(showSystem({ systemRef: 1, shown: true }))
     renderWithProviders(
       <Profiler id="talkgroups" onRender={() => void (commits += 1)}>
         <TalkgroupsScreen />
       </Profiler>,
       { store },
     )
-    await talkgroupRow('Alpha Fire')
+    await screen.findByRole('switch', { name: /Channel 001/ })
     const drawn = commits
 
     act(() => {
@@ -380,5 +398,219 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
     await talkgroupRow('Alpha Fire')
 
     expect(await axe(container)).toHaveNoViolations()
+  })
+
+  // -------------------------------------------------------------------------
+  // County scale (#57): 400+ rows that still behave like a panel.
+  // -------------------------------------------------------------------------
+
+  /** Serve a County of `rows` Talkgroups, and open the System that holds them —
+   *  at this size it starts folded away, which is the point. The fixture runs
+   *  activity backwards against catalog order (`countyCatalog`), so nothing
+   *  below can pass against a sort that does nothing. */
+  function showCounty(rows: number, opened = true) {
+    // Built now rather than when the request lands: the ages on these rows are
+    // measured against the screen's own clock, which starts at mount.
+    const catalog = countyCatalog(rows)
+    server.use(http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(catalog)))
+    const store = scannerStore()
+    if (opened) store.dispatch(showSystem({ systemRef: 1, shown: true }))
+    return showPanel(store)
+  }
+
+  const switches = () => screen.getAllByRole('switch')
+
+  describe('at county scale', () => {
+    /** The acceptance criterion, as the DOM can answer it: four hundred rows
+     *  are not four hundred buttons. What is drawn is what is on screen and a
+     *  little either side. */
+    it('draws a windowful of a 400-row System, not 400 rows', async () => {
+      showCounty(400)
+      await screen.findByRole('switch', { name: /Channel 001/ })
+
+      expect(switches().length).toBeGreaterThan(1)
+      expect(switches().length).toBeLessThan(100)
+      expect(screen.queryByRole('switch', { name: /Channel 400/ })).toBeNull()
+    })
+
+    /** ...and the rows it skipped are still *there*: the list stands its full
+     *  height, so the page's scroll bar does not shrink as the Listener reads
+     *  and the browser never yanks their position. */
+    it('stands as tall as the whole System while drawing a slice of it', async () => {
+      showCounty(400)
+      await screen.findByRole('switch', { name: /Channel 001/ })
+      const list = screen.getByRole('switch', { name: /Channel 001/ }).closest('ul')!
+
+      const drawn = switches().length
+      const padding =
+        Number.parseInt(list.style.paddingTop || '0', 10) +
+        Number.parseInt(list.style.paddingBottom || '0', 10)
+
+      expect(padding + drawn * 44).toBe(400 * 44)
+    })
+
+    it('draws the rows the Listener has scrolled to', async () => {
+      showCounty(400)
+      await screen.findByRole('switch', { name: /Channel 001/ })
+
+      // jsdom lays nothing out, so the list is told where it is: a hundred
+      // rows' worth of scroll above the top of the viewport.
+      scrolledTo(-100 * 44)
+
+      expect(await screen.findByRole('switch', { name: /Channel 100/ })).toBeVisible()
+      expect(screen.queryByRole('switch', { name: /Channel 001/ })).toBeNull()
+    })
+
+    it('folds a county-sized System away and opens it on a tap', async () => {
+      showCounty(400, false)
+      const header = await screen.findByRole('button', { name: 'County' })
+
+      expect(header).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByRole('switch')).toBeNull()
+      // Its controls are still on screen, which is what folding buys.
+      expect(screen.getByRole('button', { name: /Turn County all off/ })).toBeVisible()
+
+      await userEvent.click(header)
+
+      expect(header).toHaveAttribute('aria-expanded', 'true')
+      expect(switches().length).toBeGreaterThan(0)
+    })
+
+    it('leaves a small System open', async () => {
+      showPanel()
+      await talkgroupRow('Alpha Fire')
+
+      expect(screen.getByRole('button', { name: 'Alpha' })).toHaveAttribute(
+        'aria-expanded',
+        'true',
+      )
+    })
+
+    /** The global controls are above the list rather than below it: at 400 rows
+     *  an "All off" at the foot is a control that exists and cannot be
+     *  reached. */
+    it('keeps the global controls with the filter and the summary', async () => {
+      showCounty(400)
+      await screen.findByRole('switch', { name: /Channel 001/ })
+      const bar = screen.getByRole('searchbox', { name: /filter/i }).closest('div')!
+        .parentElement!
+
+      expect(within(bar).getByRole('button', { name: 'Turn everything off' })).toBeVisible()
+      expect(within(bar).getByText('400 of 400 on')).toBeVisible()
+    })
+  })
+
+  describe('Pins (spec US 29)', () => {
+    const pinnedSection = () => screen.getByRole('region', { name: 'Pinned' })
+
+    it('holds a pinned Talkgroup at the top, and says which System it is from', async () => {
+      const { store } = showPanel()
+      await talkgroupRow('Beta Dispatch')
+
+      await userEvent.click(screen.getByRole('button', { name: 'Pin Beta Dispatch' }))
+
+      expect(selectPinned(store.getState())).toEqual(['200:1'])
+      const pinned = within(pinnedSection()).getByRole('switch', { name: /Beta Dispatch/ })
+      expect(pinned).toBeChecked()
+      expect(within(pinnedSection()).getByText('Beta')).toBeVisible()
+      // The panel's first list is the pinned one: it is drawn above every
+      // System, which is the whole of what a Pin buys at 400 rows.
+      expect(screen.getAllByRole('list')[0]).toBe(within(pinnedSection()).getByRole('list'))
+    })
+
+    /** A Pin is panel ordering and nothing else (CONTEXT.md), so the row is
+     *  still in its System — and both copies act on the same Talkgroup. */
+    it('leaves the row in its System, and either copy still switches it', async () => {
+      const { store } = showPanel()
+      await talkgroupRow('Beta Dispatch')
+      await userEvent.click(screen.getByRole('button', { name: 'Pin Beta Dispatch' }))
+
+      const beta = screen.getByRole('group', { name: /Beta/ })
+      await userEvent.click(within(beta).getByRole('switch', { name: /Beta Dispatch/ }))
+
+      expect(
+        within(pinnedSection()).getByRole('switch', { name: /Beta Dispatch/ }),
+      ).not.toBeChecked()
+      expect(selectSelection(store.getState())).toEqual({
+        all: true,
+        sel: { '200': { '1': false } },
+      })
+    })
+
+    it('unpins it again, and the section goes with the last Pin', async () => {
+      showPanel()
+      await talkgroupRow('Beta Dispatch')
+      await userEvent.click(screen.getByRole('button', { name: 'Pin Beta Dispatch' }))
+
+      await userEvent.click(
+        within(pinnedSection()).getByRole('button', { name: 'Unpin Beta Dispatch' }),
+      )
+
+      expect(screen.queryByRole('region', { name: 'Pinned' })).toBeNull()
+    })
+
+    it('shows no pinned section when nothing is pinned', async () => {
+      showPanel()
+      await talkgroupRow('Alpha Fire')
+
+      expect(screen.queryByRole('region', { name: 'Pinned' })).toBeNull()
+    })
+  })
+
+  describe('activity on the row', () => {
+    it('shows how long ago each Talkgroup was last heard', async () => {
+      showCounty(3)
+
+      // Channel 001 is the quietest of the three, and the longest silent.
+      expect(await screen.findByRole('switch', { name: /Channel 001/ })).toHaveTextContent(
+        '3m',
+      )
+      expect(screen.getByRole('switch', { name: /Channel 003 last heard 1m ago/ }))
+        .toBeVisible()
+    })
+
+    it('says nothing about a Talkgroup the window did not hear', async () => {
+      showPanel()
+
+      expect(await talkgroupRow('Alpha Fire')).not.toHaveTextContent(/last heard/)
+    })
+
+    /** Sorted by activity, the row shows the count the order is *by* — an
+     *  ordering nothing on screen explains is one a Listener reads as broken. */
+    it('sorts by most active, and shows the count it sorted on', async () => {
+      showCounty(3)
+      await screen.findByRole('switch', { name: /Channel 001/ })
+
+      await userEvent.click(
+        screen.getByRole('button', { name: 'Sort by most active in the last 24h' }),
+      )
+
+      // Busiest first — the reverse of the catalog order they were drawn in a
+      // moment ago, which is what makes this an assertion about the sort.
+      expect(switches().map((row) => row.textContent)).toEqual([
+        expect.stringContaining('Channel 003'),
+        expect.stringContaining('Channel 002'),
+        expect.stringContaining('Channel 001'),
+      ])
+      expect(screen.getByRole('switch', { name: /Channel 003 3 recent calls/ }))
+        .toBeVisible()
+      expect(screen.getByRole('switch', { name: /Channel 001 1 recent call$/ }))
+        .toBeVisible()
+    })
+
+    it('remembers the sort', async () => {
+      const { store, unmount } = showCounty(3)
+      await screen.findByRole('switch', { name: /Channel 001/ })
+      await userEvent.click(
+        screen.getByRole('button', { name: /Sort by most active/ }),
+      )
+      unmount()
+
+      showPanel(store)
+
+      expect(
+        await screen.findByRole('button', { name: /Sort by most active/ }),
+      ).toHaveAttribute('aria-pressed', 'true')
+    })
   })
 })

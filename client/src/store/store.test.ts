@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { avoidsKey, feedOffKey, holdKey, selectionKey } from '@/lib/persist'
+import { avoidsKey, feedOffKey, holdKey, panelKey, selectionKey } from '@/lib/persist'
 import { EVERYTHING, setTalkgroups } from '@/lib/selection'
 
 import {
@@ -20,6 +20,13 @@ import {
   playbackActions,
   selectPlaybackMode,
 } from './playback'
+import {
+  initialPanelState,
+  showSystem,
+  sortPanel,
+  togglePin,
+  type PanelState,
+} from './panel'
 import { makeStore, type AppStore } from './store'
 
 /** An in-memory `Storage` that also counts what was written, so a test can say
@@ -400,5 +407,103 @@ describe('makeStore', () => {
         'stop',
       ])
     })
+  })
+})
+
+/**
+ * How the Talkgroups panel is arranged is part of a **Profile** too (#57): a
+ * Listener who picked six **Pin**s out of four hundred Talkgroups, or opened
+ * the county System, has done work a reload must not undo.
+ */
+describe('remembering how the panel is arranged (#57, spec US 29)', () => {
+  /** Pinned for [`makeStore`]'s reason: the one test here that takes the
+   *  *default* storage must assert the same thing on a laptop and a runner. */
+  let ambient: ReturnType<typeof fakeStorage>
+
+  beforeEach(() => {
+    ambient = fakeStorage()
+    vi.stubGlobal('localStorage', ambient.storage)
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  const panelOf = (store: AppStore): PanelState => store.getState().panel
+
+  const reopened = (storage: Storage, namespace = 'default') =>
+    panelOf(makeStore({ storage, namespace }))
+
+  it('starts a Listener who has never arranged anything on the defaults', () => {
+    const { storage } = fakeStorage()
+
+    expect(panelOf(makeStore({ storage, namespace: 'default' }))).toEqual(
+      initialPanelState,
+    )
+  })
+
+  it('comes back pinned, folded and sorted the way it was left', () => {
+    const { storage } = fakeStorage()
+    const store = makeStore({ storage, namespace: 'truck' })
+
+    store.dispatch(togglePin('11:100'))
+    store.dispatch(showSystem({ systemRef: 11, shown: false }))
+    store.dispatch(sortPanel('active'))
+
+    expect(storage.getItem(panelKey('truck'))).toBe(
+      JSON.stringify({ sort: 'active', pinned: ['11:100'], expanded: { 11: false } }),
+    )
+    expect(reopened(storage, 'truck')).toEqual({
+      sort: 'active',
+      pinned: ['11:100'],
+      expanded: { 11: false },
+    })
+  })
+
+  it('is independent per Profile, like everything else in one', () => {
+    const { storage } = fakeStorage()
+    makeStore({ storage, namespace: 'truck' }).dispatch(togglePin('11:100'))
+
+    expect(reopened(storage, 'desk')).toEqual(initialPanelState)
+  })
+
+  /**
+   * Guarded field by field, which is the whole reason the three share a key:
+   * a sort naming an order this build no longer has must not also cost the
+   * Listener their Pins.
+   */
+  it.each([
+    ['a sort this build does not have', '{"sort":"loudest","pinned":["11:100"]}'],
+    ['a Pin on something that is not a Talkgroup', '{"sort":"active","pinned":["oops"]}'],
+    ['a Pin that is not even a string', '{"sort":"active","pinned":[7]}'],
+    ['a System named by something else', '{"sort":"active","expanded":{"beta":true}}'],
+    ['a fold that is not a yes or a no', '{"sort":"active","expanded":{"11":"maybe"}}'],
+  ])('keeps what it can read of an arrangement holding %s', (_what, stored) => {
+    const { storage } = fakeStorage({ [panelKey('default')]: stored })
+
+    const panel = reopened(storage)
+
+    expect(panel).toEqual({
+      ...initialPanelState,
+      ...(stored.includes('"active"') ? { sort: 'active' } : {}),
+      ...(stored.includes('"11:100"') ? { pinned: ['11:100'] } : {}),
+    })
+  })
+
+  it.each([
+    ['not an object', '7'],
+    ['not JSON at all', '{oh no'],
+    ['an array', '["11:100"]'],
+  ])('ignores an arrangement that is %s', (_what, stored) => {
+    const { storage } = fakeStorage({ [panelKey('default')]: stored })
+
+    expect(reopened(storage)).toEqual(initialPanelState)
+  })
+
+  it('runs unarranged when the browser has no storage', () => {
+    const store = makeStore({ storage: undefined, namespace: 'default' })
+
+    store.dispatch(togglePin('11:100'))
+
+    expect(panelOf(store).pinned).toEqual(['11:100'])
+    expect(ambient.writes).toEqual([])
   })
 })

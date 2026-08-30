@@ -23,12 +23,28 @@
 //! place it did.
 
 use axum::extract::State;
-use sea_orm::{ConnectionTrait, DbErr, EntityTrait};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, QueryFilter, QuerySelect,
+};
 use serde::Serialize;
 
 use crate::AppState;
-use crate::db::entities::{group, system, tag, talkgroup, talkgroup_group};
+use crate::db::entities::{call, group, system, tag, talkgroup, talkgroup_group};
 use crate::failure::{Failure, Stage};
+
+/// How far back "recently" reaches, for the activity a panel row shows and the
+/// most-active sort orders by (#57, spec US 29).
+///
+/// **Bounded, and that is the design.** Last-heard over the whole Archive would
+/// be `MAX(call_at_ms) GROUP BY talkgroup_id` — a covering-index scan of every
+/// Call ever stored, on every app open, on a Pi with an SD card. A day is what
+/// a Listener means by "is this channel busy"; a Talkgroup quieter than that
+/// carries no activity at all, and its row is drawn quiet.
+///
+/// It rides on the wire ([`Catalog::activity_window_ms`]) rather than being
+/// spelled a second time in the client, so "12 calls in the last 24 hours" is
+/// true by construction if this number ever moves.
+pub const ACTIVITY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// One Talkgroup a listener can select. Nested under its System, so the Ref
 /// pair the selection is keyed by is the row's position in the document rather
@@ -53,6 +69,17 @@ pub struct CatalogTalkgroup {
     /// The curated LED color (#18), when an operator has set one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub led: Option<String>,
+    /// How many Calls this Talkgroup took in the last [`ACTIVITY_WINDOW_MS`] —
+    /// what the panel's most-active sort orders by. Absent rather than `0` for
+    /// a Talkgroup that took none, so a quiet row is drawn quiet and the
+    /// document a fresh Instance serves is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_calls: Option<i64>,
+    /// The newest Call inside that window — what a last-heard age is a
+    /// subtraction from. Absent for the same reason, and never older than the
+    /// window: it is the window's answer, not the Archive's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_call_at_ms: Option<i64>,
 }
 
 /// One System and the Talkgroups under it.
@@ -70,6 +97,9 @@ pub struct CatalogSystem {
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
     pub systems: Vec<CatalogSystem>,
+    /// How long "recently" is, for every [`CatalogTalkgroup::recent_calls`]
+    /// above — see [`ACTIVITY_WINDOW_MS`].
+    pub activity_window_ms: i64,
 }
 
 // How a catalog reaches a listener, decided beside the type rather than at the
@@ -78,7 +108,17 @@ crate::answers_json!(Catalog);
 
 /// `GET /api/catalog` — the Systems and Talkgroups a listener can select.
 pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> {
-    read(&state.db).await.map_err(Stage::LoadCatalog.failed())
+    read(&state.db, state.clock.now_ms() - ACTIVITY_WINDOW_MS)
+        .await
+        .map_err(Stage::LoadCatalog.failed())
+}
+
+/// One Talkgroup's traffic since a cutoff, as the grouped query answers it.
+#[derive(Debug, FromQueryResult)]
+struct Activity {
+    talkgroup_id: i64,
+    recent_calls: i64,
+    last_call_at_ms: i64,
 }
 
 /// Every System and Talkgroup a listener can select (#12, spec US 19–21).
@@ -89,7 +129,24 @@ pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> 
 /// affordable on a Pi with a few hundred Talkgroups, and it keeps the
 /// dialect-divergent list aggregation out of SQL (ADR-0003), like the archive
 /// search.
-pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Catalog, DbErr> {
+pub async fn read<C: ConnectionTrait>(db: &C, since_ms: i64) -> Result<Catalog, DbErr> {
+    // One grouped query for the whole panel, not one per row (#86): a county
+    // catalog is 400+ Talkgroups, and an N+1 here would be invisible from
+    // outside because every answer it gave would be correct.
+    let mut activity: std::collections::HashMap<i64, Activity> = call::Entity::find()
+        .select_only()
+        .column(call::Column::TalkgroupId)
+        .column_as(call::Column::Id.count(), "recent_calls")
+        .column_as(call::Column::CallAtMs.max(), "last_call_at_ms")
+        .filter(call::Column::CallAtMs.gte(since_ms))
+        .group_by(call::Column::TalkgroupId)
+        .into_model::<Activity>()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| (row.talkgroup_id, row))
+        .collect();
+
     let mut groups_by_talkgroup: std::collections::HashMap<i64, Vec<String>> =
         std::collections::HashMap::new();
     for (link, group) in talkgroup_group::Entity::find()
@@ -116,6 +173,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Catalog, DbErr> {
             .remove(&talkgroup.id)
             .unwrap_or_default();
         groups.sort();
+        let heard = activity.remove(&talkgroup.id);
         talkgroups_by_system
             .entry(talkgroup.system_id)
             .or_default()
@@ -126,6 +184,8 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Catalog, DbErr> {
                 tag: tag.map(|tag| tag.name),
                 groups,
                 led: talkgroup.led,
+                recent_calls: heard.as_ref().map(|heard| heard.recent_calls),
+                last_call_at_ms: heard.map(|heard| heard.last_call_at_ms),
             });
     }
 
@@ -145,7 +205,10 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Catalog, DbErr> {
         .collect();
     systems.sort_by_key(|system| display_order(system.label.as_deref(), system.r#ref));
 
-    Ok(Catalog { systems })
+    Ok(Catalog {
+        systems,
+        activity_window_ms: ACTIVITY_WINDOW_MS,
+    })
 }
 
 /// How the panel is ordered: by what the listener reads, then by Ref.

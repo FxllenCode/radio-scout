@@ -16,7 +16,7 @@ async fn a_fresh_instance_offers_an_empty_catalog() {
 
     assert_eq!(
         app.get_json("/api/catalog").await,
-        serde_json::json!({ "systems": [] }),
+        serde_json::json!({ "systems": [], "activityWindowMs": 24 * 60 * 60 * 1000_i64 }),
         "zero-config first run has nothing to select yet"
     );
 }
@@ -68,6 +68,7 @@ async fn a_talkgroup_carries_what_the_panel_groups_and_labels_it_by() {
                     "groups": ["Emergency"],
                 }],
             }],
+            "activityWindowMs": 24 * 60 * 60 * 1000_i64,
         })
     );
 }
@@ -186,5 +187,102 @@ async fn a_broken_database_is_a_server_error_not_an_empty_catalog() {
     assert!(
         line.contains("cause="),
         "the operator is told what failed: {line}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Activity: how busy each Talkgroup has been (#57, spec US 29).
+// ---------------------------------------------------------------------------
+
+/// Seed a Call on a Talkgroup at a given instant, so a test can put traffic
+/// inside the activity window and outside it.
+async fn seed_call_at(app: &TestApp, system_ref: i64, talkgroup_ref: i64, at_ms: i64) {
+    app.seed_call(
+        NewCall::new(system_ref, talkgroup_ref, at_ms),
+        common::audio_at(format!("k/{system_ref}-{talkgroup_ref}-{at_ms}.wav")),
+    )
+    .await;
+}
+
+/// The panel row needs a reason to be sorted "most active" and a last-heard age
+/// to show, and only the server can count what it has. Bounded to a window
+/// rather than the whole Archive: an unbounded `MAX`/`COUNT` is a scan of every
+/// Call ever stored, on every app open, on a Pi.
+#[tokio::test]
+async fn a_talkgroup_carries_how_busy_it_has_been() {
+    let app = TestApp::spawn().await;
+    let now = radio_scout::now_ms();
+    seed_talkgroup(&app, 100, "Alpha", 1, "Alpha Fire", "Fire", &[]).await;
+    seed_call_at(&app, 100, 1, now - 60_000).await;
+    seed_call_at(&app, 100, 1, now - 3_600_000).await;
+
+    let catalog = catalog(&app).await;
+    let talkgroup = &catalog["systems"][0]["talkgroups"][0];
+    assert_eq!(
+        talkgroup["recentCalls"], 2,
+        "the two inside the window; the seeding Call sits at epoch 0, far outside it"
+    );
+    assert_eq!(
+        talkgroup["lastCallAtMs"],
+        serde_json::json!(now - 60_000),
+        "the newest inside the window — what a last-heard age is a subtraction from"
+    );
+}
+
+/// A Talkgroup nothing has been heard on lately says nothing rather than
+/// claiming zero, so a quiet row is drawn as quiet and the JSON a fresh
+/// instance serves is unchanged.
+#[tokio::test]
+async fn a_quiet_talkgroup_carries_no_activity_at_all() {
+    let app = TestApp::spawn().await;
+    seed_talkgroup(&app, 100, "Alpha", 1, "Alpha Fire", "Fire", &[]).await;
+
+    let talkgroup = &catalog(&app).await["systems"][0]["talkgroups"][0];
+    assert_eq!(talkgroup.get("recentCalls"), None);
+    assert_eq!(talkgroup.get("lastCallAtMs"), None);
+}
+
+/// How long "recently" is, on the wire (#57).
+///
+/// The panel says "12 calls in the last 24 hours" out loud, and the only way
+/// that sentence stays true when the window moves is for the window to be the
+/// server's answer rather than a second constant in the client.
+#[tokio::test]
+async fn the_catalog_says_how_long_recently_is() {
+    let app = TestApp::spawn().await;
+
+    assert_eq!(
+        catalog(&app).await["activityWindowMs"],
+        serde_json::json!(24 * 60 * 60 * 1000_i64),
+    );
+}
+
+/// Activity is one grouped query, not one per Talkgroup (#86's rule): a county
+/// panel is 400+ rows, and an N+1 here would be invisible from outside because
+/// the answer is correct.
+#[tokio::test]
+async fn activity_costs_the_same_however_many_talkgroups_there_are() {
+    let app = TestApp::spawn().await;
+    let now = radio_scout::now_ms();
+    for r#ref in 1..=3 {
+        seed_talkgroup(&app, 100, "Alpha", r#ref, "Small", "Fire", &[]).await;
+        seed_call_at(&app, 100, r#ref, now - 60_000).await;
+    }
+
+    let before = app.statements_issued();
+    catalog(&app).await;
+    let small = app.statements_issued() - before;
+
+    for r#ref in 4..=30 {
+        seed_talkgroup(&app, 100, "Alpha", r#ref, "Big", "Fire", &[]).await;
+        seed_call_at(&app, 100, r#ref, now - 60_000).await;
+    }
+
+    let before = app.statements_issued();
+    catalog(&app).await;
+    assert_eq!(
+        app.statements_issued() - before,
+        small,
+        "ten times the Talkgroups, the same number of round trips"
     );
 }

@@ -152,13 +152,30 @@ Three ways to pick, and they compose:
   in it on or off at once. The counter (`2/2`) shows how many of its Talkgroups are currently on.
 - **Tags** — the single service label each Talkgroup carries, like *Fire Dispatch* or
   *Law Talk*. Same bulk behaviour.
-- **Individually** — the checkboxes at the bottom, grouped by System, with each Talkgroup's TGID
+- **Individually** — the checkboxes below, grouped by System, with each Talkgroup's TGID
   on the right. The filter box matches on name, tag or TGID.
 
-**ALL ON** / **ALL OFF** at the bottom, and a per-System **ALL OFF**, are the fastest way to
-start from nothing and add just what you want.
+**ALL ON** / **ALL OFF** and the filter stay at the top of the screen as you scroll, and each
+System has its own **ALL OFF** beside its name — so on a county-sized list the controls are
+never at the bottom of four hundred rows.
 
-Your selection is saved in this browser and survives a reload.
+### At county scale
+
+A big system is hundreds of Talkgroups, and the panel is built for that:
+
+- **Pin** the channels you actually listen to — the pin at the end of a row — and they sit in
+  their own section at the very top, whichever System they belong to. Pinned rows stay in their
+  System too; a pin changes where a Talkgroup is shown and nothing about what plays.
+- **Fold a System away** by tapping its name. A System with more than fifty Talkgroups starts
+  folded, so what you see first is a short list of Systems with their counts and controls. Open
+  ones stay open next time.
+- **Sort** with **A–Z** (the order the operator's labels give) or **ACTIVE** (busiest first).
+  Each row shows how long ago that channel was last heard — `3m`, `2h` — or, sorted by activity,
+  how many Calls it has taken lately. The ACTIVE button names the window it counts over.
+- **Typing in the filter opens everything**, so a search is never answered by a folded box.
+
+Your selection, your pins, your sort and which Systems you folded away are saved in this browser
+and survive a reload.
 
 ### Two independent setups in one browser
 

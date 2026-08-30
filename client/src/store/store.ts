@@ -5,17 +5,20 @@ import {
   loadAvoids,
   loadFeedOff,
   loadHold,
+  loadPanel,
   loadSelection,
   namespaceOf,
   saveAvoids,
   saveFeedOff,
   saveHold,
+  savePanel,
   saveSelection,
 } from '@/lib/persist'
 
 import { api } from './api'
 import { createAvoidClock } from './avoids'
-import { expireAvoids, initialLiveState, liveReducer, type LiveState } from './live'
+import { expireAvoids, initialLiveState, liveReducer } from './live'
+import { initialPanelState, panelReducer } from './panel'
 import { playbackReducer } from './playback'
 import { transportReducer } from './transport'
 
@@ -32,12 +35,13 @@ export interface StoreOptions {
 
 /** The root store: the RTK Query API slice plus the client-only listening state
  *  ADR-0004 keeps off the server — `live` (the **Selection**, queue, hold,
- *  avoid, history; #11/#12), `playback` (archive results + playback mode, #13),
- *  and `transport` (what the one shared `<audio>` element is doing, #11/#14).
+ *  avoid, history; #11/#12), `panel` (how the Talkgroups panel is arranged;
+ *  #57), `playback` (archive results + playback mode, #13), and `transport`
+ *  (what the one shared `<audio>` element is doing, #11/#14).
  *
- *  The selection is hydrated from local storage on the way in and written back
- *  whenever it changes (spec US 22) — and only then, so a Call arriving every
- *  few seconds costs nothing. */
+ *  Everything a **Profile** is made of is hydrated from local storage on the
+ *  way in and written back whenever it changes (spec US 22) — and only then, so
+ *  a Call arriving every few seconds costs nothing. */
 export function makeStore(options: StoreOptions = {}) {
   // `'storage' in options`, not a destructuring default: saying `storage:
   // undefined` out loud means "this browser has none", and a default would
@@ -51,6 +55,9 @@ export function makeStore(options: StoreOptions = {}) {
   // was closed is simply not in force on the way back in (#91).
   const rememberedAvoids = storage && loadAvoids(storage, namespace, Date.now())
   const rememberedHold = storage && loadHold(storage, namespace)
+  // Field by field, so an arrangement we can only half read costs the Listener
+  // only the half we could not (`lib/persist`).
+  const rememberedPanel = storage ? loadPanel(storage, namespace) : {}
   const hydrated = {
     ...(remembered ? { selection: remembered } : {}),
     ...(rememberedFeedOff === undefined ? {} : { feedOff: rememberedFeedOff }),
@@ -61,6 +68,7 @@ export function makeStore(options: StoreOptions = {}) {
     reducer: {
       [api.reducerPath]: api.reducer,
       live: liveReducer,
+      panel: panelReducer,
       playback: playbackReducer,
       transport: transportReducer,
     },
@@ -73,7 +81,10 @@ export function makeStore(options: StoreOptions = {}) {
     // Spread unconditionally: with nothing remembered `hydrated` is empty and
     // this is `initialLiveState`, which is what no preloaded state would have
     // given anyway.
-    preloadedState: { live: { ...initialLiveState, ...hydrated } },
+    preloadedState: {
+      live: { ...initialLiveState, ...hydrated },
+      panel: { ...initialPanelState, ...rememberedPanel },
+    },
   })
   // Enables refetchOnFocus / refetchOnReconnect behavior.
   setupListeners(store.dispatch)
@@ -82,10 +93,13 @@ export function makeStore(options: StoreOptions = {}) {
     /** Write `read`'s value out whenever it changes, and never otherwise — a
      *  Call arrives every few seconds, and persisting on each one would cost a
      *  phone its battery for nothing. */
-    const remember = <T,>(read: (live: LiveState) => T, save: (value: T) => void) => {
-      let last = read(store.getState().live)
+    const remember = <T,>(
+      read: (state: ReturnType<typeof store.getState>) => T,
+      save: (value: T) => void,
+    ) => {
+      let last = read(store.getState())
       store.subscribe(() => {
-        const next = read(store.getState().live)
+        const next = read(store.getState())
         if (next === last) return
         last = next
         save(next)
@@ -93,11 +107,13 @@ export function makeStore(options: StoreOptions = {}) {
     }
 
     // What a **Profile** is, per CONTEXT.md: its Selection, its Avoid list and
-    // its Hold state — plus the feed-off switch #80 added.
-    remember((live) => live.selection, (it) => saveSelection(storage, namespace, it))
-    remember((live) => live.avoided, (it) => saveAvoids(storage, namespace, it))
-    remember((live) => live.hold, (it) => saveHold(storage, namespace, it))
-    remember((live) => live.feedOff, (it) => saveFeedOff(storage, namespace, it))
+    // its Hold state — plus the feed-off switch #80 added, and how #57 left the
+    // Talkgroups panel arranged.
+    remember((it) => it.live.selection, (it) => saveSelection(storage, namespace, it))
+    remember((it) => it.live.avoided, (it) => saveAvoids(storage, namespace, it))
+    remember((it) => it.live.hold, (it) => saveHold(storage, namespace, it))
+    remember((it) => it.live.feedOff, (it) => saveFeedOff(storage, namespace, it))
+    remember((it) => it.panel, (it) => savePanel(storage, namespace, it))
   }
 
   // A store hydrated holding an Avoid has had no action to wake its clock with

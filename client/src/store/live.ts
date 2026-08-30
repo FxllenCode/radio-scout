@@ -11,11 +11,11 @@ import type { LiveStatus, Subscription } from '@/lib/liveFeed'
 import { enqueue, retain, takeNext, type QueuePolicy } from '@/lib/queue'
 import {
   EVERYTHING,
-  avoidKey,
+  talkgroupKey,
   isSelected,
   isSystemHold,
   isTalkgroupHold,
-  parseAvoidKey,
+  parseTalkgroupKey,
   silenced,
   restrictToSystem,
   restrictToTalkgroup,
@@ -82,7 +82,7 @@ export interface LiveState {
    *  arriving Call is judged against, alongside the hold and the avoids. */
   selection: Selection
   hold: Hold | null
-  /** Every **Avoid** in force, by [`avoidKey`] (spec US 14's timed
+  /** Every **Avoid** in force, by [`talkgroupKey`] (spec US 14's timed
    *  30/60/120 min cycle). */
   avoided: Avoids
   /** Calls the listener will not hear: dropped by the server's `lagged` notice
@@ -343,7 +343,7 @@ const liveSlice = createSlice({
       state.selection = setTalkgroups(state.selection, keys, on)
       if (on) {
         for (const key of keys) {
-          delete state.avoided[avoidKey(key.systemRef, key.talkgroupRef)]
+          delete state.avoided[talkgroupKey(key.systemRef, key.talkgroupRef)]
         }
       }
       purge(state)
@@ -356,7 +356,7 @@ const liveSlice = createSlice({
       state.selection = setSystem(state.selection, systemRef, on)
       if (on) {
         for (const key of Object.keys(state.avoided)) {
-          if (parseAvoidKey(key).systemRef === systemRef) delete state.avoided[key]
+          if (parseTalkgroupKey(key).systemRef === systemRef) delete state.avoided[key]
         }
       }
       purge(state)
@@ -559,7 +559,7 @@ const liveSlice = createSlice({
       const call = subjectOf(state)
       if (!call) return
 
-      state.avoided[avoidKey(call.systemRef, call.talkgroupRef)] =
+      state.avoided[talkgroupKey(call.systemRef, call.talkgroupRef)] =
         action.payload.until
       // Holding a Talkgroup you've just muted is a contradiction; the avoid is
       // the newer intent.
@@ -747,7 +747,7 @@ export const selectIsAvoided = (
   state: WithLive,
   systemRef: number,
   talkgroupRef: number,
-): boolean => avoidKey(systemRef, talkgroupRef) in state.live.avoided
+): boolean => talkgroupKey(systemRef, talkgroupRef) in state.live.avoided
 
 /** What the listener has chosen to hear, before a hold or an avoid narrows it
  *  (#12) — what the Talkgroups panel draws and what is persisted. */

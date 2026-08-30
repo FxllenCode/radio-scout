@@ -18,6 +18,7 @@
  * - **Storage being denied is a supported state.** Safari in private mode
  *   throws on `getItem`/`setItem`; the scanner still runs, just unremembered.
  */
+import type { PanelMemory, PanelSort } from './panel'
 import type { Avoids, Hold, Selection } from './selection'
 
 /** Prefix for every key this app owns in local storage. */
@@ -113,6 +114,67 @@ export function holdKey(namespace: string): string {
   return `${KEY_PREFIX}:${namespace}:hold`
 }
 
+/** Where a namespace's panel arrangement is stored (#57) — its **Pin**s, the
+ *  Systems it has folded away, and its sort.
+ *
+ *  One key for the three, unlike the Selection and the Avoids, because they are
+ *  one screen's memory of itself with one lifetime; and read field by field
+ *  below, so a value we cannot make sense of costs only the field it is in. */
+export function panelKey(namespace: string): string {
+  return `${KEY_PREFIX}:${namespace}:panel`
+}
+
+/**
+ * How this browser last had the Talkgroups panel arranged — as much of it as
+ * can be believed.
+ *
+ * Partial rather than whole, and guarded per field: a stored sort naming an
+ * order this build no longer has must not also cost the Listener the six Pins
+ * they picked out of four hundred Talkgroups. What is missing falls back to the
+ * default, which is what a Listener who has never arranged anything gets.
+ */
+export function loadPanel(storage: Storage, namespace: string): Partial<PanelMemory> {
+  const stored = parseStored(storage, panelKey(namespace))
+  if (!isRecord(stored)) return {}
+
+  return {
+    ...(isSort(stored.sort) ? { sort: stored.sort } : {}),
+    ...(isKeyList(stored.pinned) ? { pinned: stored.pinned } : {}),
+    ...(isExpanded(stored.expanded) ? { expanded: stored.expanded } : {}),
+  }
+}
+
+/** Remember how the panel is arranged for `namespace`. */
+export function savePanel(
+  storage: Storage,
+  namespace: string,
+  panel: PanelMemory,
+): void {
+  writeStored(storage, panelKey(namespace), JSON.stringify(panel))
+}
+
+const SORTS: readonly PanelSort[] = ['name', 'active']
+
+const isSort = (value: unknown): value is PanelSort =>
+  SORTS.includes(value as PanelSort)
+
+/** Every **Pin** names a Talkgroup, or the panel would hold up a row it cannot
+ *  draw — [`isAvoids`]'s lesson, one key at a time. */
+const isKeyList = (value: unknown): value is string[] =>
+  Array.isArray(value) &&
+  value.every((key) => typeof key === 'string' && TALKGROUP_KEY.test(key))
+
+/** A System is named by its Ref, so a key that is not a number could never
+ *  match one and would sit in storage forever saying nothing. */
+const isExpanded = (value: unknown): value is Record<number, boolean> =>
+  isRecord(value) &&
+  Object.entries(value).every(
+    ([systemRef, shown]) => /^\d+$/.test(systemRef) && typeof shown === 'boolean',
+  )
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
 /**
  * The **Avoids** this browser remembered, with everything already lapsed at
  * `now` dropped.
@@ -174,8 +236,9 @@ function parseStored(storage: Storage, key: string): unknown {
   }
 }
 
-/** What an [`avoidKey`] looks like: two Refs and the colon between them. */
-const AVOID_KEY = /^\d+:\d+$/
+/** What an [`talkgroupKey`] looks like: two Refs and the colon between them. The
+ *  same key an **Avoid** and a **Pin** both name a Talkgroup by. */
+const TALKGROUP_KEY = /^\d+:\d+$/
 
 /**
  * Is this a deadline map rather than whatever else was under our key?
@@ -188,9 +251,9 @@ const AVOID_KEY = /^\d+:\d+$/
  * deadline is `0`, and invisible in the panel because no row can be keyed by it.
  */
 function isAvoids(value: unknown): value is Avoids {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (!isRecord(value)) return false
   return Object.entries(value).every(
-    ([key, until]) => AVOID_KEY.test(key) && typeof until === 'number',
+    ([key, until]) => TALKGROUP_KEY.test(key) && typeof until === 'number',
   )
 }
 

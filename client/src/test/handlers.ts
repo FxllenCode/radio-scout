@@ -130,6 +130,7 @@ export const FILTER_OPTIONS: FilterOptions = {
  *  above has Calls for, plus a Talkgroup that has none — the catalog is the
  *  configured world, not the archived one. */
 export const CATALOG: Catalog = {
+  activityWindowMs: 24 * 60 * 60 * 1_000,
   systems: [
     {
       ref: 100,
@@ -148,6 +149,35 @@ export const CATALOG: Catalog = {
       ],
     },
   ],
+}
+
+/**
+ * A System at the scale #57 exists for: `rows` Talkgroups, labelled in catalog
+ * order, with activity running **backwards** against that order — the busiest
+ * and most recently heard channel is the last one alphabetically.
+ *
+ * That inversion is the whole value of the fixture. Activity that descended
+ * along the Refs would make the most-active order identical to catalog order,
+ * and every assertion about sorting would pass just as well against a sort that
+ * did nothing.
+ */
+export function countyCatalog(rows: number, now = Date.now()): Catalog {
+  return {
+    activityWindowMs: 24 * 60 * 60 * 1_000,
+    systems: [
+      {
+        ref: 1,
+        label: 'County',
+        talkgroups: Array.from({ length: rows }, (_, index) => ({
+          ref: index + 1,
+          label: `Channel ${String(index + 1).padStart(3, '0')}`,
+          groups: [],
+          recentCalls: index + 1,
+          lastCallAtMs: now - (rows - index) * 60_000,
+        })),
+      },
+    ],
+  }
 }
 
 /** One page of an archive, honoring `limit`/`offset` so pagination is real.

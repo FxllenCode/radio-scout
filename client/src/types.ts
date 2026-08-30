@@ -130,6 +130,14 @@ export interface CatalogTalkgroup {
   groups: string[]
   /** The curated LED color (#18), when an operator has set one. */
   led?: string
+  /** Calls this Talkgroup took in the catalog's [`Catalog.activityWindowMs`]
+   *  (#57). Absent for one it heard nothing on, which is why the panel reads it
+   *  as `0` rather than the server sending a column of zeroes to every phone. */
+  recentCalls?: number
+  /** The newest of those Calls — what a last-heard age is a subtraction from.
+   *  Never older than the window: it is the window's answer, not the
+   *  Archive's. */
+  lastCallAtMs?: number
 }
 
 export interface CatalogSystem {
@@ -143,6 +151,10 @@ export interface CatalogSystem {
  *  one: a Talkgroup whose Calls have aged out is still selectable. */
 export interface Catalog {
   systems: CatalogSystem[]
+  /** How far back [`CatalogTalkgroup.recentCalls`] counts (#57). On the wire
+   *  rather than spelled again here, so "12 calls in the last 24 hours" stays
+   *  true if the server's window ever moves. */
+  activityWindowMs: number
 }
 
 export interface SystemOption {

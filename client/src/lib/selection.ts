@@ -152,7 +152,7 @@ export const isTalkgroupHold = (hold: Hold | null): boolean =>
   hold?.talkgroupRef != null
 
 /**
- * Every **Avoid** in force: [`avoidKey`] → the moment it lapses, `0` for
+ * Every **Avoid** in force: [`talkgroupKey`] → the moment it lapses, `0` for
  * "until the listener says otherwise".
  *
  * A **deadline**, not a countdown (#91). Storing the moment rather than running
@@ -162,13 +162,15 @@ export const isTalkgroupHold = (hold: Hold | null): boolean =>
  */
 export type Avoids = Record<string, number>
 
-/** How an Avoid names the Talkgroup it silences. A string, because that is what
- *  an object key is, and the map has to be JSON to be remembered. */
-export const avoidKey = (systemRef: number, talkgroupRef: number) =>
+/** How a [`TalkgroupKey`] is spelled where an object key is all there is — an
+ *  **Avoid**'s deadline map, a **Pin** list, a row's identity. A string, because
+ *  that is what an object key is, and both maps have to be JSON to be
+ *  remembered. */
+export const talkgroupKey = (systemRef: number, talkgroupRef: number) =>
   `${systemRef}:${talkgroupRef}`
 
-/** An [`avoidKey`] read back as the pair it encodes. */
-export function parseAvoidKey(key: string): TalkgroupKey {
+/** A [`talkgroupKey`] read back as the pair it encodes. */
+export function parseTalkgroupKey(key: string): TalkgroupKey {
   const [systemRef, talkgroupRef] = key.split(':')
   return { systemRef: Number(systemRef), talkgroupRef: Number(talkgroupRef) }
 }
@@ -177,7 +179,7 @@ export function parseAvoidKey(key: string): TalkgroupKey {
  *  outermost of the layers a **Selection** is narrowed by, after the Selection
  *  itself and a **Hold**. */
 export function silenced(base: Selection, avoided: Avoids): Selection {
-  return setTalkgroups(base, Object.keys(avoided).map(parseAvoidKey), false)
+  return setTalkgroups(base, Object.keys(avoided).map(parseTalkgroupKey), false)
 }
 
 function clone(sel: Selection['sel']): Selection['sel'] {

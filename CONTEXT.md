@@ -140,7 +140,7 @@ The **Listener's** chosen set of active systems/talkgroups/groups that the live 
 _Avoid_: subscription, filter.
 
 **Profile**:
-One named, independent **Listener** setup within a single browser — its own **Selection**, **Avoid** list and **Hold** state. Two Profiles behave as two entirely separate radios in the same browser: a "truck" Profile and a "desk" Profile share nothing. Spelled `namespace` in the client's persistence layer, which is the mechanism rather than the concept.
+One named, independent **Listener** setup within a single browser — its own **Selection**, **Avoid** list, **Hold** state and Talkgroups-panel arrangement (**Pin**s, which Systems are folded away, the row order). Two Profiles behave as two entirely separate radios in the same browser: a "truck" Profile and a "desk" Profile share nothing. Spelled `namespace` in the client's persistence layer, which is the mechanism rather than the concept.
 _Avoid_: namespace (in prose), workspace, preset, scanner.
 
 **Priority**:
@@ -148,7 +148,7 @@ A **Listener's** per-talkgroup preference that makes its calls jump the **listen
 _Avoid_: preempt (SDRTrunk's stronger notion — interrupting the playing call — which this is not), favorite.
 
 **Pin**:
-Keeping a talkgroup at the top of the Talkgroups panel. A panel-ordering affordance only; pins change nothing about what plays.
+Keeping a talkgroup at the top of the Talkgroups panel — in a section of its own, above every System, and the pinned row stays in its System as well. A panel-ordering affordance only; pins change nothing about what plays.
 _Avoid_: favorite, star (a **Star** marks a Call).
 
 **Catch-up**:
