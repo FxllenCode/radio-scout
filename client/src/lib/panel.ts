@@ -147,6 +147,14 @@ export interface PanelRow {
   /** Held at the top of the panel (spec US 29). Marked on both copies — the
    *  one in the pinned section and the one still in its System. */
   pinned: boolean
+  /** **Priority** (#58, spec US 27): its Calls jump the listening queue.
+   *
+   *  A row draws it beside the **Pin** and the two look alike, which is a
+   *  deliberate lie about only one thing — where the state lives. A Pin is
+   *  panel arrangement and cannot change what plays; this changes what plays
+   *  *next*, so it is in the `live` slice and this field is where the panel is
+   *  told. */
+  priority: boolean
   /** Calls in the catalog's activity window, `0` for a Talkgroup it did not
    *  hear. What the most-active sort orders by. */
   recentCalls: number
@@ -216,6 +224,9 @@ export interface PanelInput extends PanelMemory {
   selection: Selection
   /** The deadlines, for the badge each avoided row carries. */
   avoided: Avoids
+  /** The Talkgroups marked **Priority** (#58), by row key. From the `live`
+   *  slice rather than from [`PanelMemory`], because it decides what plays. */
+  priority: readonly string[]
   filter: string
 }
 
@@ -223,6 +234,7 @@ export function panelOf({
   catalog,
   selection,
   avoided,
+  priority,
   filter,
   pinned,
   expanded,
@@ -234,7 +246,9 @@ export function panelOf({
   // covering the Talkgroups they have never heard of.
   const filtered = filter.trim().length > 0
   const held = new Set(pinned)
-  const drawRow = (entry: CatalogEntry) => rowOf(entry, selection, avoided, held)
+  const ranked = new Set(priority)
+  const drawRow = (entry: CatalogEntry) =>
+    rowOf(entry, selection, avoided, held, ranked)
 
   const systems = catalog.systems.flatMap((system) => {
     const entries = matches.filter((entry) => entry.systemRef === system.ref)
@@ -318,6 +332,7 @@ function rowOf(
   selection: Selection,
   avoided: Avoids,
   held: Set<string>,
+  ranked: Set<string>,
 ): PanelRow {
   const { systemRef, talkgroupRef } = talkgroup
   const key = talkgroupKey(systemRef, talkgroupRef)
@@ -331,6 +346,7 @@ function rowOf(
     led: ledForCall({ systemRef, talkgroupRef, led: talkgroup.led }),
     selected,
     pinned: held.has(key),
+    priority: ranked.has(key),
     recentCalls: talkgroup.recentCalls ?? 0,
     ...(talkgroup.lastCallAtMs === undefined
       ? {}

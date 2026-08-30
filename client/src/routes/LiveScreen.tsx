@@ -1,16 +1,21 @@
 import {
   Ban,
+  ListOrdered,
   Pause,
   Play,
   Power,
   Radio,
   RotateCcw,
   SkipForward,
+  Zap,
 } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 
+import { AvoidSheet } from '@/components/AvoidSheet'
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
+import { QueueSheet } from '@/components/QueueSheet'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
@@ -26,7 +31,6 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   advance,
   avoid,
-  clearAvoids,
   replay,
   selectAvoidedCount,
   selectDisplay,
@@ -38,9 +42,11 @@ import {
   selectLiveControls,
   selectLiveStatus,
   selectMissed,
+  selectIsPriority,
   selectQueueDepth,
   toggleHoldSystem,
   toggleHoldTalkgroup,
+  togglePriorityShown,
   turnFeedOff,
   turnFeedOn,
 } from '@/store/live'
@@ -88,6 +94,9 @@ export function LiveScreen() {
   const history = useAppSelector(selectHistory)
   const hold = useAppSelector(selectHold)
   const avoiding = useAppSelector(selectAvoidedCount)
+  /** Which sheet is open, if either (#58). One piece of state rather than two
+   *  booleans, so the two can never both be up. */
+  const [sheet, setSheet] = useState<'queue' | 'avoids' | null>(null)
   const paused = useAppSelector(selectIsPaused)
   // The two derived layers (#88). Between them the screen states no condition of
   // its own: `feed` says why the feed is or is not delivering, and `can` says
@@ -119,6 +128,11 @@ export function LiveScreen() {
    * strictly less than the sentence explaining how to get the feed back.
    */
   const { call: showing, ended } = useAppSelector(selectDisplay)
+  // Asked of the Call the display is showing, so the control reads as pressed
+  // for exactly the Talkgroup pressing it would act on (#58).
+  const prioritized = useAppSelector((state) =>
+    showing ? selectIsPriority(state, showing.systemRef, showing.talkgroupRef) : false,
+  )
   // The live feed's own progress — an archived Call interrupting it (US 26) is
   // on the element instead, and its position isn't this display's to draw.
   const progress = useAppSelector((state) =>
@@ -130,12 +144,29 @@ export function LiveScreen() {
       title="LIVE"
       status={
         <span className="inline-flex items-center gap-3">
-          <span
-            role="status"
-            aria-label="Queued calls"
-            className="font-mono text-[11px] tabular-nums text-muted-foreground"
-          >
-            Q {queued}
+          {/* The `Q` count was a number for four tickets, and this is where it
+              becomes a tool (#58, spec US 24): the same readout, now the way in
+              to what is behind it.
+
+              Disabled at zero rather than opening an empty sheet — a control
+              that looks live and does nothing is the thing #88's own tests
+              exist to catch, and it is also what keeps this out of reach with
+              the feed off, where the queue is cleared by construction.
+
+              The live region is the wrapper, not the button, so a screen reader
+              is still told the depth changed without being told a button
+              appeared. */}
+          <span role="status" className="inline-flex">
+            <button
+              type="button"
+              aria-label={`Queued calls: ${queued}`}
+              disabled={queued === 0}
+              onClick={() => setSheet('queue')}
+              className="inline-flex items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground transition-colors hover:text-foreground disabled:hover:text-muted-foreground"
+            >
+              <ListOrdered className="size-3" aria-hidden />
+              Q {queued}
+            </button>
           </span>
           <LinkState badge={readout.badge} />
         </span>
@@ -257,6 +288,26 @@ export function LiveScreen() {
         </Control>
       </div>
 
+      {/* **Priority** on the Talkgroup being shown (#58, spec US 27) — the
+          moment a Listener realises dispatch should outrank tactical chatter is
+          while they are hearing it, and the Talkgroups panel is two taps and a
+          four-hundred-row list away. Its own row rather than a seventh cell,
+          because it is the only control here that changes what plays *later*
+          rather than now, and it says so. */}
+      <div className="mt-2">
+        <Control
+          label={
+            prioritized ? 'Clear priority on this talkgroup' : 'Give this talkgroup priority'
+          }
+          pressed={prioritized}
+          disabled={!can.priority}
+          onClick={() => dispatch(togglePriorityShown())}
+          icon={<Zap className="size-3.5" aria-hidden />}
+        >
+          {prioritized ? 'Priority on' : 'Priority'}
+        </Control>
+      </div>
+
       {/* The timed cycle (spec US 14): a chatty Talkgroup goes quiet for a
           spell and comes back on its own — one tap each, rather than rdio's
           hunt through a menu. */}
@@ -273,13 +324,19 @@ export function LiveScreen() {
         ))}
       </div>
 
+      {/* Opens the list rather than clearing the lot (#58, spec US 25). It used
+          to be one control meaning "give up every Avoid you have", so a
+          Listener who mis-tapped one had to surrender the two-hour Avoid they
+          meant in order to fix it — and had no way to see what they were
+          holding. Clearing all is still offered, inside. */}
       {avoiding > 0 && (
         <div className="mt-2">
           <Control
-            label={`Stop avoiding ${avoiding} talkgroups`}
-            onClick={() => dispatch(clearAvoids())}
+            label={`Avoiding ${avoiding} talkgroups — show them`}
+            onClick={() => setSheet('avoids')}
+            icon={<Ban className="size-3.5" aria-hidden />}
           >
-            Avoiding {avoiding} — clear
+            Avoiding {avoiding}
           </Control>
         </div>
       )}
@@ -289,6 +346,9 @@ export function LiveScreen() {
         disabled={!can.recent}
         onReplay={(id) => dispatch(replay(id))}
       />
+
+      {sheet === 'queue' && <QueueSheet onClose={() => setSheet(null)} />}
+      {sheet === 'avoids' && <AvoidSheet onClose={() => setSheet(null)} />}
     </Screen>
   )
 }
@@ -513,9 +573,20 @@ function History({
 
   return (
     <section className="mt-6">
-      <h2 className="mb-2 font-mono text-xs uppercase tracking-wider text-muted-foreground">
-        Recent
-      </h2>
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <h2 className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
+          Recent
+        </h2>
+        {/* RECENT reaches back five (spec US 13); the session log reaches back
+            to when the app was opened (#58, spec US 28). The way there is from
+            the list it extends. */}
+        <Link
+          to="/session"
+          className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground underline decoration-dotted underline-offset-2 transition-colors hover:text-foreground"
+        >
+          Session log
+        </Link>
+      </div>
       <ul
         aria-label="Recent calls"
         className="divide-y divide-border rounded-xl border border-border bg-card"

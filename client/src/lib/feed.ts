@@ -95,6 +95,9 @@ export interface Controls {
   replay: boolean
   pause: boolean
   avoid: boolean
+  /** Mark the shown Call's Talkgroup **Priority** (#58, spec US 27) — one of
+   *  the controls that act on the Call being *shown*. */
+  priority: boolean
   /** The RECENT rows, which replay the Call they name. */
   recent: boolean
 }
@@ -110,12 +113,12 @@ export interface Controls {
  *   Call — a button that pressed and did nothing, because the reducer needs a
  *   Call to place a System hold on. A hold can always release itself; it can
  *   only be *placed* on a Call.
- * - **Four controls act on the Call being *shown*, not the one on the air**
+ * - **Five controls act on the Call being *shown*, not the one on the air**
  *   (#56). The display keeps the last Call up between transmissions, dimmed, so
- *   Hold, Avoid and Replay go on meaning something after it ends — which is
- *   exactly when a Listener reaches for them, a chatty Talkgroup having just
- *   stopped keying. Skip and Pause do not join them: those act on audio, and
- *   there is none.
+ *   Hold, Avoid, Replay and Priority (#58) go on meaning something after it
+ *   ends — which is exactly when a Listener reaches for them, a chatty
+ *   Talkgroup having just stopped keying. Skip and Pause do not join them:
+ *   those act on audio, and there is none.
  */
 export function controlsFor(status: FeedStatus, facts: ControlFacts): Controls {
   const plays = feedPlays(status)
@@ -132,6 +135,7 @@ export function controlsFor(status: FeedStatus, facts: ControlFacts): Controls {
     replay: plays && showing,
     pause: plays && onAir,
     avoid: plays && showing,
+    priority: plays && showing,
     recent: plays && hasRecent,
   }
 }

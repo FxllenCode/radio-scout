@@ -67,6 +67,7 @@ const EVERY_CONTROL: (keyof Controls)[] = [
   'replay',
   'pause',
   'avoid',
+  'priority',
   'recent',
 ]
 
@@ -87,7 +88,15 @@ const CONTROL_CASES: {
     what: 'a Call on the air with the feed live',
     status: 'live',
     facts: { ...NOTHING, onAir: true },
-    expected: only('holdSystem', 'holdTalkgroup', 'skip', 'replay', 'pause', 'avoid'),
+    expected: only(
+      'holdSystem',
+      'holdTalkgroup',
+      'skip',
+      'replay',
+      'pause',
+      'avoid',
+      'priority',
+    ),
   },
   {
     what: 'a lull with nothing behind it',
@@ -113,7 +122,8 @@ const CONTROL_CASES: {
   {
     // US 13: with nothing playing, Replay reaches back to the last Call.
     //
-    // …and so do **Hold and Avoid** (#56). The Call the display is showing
+    // …and so do **Hold, Avoid and Priority** (#56, #58). The Call the display
+    // is showing
     // outlives the transmission — the card stays up, dimmed — and a Listener
     // reaching for "mute that" the second a chatty Talkgroup stops keying is
     // reaching for the thing on the screen in front of them. Skip and Pause do
@@ -121,11 +131,19 @@ const CONTROL_CASES: {
     what: 'a lull with something in RECENT',
     status: 'live',
     facts: { ...NOTHING, hasRecent: true },
-    expected: only('holdSystem', 'holdTalkgroup', 'replay', 'avoid', 'recent'),
+    expected: only(
+      'holdSystem',
+      'holdTalkgroup',
+      'replay',
+      'avoid',
+      'priority',
+      'recent',
+    ),
   },
   {
     // The other half of that: nothing on the air and nothing ever heard, so
-    // there is no displayed Call for Hold or Avoid to mean anything about.
+    // there is no displayed Call for Hold, Avoid or Priority to mean anything
+    // about.
     // Pinned separately because it is what stops "reaches the last Call" from
     // quietly becoming "is always reachable".
     what: 'a lull on a feed that has never carried a Call',

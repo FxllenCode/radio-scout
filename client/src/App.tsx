@@ -4,6 +4,7 @@ import { AppShell } from '@/components/layout/AppShell'
 import { LiveScreen } from '@/routes/LiveScreen'
 import { TalkgroupsScreen } from '@/routes/TalkgroupsScreen'
 import { SearchScreen } from '@/routes/SearchScreen'
+import { SessionScreen } from '@/routes/SessionScreen'
 import { LogsScreen } from '@/routes/LogsScreen'
 import { SettingsScreen } from '@/routes/SettingsScreen'
 import { UnitScreen } from '@/routes/UnitScreen'
@@ -32,6 +33,10 @@ export default function App() {
             label anywhere it renders. A route rather than a tab: it is always
             arrived at *from* a Call, never browsed to. */}
         <Route path="unit/:systemRef/:ref" element={<UnitScreen />} />
+        {/* Everything heard this session (#58, spec US 28). A route rather
+            than a tab, for `UnitScreen`'s reason: it is arrived at from the
+            Live screen's RECENT list, never browsed to. */}
+        <Route path="session" element={<SessionScreen />} />
         <Route path="settings" element={<SettingsScreen />} />
         {/* Settings -> Logs (#30), behind the admin session the screen asks
             for itself. A child route rather than a tab: an operator opens it

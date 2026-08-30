@@ -44,6 +44,7 @@ const draw = (over: Partial<Parameters<typeof panelOf>[0]> = {}) =>
     catalog: CATALOG,
     selection: EVERYTHING,
     avoided: {},
+    priority: [],
     filter: '',
     pinned: [],
     expanded: {},
@@ -61,6 +62,7 @@ describe('the Talkgroups panel, derived once (#91)', () => {
     expect(first).toEqual({
       key: '100:1',
       label: 'Alpha Fire',
+      priority: false,
       talkgroupRef: 1,
       systemLabel: 'Alpha',
       // Resolved here rather than per row per render (#91 left this behind on
@@ -539,5 +541,38 @@ describe('what a row says about activity (#57)', () => {
     ['under an hour', 30 * MINUTE, '30m'],
   ])('names %s as “%s” on the sort control', (_what, ms, said) => {
     expect(windowLabel(ms)).toBe(said)
+  })
+})
+
+
+describe('Priority on a row (#58, spec US 27)', () => {
+  it('is off for a Talkgroup nobody marked', () => {
+    expect(rowsOf(draw()).every((row) => row.priority)).toBe(false)
+  })
+
+  it('marks the row the Listener named, and only that one', () => {
+    const marked = rowsOf(draw({ priority: ['100:1'] })).filter((row) => row.priority)
+
+    expect(marked.map((row) => row.key)).toEqual(['100:1'])
+  })
+
+  /** A **Pin** and a Priority look alike on the row and are different states in
+   *  different slices — one arranges the panel, the other decides what plays
+   *  next — so a row must be able to carry either without the other. */
+  it('is independent of the Pin beside it', () => {
+    const [row] = rowsOf(draw({ priority: ['100:1'], pinned: [] })).filter(
+      (one) => one.key === '100:1',
+    )
+
+    expect(row).toMatchObject({ priority: true, pinned: false })
+  })
+
+  /** A Pinned row is the same Talkgroup lifted out of its section, so it has to
+   *  read the same — a Priority visible in one copy and not the other would be
+   *  the panel disagreeing with itself. */
+  it('reads the same on a Pinned copy of the row', () => {
+    const panel = draw({ priority: ['100:1'], pinned: ['100:1'] })
+
+    expect(panel.pinned[0]).toMatchObject({ key: '100:1', priority: true })
   })
 })

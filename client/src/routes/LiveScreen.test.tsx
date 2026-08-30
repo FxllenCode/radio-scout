@@ -4,6 +4,7 @@ import { axe } from 'vitest-axe'
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  advance,
   gapped,
   lagged,
   received,
@@ -11,6 +12,7 @@ import {
   selectIsAvoided,
   selectLiveCall,
   selectLiveMatrix,
+  selectPriority,
   selectQueueDepth,
 } from '@/store/live'
 import {
@@ -187,7 +189,7 @@ describe('LiveScreen', () => {
       const store = listening(call(), call({ id: 2 }), call({ id: 3 }))
 
       expect(selectQueueDepth(store.getState())).toBe(2)
-      expect(screen.getByLabelText('Queued calls')).toHaveTextContent('2')
+      expect(screen.getByLabelText(/Queued calls/)).toHaveTextContent('2')
     })
 
     /** ADR-0004's `lagged`: rdio drops those Calls silently. Saying so is the
@@ -314,20 +316,25 @@ describe('LiveScreen', () => {
       expect(until).toBeLessThan(before + (minutes + 1) * 60_000)
     })
 
-    /** An indefinite avoid has no deadline to lapse, so the display has to
-     *  offer a way back — US 14's timed mode is the *optional* one. */
+    /**
+     * An indefinite avoid has no deadline to lapse, so the display has to offer
+     * a way back — US 14's timed mode is the *optional* one.
+     *
+     * Since #58 that way is the Avoid sheet rather than a bare "clear them
+     * all": the control names how many are in force and opens the list, and
+     * clearing the lot is one of the things inside it.
+     */
     it('lets the listener take an avoid back', async () => {
       const user = userEvent.setup()
       const store = listening(call())
       await user.click(screen.getByRole('button', { name: 'Avoid' }))
 
-      await user.click(
-        await screen.findByRole('button', { name: /Stop avoiding/ }),
-      )
+      await user.click(await screen.findByRole('button', { name: /Avoiding 1/ }))
+      await user.click(await screen.findByRole('button', { name: 'Clear all' }))
 
       expect(selectLiveMatrix(store.getState())).toEqual({ all: true, sel: {} })
       expect(
-        screen.queryByRole('button', { name: /Stop avoiding/ }),
+        screen.queryByRole('button', { name: /Avoiding/ }),
       ).not.toBeInTheDocument()
     })
 
@@ -863,5 +870,85 @@ describe('LiveScreen — what the recorder knew (#42)', () => {
     expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
     const recent = screen.getByRole('list', { name: 'Recent calls' })
     expect(within(recent).getByTitle('Encrypted')).toBeInTheDocument()
+  })
+})
+
+/**
+ * **Priority** from the Live screen (#58, spec US 27).
+ *
+ * The Talkgroups panel is the other place it is set, and this is the one that
+ * matters in the moment: a Listener works out that dispatch should outrank
+ * tactical chatter *while hearing it*, and the panel is two taps and a
+ * four-hundred-row list away.
+ */
+describe('Priority on the Call being shown (#58)', () => {
+  const mark = () => screen.getByRole('button', { name: /priority/i })
+
+  it('marks the Talkgroup on the display', async () => {
+    const user = userEvent.setup()
+    const store = listening(call())
+
+    await user.click(mark())
+
+    expect(selectPriority(store.getState())).toEqual(['11:54241'])
+    expect(mark()).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('lets it go again', async () => {
+    const user = userEvent.setup()
+    const store = listening(call())
+
+    await user.click(mark())
+    await user.click(mark())
+
+    expect(selectPriority(store.getState())).toEqual([])
+  })
+
+  /** #56's rule: the display outlives the transmission, so the controls under
+   *  it go on meaning something after a chatty Talkgroup stops keying — which
+   *  is exactly when a Listener reaches for one. */
+  it('acts on the Call the display kept up after it ended', async () => {
+    const user = userEvent.setup()
+    const store = listening(call())
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+
+    await user.click(mark())
+
+    expect(selectPriority(store.getState())).toEqual(['11:54241'])
+  })
+
+  it('is out of reach with nothing on the display', () => {
+    renderApp('/')
+
+    expect(mark()).toBeDisabled()
+  })
+
+  /** It reads as pressed for the Talkgroup pressing it would act on, so the
+   *  state on screen and the state the button changes are the same one. */
+  it('reads off the Call now showing, not the one before it', async () => {
+    const user = userEvent.setup()
+    const store = listening(call())
+    await user.click(mark())
+
+    act(() => {
+      store.dispatch(received(call({ id: 2, talkgroupRef: 999 }), 2))
+      store.dispatch(advance())
+    })
+
+    expect(mark()).toHaveAttribute('aria-pressed', 'false')
+  })
+})
+
+describe('the way to the session log (#58, spec US 28)', () => {
+  /** RECENT reaches back five; the log reaches back to when the app opened. The
+   *  way there is from the list it extends. */
+  it('is offered from the RECENT heading once something has been heard', async () => {
+    const user = userEvent.setup()
+    listening(call())
+
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+    await user.click(screen.getByRole('link', { name: 'Session log' }))
+
+    expect(screen.getByRole('heading', { name: 'SESSION' })).toBeInTheDocument()
   })
 })

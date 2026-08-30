@@ -9,8 +9,26 @@
  * to be spread across three reducers and a `slice(-QUEUE_LIMIT)`: arrival order
  * was the only order, so nothing had to say what "next" meant. Once a Talkgroup
  * can outrank another, "next" and "what the cap drops" become one decision made
- * in one place — and #58 turns Priority on by passing a different
- * [`PriorityOf`], not by editing the reducers again.
+ * in one place — and #58 turned Priority on by passing a different
+ * [`PriorityOf`] ([`priorityFrom`]), not by editing the reducers again.
+ *
+ * # The arrival stamp (#58)
+ *
+ * A queued Call carries an **arrival ordinal**, which #95 left it without and
+ * named as the thing #58 would need. It buys exactly two answers that nothing
+ * about an array's shape can give:
+ *
+ * - [`reorder`], when the Listener changes a Priority under a queue that is
+ *   already deep. A *promotion* could be recovered from position; a
+ *   **demotion** cannot, because the Calls it falls back among are all newly
+ *   tied and their arrival order was never written down anywhere else.
+ * - [`newest`], which is what jump-to-newest means. Under Priority the tail of
+ *   the queue is the *lowest-ranked* Call, not the last to arrive — so jumping
+ *   to the tail would hand a Listener the stalest routine chatter there is and
+ *   call it catching up.
+ *
+ * An ordinal rather than a clock, so the module stays pure and a queue is still
+ * a value a test constructs. The slice counts.
  *
  * # What this deliberately is not
  *
@@ -20,6 +38,7 @@
  * playing — the glossary calls that out by name as SDRTrunk's stronger notion,
  * which this is not.
  */
+import { talkgroupKey } from './selection'
 import type { Call } from '@/types'
 
 /**
@@ -35,9 +54,9 @@ export type PriorityOf = (call: Call) => number
 /**
  * No Talkgroup outranks another, so arrival order is the whole order.
  *
- * What ships today, and the default of [`QueuePolicy`] — production has no way
- * to mark a Talkgroup Priority until #58, and this is the policy that says so
- * out loud rather than by omission.
+ * The default of [`QueuePolicy`], and what a Listener who has marked nothing
+ * Priority runs on — said out loud rather than by omission. [`priorityFrom`]
+ * over an empty set is exactly this.
  */
 export const FIFO: PriorityOf = () => 0
 
@@ -50,10 +69,30 @@ export interface QueuePolicy {
   priorityOf?: PriorityOf
 }
 
+/**
+ * A **Call** waiting, and when it arrived.
+ *
+ * The ordinal is monotonic and means nothing but *order* — it is not a clock,
+ * not the Call's `timestamp` (which is when the radio keyed up, and a
+ * **Delay**ed Call can be stored early and emitted late), and not its `id`
+ * (the server's, which #94 established is not even emission order).
+ */
+export interface Queued {
+  call: Call
+  /** Higher is later. Compared only against other entries in the same queue. */
+  at: number
+}
+
+/** The Calls of a queue, in the order they will play — what a screen draws and
+ *  what the page-ahead reads. Written here so no caller has to know that an
+ *  entry is a wrapper. */
+export const callsOf = (queue: readonly Queued[]): Call[] =>
+  queue.map((entry) => entry.call)
+
 /** A queue after a Call joined it, and whatever the cap had to drop to fit. */
 export interface Enqueued {
   /** The queue as it now stands, in the order it will play. */
-  queue: Call[]
+  queue: Queued[]
   /**
    * What the cap dropped, in the order it dropped them — lowest Priority
    * first, stalest within a Priority.
@@ -70,7 +109,15 @@ export interface Taken {
   /** What plays now, or `null` if the feed falls quiet. */
   next: Call | null
   /** What is still waiting. */
-  queue: Call[]
+  queue: Queued[]
+}
+
+/** A queue after one named Call was taken out of it (#58). */
+export interface Withdrawn {
+  /** The Call that was named, or `null` if the queue was not holding it. */
+  call: Call | null
+  /** What is left, in the order it will play. */
+  queue: Queued[]
 }
 
 /**
@@ -85,39 +132,53 @@ export interface Taken {
  * Call that outranks *or ties* it. That tie is what keeps equal-Priority
  * traffic first-come-first-served.
  *
- * # The one precondition, and it is #58's to meet
+ * # The one precondition, and [`reorder`] is what meets it
  *
- * Play order is maintained *on insert*, which holds the array in play order
- * for as long as `priorityOf` answers the same way it did when each waiting
- * Call arrived. **A `priorityOf` that changes under a non-empty queue leaves
- * that queue stale** — a Call already waiting does not jump when the Listener
- * promotes its Talkgroup, and one arriving after can land ahead of a staler
- * equal-Priority peer.
- *
- * Harmless today: production is [`FIFO`] and answers the same way forever. It
- * is #58's to deal with, because #58 is what puts a Priority toggle in front of
- * a Listener — and the honest fix needs something this module deliberately does
- * not have. Re-sorting recovers a *promotion* exactly, but not a demotion:
- * ranking two newly-tied Calls by staleness needs an arrival stamp, and the
- * queue holds bare Calls (no field on one is arrival order — `id` is the
- * server's, which #94 established is not even emission order, and `timestamp`
- * is when the radio keyed up). Giving the queue a stamp changes what
- * `selectQueue` hands `transport.ts`, which is more than this ticket asked for.
- * So: stated here rather than papered over, and left where the toggle is built.
+ * Play order is maintained *on insert*, which holds the array in play order for
+ * as long as `priorityOf` answers the same way it did when each waiting Call
+ * arrived. A `priorityOf` that changes under a non-empty queue would therefore
+ * leave that queue stale — the Listener promotes dispatch and the forty Calls
+ * already waiting do not move, which is exactly the moment they reached for it.
+ * That is what [`reorder`] is for, and the slice dispatches it on every
+ * Priority change.
  */
 export function enqueue(
-  queue: readonly Call[],
+  queue: readonly Queued[],
   call: Call,
+  at: number,
   policy: QueuePolicy,
 ): Enqueued {
   const priorityOf = policy.priorityOf ?? FIFO
   const priority = priorityOf(call)
 
-  const ahead = queue.findIndex((waiting) => priorityOf(waiting) < priority)
+  const ahead = queue.findIndex((waiting) => priorityOf(waiting.call) < priority)
   const joined = [...queue]
-  joined.splice(ahead === -1 ? joined.length : ahead, 0, call)
+  joined.splice(ahead === -1 ? joined.length : ahead, 0, { call, at })
 
   return cap(joined, policy.limit, priorityOf)
+}
+
+/**
+ * The same queue under new Priorities — the answer when a Listener marks a
+ * Talkgroup while Calls are already waiting (#58).
+ *
+ * A total sort by (Priority, then arrival), which is the play order spelled
+ * literally. Both halves of the comparison read a *value*: nothing is inferred
+ * from where a Call currently sits, which is what makes a **demotion** exact.
+ * A stable re-sort of the array as it stands would put a demoted Call back
+ * among its new peers in the position its old Priority had lifted it to, ahead
+ * of Calls that arrived before it.
+ *
+ * It never drops: re-ordering cannot make a queue longer, so the cap has
+ * nothing to do.
+ */
+export function reorder(
+  queue: readonly Queued[],
+  priorityOf: PriorityOf,
+): Queued[] {
+  return [...queue].sort(
+    (a, b) => priorityOf(b.call) - priorityOf(a.call) || a.at - b.at,
+  )
 }
 
 /**
@@ -145,10 +206,10 @@ export function enqueue(
  * hands it an array it has just built and no longer owns, so a second copy per
  * arriving Call would buy nothing.
  */
-function cap(queue: Call[], limit: number, priorityOf: PriorityOf): Enqueued {
+function cap(queue: Queued[], limit: number, priorityOf: PriorityOf): Enqueued {
   const dropped: Call[] = []
   while (queue.length > limit) {
-    dropped.push(...queue.splice(worst(queue, priorityOf), 1))
+    dropped.push(...callsOf(queue.splice(worst(queue, priorityOf), 1)))
   }
   return { queue, dropped }
 }
@@ -157,16 +218,17 @@ function cap(queue: Call[], limit: number, priorityOf: PriorityOf): Enqueued {
  * Which waiting Call the cap gives up first: the lowest **Priority** there is,
  * and the stalest of those.
  *
- * "Stalest" is *position*, and that is not a shortcut — a queued Call carries
- * no arrival stamp of its own, so the array's order is the only record of
- * arrival there is. Taking the first of a tie is therefore taking the earliest
- * to arrive, which is what makes the second half of the rule true.
+ * "Stalest" is read off *position* rather than off [`Queued.at`], and the two
+ * are the same answer: every operation in this module hands back a queue in
+ * play order, so within one Priority band the earlier entry is the staler one.
+ * Comparing the stamps here would spell a rule the array already guarantees,
+ * and buy a branch nothing could ever take.
  */
-function worst(queue: readonly Call[], priorityOf: PriorityOf): number {
+function worst(queue: readonly Queued[], priorityOf: PriorityOf): number {
   let at = 0
-  let lowest = priorityOf(queue[0])
+  let lowest = priorityOf(queue[0].call)
   for (let index = 1; index < queue.length; index += 1) {
-    const priority = priorityOf(queue[index])
+    const priority = priorityOf(queue[index].call)
     // Strictly lower, so a tie leaves the earlier one standing as the worst.
     if (priority < lowest) {
       at = index
@@ -182,9 +244,75 @@ function worst(queue: readonly Call[], priorityOf: PriorityOf): number {
  * The head, because [`enqueue`] keeps the queue in play order — so this is the
  * one statement of "what plays next", rather than a rule every caller repeats.
  */
-export function takeNext(queue: readonly Call[]): Taken {
+export function takeNext(queue: readonly Queued[]): Taken {
   const [next, ...rest] = queue
-  return { next: next ?? null, queue: rest }
+  return { next: next?.call ?? null, queue: rest }
+}
+
+/**
+ * The Call that arrived most recently — what *jump to newest* jumps to (#58,
+ * spec US 24).
+ *
+ * Deliberately not the tail. The tail is the lowest-ranked Call in the queue,
+ * which under Priority is the routine chatter a Listener is trying to get past;
+ * handing them that and calling it catching up would be the same lie the cap's
+ * old rule told in the other direction.
+ */
+export function newest(queue: readonly Queued[]): Call | undefined {
+  let latest: Queued | undefined
+  for (const entry of queue) {
+    if (!latest || entry.at > latest.at) latest = entry
+  }
+  return latest?.call
+}
+
+/**
+ * Take one named Call out of the queue (#58).
+ *
+ * One operation for *play now* and for *drop*, because they differ only in what
+ * the caller does with what comes back — and that is the slice's decision (one
+ * plays it, the other lets it go), not this module's.
+ *
+ * By **id**, never by index: the sheet a Listener is reading re-orders under
+ * their thumb — an arriving Priority Call takes the head and every index below
+ * it moves by one — so an index would act on whichever Call had slid into that
+ * slot. A Call the queue is not holding hands back `null` rather than throwing,
+ * so a reducer can simply do nothing about a Call that played or was purged
+ * between the tap and the dispatch.
+ */
+export function withdraw(queue: readonly Queued[], id: number): Withdrawn {
+  const taken = queue.find((entry) => entry.call.id === id)
+  return {
+    call: taken?.call ?? null,
+    queue: taken ? queue.filter((entry) => entry !== taken) : [...queue],
+  }
+}
+
+/**
+ * What a Listener's marked Talkgroups mean as an ordering (#58, spec US 27).
+ *
+ * A level of one — marked or not — which is all a per-Talkgroup toggle can say;
+ * [`PriorityOf`] is a *level* so that a scheme with tiers costs this module
+ * nothing later.
+ *
+ * A Call is judged by every channel it **reaches**, its own and any it was
+ * patched onto — the same rule that decides whether it is heard at all
+ * (`wants` in `store/live`, `Selection::reaches_channels` on the server). A
+ * Call that reaches a Listener's dispatch channel *because* it was patched
+ * there is the one they least want waiting behind tactical chatter.
+ *
+ * The keys are read into a `Set` once per build rather than per Call: this is
+ * asked of every Call in the queue on every re-order, on a Pi-class phone.
+ */
+export function priorityFrom(keys: readonly string[]): PriorityOf {
+  const marked = new Set(keys)
+  if (marked.size === 0) return FIFO
+  return (call) =>
+    [call.talkgroupRef, ...(call.patches ?? [])].some((talkgroupRef) =>
+      marked.has(talkgroupKey(call.systemRef, talkgroupRef)),
+    )
+      ? 1
+      : 0
 }
 
 /**
@@ -197,8 +325,8 @@ export function takeNext(queue: readonly Call[]): Taken {
  * selection — a priority talkgroup still has to be selected to be heard."*
  */
 export function retain(
-  queue: readonly Call[],
+  queue: readonly Queued[],
   wanted: (call: Call) => boolean,
-): Call[] {
-  return queue.filter(wanted)
+): Queued[] {
+  return queue.filter((entry) => wanted(entry.call))
 }

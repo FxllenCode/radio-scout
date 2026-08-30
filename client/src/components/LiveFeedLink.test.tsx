@@ -155,7 +155,7 @@ describe('the live-feed link', () => {
     renderApp('/')
 
     expect(await screen.findByText('FD Dispatch')).toBeInTheDocument()
-    expect(screen.getByLabelText('Queued calls')).toHaveTextContent('1')
+    expect(screen.getByLabelText(/Queued calls/)).toHaveTextContent('1')
   })
 
   /** ADR-0004's `lagged` notice: rdio drops those Calls without a word. */

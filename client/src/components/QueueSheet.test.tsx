@@ -1,0 +1,193 @@
+import { act, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import {
+  received,
+  selectLiveCall,
+  selectMissed,
+  selectQueue,
+  selectQueueDepth,
+  togglePriority,
+} from '@/store/live'
+import { makeStore } from '@/store/store'
+import { renderApp } from '@/test/utils'
+import type { Call } from '@/types'
+
+function call(id: number, talkgroupRef = 54241): Call {
+  return {
+    id,
+    systemRef: 11,
+    systemLabel: 'Fulton County',
+    talkgroupRef,
+    talkgroupLabel: `Talkgroup ${talkgroupRef}`,
+    timestamp: Date.parse('2026-07-25T14:32:05'),
+    audioUrl: `/api/call/${id}/audio`,
+  }
+}
+
+/** The Live screen with `calls` arrived — the first playing, the rest waiting. */
+function listening(...calls: Call[]) {
+  const store = makeStore()
+  const view = renderApp('/', store)
+  act(() => {
+    for (const one of calls) store.dispatch(received(one, one.id))
+  })
+  return { ...view, store }
+}
+
+type Listening = ReturnType<typeof listening>
+
+const open = async (user: ReturnType<typeof userEvent.setup>) =>
+  user.click(screen.getByRole('button', { name: /Queued calls/ }))
+
+const sheet = () => screen.getByRole('dialog')
+const rows = () =>
+  within(screen.getByRole('list', { name: 'Queued calls' })).getAllByRole('listitem')
+
+const queuedIds = (store: Listening['store']) =>
+  selectQueue(store.getState()).map((one) => one.id)
+
+describe('the queue sheet (#58, spec US 24)', () => {
+  /** The `Q` readout has been a number since #11 and this is what it becomes. */
+  it('opens from the queue counter and lists what is waiting', async () => {
+    const user = userEvent.setup()
+    listening(call(1), call(2, 100), call(3, 200))
+
+    await open(user)
+
+    expect(sheet()).toHaveAccessibleName('Queue — 2 waiting')
+    expect(rows()).toHaveLength(2)
+    expect(within(rows()[0]).getByText('Talkgroup 100')).toBeInTheDocument()
+  })
+
+  /**
+   * A control that looks live and does nothing is the thing #88's tests exist
+   * to catch — and it is also what keeps this out of reach with the feed off,
+   * where the queue is emptied by construction.
+   */
+  it('is out of reach with nothing waiting', () => {
+    listening(call(1))
+
+    expect(screen.getByRole('button', { name: /Queued calls/ })).toBeDisabled()
+  })
+
+  it('plays a waiting Call now, and closes', async () => {
+    const user = userEvent.setup()
+    const { store } = listening(call(1), call(2, 100), call(3, 200))
+    await open(user)
+
+    await user.click(screen.getByRole('button', { name: 'Play Talkgroup 200 now' }))
+
+    expect(selectLiveCall(store.getState())?.id).toBe(3)
+    expect(queuedIds(store)).toEqual([2])
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  /** Pruning is a run of taps, so the sheet stays up — closing after each one
+   *  would make clearing four Calls cost eight taps. */
+  it('drops a waiting Call and stays open', async () => {
+    const user = userEvent.setup()
+    const { store } = listening(call(1), call(2, 100), call(3, 200))
+    await open(user)
+
+    await user.click(screen.getByRole('button', { name: 'Drop Talkgroup 100' }))
+
+    expect(queuedIds(store)).toEqual([3])
+    expect(rows()).toHaveLength(1)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  /** They read the row and let it go: `missed` is traffic the Listener wanted
+   *  and did not get, which this is not. */
+  it('counts a dropped Call as nothing', async () => {
+    const user = userEvent.setup()
+    const { store } = listening(call(1), call(2, 100))
+    await open(user)
+
+    await user.click(screen.getByRole('button', { name: 'Drop Talkgroup 100' }))
+
+    expect(selectMissed(store.getState())).toBe(0)
+  })
+
+  it('jumps to the newest, admitting what that cost', async () => {
+    const user = userEvent.setup()
+    const { store } = listening(call(1), call(2, 100), call(3, 200), call(4, 300))
+    await open(user)
+
+    await user.click(screen.getByRole('button', { name: /Jump to newest/ }))
+
+    expect(selectLiveCall(store.getState())?.id).toBe(4)
+    expect(selectQueueDepth(store.getState())).toBe(0)
+    expect(selectMissed(store.getState())).toBe(2)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('says how many the jump would give up before it is pressed', async () => {
+    const user = userEvent.setup()
+    listening(call(1), call(2, 100), call(3, 200), call(4, 300))
+
+    await open(user)
+
+    expect(
+      screen.getByRole('button', { name: /Jump to newest.*2 counted missed/ }),
+    ).toBeInTheDocument()
+  })
+
+  /** One Call waiting is not a backlog, and "0 counted missed" beside a button
+   *  is a number that says nothing. */
+  it('says nothing about the cost when the jump gives up nothing', async () => {
+    const user = userEvent.setup()
+    listening(call(1), call(2, 100))
+
+    await open(user)
+
+    expect(screen.getByRole('button', { name: 'Jump to newest' })).toBeInTheDocument()
+  })
+
+  /**
+   * The list re-orders under the Listener's thumb whenever a **Priority** Call
+   * arrives — so every control names a Call id and `key={call.id}` moves the
+   * row's node rather than rewriting it. A control keyed on *position* would
+   * drop whichever Call had slid into that slot.
+   */
+  it('acts on the Call it names after the queue re-orders underneath it', async () => {
+    const user = userEvent.setup()
+    const { store } = listening(call(1), call(2, 100), call(3, 200))
+    await open(user)
+    expect(rows()).toHaveLength(2)
+
+    // A Priority Call arrives and takes the head of the queue.
+    act(() => {
+      store.dispatch(togglePriority('11:900'))
+      store.dispatch(received(call(4, 900), 4))
+    })
+    expect(queuedIds(store)).toEqual([4, 2, 3])
+
+    await user.click(screen.getByRole('button', { name: 'Drop Talkgroup 100' }))
+
+    expect(queuedIds(store)).toEqual([4, 3])
+  })
+
+  /** Emptying the queue from inside the sheet leaves it up and saying so,
+   *  rather than closing on a Listener mid-prune. */
+  it('says the feed is caught up once the last Call goes', async () => {
+    const user = userEvent.setup()
+    listening(call(1), call(2, 100))
+    await open(user)
+
+    await user.click(screen.getByRole('button', { name: 'Drop Talkgroup 100' }))
+
+    expect(screen.getByText(/Nothing waiting/)).toBeInTheDocument()
+  })
+
+  it('has no accessibility violations', async () => {
+    const user = userEvent.setup()
+    const { container } = listening(call(1), call(2, 100))
+
+    await open(user)
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+})

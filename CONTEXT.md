@@ -125,7 +125,7 @@ A Run carries **its own window** into the Archive, which is not the window on sc
 _Avoid_: session (the **Operator's** admin login), playlist, queue (the **listening queue** is a different set), walk.
 
 **Listening queue**:
-The ordered set of not-yet-played live calls waiting to play. Its depth is the `Q` count in the display. Bounded — and it truncates in the same order it plays: lowest **Priority** first, then stalest. A queue that plays by one order and drops by another can starve the one talkgroup the **Listener** said mattered.
+The ordered set of not-yet-played live calls waiting to play. Its depth is the `Q` count in the display, and tapping that count is how a **Listener** sees into it — playing one now, letting one go, or giving up the backlog for the newest **Call** there is. Bounded — and it truncates in the same order it plays: lowest **Priority** first, then stalest. A queue that plays by one order and drops by another can starve the one talkgroup the **Listener** said mattered. Every queued Call carries the **ordinal it arrived at**, because arrival order is not recoverable from a queue that has been re-ordered — a Call demoted out of the Priority band has to fall back among Calls it once outranked, and nothing about where it currently sits can say which of them spoke first.
 _Avoid_: buffer, backlog.
 
 **Hold**:
@@ -144,7 +144,7 @@ One named, independent **Listener** setup within a single browser — its own **
 _Avoid_: namespace (in prose), workspace, preset, scanner.
 
 **Priority**:
-A **Listener's** per-talkgroup preference that makes its calls jump the **listening queue** instead of waiting their turn. Queue order, not selection — a priority talkgroup still has to be selected to be heard.
+A **Listener's** per-talkgroup preference that makes its calls jump the **listening queue** instead of waiting their turn. Queue order, not selection — a priority talkgroup still has to be selected to be heard. It applies to what is *already waiting*, not only to what arrives next: a Listener reaches for it precisely when they are forty Calls behind, so marking a talkgroup re-orders the queue in hand. Part of a **Profile**, unlike a **Pin**, which cannot change what plays.
 _Avoid_: preempt (SDRTrunk's stronger notion — interrupting the playing call — which this is not), favorite.
 
 **Pin**:
@@ -154,6 +154,10 @@ _Avoid_: favorite, star (a **Star** marks a Call).
 **Catch-up**:
 Draining the **listening queue** faster than real time — silence trimmed, playback rate raised — until the feed is live again. A **Listener's** action on Calls they already have; distinct from a **Backfill**, which is how they got them.
 _Avoid_: fast-forward, smart speed (a product's trademark), time compression, backfill.
+
+**Session log**:
+Every **Call** a **Listener** heard since they opened the app, newest first, replayable and reachable for a **Hold**, an **Avoid** or a download. Client-side and unpersisted — *this session* is what it says — and deeper than the RECENT list on the live screen, which is a five-deep replay control rather than a record. Each Call appears once, in the order it was **first** heard: a replay is hearing it again, not a new thing happening, and a list that reordered itself under "what was that ten minutes ago" would not answer the question.
+_Avoid_: history (RECENT's five), **Backfill** (Calls the Listener did *not* hear), **Run** (archived Calls being walked), transcript.
 
 **Backfill**:
 The **Calls** a **Listener** missed while **Feed down**, sent on reconnect so the **live feed** resumes without a hole. Ordered by when a Call was *emitted*, never by when it was stored — a **Delay**ed Call is stored early and emitted late, so a cursor over storage order would skip it silently. Bounded — past the bound the Listener is told their history has a gap only archive search can fill, because a silent truncation is indistinguishable from having missed nothing.

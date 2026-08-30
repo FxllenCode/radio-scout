@@ -4,11 +4,23 @@ import type { Call } from '@/types'
 
 import { enterLiveFeed, enterPlaybackMode } from './playback'
 import {
+  AVOID_UNDO_MS,
   HISTORY_DEPTH,
   QUEUE_LIMIT,
+  SESSION_LOG_LIMIT,
   advance,
   avoid,
+  avoidTalkgroup,
+  clearAvoid,
   clearAvoids,
+  dismissAvoidUndo,
+  dropQueued,
+  jumpToNewest,
+  playQueued,
+  togglePriority,
+  togglePriorityShown,
+  toggleHoldOn,
+  undoAvoid,
   connected,
   connecting,
   disconnected,
@@ -17,7 +29,9 @@ import {
   liveReducer,
   received,
   replay,
+  selectAvoidUndo,
   selectAvoidedCount,
+  selectAvoids,
   selectHistory,
   selectHold,
   selectIsAvoided,
@@ -30,7 +44,11 @@ import {
   selectLiveStatus,
   selectMissed,
   selectPlayId,
+  selectPriority,
+  selectIsPriority,
+  selectQueue,
   selectQueueDepth,
+  selectSessionLog,
   selectFeedStatus,
   selectSelection,
   selectSince,
@@ -284,7 +302,7 @@ describe('live slice', () => {
       expect(selectQueueDepth(rootState(state))).toBe(QUEUE_LIMIT)
       expect(selectMissed(rootState(state))).toBe(4)
       // The newest Call survived; the oldest queued ones did not.
-      expect(state.queue.at(-1)).toEqual(flood.at(-1))
+      expect(selectQueue(rootState(state)).at(-1)).toEqual(flood.at(-1))
     })
 
     it('ignores an advance while nothing is playing', () => {
@@ -476,7 +494,7 @@ describe('live slice', () => {
       const state = reduce(...arrive(call(9), call(4)))
 
       expect(selectQueueDepth(rootState(state))).toBe(1)
-      expect(state.queue[0]).toEqual(call(4))
+      expect(selectQueue(rootState(state))[0]).toEqual(call(4))
     })
   })
 
@@ -553,7 +571,7 @@ describe('live slice', () => {
       )
 
       expect(selectQueueDepth(rootState(state))).toBe(1)
-      expect(state.queue[0]).toEqual(call(3, 11, 200))
+      expect(selectQueue(rootState(state))[0]).toEqual(call(3, 11, 200))
     })
 
     it('turns away Calls the hold excludes', () => {
@@ -1024,5 +1042,543 @@ describe('encrypted Calls (#42, spec US 9)', () => {
     )
 
     expect(selectHistory(rootState(state))).toEqual([])
+  })
+})
+
+/**
+ * #58 — the queue as a tool, Priority, the Avoid undo, and the session log.
+ *
+ * Everything below is the *slice*; `lib/queue.test.ts` owns the ordering
+ * algebra and enumerates it, and the screens own the rendering. What is proven
+ * here is the wiring the screens depend on and the ordering module cannot see:
+ * which Call a control acts on, and what a change costs the queue in hand.
+ */
+describe('the queue as a tool (#58, spec US 24)', () => {
+  /** Two Calls waiting behind one playing. */
+  const listening = () => reduce(connected(), ...arrive(call(1), call(2), call(3)))
+
+  it('shows what is waiting, in the order it will play', () => {
+    const state = listening()
+
+    expect(selectQueue(rootState(state)).map((one) => one.id)).toEqual([2, 3])
+  })
+
+  describe('playing one now', () => {
+    it('takes it out of the queue and puts it on the air', () => {
+      const state = liveReducer(listening(), playQueued(3))
+
+      expect(selectLiveCall(rootState(state))?.id).toBe(3)
+      expect(selectQueue(rootState(state)).map((one) => one.id)).toEqual([2])
+    })
+
+    /** The Call it interrupted is not lost — it goes where every displaced Call
+     *  goes, so RECENT can replay it. */
+    it('files the Call it interrupted under history', () => {
+      const state = liveReducer(listening(), playQueued(3))
+
+      expect(selectHistory(rootState(state))[0]?.id).toBe(1)
+    })
+
+    /** The Listener chose it. Counting it would make the missed number a lie in
+     *  the other direction from the one it exists to prevent. */
+    it('counts nothing as missed', () => {
+      const state = liveReducer(listening(), playQueued(3))
+
+      expect(selectMissed(rootState(state))).toBe(0)
+    })
+
+    /**
+     * The moving-target case (#58's fifth criterion), at the reducer. Between
+     * the tap and the dispatch the Call can have played, or a purge can have
+     * taken it — and a reducer that guessed would put a *different* Call on the
+     * air than the one the finger went down on.
+     */
+    it('does nothing at all for a Call the queue is no longer holding', () => {
+      const before = listening()
+      const state = liveReducer(before, playQueued(99))
+
+      expect(state).toBe(before)
+    })
+  })
+
+  describe('dropping one', () => {
+    it('takes it out and leaves everything else alone', () => {
+      const state = liveReducer(listening(), dropQueued(2))
+
+      expect(selectQueue(rootState(state)).map((one) => one.id)).toEqual([3])
+      expect(selectLiveCall(rootState(state))?.id).toBe(1)
+    })
+
+    /**
+     * Deliberately not missed, and the rule is `turnFeedOff`'s: `missed` admits
+     * traffic the Listener *wanted* and did not get. They read this one in the
+     * sheet and let it go, one at a time. Jumping is the other case — there
+     * they did not look, which is why that one counts.
+     */
+    it('counts nothing as missed, because they looked at it and let it go', () => {
+      const state = liveReducer(listening(), dropQueued(2))
+
+      expect(selectMissed(rootState(state))).toBe(0)
+    })
+
+    it('does nothing for a Call the queue is no longer holding', () => {
+      const before = listening()
+
+      expect(liveReducer(before, dropQueued(99))).toBe(before)
+    })
+  })
+
+  describe('jumping to the newest', () => {
+    it('plays the newest and gives up everything behind it', () => {
+      const state = liveReducer(listening(), jumpToNewest())
+
+      expect(selectLiveCall(rootState(state))?.id).toBe(3)
+      expect(selectQueueDepth(rootState(state))).toBe(0)
+    })
+
+    /** The ticket's own words: "counted as missed, never silent". A tap that
+     *  discards a backlog owes the Listener the number. */
+    it('counts what it gave up as missed', () => {
+      const state = liveReducer(listening(), jumpToNewest())
+
+      expect(selectMissed(rootState(state))).toBe(1)
+    })
+
+    /**
+     * *Newest* is the last to have arrived, which under **Priority** is not the
+     * tail of the queue — the tail is the lowest-ranked Call there is. Jumping
+     * to it would hand the Listener the stalest routine chatter in the queue.
+     */
+    it('is the last Call to arrive, not the last in play order', () => {
+      const state = reduce(
+        connected(),
+        togglePriority('11:200'),
+        ...arrive(call(1), call(2, 11, 200), call(3)),
+      )
+      // 2 is Priority, so it plays first: the queue stands [2, 3].
+      expect(selectQueue(rootState(state)).map((one) => one.id)).toEqual([2, 3])
+
+      const jumped = liveReducer(state, jumpToNewest())
+      expect(selectLiveCall(rootState(jumped))?.id).toBe(3)
+    })
+
+    it('does nothing with an empty queue', () => {
+      const before = reduce(connected(), ...arrive(call(1)))
+
+      expect(liveReducer(before, jumpToNewest())).toBe(before)
+    })
+  })
+})
+
+describe('Priority (#58, spec US 27)', () => {
+  const priority = '11:200'
+
+  it('is nothing until the Listener marks something', () => {
+    const state = reduce({ type: '@@INIT' })
+
+    expect(selectPriority(rootState(state))).toEqual([])
+    expect(selectIsPriority(rootState(state), 11, 200)).toBe(false)
+  })
+
+  it('marks and unmarks a Talkgroup', () => {
+    const on = reduce(togglePriority(priority))
+    expect(selectIsPriority(rootState(on), 11, 200)).toBe(true)
+
+    expect(selectIsPriority(rootState(liveReducer(on, togglePriority(priority))), 11, 200)).toBe(
+      false,
+    )
+  })
+
+  /** CONTEXT.md **Priority**: "makes its calls jump the listening queue instead
+   *  of waiting their turn". */
+  it('puts an arriving Priority Call ahead of the routine traffic waiting', () => {
+    const state = reduce(
+      connected(),
+      togglePriority(priority),
+      ...arrive(call(1), call(2), call(3, 11, 200)),
+    )
+
+    expect(selectQueue(rootState(state)).map((one) => one.id)).toEqual([3, 2])
+  })
+
+  /**
+   * The reason #95 handed this ticket an arrival stamp. A Listener reaches for
+   * Priority precisely when they are already far behind — so a promotion that
+   * only applied to Calls arriving *after* it would do nothing on screen at the
+   * one moment it was asked for.
+   */
+  it('lifts Calls already waiting when the Talkgroup is promoted', () => {
+    const behind = reduce(
+      connected(),
+      ...arrive(call(1), call(2), call(3, 11, 200), call(4)),
+    )
+    expect(selectQueue(rootState(behind)).map((one) => one.id)).toEqual([2, 3, 4])
+
+    const state = liveReducer(behind, togglePriority(priority))
+    expect(selectQueue(rootState(state)).map((one) => one.id)).toEqual([3, 2, 4])
+  })
+
+  /**
+   * The direction the stamp was actually needed for. A demoted Call falls back
+   * among Calls that are now all tied with it, and only its arrival ordinal can
+   * say where — position would leave it at the head its old Priority won it.
+   */
+  it('drops a demoted Call back to where it arrived, not where it sat', () => {
+    const state = reduce(
+      connected(),
+      togglePriority(priority),
+      ...arrive(call(1), call(2), call(3, 11, 200), call(4)),
+    )
+    expect(selectQueue(rootState(state)).map((one) => one.id)).toEqual([3, 2, 4])
+
+    const off = liveReducer(state, togglePriority(priority))
+    expect(selectQueue(rootState(off)).map((one) => one.id)).toEqual([2, 3, 4])
+  })
+
+  /** The Live screen's own control, which acts on the Call the display is
+   *  showing — the same subject *Hold* and *Avoid* use (#56), so three lit
+   *  buttons cannot be about three different Calls. */
+  it('is markable from the Call on the display', () => {
+    const state = reduce(connected(), ...arrive(call(1, 11, 200)), togglePriorityShown())
+
+    expect(selectIsPriority(rootState(state), 11, 200)).toBe(true)
+  })
+
+  /** It goes on meaning something after the transmission ends — that is what
+   *  the display outliving the Call is for. */
+  it('acts on the Call the display kept up after it ended', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1, 11, 200)),
+      advance(),
+      togglePriorityShown(),
+    )
+
+    expect(selectIsPriority(rootState(state), 11, 200)).toBe(true)
+  })
+
+  it('does nothing with nothing on the display', () => {
+    const before = reduce(connected())
+
+    expect(liveReducer(before, togglePriorityShown())).toBe(before)
+  })
+
+  /** CONTEXT.md: "Queue order, not selection — a priority talkgroup still has
+   *  to be selected to be heard." */
+  it('does not make an unselected Talkgroup audible', () => {
+    const state = reduce(
+      connected(),
+      chooseTalkgroups({ keys: [{ systemRef: 11, talkgroupRef: 200 }], on: false }),
+      togglePriority(priority),
+      ...arrive(call(1), call(2, 11, 200)),
+    )
+
+    expect(selectLiveCall(rootState(state))?.id).toBe(1)
+    expect(selectQueueDepth(rootState(state))).toBe(0)
+  })
+
+  /** A **Patch** reaches the channel it was patched onto, and Priority follows
+   *  it — `lib/queue`'s rule, proven here to be the one the slice runs. */
+  it('promotes a patched Call reaching a Priority Talkgroup', () => {
+    const patched = { ...call(3), patches: [200] }
+    const state = reduce(
+      connected(),
+      togglePriority(priority),
+      ...arrive(call(1), call(2), patched),
+    )
+
+    expect(selectQueue(rootState(state)).map((one) => one.id)).toEqual([3, 2])
+  })
+})
+
+describe('undoing an Avoid (#58, spec US 25)', () => {
+  const heard = () => reduce(connected(), ...arrive(call(1)))
+
+  it('offers nothing until something is avoided', () => {
+    expect(selectAvoidUndo(rootState(heard()))).toBeNull()
+  })
+
+  it('offers an undo naming the Talkgroup that was silenced', () => {
+    const state = liveReducer(heard(), avoid({ until: 0, at: NOW }))
+    const offer = selectAvoidUndo(rootState(state))
+
+    expect(offer?.key).toBe('11:100')
+    expect(offer?.expiresAt).toBe(NOW + AVOID_UNDO_MS)
+  })
+
+  it('lets the Talkgroup back in', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1)),
+      avoid({ until: 0, at: NOW }),
+      undoAvoid(),
+    )
+
+    expect(selectIsAvoided(rootState(state), 11, 100)).toBe(false)
+    expect(selectAvoidUndo(rootState(state))).toBeNull()
+  })
+
+  /** Avoiding a Talkgroup you are holding releases the hold — the avoid is the
+   *  newer intent. Undoing the avoid has to put the hold back, or the undo
+   *  would be a half-undo that silently cost the Listener their hold. */
+  it('restores the Hold the Avoid released', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1)),
+      toggleHoldTalkgroup(),
+      avoid({ until: 0, at: NOW }),
+      undoAvoid(),
+    )
+
+    expect(selectHold(rootState(state))).toEqual({ systemRef: 11, talkgroupRef: 100 })
+  })
+
+  /** Avoiding something already avoided — re-arming a lapsing 30-minute avoid
+   *  as an indefinite one, say — must undo to the deadline that was there,
+   *  never to "not avoided at all". */
+  it('restores the deadline that was already in force', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1)),
+      avoid({ until: NOW + 60_000, at: NOW }),
+      avoid({ until: 0, at: NOW }),
+      undoAvoid(),
+    )
+
+    expect(selectAvoids(rootState(state))).toEqual({ '11:100': NOW + 60_000 })
+  })
+
+  it('is dismissable, which is what the grace window running out means', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1)),
+      avoid({ until: 0, at: NOW }),
+      dismissAvoidUndo(),
+    )
+
+    expect(selectAvoidUndo(rootState(state))).toBeNull()
+    expect(selectIsAvoided(rootState(state), 11, 100)).toBe(true)
+  })
+
+  /** One offer, and it names the last thing silenced — undoing an avoid two
+   *  taps ago while the newer one stands would be an undo of something that is
+   *  no longer on screen. */
+  it('replaces the offer when a second Talkgroup is avoided', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1), call(2, 11, 200)),
+      avoid({ until: 0, at: NOW }),
+      advance(),
+      avoid({ until: 0, at: NOW }),
+    )
+
+    expect(selectAvoidUndo(rootState(state))?.key).toBe('11:200')
+  })
+
+  it('does nothing with no offer standing', () => {
+    const before = heard()
+
+    expect(liveReducer(before, undoAvoid())).toBe(before)
+  })
+})
+
+describe('the Avoid sheet (#58, spec US 25)', () => {
+  const twoAvoided = () =>
+    reduce(
+      connected(),
+      ...arrive(call(1), call(2, 11, 200)),
+      avoid({ until: 0, at: NOW }),
+      advance(),
+      avoid({ until: NOW + 60_000, at: NOW }),
+    )
+
+  it('lists every Avoid in force with the moment each lapses', () => {
+    expect(selectAvoids(rootState(twoAvoided()))).toEqual({
+      '11:100': 0,
+      '11:200': NOW + 60_000,
+    })
+  })
+
+  /** The individual removal spec US 25 asks for — `clearAvoids` is all or
+   *  nothing, which is exactly the blunt instrument this replaces. */
+  it('clears exactly one, leaving the rest in force', () => {
+    const state = liveReducer(twoAvoided(), clearAvoid('11:100'))
+
+    expect(selectAvoids(rootState(state))).toEqual({ '11:200': NOW + 60_000 })
+  })
+
+  it('ignores a Talkgroup that is not avoided', () => {
+    const state = liveReducer(twoAvoided(), clearAvoid('11:999'))
+
+    expect(selectAvoidedCount(rootState(state))).toBe(2)
+  })
+})
+
+describe('the session log (#58, spec US 28)', () => {
+  it('holds everything heard this session, newest first', () => {
+    const state = reduce(connected(), ...arrive(call(1), call(2)), advance())
+
+    expect(selectSessionLog(rootState(state)).map((one) => one.id)).toEqual([2, 1])
+  })
+
+  /** The point of it: RECENT reaches back five (spec US 13), and "what was that
+   *  ten minutes ago" is further back than that. */
+  it('reaches further back than RECENT does', () => {
+    const many = Array.from({ length: HISTORY_DEPTH + 4 }, (_, at) => call(at + 1))
+    const played = many.reduce(
+      (sofar) => liveReducer(sofar, advance()),
+      reduce(connected(), ...arrive(...many)),
+    )
+
+    expect(selectHistory(rootState(played))).toHaveLength(HISTORY_DEPTH)
+    expect(selectSessionLog(rootState(played))).toHaveLength(many.length)
+  })
+
+  /**
+   * Each Call once, in first-heard order. A replay is the Listener hearing it
+   * again, not a new thing happening — and a log that moved it would answer
+   * "what was that ten minutes ago" with a list that reorders itself under the
+   * question. It is also what keeps `key={call.id}` unique (#82's lesson).
+   */
+  it('does not duplicate or reorder a Call that was replayed', () => {
+    const state = reduce(connected(), ...arrive(call(1), call(2)), advance(), replay(1))
+
+    expect(selectSessionLog(rootState(state)).map((one) => one.id)).toEqual([2, 1])
+  })
+
+  /**
+   * The session log's own replay (#58, spec US 28) reaches further than RECENT
+   * does, which is the whole point of having it — so `replay` looks the Call up
+   * *there* rather than in the five-deep history.
+   */
+  it('replays a Call further back than RECENT could reach', () => {
+    const many = Array.from({ length: HISTORY_DEPTH + 4 }, (_, at) => call(at + 1))
+    const played = many.reduce(
+      (sofar) => liveReducer(sofar, advance()),
+      reduce(connected(), ...arrive(...many)),
+    )
+    const oldest = many[0]
+    expect(selectHistory(rootState(played))).not.toContainEqual(oldest)
+
+    const again = liveReducer(played, replay(oldest.id))
+    expect(selectLiveCall(rootState(again))).toEqual(oldest)
+  })
+
+  /** An encrypted Call never plays (#42) but it is activity the Listener saw —
+   *  RECENT shows it, and the session log is what RECENT is a window onto. */
+  it('holds an encrypted Call, which is the only record it was busy', () => {
+    const state = reduce(connected(), ...arrive(call(1), encryptedCall(2)))
+
+    expect(selectSessionLog(rootState(state)).map((one) => one.id)).toEqual([2, 1])
+  })
+
+  it('is bounded, so a phone left on all day does not grow without limit', () => {
+    const flood = Array.from({ length: SESSION_LOG_LIMIT + 20 }, (_, at) =>
+      encryptedCall(at + 1),
+    )
+    const state = reduce(connected(), ...arrive(...flood))
+
+    expect(selectSessionLog(rootState(state))).toHaveLength(SESSION_LOG_LIMIT)
+    // The newest survive: the oldest is what a Listener is least likely to be
+    // asking about.
+    expect(selectSessionLog(rootState(state))[0]?.id).toBe(flood.length)
+  })
+
+  /** It is the *session*'s, not the feed's. Switching off, or going to the
+   *  archive, empties the queue and the display and must not erase what was
+   *  already heard. */
+  it('survives the feed being switched off and playback mode', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1), call(2)),
+      advance(),
+      turnFeedOff(),
+      enterPlaybackMode(),
+    )
+
+    expect(selectSessionLog(rootState(state)).map((one) => one.id)).toEqual([2, 1])
+  })
+
+  describe('its quick actions act on the Call they were opened on', () => {
+    const twoHeard = () =>
+      reduce(connected(), ...arrive(call(1), call(2, 11, 200)), advance())
+
+    it('holds the Talkgroup of a Call further down the log', () => {
+      const state = liveReducer(twoHeard(), toggleHoldOn({ systemRef: 11, talkgroupRef: 100 }))
+
+      expect(selectHold(rootState(state))).toEqual({ systemRef: 11, talkgroupRef: 100 })
+    })
+
+    it('releases a hold it already names, so the one control does both', () => {
+      const held = liveReducer(twoHeard(), toggleHoldOn({ systemRef: 11, talkgroupRef: 100 }))
+      const state = liveReducer(held, toggleHoldOn({ systemRef: 11, talkgroupRef: 100 }))
+
+      expect(selectHold(rootState(state))).toBeNull()
+    })
+
+    /** A hold on a *different* Talkgroup is replaced rather than released —
+     *  from a list, naming a channel means "hold this one". */
+    it('moves a hold that names a different Talkgroup', () => {
+      const held = liveReducer(twoHeard(), toggleHoldOn({ systemRef: 11, talkgroupRef: 200 }))
+      const state = liveReducer(held, toggleHoldOn({ systemRef: 11, talkgroupRef: 100 }))
+
+      expect(selectHold(rootState(state))).toEqual({ systemRef: 11, talkgroupRef: 100 })
+    })
+
+    it('avoids the Talkgroup of a Call further down the log, undoably', () => {
+      const state = liveReducer(
+        twoHeard(),
+        avoidTalkgroup({ systemRef: 11, talkgroupRef: 100, until: 0, at: NOW }),
+      )
+
+      expect(selectIsAvoided(rootState(state), 11, 100)).toBe(true)
+      expect(selectAvoidUndo(rootState(state))?.key).toBe('11:100')
+    })
+  })
+})
+
+describe('what an Avoid releases (#58)', () => {
+  /** A **Hold** on the Talkgroup being silenced is a contradiction, and the
+   *  Avoid is the newer intent. */
+  it('releases a Hold on the Talkgroup it silences', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1)),
+      toggleHoldTalkgroup(),
+      avoid({ until: 0, at: NOW }),
+    )
+
+    expect(selectHold(rootState(state))).toBeNull()
+  })
+
+  /**
+   * A Ref is unique only within one System, and #58 lets an Avoid be placed on
+   * a Talkgroup that is *not* the one on the display — so comparing bare Refs
+   * would release a hold on another System's channel of the same number, which
+   * on screen looks like the hold simply vanishing.
+   */
+  it('leaves a Hold on another System’s Talkgroup of the same number alone', () => {
+    const held = reduce(connected(), ...arrive(call(1, 11, 100)), toggleHoldTalkgroup())
+    expect(selectHold(rootState(held))).toEqual({ systemRef: 11, talkgroupRef: 100 })
+
+    const state = liveReducer(
+      held,
+      avoidTalkgroup({ systemRef: 12, talkgroupRef: 100, until: 0, at: NOW }),
+    )
+
+    expect(selectHold(rootState(state))).toEqual({ systemRef: 11, talkgroupRef: 100 })
+  })
+
+  /** A System **Hold** carries no Talkgroup, so no Avoid can name it — and one
+   *  released by an unrelated mute would be a narrowing that undid itself. */
+  it('leaves a System Hold alone', () => {
+    const state = reduce(
+      connected(),
+      ...arrive(call(1)),
+      toggleHoldSystem(),
+      avoidTalkgroup({ systemRef: 11, talkgroupRef: 200, until: 0, at: NOW }),
+    )
+
+    expect(selectHold(rootState(state))).toEqual({ systemRef: 11, talkgroupRef: null })
   })
 })

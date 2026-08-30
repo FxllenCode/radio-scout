@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { avoidsKey, feedOffKey, holdKey, panelKey, selectionKey } from '@/lib/persist'
+import {
+  avoidsKey,
+  feedOffKey,
+  holdKey,
+  panelKey,
+  priorityKey,
+  selectionKey,
+} from '@/lib/persist'
 import { EVERYTHING, setTalkgroups } from '@/lib/selection'
 
 import {
@@ -9,7 +16,9 @@ import {
   received,
   selectFeedStatus,
   selectHold,
+  selectPriority,
   selectSelection,
+  togglePriority,
   toggleHoldSystem,
   turnFeedOff,
   turnFeedOn,
@@ -505,5 +514,56 @@ describe('remembering how the panel is arranged (#57, spec US 29)', () => {
 
     expect(panelOf(store).pinned).toEqual(['11:100'])
     expect(ambient.writes).toEqual([])
+  })
+})
+
+/**
+ * **Priority** is part of a **Profile** (#58, spec US 27), and it is the one
+ * part that decides what *plays* rather than only what a screen looks like — so
+ * a browser that cannot read what it stored must fall back to no Priority at
+ * all rather than to a key no Call can match.
+ */
+describe('remembering Priority (#58, spec US 27)', () => {
+  const priorityOf = (store: AppStore) => selectPriority(store.getState())
+
+  it('starts a Listener who has marked nothing on nothing', () => {
+    const { storage } = fakeStorage()
+
+    expect(priorityOf(makeStore({ storage, namespace: 'default' }))).toEqual([])
+  })
+
+  it('comes back marked the way it was left', () => {
+    const { storage } = fakeStorage()
+    makeStore({ storage, namespace: 'truck' }).dispatch(togglePriority('11:100'))
+
+    expect(storage.getItem(priorityKey('truck'))).toBe('["11:100"]')
+    expect(priorityOf(makeStore({ storage, namespace: 'truck' }))).toEqual(['11:100'])
+  })
+
+  it('is independent per Profile, like everything else in one', () => {
+    const { storage } = fakeStorage()
+    makeStore({ storage, namespace: 'truck' }).dispatch(togglePriority('11:100'))
+
+    expect(priorityOf(makeStore({ storage, namespace: 'desk' }))).toEqual([])
+  })
+
+  it('ignores a stored list it cannot make sense of', () => {
+    const { storage } = fakeStorage({ [priorityKey('default')]: '["oops"]' })
+
+    expect(priorityOf(makeStore({ storage, namespace: 'default' }))).toEqual([])
+  })
+
+  /** The rule every remembered field here follows: written when it changes and
+   *  never otherwise, because a Call arrives every few seconds and a phone's
+   *  battery is the cost of getting this wrong. */
+  it('is written only when it changes', () => {
+    const { storage, writes } = fakeStorage()
+    const store = makeStore({ storage, namespace: 'default' })
+
+    store.dispatch(togglePriority('11:100'))
+    const after = writes.length
+    store.dispatch(received(CALL, 1, NOW))
+
+    expect(writes).toHaveLength(after)
   })
 })

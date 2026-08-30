@@ -8,7 +8,19 @@ import {
   type FeedStatus,
 } from '@/lib/feed'
 import type { LiveStatus, Subscription } from '@/lib/liveFeed'
-import { enqueue, retain, takeNext, type QueuePolicy } from '@/lib/queue'
+import {
+  callsOf,
+  enqueue,
+  newest,
+  priorityFrom,
+  reorder,
+  retain,
+  takeNext,
+  withdraw,
+  type PriorityOf,
+  type Queued,
+  type QueuePolicy,
+} from '@/lib/queue'
 import {
   EVERYTHING,
   talkgroupKey,
@@ -37,18 +49,41 @@ export const HISTORY_DEPTH = 5
 
 /** Ceiling on the listening queue. A phone that fell far behind must not grow
  *  an unbounded queue of stale traffic on a Pi-class device; past this
- *  [`QUEUE_POLICY`] decides what goes, and it is counted as missed. */
+ *  [`queuePolicy`] decides what goes, and it is counted as missed. */
 export const QUEUE_LIMIT = 100
 
 /**
- * How the listening queue orders itself (#95, `@/lib/queue`).
+ * How the listening queue orders itself (#95, `@/lib/queue`), given what this
+ * Listener has marked **Priority** (#58).
  *
- * **FIFO** — no `priorityOf` — because nothing yet gives a Listener a way to
- * mark a Talkgroup **Priority**; #58 is where that arrives, and it arrives
- * *here*, as one field, rather than as an edit to the three reducers below and
- * the cap rule. The cap already honours a Priority the day one exists.
+ * One field on top of the limit, which is what #95's seam was for: the ordering
+ * rule, the cap's rule and the re-order all read this one function, so nothing
+ * below has to know what Priority *is*.
  */
-const QUEUE_POLICY: QueuePolicy = { limit: QUEUE_LIMIT }
+const queuePolicy = (priorityOf: PriorityOf): QueuePolicy => ({
+  limit: QUEUE_LIMIT,
+  priorityOf,
+})
+
+/**
+ * How long an **Avoid** can be taken back (#58, spec US 25).
+ *
+ * Long enough to notice a mis-tap and reach the snackbar, short enough that it
+ * is gone before it becomes furniture. Held in the store rather than in the
+ * component that draws it, so the deadline survives the Listener changing tabs
+ * and the offer does not restart its window on the way back.
+ */
+export const AVOID_UNDO_MS = 8_000
+
+/**
+ * How many Calls the session log keeps (#58, spec US 28).
+ *
+ * Deep enough to answer "what was that ten minutes ago" on a busy county
+ * system, bounded because a phone left on a dispatch channel all day would
+ * otherwise hold every Call of the day in memory. Far deeper than
+ * [`HISTORY_DEPTH`], which is a replay list and not a record.
+ */
+export const SESSION_LOG_LIMIT = 250
 
 /** How many Call ids are remembered for de-duplication. Catch-up delivery is
  *  *at-least-once* (ADR-0004), so a Call can arrive twice; ids are compared as
@@ -60,8 +95,22 @@ export interface LiveState {
   status: LiveStatus
   /** Calls waiting to play, **in the order they will play** (CONTEXT.md
    *  **Listening queue**) — arrival order until a Talkgroup has **Priority**,
-   *  and the policy's order after (`@/lib/queue`, #95). */
-  queue: Call[]
+   *  and the policy's order after (`@/lib/queue`, #95). Each carries the
+   *  ordinal it arrived at, which is what lets a Priority change re-order a
+   *  queue that is already deep (#58). */
+  queue: Queued[]
+  /** The next arrival ordinal. Monotonic and meaningless on its own — it exists
+   *  only so two waiting Calls can be compared. A counter rather than a clock,
+   *  so the reducer stays pure and replays identically. */
+  arrivals: number
+  /** Talkgroups this Listener marked **Priority** (#58, spec US 27), by
+   *  [`talkgroupKey`].
+   *
+   *  Here rather than in the `panel` slice, whose rule is that nothing in it can
+   *  change what plays — and this changes what plays *next*, which is the whole
+   *  of what a queue is. Remembered per **Profile** all the same, beside the
+   *  Selection and the Avoids. */
+  priority: string[]
   /** What the feed is playing now. */
   current: Call | null
   /** Recently played, newest first — what Replay walks. */
@@ -85,9 +134,42 @@ export interface LiveState {
   /** Every **Avoid** in force, by [`talkgroupKey`] (spec US 14's timed
    *  30/60/120 min cycle). */
   avoided: Avoids
-  /** Calls the listener will not hear: dropped by the server's `lagged` notice
-   *  or by the queue cap. The display admits them rather than hiding them. */
+  /** Calls the listener will not hear: dropped by the server's `lagged` notice,
+   *  by the queue cap, or given up by a jump to the newest (#58). The display
+   *  admits them rather than hiding them.
+   *
+   *  A Call the Listener *dropped by hand* from the queue sheet is deliberately
+   *  not one of them — `turnFeedOff`'s rule, one Call at a time: they read it
+   *  and let it go. */
   missed: number
+  /**
+   * Everything heard this session, newest first (#58, spec US 28) — what RECENT
+   * is a five-deep window onto.
+   *
+   * Each Call once, in the order it was *first* heard: a replay is the Listener
+   * hearing it again rather than a new thing happening, and a log that moved it
+   * would answer "what was that ten minutes ago" with a list that reorders
+   * itself under the question. It also keeps `key={call.id}` unique, which is
+   * #82's lesson one list along.
+   *
+   * Not persisted, unlike the **Profile**: *this session* is what it says.
+   */
+  sessionLog: Call[]
+  /**
+   * The **Avoid** that can still be taken back, and until when (#58, spec
+   * US 25) — `null` once it has been used, dismissed, or replaced by a newer
+   * one.
+   *
+   * It carries what the Avoid *displaced* rather than merely which Talkgroup
+   * went quiet, because avoiding is two changes: the deadline, and the **Hold**
+   * it releases when the two contradict. An undo that put back only the first
+   * would silently cost the Listener their hold.
+   *
+   * What it cannot put back is the Calls the purge took — they are gone, and
+   * the honest offer is "the channel is not muted" rather than "nothing
+   * happened".
+   */
+  avoidUndo: AvoidUndo | null
   /** A **Backfill** could not reach back as far as we asked, so there is a hole
    *  in this listener's history that only archive search can fill (ADR-0004).
    *
@@ -121,9 +203,26 @@ export interface LiveState {
 
 /** The state a listener who has never touched anything starts from. Exported
  *  so the store can hydrate the persisted selection into it (#12). */
+/** An **Avoid** that can still be taken back, and everything it displaced. */
+export interface AvoidUndo {
+  /** The Talkgroup that went quiet, by [`talkgroupKey`]. */
+  key: string
+  /** The deadline that was in force before, or absent if it was not avoided at
+   *  all — the difference between undoing to "audible" and undoing to "still
+   *  avoided, for another twenty minutes". */
+  previous?: number
+  /** The **Hold** that stood before, which avoiding may have released. */
+  hold: Hold | null
+  /** When the offer lapses. The moment rather than a countdown, so it survives
+   *  the Listener changing tabs (`Avoids` own reasoning, one field along). */
+  expiresAt: number
+}
+
 export const initialLiveState: LiveState = {
   status: 'offline',
   queue: [],
+  arrivals: 0,
+  priority: [],
   current: null,
   history: [],
   playId: 0,
@@ -132,6 +231,8 @@ export const initialLiveState: LiveState = {
   hold: null,
   avoided: {},
   missed: 0,
+  sessionLog: [],
+  avoidUndo: null,
   gap: false,
   // On. A Listener who has never touched the toggle gets audio playing, which
   // is what the app is for.
@@ -172,6 +273,27 @@ function wanted(state: LiveState, call: Call): boolean {
   return wants(matrixOf(state), call)
 }
 
+/** What this Listener's marked Talkgroups mean as an ordering (#58) — built
+ *  from the state rather than held beside it, so the set and the rule cannot
+ *  come to disagree. */
+function priorityIn(state: LiveState): PriorityOf {
+  return priorityFrom(state.priority)
+}
+
+/**
+ * Write a Call into the session log (#58, spec US 28).
+ *
+ * Once each and in first-heard order — see [`LiveState.sessionLog`]. Called
+ * from the two places a Call becomes something the Listener saw happen:
+ * [`play`], and the encrypted branch of `received`, which is the only record
+ * that a channel was busy at all.
+ */
+function heard(state: LiveState, call: Call) {
+  if (state.sessionLog.some((one) => one.id === call.id)) return
+  state.sessionLog.unshift(call)
+  if (state.sessionLog.length > SESSION_LOG_LIMIT) state.sessionLog.pop()
+}
+
 /**
  * Start `call`, filing whatever was playing under history.
  *
@@ -192,6 +314,7 @@ function play(state: LiveState, call: Call | null) {
     state.history.unshift(state.current)
   }
   if (call) {
+    heard(state, call)
     state.history = state.history.filter((one) => one.id !== call.id)
   }
   state.history = state.history.slice(0, HISTORY_DEPTH)
@@ -274,6 +397,60 @@ function expire(state: LiveState, now: number) {
   for (const [key, until] of Object.entries(state.avoided)) {
     if (until !== 0 && until <= now) delete state.avoided[key]
   }
+}
+
+/**
+ * Silence one named Talkgroup until `until`, and remember what that displaced
+ * (#58).
+ *
+ * The whole of what avoiding *is*, written once, because two surfaces reach it:
+ * the Live screen's control, which acts on the Call the display is showing
+ * (#56), and the session log's quick action, which names a Talkgroup from a row
+ * further down. A refusal's *shape* may differ between surfaces; the policy
+ * underneath may not (#92's rule, one layer up).
+ */
+function applyAvoid(state: LiveState, key: string, until: number, at: number) {
+  state.avoidUndo = {
+    ...(key in state.avoided ? { previous: state.avoided[key] } : {}),
+    key,
+    hold: state.hold,
+    expiresAt: at + AVOID_UNDO_MS,
+  }
+  state.avoided[key] = until
+  // Holding a Talkgroup you've just muted is a contradiction; the avoid is the
+  // newer intent. Compared as the whole key rather than as a bare Ref: a Ref is
+  // unique only within one System (#47's `UnitScope` lesson), and #58 lets an
+  // Avoid be placed on a Talkgroup that is not the one being displayed — so a
+  // Ref-only test would release a hold on another System's channel of the same
+  // number, which on screen looks like the hold simply vanishing.
+  const held = state.hold
+  if (held?.talkgroupRef != null && talkgroupKey(held.systemRef, held.talkgroupRef) === key) {
+    state.hold = null
+  }
+  purge(state)
+}
+
+/** Mark a Talkgroup **Priority**, or let it go, and re-order the queue in hand
+ *  to match — written once, because two controls reach it: the panel row and
+ *  the Live screen's control over the Call on the display. */
+function markPriority(state: LiveState, key: string) {
+  state.priority = state.priority.includes(key)
+    ? state.priority.filter((one) => one !== key)
+    : [...state.priority, key]
+  state.queue = reorder(state.queue, priorityIn(state))
+}
+
+/** Narrow to one named Talkgroup, or let it go if that is the one already
+ *  held — one control for both, so a list can offer *Hold* and *Release* from
+ *  the same row. A hold naming a *different* Talkgroup moves rather than
+ *  releases: from a list, naming a channel means "hold this one". */
+function holdOn(state: LiveState, { systemRef, talkgroupRef }: TalkgroupKey) {
+  if (state.hold?.systemRef === systemRef && state.hold.talkgroupRef === talkgroupRef) {
+    state.hold = null
+    return
+  }
+  state.hold = { systemRef, talkgroupRef }
+  purge(state)
 }
 
 /** Drop whatever the listener no longer wants — after a selection change, a
@@ -467,6 +644,7 @@ const liveSlice = createSlice({
         // `ended`. The feed would stop on it silently and forever, with
         // everything queued behind it frozen.
         if (call.encrypted) {
+          heard(state, call)
           state.history.unshift(call)
           state.history = state.history.slice(0, HISTORY_DEPTH)
           return
@@ -480,7 +658,13 @@ const liveSlice = createSlice({
         // (#95) — lowest **Priority** first and stalest within it, so a full
         // queue can no longer discard the one Talkgroup the Listener said
         // mattered. Whatever went is counted rather than vanishing.
-        const { queue, dropped } = enqueue(state.queue, call, QUEUE_POLICY)
+        state.arrivals += 1
+        const { queue, dropped } = enqueue(
+          state.queue,
+          call,
+          state.arrivals,
+          queuePolicy(priorityIn(state)),
+        )
         state.queue = queue
         state.missed += dropped.length
       },
@@ -492,8 +676,16 @@ const liveSlice = createSlice({
       next(state)
     },
 
-    /** Play a Call again — the one playing, or one from the history (spec
-     *  US 13). The queue behind it is untouched. */
+    /**
+     * Play a Call again — the one playing, or one heard earlier this session
+     * (spec US 13, and #58's session log).
+     *
+     * Looked up in [`LiveState.sessionLog`] rather than in the history, because
+     * #58 gives a Listener a screen reaching 250 Calls back and RECENT reaches
+     * five. Every Call the history holds is in the log — [`play`] writes it
+     * there as it starts — so this is strictly the wider list, not a second
+     * one. The queue behind it is untouched.
+     */
     replay(state, action: PayloadAction<number>) {
       // Nothing plays while the listener has the feed off or is playing the
       // archive (#80, #88). The Replay control is disabled there, but replay is
@@ -504,7 +696,7 @@ const liveSlice = createSlice({
       const again =
         state.current?.id === action.payload
           ? state.current
-          : state.history.find((call) => call.id === action.payload)
+          : state.sessionLog.find((call) => call.id === action.payload)
       if (!again) return
 
       // Every case goes through `play` — including replaying the Call already
@@ -534,7 +726,12 @@ const liveSlice = createSlice({
       purge(state)
     },
 
-    /** Narrow to the Talkgroup on the display, or let it go again. */
+    /** Narrow to the Talkgroup on the display, or let it go again.
+     *
+     *  Deliberately not [`holdOn`]: this is a lit toggle, so pressing it
+     *  releases *whatever* Talkgroup hold stands, where naming a channel from a
+     *  list means "hold this one" and only releases the one it named. Two
+     *  controls, two meanings — the shared part is `purge`. */
     toggleHoldTalkgroup(state) {
       if (isTalkgroupHold(state.hold)) {
         state.hold = null
@@ -555,16 +752,148 @@ const liveSlice = createSlice({
      *  This is the control [`displayedIn`] exists for: a Talkgroup that will not
      *  stop chattering is one a Listener silences a beat *after* it stops, not
      *  during. */
-    avoid(state, action: PayloadAction<{ until: number }>) {
+    avoid: {
+      prepare: (payload: { until: number; at?: number }) => ({
+        payload: { at: Date.now(), ...payload },
+      }),
+
+      reducer(state, action: PayloadAction<{ until: number; at: number }>) {
+        const call = subjectOf(state)
+        if (!call) return
+        applyAvoid(
+          state,
+          talkgroupKey(call.systemRef, call.talkgroupRef),
+          action.payload.until,
+          action.payload.at,
+        )
+      },
+    },
+
+    /** Silence a Talkgroup named from a list rather than from the display —
+     *  the session log's quick action (#58, spec US 28). Same policy, same
+     *  undo offer: [`applyAvoid`] is the only way either gets there. */
+    avoidTalkgroup: {
+      prepare: (payload: TalkgroupKey & { until: number; at?: number }) => ({
+        payload: { at: Date.now(), ...payload },
+      }),
+
+      reducer(
+        state,
+        action: PayloadAction<TalkgroupKey & { until: number; at: number }>,
+      ) {
+        const { systemRef, talkgroupRef, until, at } = action.payload
+        applyAvoid(state, talkgroupKey(systemRef, talkgroupRef), until, at)
+      },
+    },
+
+    /**
+     * Take back the last **Avoid** (#58, spec US 25).
+     *
+     * Both halves of what it displaced: the deadline that stood before — which
+     * may itself be an Avoid, so this is not "make it audible" — and the
+     * **Hold** avoiding released. What it cannot undo is the purge: those Calls
+     * are gone, and the offer is honest about being "the channel is not muted"
+     * rather than "nothing happened".
+     *
+     * The purge afterwards is not redundant. Restoring a Hold *narrows* the
+     * matrix again, and the queue has been filling under the wider one since.
+     */
+    undoAvoid(state) {
+      const undo = state.avoidUndo
+      if (!undo) return
+
+      if (undo.previous === undefined) {
+        delete state.avoided[undo.key]
+      } else {
+        state.avoided[undo.key] = undo.previous
+      }
+      state.hold = undo.hold
+      state.avoidUndo = null
+      purge(state)
+    },
+
+    /** The grace window ran out, or the Listener waved the offer away. The
+     *  Avoid itself stands — this is only the offer going. */
+    dismissAvoidUndo(state) {
+      state.avoidUndo = null
+    },
+
+    /** Let one Talkgroup back in, from the sheet listing what is silenced (#58,
+     *  spec US 25) — where `clearAvoids` is the all-or-nothing instrument this
+     *  exists beside. */
+    clearAvoid(state, action: PayloadAction<string>) {
+      delete state.avoided[action.payload]
+    },
+
+    /** Hold, or release, a Talkgroup named from a list (#58) — see
+     *  [`holdOn`]. */
+    toggleHoldOn(state, action: PayloadAction<TalkgroupKey>) {
+      holdOn(state, action.payload)
+    },
+
+    /**
+     * Mark a Talkgroup **Priority**, or let it go (#58, spec US 27).
+     *
+     * The queue in hand is re-ordered on the spot, which is the whole point:
+     * a Listener reaches for Priority when they are already far behind, and a
+     * promotion that only applied to Calls arriving *later* would do nothing
+     * on screen at the one moment it was asked for (`lib/queue`'s [`reorder`]).
+     */
+    togglePriority(state, action: PayloadAction<string>) {
+      markPriority(state, action.payload)
+    },
+
+    /** The same, for the Call the display is showing — the subject *Hold* and
+     *  *Avoid* already act on (#56), so three lit controls cannot be about
+     *  three different Calls. */
+    togglePriorityShown(state) {
       const call = subjectOf(state)
       if (!call) return
+      markPriority(state, talkgroupKey(call.systemRef, call.talkgroupRef))
+    },
 
-      state.avoided[talkgroupKey(call.systemRef, call.talkgroupRef)] =
-        action.payload.until
-      // Holding a Talkgroup you've just muted is a contradiction; the avoid is
-      // the newer intent.
-      if (state.hold?.talkgroupRef === call.talkgroupRef) state.hold = null
-      purge(state)
+    /**
+     * Play a waiting Call now (#58, spec US 24) — the queue sheet's *play*.
+     *
+     * By **id**, never by position: the sheet re-orders under the Listener's
+     * thumb as Calls arrive, so an index would put a different Call on the air
+     * than the one the finger went down on. A Call that has since played or
+     * been purged is simply not there, and nothing happens.
+     */
+    playQueued(state, action: PayloadAction<number>) {
+      const taken = withdraw(state.queue, action.payload)
+      if (!taken.call) return
+      state.queue = taken.queue
+      play(state, taken.call)
+    },
+
+    /** Let a waiting Call go (#58, spec US 24). Not counted as missed — see
+     *  [`LiveState.missed`]. */
+    dropQueued(state, action: PayloadAction<number>) {
+      const taken = withdraw(state.queue, action.payload)
+      if (!taken.call) return
+      state.queue = taken.queue
+    },
+
+    /**
+     * Give up the backlog and play what was said most recently (#58, spec
+     * US 24).
+     *
+     * The **newest arrival**, not the tail of the queue — under Priority the
+     * tail is the lowest-ranked Call there is, and handing a Listener that
+     * while calling it catching up would be the cap's old mistake in the other
+     * direction.
+     *
+     * Everything given up is counted, per the ticket: "never silent". This is
+     * the one Listener-initiated discard that is, because it is the one where
+     * they did not look at what went.
+     */
+    jumpToNewest(state) {
+      const latest = newest(state.queue)
+      if (!latest) return
+      state.missed += state.queue.length - 1
+      state.queue = []
+      play(state, latest)
     },
 
     /** Let a Talkgroup back in before its time is up — an indefinite avoid has
@@ -629,22 +958,32 @@ const liveSlice = createSlice({
 export const {
   advance,
   avoid,
+  avoidTalkgroup,
   chooseEverything,
   chooseSystem,
   chooseTalkgroups,
+  clearAvoid,
   clearAvoids,
   connected,
   connecting,
   disconnected,
+  dismissAvoidUndo,
+  dropQueued,
   expireAvoids,
   gapped,
+  jumpToNewest,
   lagged,
+  playQueued,
   received,
   replay,
+  toggleHoldOn,
   toggleHoldSystem,
   toggleHoldTalkgroup,
+  togglePriority,
+  togglePriorityShown,
   turnFeedOff,
   turnFeedOn,
+  undoAvoid,
 } = liveSlice.actions
 
 export const liveReducer = liveSlice.reducer
@@ -661,9 +1000,37 @@ export const selectLiveCall = (state: WithLive): Call | null => state.live.curre
 /** The `Q` count on the display. */
 export const selectQueueDepth = (state: WithLive): number => state.live.queue.length
 
-/** The Calls waiting their turn, in the order they will play — so a queue sheet
- *  (#58) reads top-down without knowing the ordering rule. */
-export const selectQueue = (state: WithLive): Call[] => state.live.queue
+/**
+ * The Calls waiting their turn, in the order they will play — so the queue
+ * sheet (#58) reads top-down without knowing the ordering rule, and the
+ * page-ahead can take the head.
+ *
+ * Memoized, because it unwraps the arrival stamps into a fresh array: an
+ * unmemoized version would hand `selectUpcomingCall` a new array on every
+ * `progressed`, which is several a second while a Call plays.
+ */
+export const selectQueue: (state: WithLive) => Call[] = createSelector(
+  [(state: WithLive) => state.live.queue],
+  callsOf,
+)
+
+/** Talkgroups this Listener marked **Priority** (#58, spec US 27) — what the
+ *  panel rows read and what is persisted. */
+export const selectPriority = (state: WithLive): string[] => state.live.priority
+
+/** Does this Talkgroup outrank the routine traffic? */
+export const selectIsPriority = (
+  state: WithLive,
+  systemRef: number,
+  talkgroupRef: number,
+): boolean => state.live.priority.includes(talkgroupKey(systemRef, talkgroupRef))
+
+/** Everything heard this session, newest first (#58, spec US 28). */
+export const selectSessionLog = (state: WithLive): Call[] => state.live.sessionLog
+
+/** The **Avoid** that can still be taken back, or `null` (#58, spec US 25). */
+export const selectAvoidUndo = (state: WithLive): AvoidUndo | null =>
+  state.live.avoidUndo
 
 export const selectHistory = (state: WithLive): Call[] => state.live.history
 

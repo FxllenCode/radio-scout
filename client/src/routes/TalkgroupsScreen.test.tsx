@@ -6,7 +6,7 @@ import { axe } from 'vitest-axe'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { EVERYTHING } from '@/lib/selection'
-import { avoid, received, selectSelection } from '@/store/live'
+import { avoid, received, selectPriority, selectSelection } from '@/store/live'
 import { selectPinned, showSystem } from '@/store/panel'
 import { makeStore, type AppStore } from '@/store/store'
 import { progressed } from '@/store/transport'
@@ -612,5 +612,64 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
         await screen.findByRole('button', { name: /Sort by most active/ }),
       ).toHaveAttribute('aria-pressed', 'true')
     })
+  })
+})
+
+/**
+ * **Priority** on a panel row (#58, spec US 27).
+ *
+ * It sits beside the **Pin** and looks like it, which is a deliberate likeness
+ * about one thing only — both are per-Talkgroup preferences set from here. What
+ * they change is not alike at all: a Pin moves a row, and this decides what
+ * plays next, which is why it lives in the `live` slice and a Pin does not.
+ */
+describe('marking a Talkgroup Priority (#58, spec US 27)', () => {
+  const priorityFor = (label: string) =>
+    screen.getByRole('button', { name: `Give priority to ${label}` })
+
+  it('is off until the Listener marks it', async () => {
+    const { store } = showPanel()
+    await talkgroupRow('Alpha Fire')
+
+    expect(priorityFor('Alpha Fire')).toHaveAttribute('aria-pressed', 'false')
+    expect(selectPriority(store.getState())).toEqual([])
+  })
+
+  it('marks the row it is on, and says so', async () => {
+    const user = userEvent.setup()
+    const { store } = showPanel()
+    await talkgroupRow('Alpha Fire')
+
+    await user.click(priorityFor('Alpha Fire'))
+
+    expect(selectPriority(store.getState())).toEqual(['100:1'])
+    expect(
+      screen.getByRole('button', { name: 'Clear priority on Alpha Fire' }),
+    ).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('lets it go again', async () => {
+    const user = userEvent.setup()
+    const { store } = showPanel()
+    await talkgroupRow('Alpha Fire')
+
+    await user.click(priorityFor('Alpha Fire'))
+    await user.click(
+      screen.getByRole('button', { name: 'Clear priority on Alpha Fire' }),
+    )
+
+    expect(selectPriority(store.getState())).toEqual([])
+  })
+
+  /** A Pin and a Priority are two states in two slices, and a row must be able
+   *  to carry either without the other. */
+  it('does not pin the row it prioritizes', async () => {
+    const user = userEvent.setup()
+    const { store } = showPanel()
+    await talkgroupRow('Alpha Fire')
+
+    await user.click(priorityFor('Alpha Fire'))
+
+    expect(store.getState().panel.pinned).toEqual([])
   })
 })

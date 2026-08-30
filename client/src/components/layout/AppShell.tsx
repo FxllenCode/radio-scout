@@ -1,5 +1,6 @@
 import { Outlet, useLocation } from 'react-router-dom'
 
+import { AvoidUndoBar } from '@/components/AvoidUndo'
 import { CallPlayer } from '@/components/CallPlayer'
 import { InstallBanner } from '@/components/InstallBanner'
 import { LiveFeedLink } from '@/components/LiveFeedLink'
@@ -58,9 +59,16 @@ export function AppShell() {
           banner slot from the install offer: it is the rarer and the more
           actionable of the two, and a listener who reloads is offered the
           install again on the way back. The mini-player sits under whichever
-          won, closest to the thumb. */}
+          won, closest to the thumb.
+
+          The **Avoid** undo (#58) sits here rather than on the Live screen for
+          the reason the strip does: its offer has a deadline, and a Listener
+          who avoids a channel and then goes looking at Talkgroups has spent
+          none of it. It goes *below* the banners and above the player, so the
+          thing with a running clock is the closest to the thumb. */}
       <div className="pointer-events-none fixed inset-x-0 bottom-16 z-40 mx-auto flex max-w-2xl flex-col gap-2 px-3">
         {update.ready ? <UpdateBanner apply={update.apply} /> : <InstallBanner />}
+        <AvoidUndoBar />
         {docked && <MiniPlayer strip={docked} />}
       </div>
       <BottomTabBar />

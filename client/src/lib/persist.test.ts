@@ -6,9 +6,12 @@ import { EVERYTHING, setTalkgroups } from './selection'
 import {
   feedOffKey,
   loadFeedOff,
+  loadPriority,
   loadSelection,
   namespaceOf,
+  priorityKey,
   saveFeedOff,
+  savePriority,
   saveSelection,
   selectionKey,
 } from './persist'
@@ -144,5 +147,57 @@ describe('persisting the feed-off switch', () => {
   it('degrades to an unremembered Profile when storage is denied', () => {
     expect(loadFeedOff(hostileStorage, 'default')).toBeUndefined()
     expect(() => saveFeedOff(hostileStorage, 'default', true)).not.toThrow()
+  })
+})
+
+/**
+ * **Priority** is part of a **Profile** (#58, spec US 27): a Listener who
+ * picked their dispatch channels out of four hundred Talkgroups has done real
+ * work, and it must not cost them a reload.
+ *
+ * Its own key, for [`avoidsKey`]'s reason: a list an older build cannot read
+ * costs the Listener that list alone, never their Selection.
+ */
+describe('persisting Priority (#58)', () => {
+  it('survives a reload', () => {
+    const storage = fakeStorage()
+
+    savePriority(storage, 'default', ['11:100', '12:900'])
+
+    expect(loadPriority(storage, 'default')).toEqual(['11:100', '12:900'])
+  })
+
+  it('is independent per Profile', () => {
+    const storage = fakeStorage()
+
+    savePriority(storage, 'truck', ['11:100'])
+
+    expect(loadPriority(storage, 'truck')).toEqual(['11:100'])
+    expect(loadPriority(storage, 'desk')).toBeUndefined()
+  })
+
+  /** Every entry names a Talkgroup, or the ordering would be keyed by something
+   *  no Call can ever match — a **Pin**'s rule, and here it decides what plays
+   *  next rather than only what a row looks like. */
+  it.each([
+    ['not a list', '{"11:100":true}'],
+    ['a key that is not a Talkgroup', '["oops"]'],
+    ['a key that is not even a string', '[7]'],
+    ['half-written JSON', '["11:'],
+  ])('has nothing to say about %s', (_what, stored) => {
+    expect(
+      loadPriority(fakeStorage({ [priorityKey('default')]: stored }), 'default'),
+    ).toBeUndefined()
+  })
+
+  it('reads an empty list back as one, which is a Listener who cleared theirs', () => {
+    expect(
+      loadPriority(fakeStorage({ [priorityKey('default')]: '[]' }), 'default'),
+    ).toEqual([])
+  })
+
+  it('runs unremembered on a browser that denies storage', () => {
+    expect(() => savePriority(hostileStorage, 'default', ['11:100'])).not.toThrow()
+    expect(loadPriority(hostileStorage, 'default')).toBeUndefined()
   })
 })

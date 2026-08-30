@@ -1,10 +1,11 @@
-import { ChevronDown, ChevronRight, Pin, Search } from 'lucide-react'
+import { ChevronDown, ChevronRight, Pin, Search, Zap } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
 import { useWindowedRows } from '@/hooks/useWindowedRows'
+import { avoidMinutesLeft } from '@/lib/avoiding'
 import {
   lastHeard,
   panelOf,
@@ -25,6 +26,8 @@ import {
   chooseTalkgroups,
   selectAudibleSelection,
   selectAvoids,
+  selectPriority,
+  togglePriority,
 } from '@/store/live'
 import {
   selectExpandedSystems,
@@ -99,6 +102,9 @@ export function TalkgroupsScreen() {
   const selection = useAppSelector(selectAudibleSelection)
   const avoided = useAppSelector(selectAvoids)
   const pinned = useAppSelector(selectPinned)
+  // From the `live` slice, not the panel's: **Priority** decides what plays
+  // next, and `store/panel`'s rule is that nothing in it can (#58).
+  const priority = useAppSelector(selectPriority)
   const expanded = useAppSelector(selectExpandedSystems)
   const sort = useAppSelector(selectPanelSort)
   // Refetched when the Listener comes back to this screen and the answer is
@@ -114,8 +120,9 @@ export function TalkgroupsScreen() {
 
   const catalog = data ?? EMPTY_CATALOG
   const panel = useMemo(
-    () => panelOf({ catalog, selection, avoided, filter, pinned, expanded, sort }),
-    [catalog, selection, avoided, filter, pinned, expanded, sort],
+    () =>
+      panelOf({ catalog, selection, avoided, priority, filter, pinned, expanded, sort }),
+    [catalog, selection, avoided, priority, filter, pinned, expanded, sort],
   )
   const { on, total } = panel
   // Only while something drawn is a subtraction from the clock — see [`useNow`].
@@ -133,6 +140,7 @@ export function TalkgroupsScreen() {
     sort,
     onChoose: choose,
     onPin: (key: string) => dispatch(togglePin(key)),
+    onPriority: (key: string) => dispatch(togglePriority(key)),
   }
 
   return (
@@ -350,6 +358,7 @@ interface RowControls {
   sort: PanelSort
   onChoose: (choice: Choice) => void
   onPin: (key: string) => void
+  onPriority: (key: string) => void
 }
 
 function SystemSection({
@@ -427,8 +436,9 @@ function TalkgroupRow({
   sort,
   onChoose,
   onPin,
+  onPriority,
 }: { row: PanelRow; named?: boolean } & RowControls) {
-  const { selected, avoidedUntil, pinned } = row
+  const { selected, avoidedUntil, pinned, priority } = row
 
   return (
     <li className="flex items-center" style={{ height: ROW_HEIGHT }}>
@@ -484,15 +494,33 @@ function TalkgroupRow({
           {row.talkgroupRef}
         </span>
       </button>
-      {/* A sibling of the switch, never inside it: a button within a button is
-          neither valid HTML nor reachable by a screen reader (#47). */}
+      {/* Siblings of the switch, never inside it: a button within a button is
+          neither valid HTML nor reachable by a screen reader (#47).
+
+          Priority first, because it is the one that changes what a Listener
+          *hears* — a **Pin** only moves the row. They look alike deliberately:
+          two per-Talkgroup preferences a Listener sets from the same place. */}
+      <button
+        type="button"
+        aria-label={`${priority ? 'Clear priority on' : 'Give priority to'} ${row.label}`}
+        aria-pressed={priority}
+        onClick={() => onPriority(row.key)}
+        className={cn(
+          'flex h-full shrink-0 items-center pl-1.5 pr-1 transition-colors',
+          priority
+            ? 'text-led-amber'
+            : 'text-muted-foreground/30 hover:text-muted-foreground',
+        )}
+      >
+        <Zap className={cn('size-3.5', priority && 'fill-current')} aria-hidden />
+      </button>
       <button
         type="button"
         aria-label={`${pinned ? 'Unpin' : 'Pin'} ${row.label}`}
         aria-pressed={pinned}
         onClick={() => onPin(row.key)}
         className={cn(
-          'flex h-full shrink-0 items-center px-2.5 transition-colors',
+          'flex h-full shrink-0 items-center pl-1 pr-2.5 transition-colors',
           pinned
             ? 'text-foreground'
             : 'text-muted-foreground/30 hover:text-muted-foreground',
@@ -560,7 +588,10 @@ function Measure({ said, shown }: { said: string; shown: string | number }) {
  */
 function AvoidBadge({ until, now }: { until: number; now: number }) {
   const timed = until > 0
-  const minutes = Math.max(1, Math.ceil((until - now) / 60_000))
+  // The rounding rule is `lib/avoiding`'s, shared with the Avoid sheet so a
+  // badge and a row cannot say a channel has a different number of minutes
+  // left (#58).
+  const minutes = avoidMinutesLeft(now, until)
 
   return (
     <span className="flex shrink-0 items-center gap-1 rounded border border-led-orange/40 bg-led-orange/10 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-led-orange">

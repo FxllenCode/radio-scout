@@ -6,12 +6,14 @@ import {
   loadFeedOff,
   loadHold,
   loadPanel,
+  loadPriority,
   loadSelection,
   namespaceOf,
   saveAvoids,
   saveFeedOff,
   saveHold,
   savePanel,
+  savePriority,
   saveSelection,
 } from '@/lib/persist'
 
@@ -55,6 +57,11 @@ export function makeStore(options: StoreOptions = {}) {
   // was closed is simply not in force on the way back in (#91).
   const rememberedAvoids = storage && loadAvoids(storage, namespace, Date.now())
   const rememberedHold = storage && loadHold(storage, namespace)
+  // **Priority** (#58) rides in the `live` slice rather than in `panel`,
+  // because it changes what plays next and `panel`'s rule is that nothing in it
+  // can. It is remembered all the same: picking six dispatch channels out of
+  // four hundred is work.
+  const rememberedPriority = storage && loadPriority(storage, namespace)
   // Field by field, so an arrangement we can only half read costs the Listener
   // only the half we could not (`lib/persist`).
   const rememberedPanel = storage ? loadPanel(storage, namespace) : {}
@@ -63,6 +70,7 @@ export function makeStore(options: StoreOptions = {}) {
     ...(rememberedFeedOff === undefined ? {} : { feedOff: rememberedFeedOff }),
     ...(rememberedAvoids ? { avoided: rememberedAvoids } : {}),
     ...(rememberedHold === undefined ? {} : { hold: rememberedHold }),
+    ...(rememberedPriority ? { priority: rememberedPriority } : {}),
   }
   const store = configureStore({
     reducer: {
@@ -107,12 +115,14 @@ export function makeStore(options: StoreOptions = {}) {
     }
 
     // What a **Profile** is, per CONTEXT.md: its Selection, its Avoid list and
-    // its Hold state — plus the feed-off switch #80 added, and how #57 left the
-    // Talkgroups panel arranged.
+    // its Hold state — plus the feed-off switch #80 added, the Talkgroups
+    // marked **Priority** (#58), and how #57 left the Talkgroups panel
+    // arranged.
     remember((it) => it.live.selection, (it) => saveSelection(storage, namespace, it))
     remember((it) => it.live.avoided, (it) => saveAvoids(storage, namespace, it))
     remember((it) => it.live.hold, (it) => saveHold(storage, namespace, it))
     remember((it) => it.live.feedOff, (it) => saveFeedOff(storage, namespace, it))
+    remember((it) => it.live.priority, (it) => savePriority(storage, namespace, it))
     remember((it) => it.panel, (it) => savePanel(storage, namespace, it))
   }
 

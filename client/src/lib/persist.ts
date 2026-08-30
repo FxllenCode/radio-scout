@@ -114,6 +114,41 @@ export function holdKey(namespace: string): string {
   return `${KEY_PREFIX}:${namespace}:hold`
 }
 
+/** Where a namespace's **Priority** Talkgroups are stored (#58, spec US 27).
+ *
+ *  Its own key, for [`avoidsKey`]'s reason: a list an older build cannot read
+ *  must cost the Listener that list alone and never their Selection. */
+export function priorityKey(namespace: string): string {
+  return `${KEY_PREFIX}:${namespace}:priority`
+}
+
+/**
+ * The Talkgroups this browser last had marked **Priority**, or `undefined` if
+ * there isn't a usable list.
+ *
+ * Checked to the leaves like every other stored value here, and the leaves are
+ * the whole of it: a key that is not a `systemRef:talkgroupRef` pair could
+ * never match a Call, so it would sit in storage forever ordering nothing —
+ * and unlike a bad **Pin**, which merely fails to draw a row, this one decides
+ * what plays next.
+ */
+export function loadPriority(
+  storage: Storage,
+  namespace: string,
+): string[] | undefined {
+  const stored = parseStored(storage, priorityKey(namespace))
+  return isKeyList(stored) ? stored : undefined
+}
+
+/** Remember the Priority Talkgroups for `namespace`. */
+export function savePriority(
+  storage: Storage,
+  namespace: string,
+  priority: readonly string[],
+): void {
+  writeStored(storage, priorityKey(namespace), JSON.stringify(priority))
+}
+
 /** Where a namespace's panel arrangement is stored (#57) — its **Pin**s, the
  *  Systems it has folded away, and its sort.
  *

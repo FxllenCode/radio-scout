@@ -25,8 +25,10 @@ way it is a link: tap it for that radio's history, which is where "who was that,
 gets answered. **RECENT** carries the same link on every row.
 
 Top right: **Q** is the listening queue, how many Calls are waiting behind this one, and a dot
-showing whether the live feed is connected. Underneath the card is **RECENT**, the handful that
-just played, so you can catch what you missed.
+showing whether the live feed is connected. Tap the **Q** to see what is waiting — see
+[The queue](#the-queue) below. Underneath the card is **RECENT**, the handful that just played,
+so you can catch what you missed, with **SESSION LOG** beside it for everything else you have
+heard since you opened the app.
 
 On a multi-site system, the tag/group line also names the **Site** the Call was heard on, so
 simulcast coverage is legible. Single-site systems say nothing there, and neither do recorders
@@ -62,8 +64,62 @@ Talkgroup reads as *busy* instead of as a dead feed.
 | **SKIP** | Abandon the current Call and jump to the next in the queue. |
 | **REPLAY** | Play the current Call again from the start. |
 | **PAUSE** / **RESUME** | Stop and restart playback. Calls keep arriving and queueing while paused. |
-| **AVOID** | Mute this Talkgroup so it stops interrupting. |
+| **AVOID** | Mute this Talkgroup so it stops interrupting. An **Undo** appears for a few seconds afterwards. |
 | **30 / 60 / 120 MIN** | Avoid this Talkgroup, then bring it back automatically after that long. |
+| **PRIORITY** | Put this Talkgroup ahead of the others in the queue. See [Priority](#priority). |
+| **AVOIDING _n_** | Appears while anything is muted: the list of what, with one tap to let any of them back in. |
+
+### The queue
+
+Tap the **Q** count and you get the queue itself, in the order it will play:
+
+- **▶ on a row** plays that Call now, instead of waiting for it.
+- **✕ on a row** drops it. Nothing else moves, and it is not counted as missed — you looked at
+  it and let it go.
+- **JUMP TO NEWEST** gives up the whole backlog for the most recent Call there is. The button
+  says how many that costs, and the number lands on the *missed* counter under the card — this
+  is the one thing you can do here that is counted, because it is the one where you did not read
+  what went.
+
+The queue is capped, so a phone that fell a long way behind does not grow an endless backlog.
+What the cap gives up is counted as missed too, and it gives up the lowest **Priority** first.
+
+### Priority
+
+Some channels matter more than others when you are behind. Mark a Talkgroup **Priority** — from
+the **PRIORITY** control on the Live screen, or the ⚡ at the end of its row under **Talkgroups**
+— and its Calls jump the queue instead of waiting their turn.
+
+Three things worth knowing:
+
+- **It applies to what is already waiting.** Mark dispatch while forty Calls are queued and
+  those Calls move now; you do not have to wait for the next one.
+- **It is queue order, not selection.** A Priority Talkgroup still has to be switched on to be
+  heard, and avoiding one still silences it.
+- **The cap respects it.** When the queue is full it gives up routine traffic first, so a busy
+  night no longer discards the one channel you said mattered while chatter plays on.
+
+It is remembered per **Profile**, like your selection.
+
+### Taking an Avoid back
+
+**AVOID** is the one control whose effect is silence, so a mis-tap looks exactly like a channel
+that went quiet. After every avoid a bar appears above the tabs naming what was silenced, with
+**UNDO**. It follows you between tabs and lasts a few seconds; undoing also restores a hold the
+avoid released.
+
+After that, **AVOIDING _n_** on the Live screen opens the list of everything currently muted —
+each with how long it has left, or *until cleared* — and lets you unmute any one of them.
+**CLEAR ALL** is still there, at the bottom, where it can no longer be the only option.
+
+### The session log
+
+**SESSION LOG**, beside **RECENT**, is everything you have heard since you opened the app —
+much deeper than the five rows on the Live screen. Tap a row to hear it again; press and hold a
+row for **Replay**, **Hold this talkgroup**, **Avoid this talkgroup** and **Download**.
+
+It is this session only and lives in your browser — nothing is sent anywhere and nothing
+survives a reload. Everything older than that is in **Search**, which is the Archive.
 
 ### Turning the feed off, versus pausing it
 
@@ -166,6 +222,8 @@ A big system is hundreds of Talkgroups, and the panel is built for that:
 - **Pin** the channels you actually listen to — the pin at the end of a row — and they sit in
   their own section at the very top, whichever System they belong to. Pinned rows stay in their
   System too; a pin changes where a Talkgroup is shown and nothing about what plays.
+- **Priority** — the ⚡ beside the pin — is the opposite: it changes nothing about where the row
+  is drawn, and everything about when its Calls play. See [Priority](#priority).
 - **Fold a System away** by tapping its name. A System with more than fifty Talkgroups starts
   folded, so what you see first is a short list of Systems with their counts and controls. Open
   ones stay open next time.
@@ -174,8 +232,8 @@ A big system is hundreds of Talkgroups, and the panel is built for that:
   how many Calls it has taken lately. The ACTIVE button names the window it counts over.
 - **Typing in the filter opens everything**, so a search is never answered by a folded box.
 
-Your selection, your pins, your sort and which Systems you folded away are saved in this browser
-and survive a reload.
+Your selection, your pins, your priorities, your sort and which Systems you folded away are
+saved in this browser and survive a reload.
 
 ### Two independent setups in one browser
 
@@ -186,8 +244,8 @@ http://<host>:3000/?id=truck
 http://<host>:3000/?id=desk
 ```
 
-Each name is a separate **Profile** with its own selection, avoids and holds — nothing is
-shared between them. Bookmark each one, or install them as two home-screen apps. With no `?id=`
+Each name is a separate **Profile** with its own selection, avoids, holds and priorities —
+nothing is shared between them. Bookmark each one, or install them as two home-screen apps. With no `?id=`
 you get the default Profile.
 
 ---
