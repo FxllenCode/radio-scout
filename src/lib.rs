@@ -29,6 +29,7 @@ pub mod merge;
 pub mod mining;
 pub mod observability;
 pub mod query;
+pub mod quiet;
 pub mod retention;
 pub mod selection;
 pub mod serve;
@@ -92,6 +93,12 @@ pub struct AppState {
     /// a **row**, so like a Webhook and unlike enhancement there is no disabled
     /// form: an Instance with none has an empty roster.
     pub tones: crate::tone::Tones,
+    /// Looking at a Call's audio for the gaps **Catch-up** skips (#59) — the
+    /// scan queue and whether this Instance scans at all. Unlike the four above
+    /// it has no roster and no per-Call gate: whether a Call holds a gap can
+    /// only be answered by looking, so the switch is `[quiet] enabled` and
+    /// nothing else.
+    pub quiet: crate::quiet::Quiet,
     /// What time it is, for everything a handler stamps or expires (#90).
     pub clock: Clock,
     /// What every background Worker owes right now (#93) — the reading half, so
@@ -117,6 +124,7 @@ impl AppState {
             downstreams: crate::downstream::Downstreams::default(),
             webhooks: crate::webhook::Webhooks::default(),
             tones: crate::tone::Tones::default(),
+            quiet: crate::quiet::Quiet::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
         }
@@ -173,6 +181,7 @@ pub fn build_app(state: AppState) -> Router {
         // per-Call download.
         .route("/api/calls", get(archive::search))
         .route("/api/calls/filters", get(archive::filters))
+        .route("/api/calls/quiet", get(archive::quiet))
         // What a listener can select from (#12) — Systems + Talkgroups, whether
         // or not any of their Calls are still in the archive.
         .route("/api/catalog", get(catalog::catalog))

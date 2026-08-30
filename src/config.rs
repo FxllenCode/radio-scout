@@ -65,6 +65,7 @@ use crate::ingest::IngestConfig;
 use crate::logsink;
 use crate::mining::MiningConfig;
 use crate::observability::{self, LogConfig};
+use crate::quiet::QuietConfig;
 use crate::retention::{self, RetentionConfig};
 use crate::tone::ToneConfig;
 use crate::webhook::WebhookConfig;
@@ -407,6 +408,7 @@ pub struct Config {
     pub downstream: DownstreamConfig,
     pub webhook: WebhookConfig,
     pub tone: ToneConfig,
+    pub quiet: QuietConfig,
     pub log: LogConfig,
 }
 
@@ -515,6 +517,16 @@ impl Config {
                 "tone.queue_depth",
                 "0",
                 "a positive number of Calls — delete the tone profiles to stop detecting",
+            ));
+        }
+        // The same reading a third time, and here there *is* a second one to
+        // point at: `enabled = false` is the master switch, so a zero depth can
+        // only be a mistake.
+        if self.quiet.queue_depth == 0 {
+            return Err(ConfigError::invalid_key(
+                "quiet.queue_depth",
+                "0",
+                "a positive number of Calls — use enabled = false to stop scanning",
             ));
         }
         // LUFS is referenced to full scale, so a usable target is negative and
@@ -1072,6 +1084,28 @@ pub const SETTINGS: &[Setting] = &[
         example: "64",
         set: |setting, config, value| {
             config.tone.queue_depth = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "quiet.enabled",
+        var: "RADIO_SCOUT_QUIET_ENABLED",
+        expected: "true or false",
+        // `false`, because scanning is on by default and switching it off is
+        // the only reason to write this variable at all.
+        example: "false",
+        set: |setting, config, value| {
+            config.quiet.enabled = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "quiet.queue_depth",
+        var: "RADIO_SCOUT_QUIET_QUEUE_DEPTH",
+        expected: "a number of Calls",
+        example: "64",
+        set: |setting, config, value| {
+            config.quiet.queue_depth = setting.parse(value)?;
             Ok(())
         },
     },
@@ -1684,6 +1718,29 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # How many Calls may be waiting to be looked at. Past this they keep the audio
 # they arrived with and are not checked for a page, which is logged. Detection
 # is much cheaper than enhancement, so this rarely fills.
+# queue_depth = 512
+
+[quiet]
+# Quiet spans (#59): looking at each Call's audio for the stretches where nobody
+# is talking, so that Catch-up — the listener draining a backlog from the queue
+# sheet — can skip them instead of sitting through them. Like tone-out detection
+# it is pure signal processing and never speech recognition (ADR-0013): it asks
+# how much energy is present, never what was said.
+#
+# Unlike everything else that looks at audio, this looks at *every* Call, because
+# whether a Call has a gap in it can only be answered by looking. It is the
+# cheap half of the cheapest worker — a decode and a scan, where enhancement
+# decodes, resamples twice, filters, measures loudness and re-encodes — and it
+# runs behind ingest, so an upload is answered before anything is decoded.
+#
+# Turn it off if this instance will never have a listener (a headless forwarder),
+# or if the hardware cannot spare the decode. Catch-up still works with it off:
+# it raises the playback rate and trims nothing.
+# enabled = true
+
+# How many Calls may be waiting to be scanned. Past this they keep whatever they
+# arrived as and are not scanned, which is logged; a listener catching up on one
+# of those hears it at the raised rate, untrimmed.
 # queue_depth = 512
 
 [log]

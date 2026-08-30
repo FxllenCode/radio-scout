@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
   advance,
+  engageCatchup,
   gapped,
   lagged,
   received,
@@ -950,5 +951,31 @@ describe('the way to the session log (#58, spec US 28)', () => {
     await user.click(screen.getByRole('link', { name: 'Session log' }))
 
     expect(screen.getByRole('heading', { name: 'SESSION' })).toBeInTheDocument()
+  })
+})
+
+describe('Catch-up on the display (#59, spec US 23)', () => {
+  /**
+   * **The screen never lies about the feed** (#56), applied to the one thing
+   * Catch-up adds that a Listener could not otherwise see: audio is playing at
+   * one and a half times and skipping the quiet, and every other readout on this
+   * screen would look exactly the same.
+   */
+  it('says so while the queue is draining fast, and not otherwise', async () => {
+    const store = listening(call(), call({ id: 2 }), call({ id: 3 }))
+    expect(screen.queryByText('1.5×')).not.toBeInTheDocument()
+
+    act(() => {
+      store.dispatch(engageCatchup())
+    })
+    expect(screen.getByText('1.5×')).toBeInTheDocument()
+
+    // The queue empties, so it ends — and the readout goes with it rather than
+    // sitting there claiming a speed nothing is playing at.
+    act(() => {
+      store.dispatch(advance())
+      store.dispatch(advance())
+    })
+    await waitFor(() => expect(screen.queryByText('1.5×')).not.toBeInTheDocument())
   })
 })

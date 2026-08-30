@@ -279,6 +279,27 @@ pub struct StoredCall {
     /// list, no live frame and no **Webhook** could show.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tones: Vec<TonePage>,
+    /// Where nobody is talking, so **Catch-up** can skip it (#59, spec US 23) —
+    /// `[[start_ms, end_ms], …]`, in order and disjoint.
+    ///
+    /// **Absent from most Calls, which is what makes it affordable here.** A
+    /// span is only carried when it is at least [`crate::quiet::MIN_SPAN_MS`]
+    /// long, and somebody saying one thing has no such hole in it — so this is
+    /// [`StoredCall::tones`]' argument reached by a different route: not "the
+    /// event is rare" but "the gap worth trimming is". A Trunk Recorder call
+    /// file spanning several keyups is where it earns its ~20 bytes.
+    ///
+    /// **It is absent from every live frame**, and not because of a rule: the
+    /// frame is published at ingest and the scan happens behind it (#46 — nothing
+    /// republishes a frame). A Call read back from the Archive carries it; a Call
+    /// pushed to a Listener does not, and Catch-up pulls the window it is about
+    /// to play from `GET /api/calls/quiet`.
+    ///
+    /// A pair rather than an object, because it is two numbers and there will
+    /// never be a third: `{"startMs":…,"endMs":…}` is three times the bytes for
+    /// the same fact, on the one field whose whole defence is that it is small.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quiet: Vec<[i64; 2]>,
     /// The Site Ref this Call was heard on, for multi-site Systems (spec
     /// US 11). Absent unless a recorder named one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -697,6 +718,7 @@ mod tests {
             encrypted: false,
             tone: false,
             tones: Vec::new(),
+            quiet: Vec::new(),
             site_ref: Some(3),
             site_label: Some("Downtown".into()),
             object_key: "ab/secret-internal-key.m4a".into(),
@@ -756,6 +778,7 @@ mod tests {
             encrypted: false,
             tone: false,
             tones: Vec::new(),
+            quiet: Vec::new(),
             site_ref: None,
             site_label: None,
             object_key: "internal".into(),

@@ -636,6 +636,29 @@ Force a suspension: after a Step 4 FAIL (or by leaving the phone locked for 10+ 
 
 ---
 
+**Step 9 — Catch‑up: rate and seeking, backgrounded ([#59](https://github.com/FxllenCode/radio-scout/issues/59)).**
+Catch‑up changes what the one `<audio>` element is doing — `playbackRate` goes to 1.5 and
+`currentTime` jumps over each quiet span — which is a change to media‑source behaviour and
+therefore re‑opens this gate ([ADR‑0005](../adr/0005-client-audio-media-session-background.md)).
+Feed a backlog first: `cargo run --example feed -- --burst 20 --seconds 8`, then open the **Q**
+sheet and press **CATCH UP**.
+1. Foreground, listen to two or three Calls draining. Speech should be faster and still plainly
+   intelligible; a chipmunk means `preservesPitch` was not honoured on this build.
+2. Lock the screen and do not touch the phone.
+- **PASS:** the backlog goes on draining from the locked phone at the raised rate, each Call's
+  metadata repaints as it starts, and the lock‑screen scrubber tracks the audio rather than
+  running behind it. Transport buttons still work afterwards.
+- **PARTIAL:** audio drains but the scrubber drifts, or a jump leaves it stranded → note it;
+  `setPositionState` is polish, draining is the product.
+- **FAIL — the one that matters:** audio stops at the first quiet span skipped. A `currentTime`
+  write is a seek, and a seek on a backgrounded page is exactly the kind of thing that can drop
+  the audio session (§4d, eviction). If this fails, Catch‑up's trim must be gated to the
+  foreground and only the rate kept in the background. Record which Call it died on.
+3. Let it drain to the end and confirm it **stops on its own**: the queue empties, the rate
+   returns to normal, and the **1.5×** marker beside the **Q** count is gone.
+
+---
+
 **Recording the result.** Every run gets: exact iOS build, mechanism variant, pass/fail per step, and the 3‑of‑3 tally for Step 4. This checklist is per‑iOS‑point‑release — a pass on 26.5 says nothing about 26.6 (§3 is the evidence for that).
 
 ### Run log
@@ -652,6 +675,7 @@ Force a suspension: after a Step 4 FAIL (or by leaving the phone locked for 10+ 
 | 6 — `disableRemotePlayback` cost | Not run — only required if the ladder reaches rung D, and Step 4 passed |
 | 7 — Battery sanity | **Not run** — the one real gap; there is still no baseline number |
 | 8 — Suspension recovery | **PASS** |
+| 9 — Catch‑up rate + seeking | Did not exist yet ([#59](https://github.com/FxllenCode/radio-scout/issues/59) shipped after this run) — **owed** |
 
 **What this establishes:** the keep‑alive holds a backgrounded home‑screen PWA resident across a ~84 s silent gap on this build, both screen‑locked and app‑switched, and recovers cleanly afterwards. Step 4 is the WebKit‑bug workaround's whole reason for existing, and 3/3 clears the intermittency bar §14 sets.
 

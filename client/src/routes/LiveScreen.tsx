@@ -1,5 +1,6 @@
 import {
   Ban,
+  FastForward,
   ListOrdered,
   Pause,
   Play,
@@ -22,6 +23,7 @@ import { Button } from '@/components/ui/button'
 import { Waveform } from '@/components/Waveform'
 import { callCategory, formatFrequency, systemName, talkgroupName, unitName } from '@/lib/call'
 import { formatCallTime } from '@/lib/archive'
+import { CATCHUP_RATE } from '@/lib/catchup'
 import { feedReadout, type FeedBadge, type FeedEmpty } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
 import { isSystemHold, isTalkgroupHold } from '@/lib/selection'
@@ -43,6 +45,7 @@ import {
   selectLiveStatus,
   selectIsPriority,
   selectMissed,
+  selectIsCatchingUp,
   selectQueueDepth,
   toggleHoldSystem,
   toggleHoldTalkgroup,
@@ -89,6 +92,7 @@ export function LiveScreen() {
   const call = useAppSelector(selectLiveCall)
   const status = useAppSelector(selectLiveStatus)
   const queued = useAppSelector(selectQueueDepth)
+  const catchingUp = useAppSelector(selectIsCatchingUp)
   const missed = useAppSelector(selectMissed)
   const gap = useAppSelector(selectHasGap)
   const history = useAppSelector(selectHistory)
@@ -170,6 +174,22 @@ export function LiveScreen() {
               Q {queued}
             </button>
           </span>
+          {/* **The screen never lies about the feed** (#56), applied to the one
+              thing #59 adds that a Listener cannot otherwise see: audio is
+              playing at one and a half times and skipping the quiet, and
+              nothing else on this screen would say so. Rendered beside the `Q`
+              rather than inside the button because it is a readout and that is
+              a control — and only while it is on, so a Listener who is not
+              catching up reads exactly what they read before. */}
+          {catchingUp && (
+            <span
+              role="status"
+              className="inline-flex items-center gap-1 font-mono text-[11px] tabular-nums text-led-amber"
+            >
+              <FastForward className="size-3" aria-hidden />
+              {CATCHUP_RATE}×
+            </span>
+          )}
           <LinkState badge={readout.badge} />
         </span>
       }

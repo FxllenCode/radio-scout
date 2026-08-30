@@ -2,6 +2,7 @@ import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
 
 import { loginFailure, statusOf } from '@/lib/adminError'
 import { searchParams } from '@/lib/archive'
+import type { QuietSpan } from '@/lib/catchup'
 import type {
   AdminApiKey,
   AdminAssignment,
@@ -95,6 +96,24 @@ export const api = createApi({
     getFilterOptions: builder.query<FilterOptions, SearchQuery>({
       query: (search) => ({ url: `api/calls/filters?${searchParams(search)}` }),
       providesTags: ['Call'],
+    }),
+
+    /**
+     * Where a window of queued Calls is quiet (#59, spec US 23).
+     *
+     * **The only way a Call in the listening queue can get its spans.** It was
+     * pushed over the live feed at ingest, before anything looked at its audio,
+     * and nothing republishes a frame (#46) — so a Call read back from the
+     * Archive carries them on itself and one delivered live never does.
+     *
+     * Asked only while **Catch-up** is engaged, and only about the head of the
+     * queue: a Listener who is not behind never sends this request. Untagged,
+     * because a Call's gaps are a fact about audio that is already written and
+     * cannot change under a `Call` invalidation — where re-fetching on every
+     * arriving Call is exactly the cost this feature must not have.
+     */
+    getQuietSpans: builder.query<Record<string, QuietSpan[]>, number[]>({
+      query: (ids) => ({ url: `api/calls/quiet?ids=${ids.join(',')}` }),
     }),
 
     /** Everything a listener can select from (#12, spec US 19). Unlike the
@@ -527,6 +546,7 @@ export const {
   useGetAdminUnitsQuery,
   useGetApiKeysQuery,
   useGetCatalogQuery,
+  useGetQuietSpansQuery,
   useGetDownstreamsQuery,
   useGetToneProfilesQuery,
   useGetWebhooksQuery,

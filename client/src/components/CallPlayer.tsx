@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 
 import {
+  CATCHUP_RATE,
+  NORMAL_RATE,
+  stepAt,
+} from '@/lib/catchup'
+import {
   bindTransport,
   preferPlaybackAudioSession,
   setNowPlaying,
@@ -10,7 +15,7 @@ import {
 import { prefetchAudio } from '@/lib/prefetch'
 import { keepAliveLoopUrl } from '@/lib/silence'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { selectPlayId } from '@/store/live'
+import { selectIsCatchingUp, selectPlayId } from '@/store/live'
 import {
   KEEP_ALIVE_LIMIT_MS,
   keepAliveExpired,
@@ -56,6 +61,11 @@ export function CallPlayer() {
   // Replaying the Call already loaded leaves `src` untouched, so the element
   // needs a separate nudge to start it over (spec US 13).
   const playId = useAppSelector(selectPlayId)
+  // **Catch-up** (#59, spec US 23). The two levers ADR-0005 leaves us —
+  // `playbackRate` and `currentTime` — and nothing else: there is no WebAudio
+  // here and there never will be.
+  const catchingUp = useAppSelector(selectIsCatchingUp)
+  const rate = catchingUp ? CATCHUP_RATE : NORMAL_RATE
   const element = useRef<HTMLAudioElement>(null)
   /** Bumped on every return to the foreground — what re-binds the lock screen. */
   const [foregrounded, setForegrounded] = useState(0)
@@ -128,9 +138,16 @@ export function CallPlayer() {
 
   // A different Call (or the same one again): the transport's pause and
   // progress belong to what was playing, not to what is about to.
+  //
+  // Keyed on **which Call**, not on which object. A Call in the store is
+  // rewritten in place when something learns more about it — #59's quiet spans
+  // arrive behind the Call already playing — and keying on identity would read
+  // that as a new source: the pause a Listener had just pressed would be
+  // cleared, and the audio would carry on under them.
+  const playingId = current?.id ?? null
   useEffect(() => {
     dispatch(sourceChanged())
-  }, [current, playId, dispatch])
+  }, [playingId, playId, dispatch])
 
   // The element follows the store rather than owning "is it playing", so a
   // lock-screen pause and an in-app pause are the same state.
@@ -171,6 +188,39 @@ export function CallPlayer() {
     }
   }, [current, bridging, playId, paused, dispatch])
 
+  // The rate is re-applied on every new source, not only when it changes: an
+  // element that has been handed a new `src` does not reliably keep the rate it
+  // was set to, and a Call that quietly played at 1× would look exactly like
+  // Catch-up having stopped. `preservesPitch` is set beside it because the
+  // acceptance criterion is *speech intact* — every browser that matters
+  // defaults it on, and a browser that did not would turn dispatch traffic into
+  // a chipmunk at the one moment a Listener is trying to follow it.
+  //
+  // The keep-alive loop is excluded: it is a hundred-hertz square wave nobody
+  // hears, and playing it fast would shorten the gap it exists to hold open.
+  useEffect(() => {
+    const audio = element.current
+    if (!audio) return
+    audio.preservesPitch = true
+    audio.playbackRate = bridging ? NORMAL_RATE : rate
+
+    // ...and tell the lock screen, because the OS runs that scrubber off its
+    // own clock at whatever rate it was last given. Catch-up is engaged and
+    // stopped from a sheet the Listener opens *while a Call is playing*, so a
+    // rate change mid-Call is the ordinary case, not an edge — and left
+    // unpublished it leaves the lock screen disagreeing with the audio coming
+    // out of the phone for the rest of that Call.
+    //
+    // Only where the element knows how long the Call is: `NaN` until it has
+    // read the container header, which is every new source, and `loadedmetadata`
+    // publishes that one. A replay reaches here with the position already
+    // rewound, because the effect above runs first.
+    const { duration, currentTime } = audio
+    if (!bridging && Number.isFinite(duration) && duration > 0) {
+      setPositionState(duration, currentTime, rate)
+    }
+  }, [rate, bridging, current, playId])
+
   // Warm the next Call while this one plays (see lib/prefetch), and drop that
   // download if the queue moves somewhere else first.
   useEffect(() => {
@@ -193,7 +243,7 @@ export function CallPlayer() {
       onEnded={() => dispatch(nextCall())}
       onLoadedMetadata={(event) => {
         if (bridging) return
-        setPositionState(event.currentTarget.duration)
+        setPositionState(event.currentTarget.duration, 0, rate)
         dispatch(
           progressed({ position: 0, duration: event.currentTarget.duration }),
         )
@@ -205,6 +255,24 @@ export function CallPlayer() {
         if (bridging) return
         const { currentTime, duration } = event.currentTarget
         dispatch(progressed({ position: currentTime, duration }))
+        // Skip the stretches nobody is talking in (#59). The spans are the
+        // server's — a browser with no WebAudio cannot look at samples — and a
+        // Call that has none simply plays through at the raised rate, which is
+        // the documented fallback and not a failure.
+        if (catchingUp) {
+          const step = stepAt(current?.quiet, currentTime, duration)
+          if (step?.do === 'seek') {
+            event.currentTarget.currentTime = step.toSeconds
+            // The OS runs the scrubber off its own clock, so a jump it was not
+            // told about leaves the lock screen wrong by the whole gap.
+            setPositionState(duration, step.toSeconds, rate)
+            return
+          }
+          if (step?.do === 'advance') {
+            dispatch(nextCall())
+            return
+          }
+        }
         // Hand over *before* the last Call ends rather than on it: an element
         // that reaches `ended` with nothing to follow is the exact moment iOS
         // lets go of a backgrounded PWA (WebKit bug 261858), and the moment

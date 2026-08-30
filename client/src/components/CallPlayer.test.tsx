@@ -10,7 +10,14 @@ import { ARCHIVE, ORIGIN, searchPage } from '@/test/handlers'
 import { audioSessionType, installMediaSession } from '@/test/mediaSession'
 import { server } from '@/test/setup'
 import { renderWithProviders } from '@/test/utils'
-import { advance, received, replay } from '@/store/live'
+import {
+  advance,
+  engageCatchup,
+  quietFound,
+  received,
+  replay,
+  selectQueue,
+} from '@/store/live'
 import {
   KEEP_ALIVE_LIMIT_MS,
   pause,
@@ -547,6 +554,203 @@ describe('CallPlayer', () => {
       })
 
       expect(session.positions).toHaveLength(published)
+    })
+  })
+})
+
+describe('Catch-up (#59, spec US 23)', () => {
+  /** A live Call with the shape a Trunk Recorder file has: a gap in the middle
+   *  and a tail after the last word. */
+  const call = (id: number, quiet?: [number, number][]) => ({
+    id,
+    systemRef: 11,
+    talkgroupRef: 100,
+    durationMs: 12_000,
+    quiet,
+    audioUrl: `/api/call/${id}/audio`,
+  })
+
+  /** Two Calls arrived, the first playing and the second waiting — which is
+   *  what makes a backlog, and therefore what Catch-up can be engaged on. */
+  function behind(...quiet: ([number, number][] | undefined)[]) {
+    const store = makeStore()
+    renderWithProviders(<CallPlayer />, { store })
+    act(() => {
+      quiet.forEach((spans, index) => {
+        store.dispatch(received(call(index + 1, spans), index + 1))
+      })
+    })
+    return store
+  }
+
+  /**
+   * **The rate is one of the two levers ADR-0005 leaves us**, and the only one
+   * that works with no help from the server. Applied to the element rather than
+   * tracked beside it, and re-applied per source — an element handed a new `src`
+   * does not reliably keep it.
+   */
+  it('plays the queue faster, and goes back to normal when it is stopped', () => {
+    const store = behind(undefined, undefined)
+    expect(player().playbackRate).toBe(1)
+
+    act(() => {
+      store.dispatch(engageCatchup())
+    })
+    expect(player().playbackRate).toBe(1.5)
+    // Or dispatch traffic becomes a chipmunk at the one moment a Listener is
+    // trying to follow it.
+    expect(player().preservesPitch).toBe(true)
+
+    act(() => {
+      store.dispatch(advance())
+    })
+    // The queue emptied, so Catch-up ended — and the Call now playing, which is
+    // the newest there is, plays at real time.
+    expect(player().playbackRate).toBe(1)
+  })
+
+  /** With no spans — an Instance with `[quiet] enabled = false`, or one whose
+   *  scanner has not caught up — the rate alone is the documented fallback, and
+   *  nothing seeks. */
+  it('trims nothing on a Call with no spans', () => {
+    const store = behind(undefined, undefined)
+    act(() => {
+      store.dispatch(engageCatchup())
+    })
+
+    playhead({ currentTime: 2, duration: 12 })
+
+    expect(player().currentTime).toBe(2)
+  })
+
+  it('jumps over the stretch nobody is talking in', () => {
+    const store = behind([[1500, 4500]], undefined)
+    act(() => {
+      store.dispatch(engageCatchup())
+    })
+
+    playhead({ currentTime: 2, duration: 12 })
+
+    expect(player().currentTime).toBe(4.5)
+  })
+
+  /** The commonest gap there is: a recorder's call file keeps recording after
+   *  the last word. It takes the next Call rather than seeking to the duration,
+   *  which browsers answer differently. */
+  it('takes the next Call when the rest is silence', () => {
+    const store = behind([[6000, 12_000]], undefined)
+    act(() => {
+      store.dispatch(engageCatchup())
+    })
+    expect(selectQueue(store.getState())).toHaveLength(1)
+
+    playhead({ currentTime: 7, duration: 12 })
+
+    expect(selectNowPlaying(store.getState())?.id).toBe(2)
+  })
+
+  /** Nothing is trimmed while Catch-up is off — those are seconds the Listener
+   *  chose to sit through. */
+  it('does not trim when it is not engaged', () => {
+    behind([[1500, 4500]], undefined)
+
+    playhead({ currentTime: 2, duration: 12 })
+
+    expect(player().currentTime).toBe(2)
+  })
+
+  /**
+   * **Spans landing on the Call already playing must not restart it.**
+   *
+   * `quietFound` writes them onto that Call, which hands the store a new object
+   * — and the transport's "a different Call is on the element" reset keys on
+   * *which Call*, not on which object, or a Listener who paused would be
+   * un-paused by an answer arriving behind them.
+   */
+  it('does not disturb a paused Call when its spans arrive', () => {
+    const store = behind(undefined, undefined)
+    act(() => {
+      store.dispatch(engageCatchup())
+      store.dispatch(pause())
+    })
+    expect(selectIsPaused(store.getState())).toBe(true)
+
+    act(() => {
+      store.dispatch(quietFound({ ids: [1], spans: { '1': [[500, 2000]] } }))
+    })
+
+    expect(selectNowPlaying(store.getState())?.quiet).toEqual([[500, 2000]])
+    expect(selectIsPaused(store.getState())).toBe(true)
+  })
+
+  /**
+   * **A rate change mid-Call reaches the lock screen too.** Catch-up is engaged
+   * and stopped from a sheet the Listener opens while a Call is playing, so this
+   * is the ordinary case rather than an edge — and unpublished it leaves the OS
+   * scrubber running at a speed nothing is playing at for the rest of that Call.
+   */
+  it('republishes the scrubber when the rate changes under a playing Call', () => {
+    const session = installMediaSession()
+    const store = behind(undefined, undefined)
+    Object.defineProperty(player(), 'duration', { value: 12, configurable: true })
+    Object.defineProperty(player(), 'currentTime', { value: 3, configurable: true })
+
+    act(() => {
+      store.dispatch(engageCatchup())
+    })
+
+    expect(session.positions.at(-1)).toMatchObject({
+      duration: 12,
+      position: 3,
+      playbackRate: 1.5,
+    })
+  })
+
+  /** A Call the element has not read a header for yet has no scrubber to
+   *  publish — `loadedmetadata` owns that one, and inventing a duration here
+   *  would put a scrubber on the lock screen for a length nobody knows.
+   *
+   *  The entries that *are* there are `setNowPlaying`'s clearing call, which
+   *  publishes no state at all; what this asserts is that nothing published a
+   *  state. */
+  it('publishes no scrubber for a Call whose length is not known yet', () => {
+    const session = installMediaSession()
+    const store = behind(undefined, undefined)
+
+    act(() => {
+      store.dispatch(engageCatchup())
+    })
+
+    expect(session.positions.filter(Boolean)).toEqual([])
+  })
+
+  /**
+   * **The lock screen has to be told about the jump.** The OS advances that
+   * scrubber on its own clock from whatever it was last given, so a seek it did
+   * not hear about leaves it wrong by the whole gap — and the rate rides along,
+   * or it runs slow for the whole Call.
+   */
+  it('keeps the lock-screen scrubber honest across the rate and the jump', () => {
+    const session = installMediaSession()
+    const store = behind([[1500, 4500]], undefined)
+    act(() => {
+      store.dispatch(engageCatchup())
+    })
+
+    // A duration first: with `NaN` there is no scrubber to publish, which is
+    // the state jsdom's element starts in and a browser's is in until it has
+    // read the container header.
+    Object.defineProperty(player(), 'duration', { value: 12, configurable: true })
+    act(() => {
+      player().dispatchEvent(new Event('loadedmetadata'))
+    })
+    expect(session.positions.at(-1)).toMatchObject({ playbackRate: 1.5 })
+
+    playhead({ currentTime: 2, duration: 12 })
+
+    expect(session.positions.at(-1)).toMatchObject({
+      position: 4.5,
+      playbackRate: 1.5,
     })
   })
 })

@@ -87,6 +87,50 @@ pub fn routine_traffic() -> Vec<u8> {
     wav(&samples, PAGE_RATE)
 }
 
+/// **A Trunk Recorder call file, as one really arrives** (#59) — two keyups
+/// with the hang time between them, and the squelch tail after the last word.
+///
+/// This is the shape Catch-up exists for. A recorder's call file spans the whole
+/// grant, so what a Listener draining a backlog sits through is not only the
+/// talking: it is the seconds between one unit finishing and the next keying,
+/// and the tail after the last one lets go.
+///
+/// The gaps are near-silence rather than digital zero, because a real recorder's
+/// gap has a floor — and a detector that only found exact zeroes would find
+/// nothing in any Call a radio ever produced.
+pub fn two_keyups() -> Vec<u8> {
+    let samples = [
+        keyed(0, 1_500),
+        hang(3_000),
+        keyed(1_500, 1_500),
+        hang(2_000),
+    ]
+    .concat();
+    wav(&samples, PAGE_RATE)
+}
+
+/// Somebody talking, with the hiss a rooftop antenna gets. `from` keeps the
+/// noise walking across the whole Call rather than repeating per keyup.
+fn keyed(from_ms: usize, ms: usize) -> Vec<f32> {
+    let from = from_ms * PAGE_RATE as usize / 1000;
+    voice(ms)
+        .into_iter()
+        .enumerate()
+        .map(|(n, sample)| (sample + hiss(from + n)).clamp(-1.0, 1.0))
+        .collect()
+}
+
+/// The channel between keyups: a floor, not digital zero.
+fn hang(ms: usize) -> Vec<f32> {
+    (0..ms * PAGE_RATE as usize / 1000)
+        .map(|n| hiss(n) * 0.02)
+        .collect()
+}
+
+/// Where [`two_keyups`]'s gaps are, in milliseconds — what a test asserts
+/// against, rather than repeating the arithmetic of the fixture it is reading.
+pub const TWO_KEYUPS_GAPS: [(i64, i64); 2] = [(1_500, 4_500), (6_000, 8_000)];
+
 fn tone(hz: f64, ms: usize) -> Vec<f32> {
     let len = ms * PAGE_RATE as usize / 1000;
     let ramp = PAGE_RATE as usize / 200;

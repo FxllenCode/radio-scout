@@ -1078,6 +1078,17 @@ pub async fn stored_calls<C: ConnectionTrait>(
                 // says there is something to read.
                 tone: call.tone_matched(),
                 tones: paged.remove(&call.id).unwrap_or_default(),
+                // Off the Call row too, and unpacked rather than joined — the
+                // spans are a column precisely so this costs no statement
+                // (#59). Most Calls carry `NULL` here and serialize no key.
+                quiet: call
+                    .quiet
+                    .as_deref()
+                    .map(crate::quiet::unpack)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(<[i64; 2]>::from)
+                    .collect(),
                 site_ref: call
                     .site_id
                     .and_then(|id| sites.get(&id))
@@ -1459,6 +1470,59 @@ pub async fn filters(
     options(&state.db, &search)
         .await
         .map_err(Stage::LoadFilterOptions.failed())
+}
+
+/// `GET /api/calls/quiet?ids=1,2,3` — where those Calls are quiet (#59, spec
+/// US 23).
+///
+/// **This endpoint exists because a live frame cannot carry the answer.** The
+/// frame is published at ingest, before anything has looked at the audio, and
+/// nothing republishes one (#46) — so a Call sitting in a Listener's queue has
+/// no spans on it however long ago the scanner finished with it. Catch-up asks
+/// about the window of the queue it is about to play. The Archive needs none of
+/// this: a Call read back from a search page carries its spans on itself.
+///
+/// One statement whatever the window's size, and Calls with nothing to trim are
+/// absent rather than empty — see [`crate::db::repo::quiet_spans_for`].
+pub async fn quiet(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<crate::quiet::QuietWindow, Failure> {
+    let ids = parse_ids(params.get("ids").map(String::as_str))?;
+
+    crate::db::repo::quiet_spans_for(&state.db, &ids)
+        .await
+        .map(crate::quiet::QuietWindow::of)
+        .map_err(Stage::LoadQuietSpans.failed())
+}
+
+/// The `ids` of a quiet-span request, or the named rejection every other bad
+/// parameter here gets.
+///
+/// **An absent or empty list is refused rather than answered `{}`.** A caller
+/// with nothing to ask about does not send this request, so the only way to get
+/// here empty is a bug — and a mistyped parameter name that answered "no Call
+/// has any gaps" would be a Catch-up that silently stopped trimming and looked
+/// exactly like an Archive full of continuous speech.
+fn parse_ids(raw: Option<&str>) -> Result<Vec<CallId>, Reason> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Err(bad("ids must name at least one Call, e.g. ids=1,2,3"));
+    };
+    let ids = raw
+        .split(',')
+        .map(|id| {
+            id.trim()
+                .parse::<CallId>()
+                .map_err(|_| bad(format!("ids must be Call ids; {id:?} is not one")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.len() > crate::quiet::MAX_WINDOW {
+        return Err(bad(format!(
+            "ids may name at most {} Calls",
+            crate::quiet::MAX_WINDOW
+        )));
+    }
+    Ok(ids)
 }
 
 /// `GET /api/call/{id}` — one Call, with everything the recorder said about it
@@ -1967,6 +2031,7 @@ mod tests {
             encrypted: false,
             tone: false,
             tones: Vec::new(),
+            quiet: Vec::new(),
             site_ref: None,
             site_label: None,
             object_key: "ab/opaque-key.m4a".into(),

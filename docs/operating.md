@@ -398,6 +398,40 @@ names the station:
 }
 ```
 
+## Catch-up, and the quiet-span scan
+
+A listener who is a long way behind can press **CATCH UP** in the queue sheet: the queue drains at
+1.5×, and the stretches where nobody is talking are skipped. That second half needs something from
+the instance — a browser cannot look at audio samples — so Radio-Scout reads each stored call once,
+in the background, and writes down where it is quiet.
+
+**This is the one background worker that looks at every call.** Enhancement ships off; tone-out
+detection skips any channel with no profile. There is no equivalent shortcut here: whether a call
+has a gap in it can only be answered by looking at it. It is also the cheapest of the three — a
+decode and a scan, where enhancement decodes, resamples twice, filters, measures loudness and
+re-encodes — and, like both of them, it runs **behind** ingest. The recorder is answered and the
+call is on the live feed before anything is decoded.
+
+**This is signal processing, not speech recognition**, on tone-out detection's terms: it asks how
+much energy is present, never what was said.
+
+It is **on by default**, because catch-up is a listener feature and nobody should have to find a
+setting before the queue can be drained. Turn it off in `radio-scout.toml` if this instance will
+never have a listener — a headless forwarder — or if the hardware cannot spare the decode:
+
+```toml
+[quiet]
+enabled = false
+```
+
+Catch-up still works with it off. It raises the playback rate and trims nothing, which is also
+what happens for any individual call the scan could not read.
+
+**Nothing goes back over the archive.** Calls stored before you upgraded, or while scanning was
+off, are never re-read: switching a feature on must not pull a county's worth of objects back off
+your disk at the next boot. `[quiet] queue_depth` is how many calls may be waiting to be scanned;
+past that they keep whatever they arrived as, which is logged.
+
 ### Tidying up talkgroup names
 
 Auto-populate means an archive is usable immediately, but Talkgroups arrive named after their

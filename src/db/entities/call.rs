@@ -135,6 +135,24 @@ pub struct Model {
     /// A transient failure — an object store that would not answer — leaves it
     /// `NULL` on purpose, so the next sweep tries again.
     pub mined_at_ms: Option<i64>,
+    /// Where this Call is in **quiet-span scanning** (#59) — one of
+    /// [`QuietState`]'s four values.
+    ///
+    /// [`ToneState`]'s column with one question rather than two: *was the audio
+    /// looked at*. What was found lives in [`Model::quiet`], and the two are not
+    /// the same fact — `done` with no spans is a Call somebody said one thing
+    /// on, which is most of them.
+    pub quiet_state: String,
+    /// Where nobody is talking, [`crate::quiet::pack`]ed (#59, spec US 23).
+    ///
+    /// `NULL` on every Call that was never scanned, could not be, or held no gap
+    /// long enough to be worth a seek — which is most Calls. A column rather
+    /// than a child table because nothing ever joins to it: it is read by
+    /// whoever is about to *play* this exact Call and by nobody else, so rows
+    /// would buy a `RESTRICT` foreign key on the retention sweeper's path for
+    /// nothing (`call_tones`' cost, which a page-out earns by being searchable
+    /// and this is not).
+    pub quiet: Option<String>,
     pub created_at_ms: i64,
 }
 
@@ -210,6 +228,36 @@ impl ToneState {
     pub const MATCHED: &'static str = "matched";
     /// Could not be looked at: undecodable audio, an object that had gone, or a
     /// queue that was full. The Call is untouched and stays playable.
+    pub const SKIPPED: &'static str = "skipped";
+}
+
+/// Where a Call has got to in **quiet-span scanning** (#59).
+///
+/// [`ToneState`]'s shape minus its two "looked at, and here is what it said"
+/// arms, because a scan's finding is a list and not a verdict: `done` with an
+/// empty [`Model::quiet`] is a Call with nothing worth trimming, which is the
+/// ordinary answer and not a separate state.
+///
+/// Constants rather than a Rust enum for [`EnhancementState`]'s reason: the
+/// value crosses a database boundary in both directions, and a row written by a
+/// newer version must degrade to "not pending", which is the safe reading
+/// everywhere that asks.
+pub struct QuietState;
+
+impl QuietState {
+    /// Never offered — every Call ingested while `[quiet] enabled = false`, and
+    /// every Call that predates this. **Deliberately never re-queued**, which is
+    /// [`EnhancementState::NONE`]'s rule and [`ToneState::NONE`]'s: switching
+    /// scanning on marks the Calls that follow, and does not read an Operator's
+    /// whole Archive back off their disk at the next boot.
+    pub const NONE: &'static str = "none";
+    /// Queued or in flight. What a restart picks back up.
+    pub const PENDING: &'static str = "pending";
+    /// Looked at. [`Model::quiet`] is what was found, and is very often nothing.
+    pub const DONE: &'static str = "done";
+    /// Could not be looked at: undecodable audio, an object that had gone, or a
+    /// queue that was full. The Call is untouched and stays playable; **Catch-up**
+    /// falls back to raising the rate alone.
     pub const SKIPPED: &'static str = "skipped";
 }
 

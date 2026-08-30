@@ -7,6 +7,7 @@ import { LiveFeedLink } from '@/components/LiveFeedLink'
 import { MiniPlayer } from '@/components/MiniPlayer'
 import { UpdateBanner } from '@/components/UpdateBanner'
 import { useAppUpdate } from '@/hooks/useAppUpdate'
+import { useCatchupQuiet } from '@/hooks/useCatchupQuiet'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { selectStrip } from '@/store/transport'
@@ -39,6 +40,10 @@ const PLAYS_FOR_ITSELF = ['/']
  *  Listener between tabs instead of being a thing only the Live screen knew. */
 export function AppShell() {
   const update = useAppUpdate()
+  // Here rather than on a screen, because Catch-up drains the listening queue
+  // wherever the Listener happens to be looking — the same reason the audio
+  // element and the socket are here (#59).
+  useCatchupQuiet()
   const { pathname } = useLocation()
   const strip = useAppSelector(selectStrip)
   const room = !PLAYS_FOR_ITSELF.includes(pathname)

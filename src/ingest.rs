@@ -1034,6 +1034,7 @@ async fn offer_off_path(state: &AppState, call: &call::Model) {
     if call.has_audio() {
         let _queued = queue_for_enhancement(state, call.id).await;
         queue_for_tone_detection(state, call.id).await;
+        queue_for_quiet_scan(state, call.id).await;
     }
 }
 
@@ -1066,6 +1067,33 @@ async fn queue_for_tone_detection(state: &AppState, call_id: CallId) {
         return;
     }
     state.tones.submit(call_id);
+}
+
+/// Offer a stored Call to the quiet-span queue (#59).
+///
+/// [`queue_for_tone_detection`]'s shape without its roster question, because
+/// there is nothing to ask: whether a Call holds a gap can only be answered by
+/// looking at it. So the gate is `[quiet] enabled` alone — read first, so a
+/// switched-off Instance spends no statement per upload marking a row `pending`
+/// for a worker that was never spawned.
+///
+/// Deliberately *marked before it is offered*, which is enhancement's rule and
+/// tone-out detection's, for their reason: a process that dies between the two
+/// finds the Call again at the next boot, where the reverse order would leave it
+/// queued in memory and `none` on disk.
+async fn queue_for_quiet_scan(state: &AppState, call_id: CallId) {
+    if !state.quiet.is_enabled() {
+        return;
+    }
+    if let Err(error) = repo::mark_quiet(&state.db, call_id, call::QuietState::PENDING).await {
+        warn!(
+            reason = %"mark-pending-failed",
+            %error,
+            "could not mark a Call for quiet-span scanning"
+        );
+        return;
+    }
+    state.quiet.submit(call_id);
 }
 
 /// Queue a **page** for every Webhook that asked for one (#55, #54).

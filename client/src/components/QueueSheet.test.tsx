@@ -5,6 +5,7 @@ import { axe } from 'vitest-axe'
 
 import {
   received,
+  selectIsCatchingUp,
   selectLiveCall,
   selectMissed,
   selectQueue,
@@ -208,5 +209,65 @@ describe('the queue sheet (#58, spec US 24)', () => {
     await open(user)
 
     expect(await axe(container)).toHaveNoViolations()
+  })
+})
+
+describe('Catch-up from the queue sheet (#59, spec US 23)', () => {
+  /** A Call the shape a Trunk Recorder file really is: twelve seconds, of which
+   *  nine is nobody talking. */
+  const long = (id: number, talkgroupRef = 54241): Call => ({
+    ...call(id, talkgroupRef),
+    durationMs: 12_000,
+    quiet: [
+      [1500, 4500],
+      [6000, 12_000],
+    ],
+  })
+
+  const control = () => screen.getByRole('button', { name: /Catch up|Catching up/ })
+
+  /**
+   * **The offer says what it is worth**, because a bare "4:20" says nothing
+   * about whether the button is worth pressing — and this is the sheet where
+   * the other way out of a backlog is *give it up and lose 39 Calls*.
+   */
+  it('offers to catch up, and says what it would save', async () => {
+    const user = userEvent.setup()
+    listening(long(1), long(2, 100), long(3, 200))
+    await open(user)
+
+    // Two waiting: 24 seconds as recorded, 4 with the gaps out at 1.5×.
+    expect(control()).toHaveTextContent('0:04 instead of 0:24')
+  })
+
+  it('engages, counts down, and can be stopped', async () => {
+    const user = userEvent.setup()
+    const { store } = listening(long(1), long(2, 100), long(3, 200))
+    await open(user)
+
+    await user.click(control())
+
+    expect(selectIsCatchingUp(store.getState())).toBe(true)
+    expect(control()).toHaveTextContent('Catching up at 1.5×')
+    expect(control()).toHaveTextContent('0:04 left')
+    // The sheet stays up: a Listener watching the estimate fall is watching
+    // this work, where playing and jumping are done with the sheet.
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+    await user.click(control())
+    expect(selectIsCatchingUp(store.getState())).toBe(false)
+  })
+
+  /**
+   * A countdown that reached zero with Calls still waiting would be the display
+   * lying about the feed, which is what #56 was for — so a Call nobody measured
+   * makes the estimate a floor and the readout says so.
+   */
+  it('marks the estimate as a floor when a waiting Call has no duration', async () => {
+    const user = userEvent.setup()
+    listening(long(1), long(2, 100), call(3, 200))
+    await open(user)
+
+    expect(control()).toHaveTextContent('0:02+ instead of 0:12+')
   })
 })

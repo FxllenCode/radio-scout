@@ -2200,6 +2200,9 @@ async fn recorder_truth_migration_converges_on_databases_that_predate_the_column
         // reproduce what an upgrading operator's schema really looks like —
         // the standing tax m0003 and m0004 already pay.
         ("calls", "tone"),
+        // ...and #59's two, for that same reason.
+        ("calls", "quiet_state"),
+        ("calls", "quiet"),
         ("call_frequencies", "at_ms"),
         ("call_units", "tag_ota"),
         ("call_units", "emergency"),
@@ -2242,6 +2245,12 @@ async fn recorder_truth_migration_converges_on_databases_that_predate_the_column
     assert!(!existing.encrypted);
     assert_eq!(existing.duration_ms, None, "nobody ever measured it");
     assert_eq!(existing.site_id, None);
+    assert_eq!(
+        existing.quiet_state,
+        radio_scout::db::entities::call::QuietState::NONE,
+        "a Call nobody scanned takes the documented default rather than NULL"
+    );
+    assert_eq!(existing.quiet, None);
 
     let views = archive::stored_calls(&db, std::slice::from_ref(&existing))
         .await

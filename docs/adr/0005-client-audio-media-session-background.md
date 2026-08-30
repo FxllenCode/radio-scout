@@ -189,3 +189,39 @@ Call.
 - **The service worker stays ours** (`sw.ts`, `injectManifest`). The reason recorded above — *"a generated worker cannot have a `push` handler at all"* — no longer applies. It stays because the update flow messages `SKIP_WAITING`, and because the worker must never answer `/api/*` from cache.
 
 The keep-alive's idle timeout is unchanged in mechanism and changed in meaning: past the budget we still stop fighting iOS, but what follows is silence rather than a handoff.
+
+## Amendment (#59, 2026-08-30): Catch-up, and the two levers this ADR leaves
+
+**Catch-up** (spec US 23) drains the listening queue faster than real time. It is the first
+feature to change what the one `<audio>` element is *doing* rather than what is loaded into it,
+so it is recorded here.
+
+**It uses `playbackRate` and `currentTime`, and there is no third option.** This ADR's central
+finding is that WebAudio is unusable — iOS treats its output as ambient and mutes it in the
+background, which is the root cause of rdio-scanner's broken iOS experience — so a browser here
+cannot look at a sample, cannot resample, and cannot splice. Raising the rate is free; skipping
+the silence is not, because *where* the silence is has to come from somewhere else. That
+somewhere is the server: a **Worker** scans each stored Call once and writes down its **Quiet
+spans**, and the client seeks over them. The asymmetry is a consequence of this ADR, not a
+design preference.
+
+**`preservesPitch` is set explicitly** rather than relied on. Every engine that matters defaults
+it on, and the acceptance criterion is *speech intact* — a browser that defaulted the other way
+would turn dispatch traffic into a chipmunk at the one moment a Listener is trying to follow it.
+
+**The rate is published to the Media Session, and so is every jump.** The OS advances the
+lock-screen scrubber on its own clock from whatever `setPositionState` was last given. Left at
+`1` it runs slow for the whole Call, and a seek it was not told about leaves it wrong by the
+whole gap — a lock screen quietly disagreeing with the audio coming out of the phone, which is
+the thing this ADR exists to get right.
+
+**The keep-alive is excluded**, deliberately: it is a hundred-hertz square wave nobody hears,
+and playing it fast would shorten the gap it exists to hold open.
+
+**The real-device gate re-opens**, and this is the part that is *owed rather than done*. A
+`currentTime` write is a seek, and a seek on a backgrounded page is exactly the class of thing
+§4d's eviction discussion says can cost the audio session. Research §14 gains **Step 9** for it,
+with the failure named in advance: if a backgrounded drain dies at the first span skipped, the
+trim is gated to the foreground and only the rate is kept in the background. Nothing in CI can
+answer that question — Playwright's WebKit is not iOS Safari — so it stays where every other
+claim of this kind lives, on the manual gate.

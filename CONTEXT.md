@@ -152,8 +152,12 @@ Keeping a talkgroup at the top of the Talkgroups panel — in a section of its o
 _Avoid_: favorite, star (a **Star** marks a Call).
 
 **Catch-up**:
-Draining the **listening queue** faster than real time — silence trimmed, playback rate raised — until the feed is live again. A **Listener's** action on Calls they already have; distinct from a **Backfill**, which is how they got them.
+Draining the **listening queue** faster than real time — **Quiet spans** skipped, playback rate raised — until the feed is live again. A **Listener's** action on Calls they already have; distinct from a **Backfill**, which is how they got them. Ends when the queue is empty, because the Call playing then is the newest there is and hurrying through the present is not catching up.
 _Avoid_: fast-forward, smart speed (a product's trademark), time compression, backfill.
+
+**Quiet span**:
+A stretch of one **Call** where nobody is talking, measured against how loud *that Call's* speech is and reported only when it is long enough to be worth skipping. What **Catch-up** jumps over. Found by a **Worker** reading the stored audio once, never on the ingest path and never by the browser — a client with one `<audio>` element and no WebAudio ([ADR-0005](docs/adr/0005-client-audio-media-session-background.md)) cannot look at a sample. A Call with none is the ordinary case, not a failure: somebody saying one thing has no hole in it, and Catch-up then raises the rate and trims nothing.
+_Avoid_: silence (the keep-alive loop is the client's word for that, and a quiet span is not digital silence — it is a level relative to the speech beside it), dead air, gap (a **Backfill** has one, meaning something a Listener never got), VAD, speech detection (nothing here asks what was said — [ADR-0013](docs/adr/0013-no-transcription.md)).
 
 **Session log**:
 Every **Call** a **Listener** heard since they opened the app, newest first, replayable and reachable for a **Hold**, an **Avoid** or a download. Client-side and unpersisted — *this session* is what it says — and deeper than the RECENT list on the live screen, which is a five-deep replay control rather than a record. Each Call appears once, in the order it was **first** heard: a replay is hearing it again, not a new thing happening, and a list that reordered itself under "what was that ten minutes ago" would not answer the question.

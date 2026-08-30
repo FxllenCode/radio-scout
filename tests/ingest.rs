@@ -98,7 +98,7 @@ async fn a_steady_state_call_resolves_its_channel_once() {
 
     assert_eq!(
         spent,
-        18 + read_backs,
+        21 + read_backs,
         "one steady-state Call, end to end: the API key; the System and the \
          Talkgroup, once each; the dedup window; the **Downstream** roster \
          (#52 — one indexed read of a table with single-digit rows, and the \
@@ -107,7 +107,12 @@ async fn a_steady_state_call_resolves_its_channel_once() {
          row and its one `call_units` row (+ a read-back each on SQLite); the \
          Unit the roster resolves the radio to; the nine the live-feed view is \
          denormalized from, two of which resolve that radio to its apparatus \
-         for the wire; and the emission. One fewer than before #107, which \
+         for the wire; and the emission. Then quiet-span scanning's three \
+         (#59), which are the only ones here that are not ingest's: the mark \
+         that queues the Call, and the worker's own read of it and write of \
+         what it found — awaited by `settle()` above, so they are counted \
+         rather than raced. It is the first Worker that looks at *every* Call, \
+         and this is what that costs. One fewer than before #107, which \
          removed notifications and with them the push sender's per-Call read \
          of who was subscribed. Two more than this and something is being \
          resolved twice again."

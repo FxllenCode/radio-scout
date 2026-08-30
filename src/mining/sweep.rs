@@ -498,6 +498,8 @@ mod tests {
             stop_at_ms: None,
             emergency: false,
             encrypted: false,
+            quiet_state: call::QuietState::NONE.into(),
+            quiet: None,
             priority: None,
             audio_type: None,
             site_id: None,

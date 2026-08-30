@@ -127,6 +127,8 @@ stages! {
     LoadCallDetail => "load-call-detail",
     /// One radio's history — where it talks, and since when (#47).
     LoadUnitHistory => "load-unit-history",
+    /// Where a window of queued Calls is quiet, for **Catch-up** (#59).
+    LoadQuietSpans => "load-quiet-spans",
     /// The Systems and Talkgroups a listener can select.
     LoadCatalog => "load-catalog",
     // -- The admin surface -------------------------------------------------

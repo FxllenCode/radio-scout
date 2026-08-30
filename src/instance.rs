@@ -586,6 +586,7 @@ async fn assemble(
     state.webhooks =
         crate::webhook::Webhooks::new(config.webhook.clone(), config.server.public_url.clone());
     state.tones = crate::tone::Tones::new(config.tone.clone());
+    state.quiet = crate::quiet::Quiet::new(config.quiet.clone());
     // Read once at boot whether there is anything to look for (#55), so an
     // Instance with no **Tone profile** — which is every Instance until an
     // Operator writes one — spends nothing per upload rediscovering it. Every
@@ -621,6 +622,14 @@ async fn assemble(
     // this sleeps on an empty queue. First it picks up whatever a previous
     // process was part-way through.
     running.extend(crate::tone::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
+    // Quiet-span scanning (#59), and the one worker here that is **on by
+    // default and looks at every Call**: Catch-up needs to know where the gaps
+    // are, and no roster can answer that. `[quiet] enabled = false` spawns
+    // nothing at all, unlike the two senders above — a Tone profile is a row
+    // that may appear five minutes from now, where this is an Operator saying
+    // their hardware does not do this, and nothing can change it without a
+    // restart.
+    running.extend(crate::quiet::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     let app = build_app(state.clone());
 
     let bind = parts

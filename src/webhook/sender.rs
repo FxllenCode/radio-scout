@@ -467,6 +467,7 @@ mod tests {
             encrypted: false,
             tone: false,
             tones: Vec::new(),
+            quiet: Vec::new(),
             site_ref: None,
             site_label: None,
             object_key: String::from("calls/101.wav"),
@@ -600,6 +601,7 @@ mod tests {
                     encrypted: true,
                     tone: false,
                     tones: Vec::new(),
+                    quiet: Vec::new(),
                     audio_url: None,
                     ..a_call()
                 },

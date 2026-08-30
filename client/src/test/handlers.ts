@@ -279,6 +279,11 @@ export const handlers = [
   http.get(`${ORIGIN}/api/calls/filters`, () =>
     HttpResponse.json(FILTER_OPTIONS),
   ),
+  // Where a window of queued Calls is quiet (#59). Sparse the way the server's
+  // is — a Call with nothing to trim is absent, not present and empty — so a
+  // test that never overrides this is testing the ordinary case, which is a
+  // backlog with no gaps in it and Catch-up running on the rate alone.
+  http.get(`${ORIGIN}/api/calls/quiet`, () => HttpResponse.json({})),
   http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(CATALOG)),
   // One radio's history (#47). Answers for the one radio `ARCHIVE` names and
   // 404s for anything else, which is the server's own rule.

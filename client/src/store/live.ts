@@ -7,6 +7,7 @@ import {
   type Controls,
   type FeedStatus,
 } from '@/lib/feed'
+import type { QuietSpan } from '@/lib/catchup'
 import type { LiveStatus, Subscription } from '@/lib/liveFeed'
 import {
   callsOf,
@@ -187,6 +188,22 @@ export interface LiveState {
    *  Selection, and so nothing arriving can override a choice. */
   feedOff: boolean
   /**
+   * **Catch-up** is engaged (#59, spec US 23): the queue is draining faster
+   * than real time — gaps skipped, rate raised — until the Listener is live.
+   *
+   * Here beside the queue rather than in `panel`, for [`LiveState.priority`]'s
+   * reason: this changes what plays and how, which is the whole of what a queue
+   * is. **Not persisted**, unlike the Selection and the Avoids: being behind is
+   * a fact about right now, and a Listener who closed the app forty Calls behind
+   * and opens it tomorrow is not behind any more — [`LiveState.sessionLog`]'s
+   * rule, one field along.
+   *
+   * Nothing has to switch it off. `liveReducer` clears it whenever the queue is
+   * empty, so "disengages automatically at live" is structural rather than a
+   * line every reducer that shrinks the queue has to remember.
+   */
+  catchup: boolean
+  /**
    * The listener is playing the Archive instead (CONTEXT.md **Playback mode**).
    *
    * Not a mirror of the `playback` slice so much as this slice remembering
@@ -237,6 +254,7 @@ export const initialLiveState: LiveState = {
   // On. A Listener who has never touched the toggle gets audio playing, which
   // is what the app is for.
   feedOff: false,
+  catchup: false,
   inPlayback: false,
 }
 
@@ -908,6 +926,49 @@ const liveSlice = createSlice({
       play(state, latest)
     },
 
+    /**
+     * Drain the backlog (#59, spec US 23) — engaged from the queue sheet, which
+     * is where a Listener looking at a number they cannot face will be.
+     *
+     * Nothing here disengages it: `liveReducer` does that the moment the queue
+     * is empty, whichever reducer emptied it.
+     */
+    engageCatchup(state) {
+      state.catchup = true
+    },
+
+    /** Stop draining and go back to real time. */
+    stopCatchup(state) {
+      state.catchup = false
+    },
+
+    /**
+     * The **Quiet spans** of some queued Calls arrived (#59).
+     *
+     * Written **onto the Calls themselves** rather than kept in a table beside
+     * them, because a Call read back from the Archive already carries its spans
+     * — so this leaves one field, `call.quiet`, that every reader can trust
+     * whichever way the Call arrived. Only a Call pushed over the live feed is
+     * ever missing them, and that is because the frame goes out at ingest, ahead
+     * of the scan (#46: nothing republishes a frame).
+     *
+     * **Every id asked about is written, not only the ones that answered.** A
+     * Call with nothing to trim is absent from the server's reply, and left
+     * undefined it would be asked about again on every pass — forever, for every
+     * ordinary Call there is. An empty array is the answer "looked up, no gaps".
+     */
+    quietFound(
+      state,
+      action: PayloadAction<{ ids: number[]; spans: Record<string, QuietSpan[]> }>,
+    ) {
+      const { ids, spans } = action.payload
+      const found = new Map(ids.map((id) => [id, spans[String(id)] ?? []]))
+      for (const call of [...state.queue.map((entry) => entry.call), state.current]) {
+        const quiet = call && found.get(call.id)
+        if (call && quiet) call.quiet = quiet
+      }
+    },
+
     /** Let a Talkgroup back in before its time is up — an indefinite avoid has
      *  no other way back (spec US 14's timed mode is the *optional* one). */
     clearAvoids(state) {
@@ -981,13 +1042,16 @@ export const {
   disconnected,
   dismissAvoidUndo,
   dropQueued,
+  engageCatchup,
   expireAvoids,
   gapped,
   jumpToNewest,
   lagged,
   playQueued,
+  quietFound,
   received,
   replay,
+  stopCatchup,
   toggleHoldOn,
   toggleHoldSystem,
   toggleHoldTalkgroup,
@@ -998,7 +1062,24 @@ export const {
   undoAvoid,
 } = liveSlice.actions
 
-export const liveReducer = liveSlice.reducer
+/**
+ * The slice, plus the one rule no reducer owns: **Catch-up ends at live** (#59).
+ *
+ * Wrapped rather than repeated, because the queue can empty six ways — the last
+ * Call coming off it, a jump to the newest, a drop, a purge after a Selection
+ * change, a **Hold**, an **Avoid** — and a line in each is five chances to
+ * forget one and a standing tax on every reducer added later. Here it is true by
+ * construction, which is #92's argument one layer up.
+ *
+ * "At live" is an empty queue: nothing is waiting, so the Call now playing is
+ * the newest there is, and playing *that* at one and a half times would be
+ * hurrying through the present.
+ */
+export const liveReducer: typeof liveSlice.reducer = (state, action) => {
+  const next = liveSlice.reducer(state, action)
+  if (!next.catchup || next.queue.length > 0) return next
+  return { ...next, catchup: false }
+}
 
 /** The slice of the store this module owns. */
 interface WithLive {
@@ -1061,6 +1142,10 @@ export const selectAvoidedCount = (state: WithLive): number =>
 export const selectSince = (state: WithLive): number | undefined => state.live.since
 
 export const selectMissed = (state: WithLive): number => state.live.missed
+
+/** Is the queue draining faster than real time (#59, spec US 23)? */
+export const selectIsCatchingUp = (state: WithLive): boolean => state.live.catchup
+
 
 /** Does this listener's history have a hole a **Backfill** could not fill? */
 export const selectHasGap = (state: WithLive): boolean => state.live.gap

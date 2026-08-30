@@ -34,6 +34,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0014_drop_push_subscriptions::Migration),
             Box::new(m0015_webhooks::Migration),
             Box::new(m0016_tone_profiles::Migration),
+            Box::new(m0017_quiet_spans::Migration),
         ]
     }
 }
@@ -1670,6 +1671,108 @@ mod m0016_tone_profiles {
                         .to_owned(),
                 )
                 .await
+        }
+    }
+}
+
+/// **Quiet spans** (#59): where nobody is talking, and whether anybody has
+/// looked.
+///
+/// Two columns on `calls` and no table at all, which is the difference between
+/// this and [`m0016_tone_profiles`]: a page-out is an event an Operator searches
+/// and filters on, and a quiet span is a hint read by whoever plays that one
+/// Call. Rows would buy a second `RESTRICT` foreign key on the retention
+/// sweeper's path for something nothing joins to.
+///
+/// `calls.quiet_state` defaults to [`call::QuietState::NONE`] for
+/// [`m0016_tone_profiles`]'s reason, and it is the same reason: a Call that
+/// already exists was stored before anything scanned, and marking them `pending`
+/// would read an Operator's whole Archive back off their disk at the next boot.
+mod m0017_quiet_spans {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0017_quiet_spans"
+        }
+    }
+
+    const PENDING: &str = "idx_calls_quiet_state";
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // Guarded like m0003's, m0010's and m0012's, for the reason m0003
+            // wrote down: `m0001_init` generates its DDL from the *live* entity,
+            // so a fresh database already has both columns and this must be a
+            // no-op there rather than an error.
+            if !manager.has_column("calls", "quiet_state").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(
+                                ColumnDef::new(call::Column::QuietState)
+                                    .string()
+                                    .not_null()
+                                    .default(call::QuietState::NONE),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_column("calls", "quiet").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(ColumnDef::new(call::Column::Quiet).string().null())
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // One question, unlike m0016's two: a restart asks for `pending`.
+            // Nothing filters on this — a Listener does not search for Calls
+            // with gaps in them — so the index exists for the resume sweep
+            // alone, which without it is a scan of the whole Archive on a Pi
+            // every time the process comes up. `id` rides along because the
+            // sweep orders by it.
+            if !manager.has_index("calls", PENDING).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(PENDING)
+                            .table(call::Entity)
+                            .col(call::Column::QuietState)
+                            .col(call::Column::Id)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // The index first: SQLite refuses to drop a column an index still
+            // names (m0012's lesson).
+            if manager.has_index("calls", PENDING).await? {
+                manager
+                    .drop_index(Index::drop().name(PENDING).table(call::Entity).to_owned())
+                    .await?;
+            }
+            for column in [call::Column::Quiet, call::Column::QuietState] {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .drop_column(column)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
         }
     }
 }

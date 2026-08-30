@@ -84,6 +84,30 @@ Tap the **Q** count and you get the queue itself, in the order it will play:
 The queue is capped, so a phone that fell a long way behind does not grow an endless backlog.
 What the cap gives up is counted as missed too, and it gives up the lowest **Priority** first.
 
+### Catching up
+
+**CATCH UP** is the other way out of a backlog, and the one that costs you nothing. Instead of
+giving the queue up, it drains it: the stretches where nobody is talking are skipped, and what is
+left plays at 1.5×. Every word still reaches you, sooner.
+
+The button says what it is worth before you press it — *0:52 instead of 4:20* — and counts down
+once it is running. A **1.5×** marker appears beside the **Q** count so the screen never claims
+to be doing something it isn't.
+
+It stops on its own the moment the queue is empty. There is nothing to catch up on then, and the
+call playing is the newest there is, so it plays at normal speed. You can also stop it by pressing
+the button again.
+
+Two things worth knowing:
+
+- **Where the gaps come from.** Your instance looks at each call's audio once, in the background,
+  and works out where the silence is. A recorder's file usually spans a whole grant, so it holds
+  the pauses between one unit letting go and the next keying — which is why the trim is often
+  worth more than the speed.
+- **It still helps if it hasn't looked.** A call the instance has not scanned — or an instance
+  where the operator turned scanning off — simply plays at 1.5× with nothing trimmed. Nothing
+  breaks, and nothing is skipped that shouldn't be.
+
 ### Priority
 
 Some channels matter more than others when you are behind. Mark a Talkgroup **Priority** — from

@@ -15,8 +15,11 @@ import {
   clearAvoids,
   dismissAvoidUndo,
   dropQueued,
+  engageCatchup,
   jumpToNewest,
   playQueued,
+  quietFound,
+  stopCatchup,
   togglePriority,
   togglePriorityShown,
   toggleHoldOn,
@@ -35,6 +38,7 @@ import {
   selectHistory,
   selectHold,
   selectIsAvoided,
+  selectIsCatchingUp,
   selectLiveCall,
   chooseEverything,
   chooseSystem,
@@ -1653,4 +1657,113 @@ describe('what an Avoid releases (#58)', () => {
 
     expect(selectHold(rootState(state))).toEqual({ systemRef: 11, talkgroupRef: null })
   })
+})
+
+describe('Catch-up (#59, spec US 23)', () => {
+  it('engages, and stops', () => {
+    const behind = reduce(connected(), ...arrive(call(1), call(2), call(3)))
+
+    const on = liveReducer(behind, engageCatchup())
+    expect(selectIsCatchingUp(rootState(on))).toBe(true)
+
+    const off = liveReducer(on, stopCatchup())
+    expect(selectIsCatchingUp(rootState(off))).toBe(false)
+  })
+
+  /**
+   * **It ends at live, whichever way the queue emptied.** The rule lives in the
+   * reducer wrapper rather than in each of these, so every one of them is the
+   * same assertion — and a seventh way to empty the queue, added later, is
+   * covered without anybody remembering to.
+   */
+  it.each([
+    ['the last Call comes off it', () => advance()],
+    ['the Listener jumps to the newest', () => jumpToNewest()],
+    ['the last waiting Call is dropped', () => dropQueued(2)],
+    ['the last waiting Call is played now', () => playQueued(2)],
+    ['a Selection change purges it', () => chooseEverything(false)],
+  ])('disengages when %s', (_what, action) => {
+    const behind = reduce(
+      connected(),
+      ...arrive(call(1), call(2)),
+      engageCatchup(),
+    )
+    expect(selectIsCatchingUp(rootState(behind))).toBe(true)
+
+    const after = liveReducer(behind, action())
+
+    expect(selectQueue(rootState(after))).toHaveLength(0)
+    expect(selectIsCatchingUp(rootState(after))).toBe(false)
+  })
+
+  /** Engaging with nothing waiting is not an error, it is already true: there
+   *  is nothing to catch up on, so it does not stay on. */
+  it('will not engage with an empty queue', () => {
+    const live = reduce(connected(), ...arrive(call(1)), engageCatchup())
+
+    expect(selectIsCatchingUp(rootState(live))).toBe(false)
+  })
+
+  /** Catching up is a fact about *now*. A Listener who was forty behind
+   *  yesterday is not behind today, so nothing about this survives a reload —
+   *  unlike the Selection, the Avoids and Priority, which do. */
+  it('is not part of the Profile', () => {
+    const behind = reduce(connected(), ...arrive(call(1), call(2)), engageCatchup())
+
+    expect(behind).toHaveProperty('catchup', true)
+    expect(Object.keys(behind)).toContain('catchup')
+    // Rebuilt from nothing, which is what a reload does.
+    expect(selectIsCatchingUp(rootState(reduce(connected())))).toBe(false)
+  })
+
+  describe('the spans a queued Call is missing', () => {
+    /**
+     * A Call pushed over the live feed carries none: the frame goes out at
+     * ingest, ahead of the scan, and nothing republishes one (#46). This is the
+     * pull that fills them in.
+     */
+    it('are written onto the waiting Calls', () => {
+      const behind = reduce(connected(), ...arrive(call(1), call(2), call(3)))
+
+      const after = liveReducer(
+        behind,
+        quietFound({ ids: [2, 3], spans: { '2': [[1000, 3000]] } }),
+      )
+
+      const queue = selectQueue(rootState(after))
+      expect(queue[0].quiet).toEqual([[1000, 3000]])
+      // **Every id asked about is written, not only the ones that answered.**
+      // A Call with nothing to trim is absent from the reply, and left
+      // undefined it would be asked about again forever.
+      expect(queue[1].quiet).toEqual([])
+    })
+
+    /** The Call on the air gets them too — it is the one being trimmed right
+     *  now, and it left the queue before the answer came back. */
+    it('are written onto the Call already playing', () => {
+      const behind = reduce(connected(), ...arrive(call(1), call(2)))
+
+      const after = liveReducer(
+        behind,
+        quietFound({ ids: [1], spans: { '1': [[500, 2000]] } }),
+      )
+
+      expect(selectLiveCall(rootState(after))?.quiet).toEqual([[500, 2000]])
+    })
+
+    /** An answer about Calls this Listener no longer holds — dropped, purged,
+     *  or played while the request was in flight — changes nothing. */
+    it('are ignored for Calls the queue is not holding', () => {
+      const behind = reduce(connected(), ...arrive(call(1), call(2)))
+
+      const after = liveReducer(
+        behind,
+        quietFound({ ids: [99], spans: { '99': [[0, 1000]] } }),
+      )
+
+      expect(selectQueue(rootState(after))[0].quiet).toBeUndefined()
+      expect(selectLiveCall(rootState(after))?.quiet).toBeUndefined()
+    })
+  })
+
 })

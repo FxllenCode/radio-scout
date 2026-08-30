@@ -79,10 +79,28 @@ export function setPlaybackState(state: MediaSessionPlaybackState): void {
   media.playbackState = state
 }
 
-/** Publish the lock-screen scrubber for a Call of `duration` seconds, starting
- *  at the top. `null` — or a duration the element doesn't know yet (`NaN`) or
- *  can't bound (`Infinity`) — clears it instead. */
-export function setPositionState(duration: number | null): void {
+/**
+ * Publish the lock-screen scrubber for a Call of `duration` seconds. `null` — or
+ * a duration the element doesn't know yet (`NaN`) or can't bound (`Infinity`) —
+ * clears it instead.
+ *
+ * `position` and `rate` default to the top of the Call at normal speed, which is
+ * every case but one: **Catch-up** (#59) plays faster and jumps over the gaps,
+ * and the OS advances this scrubber on its own clock from whatever it was last
+ * given. Left at `1` it would run slow and then be wrong by the whole of every
+ * gap skipped — a lock screen quietly disagreeing with the audio coming out of
+ * the phone, which is the thing ADR-0005 exists to get right.
+ *
+ * `position` is clamped to the duration: a seek reported a hair past the end
+ * makes the pair invalid, and the browser's rejection is a `throw` that would
+ * otherwise be caught below and silently cost the scrubber for the rest of the
+ * Call.
+ */
+export function setPositionState(
+  duration: number | null,
+  position = 0,
+  rate = 1,
+): void {
   const media = session()
   if (!media?.setPositionState) return
 
@@ -91,7 +109,11 @@ export function setPositionState(duration: number | null): void {
       media.setPositionState()
       return
     }
-    media.setPositionState({ duration, position: 0, playbackRate: 1 })
+    media.setPositionState({
+      duration,
+      position: Math.min(Math.max(0, position), duration),
+      playbackRate: rate,
+    })
   } catch {
     // "Limited availability" (MDN): a browser may reject a state we think is
     // valid. The scrubber is polish; losing it must not take the player down.

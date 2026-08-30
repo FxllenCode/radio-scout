@@ -612,6 +612,12 @@ async fn the_statements_an_app_issues_are_counted() {
 
     let before = app.statements_issued();
     app.upload_ok(CallUpload::new()).await;
+    // Settled first, because an off-path **Worker** issues statements of its own
+    // — quiet-span scanning (#59) reads and writes every Call — and a sample
+    // taken while one is still running would move under the assertion below.
+    // `settle()` is how the suite waits (#93), and it is the *only* way this can
+    // be made deterministic: nothing here is a request to await.
+    app.settle().await;
     let after_ingest = app.statements_issued();
     assert!(
         after_ingest > before,
@@ -910,8 +916,12 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // is a row as well, so this starts whatever the roster says and
             // sleeps on an empty queue while there is nothing to look for.
             radio_scout::tone::WORKER,
+            // ...and quiet-span scanning (#59), which is the one that is *not*
+            // a roster: it looks at every Call, so what starts it is
+            // `[quiet] enabled`, and it ships on.
+            radio_scout::quiet::WORKER,
         ],
-        "the shipped default runs six: enhancement is off, the rest are on"
+        "the shipped default runs seven: enhancement is off, the rest are on"
     );
 
     let mut app = app;
@@ -932,6 +942,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::downstream::WORKER,
             radio_scout::webhook::WORKER,
             radio_scout::tone::WORKER,
+            radio_scout::quiet::WORKER,
         ],
     );
 }

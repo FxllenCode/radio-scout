@@ -24,14 +24,43 @@
  * — "counted as missed, never silent" — and the asymmetry with the per-row drop
  * is deliberate: a Listener who read a row and let it go is not someone traffic
  * was kept from, which is what `missed` means (`store/live`).
+ *
+ * # Catch-up lives here (#59, spec US 23)
+ *
+ * Two ways out of a deep queue, deliberately side by side: **jump**, which gives it
+ * up and admits how much, and **catch up**, which hears all of it faster. The
+ * ticket puts the control in this sheet because this is where a Listener staring
+ * at a number they cannot face already is — and because the two offers only make
+ * sense read against each other. So the sheet says what each costs: what jumping
+ * would discard, and how long catching up would take against how long sitting
+ * through it would.
+ *
+ * It does not close the sheet. Playing and jumping are decisions about *which*
+ * Call to hear next and the sheet has done its job; engaging Catch-up changes
+ * the pace of everything waiting, and a Listener watching the estimate fall is
+ * watching this feature work.
  */
-import { Play, SkipForward, X } from 'lucide-react'
+import { FastForward, Play, SkipForward, X } from 'lucide-react'
 
 import { formatCallTime } from '@/lib/archive'
 import { talkgroupName, systemName } from '@/lib/call'
+import {
+  CATCHUP_RATE,
+  drain,
+  formatRemaining,
+  type Drain,
+} from '@/lib/catchup'
 import { ledForCall } from '@/lib/led'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { dropQueued, jumpToNewest, playQueued, selectQueue } from '@/store/live'
+import {
+  dropQueued,
+  engageCatchup,
+  jumpToNewest,
+  playQueued,
+  selectIsCatchingUp,
+  selectQueue,
+  stopCatchup,
+} from '@/store/live'
 
 import { Sheet, SheetAction } from './Sheet'
 import { StatusLed } from './StatusLed'
@@ -40,6 +69,14 @@ import { UnitLink } from './UnitLink'
 export function QueueSheet({ onClose }: { onClose: () => void }) {
   const dispatch = useAppDispatch()
   const queue = useAppSelector(selectQueue)
+  const catchingUp = useAppSelector(selectIsCatchingUp)
+  // **Both costs, always** — what catching up takes and what sitting through it
+  // takes — because the offer is a comparison and the countdown is only half of
+  // one. Computed here rather than selected: they are answers about the queue
+  // rather than facts in the store, and they are only ever asked while this
+  // sheet is open, which is a few taps a day.
+  const catchingUpCost = drain(queue, true)
+  const asRecorded = drain(queue, false)
 
   const play = (id: number) => {
     dispatch(playQueued(id))
@@ -54,8 +91,19 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
         </p>
       ) : (
         <>
-          {/* The way out of a backlog, at the top where a Listener who opened
-              this sheet *because* it said 40 will look first. */}
+          {/* The two ways out, at the top where a Listener who opened this
+              sheet *because* it said 40 will look first. */}
+          <SheetAction
+            className="mb-2"
+            onClick={() => dispatch(catchingUp ? stopCatchup() : engageCatchup())}
+          >
+            <FastForward className="size-3.5" aria-hidden />
+            {catchingUp ? `Catching up at ${CATCHUP_RATE}×` : 'Catch up'}
+            <span className="text-muted-foreground">
+              — {remaining(catchingUpCost, asRecorded, catchingUp)}
+            </span>
+          </SheetAction>
+
           <SheetAction
             className="mb-3"
             onClick={() => {
@@ -116,4 +164,28 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
       )}
     </Sheet>
   )
+}
+
+/**
+ * What the Catch-up row says about what is waiting.
+ *
+ * Engaged, it is a countdown; not engaged, it is the offer — how long it would
+ * take against how long it takes now, because "4:20" alone says nothing about
+ * whether the button is worth pressing.
+ *
+ * A `+` where some waiting Call carries no duration (every Call stored before
+ * #42, and any whose recorder said nothing and whose header could not be read):
+ * the estimate is a floor, and a countdown that reached zero with Calls still
+ * waiting would be the display lying about the feed, which is what #56 was for.
+ */
+function remaining(
+  catchingUpCost: Drain,
+  asRecorded: Drain,
+  catchingUp: boolean,
+): string {
+  const at = (spent: Drain) =>
+    `${formatRemaining(spent.seconds)}${spent.unmeasured > 0 ? '+' : ''}`
+  return catchingUp
+    ? `${at(catchingUpCost)} left`
+    : `${at(catchingUpCost)} instead of ${at(asRecorded)}`
 }

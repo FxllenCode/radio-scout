@@ -1103,6 +1103,13 @@ fn describe_transmission(row: &mut call::ActiveModel, new: &NewCall, audio: Opti
     // reason — `m0001_init`'s entity-derived DDL carries no column defaults, so
     // only an *upgraded* database has m0016's.
     row.tone = Set(call::ToneState::NONE.to_string());
+    // And likewise for quiet spans (#59), where it matters *more* than for
+    // either of the two above: a **Replacement** is a different copy of the
+    // transmission with its own gaps in different places, so spans left over
+    // from the copy it displaces would seek a Listener into the middle of a word
+    // in audio those spans were never measured against.
+    row.quiet_state = Set(call::QuietState::NONE.to_string());
+    row.quiet = Set(None);
 }
 
 /// The patch rows for a Call, given the canonical Refs [`resolve_patches`]
@@ -3829,6 +3836,100 @@ pub async fn record_tone_matches(
     txn.commit().await
 }
 
+/// One Call's audio, for the quiet-span scanner (#59).
+///
+/// **One statement**, where [`tone_subject`] needs two: there is no roster to
+/// consult — whether a Call has a gap in it can only be answered by looking at
+/// it, which is why this worker has no armed bit and looks at every Call.
+pub async fn quiet_subject<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+) -> Result<Option<crate::quiet::worker::Subject>, DbErr> {
+    Ok(call::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .map(|call| crate::quiet::worker::Subject {
+            object_key: call.object_key,
+        }))
+}
+
+/// Calls a restart interrupted: queued or in flight when the process went away.
+///
+/// **Deliberately only `pending`**, which is [`calls_pending_tone`]'s rule and
+/// its reason: `none` is every Call stored before this Instance scanned, and
+/// re-queueing those would make switching scanning on read a whole Archive back
+/// off an Operator's disk at the next boot.
+pub async fn calls_pending_quiet<C: ConnectionTrait>(db: &C) -> Result<Vec<CallId>, DbErr> {
+    Ok(call::Entity::find()
+        .filter(call::Column::QuietState.eq(call::QuietState::PENDING))
+        .order_by_asc(call::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|c| c.id)
+        .collect())
+}
+
+/// Where a Call has got to in scanning.
+pub async fn mark_quiet<C: ConnectionTrait>(db: &C, id: CallId, state: &str) -> Result<(), DbErr> {
+    call::Entity::update_many()
+        .col_expr(call::Column::QuietState, Expr::value(state))
+        .filter(call::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Write down where a Call is quiet, and how the scan ended.
+///
+/// **One statement, both columns**, because they are one fact: a Call left
+/// `done` with a previous scan's spans still on it would trim a **Replacement**
+/// (#46) at the old copy's gaps, and a Call whose spans landed while its state
+/// said `pending` would be re-scanned at the next boot and write them again.
+/// [`crate::quiet::worker::Settled::packed`] is `None` for every arm that found
+/// nothing, so a re-scan that comes up empty clears what the last one wrote.
+pub async fn settle_quiet<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+    settled: &crate::quiet::worker::Settled,
+) -> Result<(), DbErr> {
+    call::Entity::update_many()
+        .col_expr(call::Column::QuietState, Expr::value(settled.state()))
+        .col_expr(call::Column::Quiet, Expr::value(settled.packed()))
+        .filter(call::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// The quiet spans of the Calls a Listener is about to play (#59, spec US 23).
+///
+/// **One statement for the whole window**, which is the point: Catch-up asks
+/// about the head of a queue that may be forty deep, and a request per Call
+/// would be the N+1 #86 deleted on the one screen whose whole purpose is to be
+/// fast. Calls with nothing to trim are simply absent from the answer rather
+/// than present and empty, so the reply is small on the ordinary case.
+pub async fn quiet_spans_for<C: ConnectionTrait>(
+    db: &C,
+    ids: &[CallId],
+) -> Result<Vec<(CallId, Vec<crate::quiet::Span>)>, DbErr> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(call::Entity::find()
+        .filter(call::Column::Id.is_in(ids.iter().copied()))
+        .filter(call::Column::Quiet.is_not_null())
+        .order_by_asc(call::Column::Id)
+        .all(db)
+        .await?
+        .into_iter()
+        .filter_map(|call| {
+            let spans = crate::quiet::unpack(call.quiet.as_deref()?);
+            (!spans.is_empty()).then_some((call.id, spans))
+        })
+        .collect())
+}
+
 /// The Refs a **stored** Call is scoped by — read off the row, for the surfaces
 /// that arrive at a Call long after it was stored.
 ///
@@ -3976,6 +4077,7 @@ mod tests {
                 encrypted: Set(false),
                 enhancement: Set(String::from(call::EnhancementState::NONE)),
                 tone: Set(String::from(call::ToneState::NONE)),
+                quiet_state: Set(String::from(call::QuietState::NONE)),
                 created_at_ms: Set(at_ms),
                 ..Default::default()
             }

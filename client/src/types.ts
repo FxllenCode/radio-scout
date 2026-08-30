@@ -1,3 +1,5 @@
+import type { QuietSpan } from '@/lib/catchup'
+
 /** A stored Call as delivered over the live feed and the archive API. Mirrors
  *  the backend `StoredCall` (compact camelCase). Per CONTEXT.md, **Ref** is the
  *  recorder-supplied external id and **id** is Radio-Scout's internal key.
@@ -64,6 +66,16 @@ export interface Call {
    *  is asking *who*. The label is the profile's as it was when the page fired,
    *  so a profile renamed later does not rewrite history. */
   tones?: TonePage[]
+  /** Where nobody is talking, so **Catch-up** can skip it (#59, spec US 23) —
+   *  `[[startMs, endMs], …]`, in order and disjoint.
+   *
+   *  Absent from most Calls: the server only reports a gap long enough to be
+   *  worth a seek, and somebody saying one thing has none. **Also absent from
+   *  every live frame**, because the frame is published at ingest and the scan
+   *  happens behind it — `GET /api/calls/quiet` is how a queued Call gets these,
+   *  and `store/live`'s `quietFound` is what writes them on. A Call read back
+   *  from the Archive carries them already. */
+  quiet?: QuietSpan[]
   /** The Site (tower) this was heard on, for multi-site systems (spec US 11). */
   siteRef?: number
   /** What that tower is called (#48, spec US 13). Independent of `siteRef`:
