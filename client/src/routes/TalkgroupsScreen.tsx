@@ -1,5 +1,6 @@
-import { ChevronDown, ChevronRight, Pin, Search, Zap } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { ChevronDown, ChevronRight, Link2, Pin, Search, Zap } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
@@ -17,16 +18,20 @@ import {
   type PanelSystem,
 } from '@/lib/panel'
 import type { TriState } from '@/lib/selection'
+import { decodeSelection, encodeSelection } from '@/lib/selectionUrl'
+import { linkTo, shareLink, shareNotice } from '@/lib/share'
 import { cn } from '@/lib/utils'
 import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
+  applyLinkedSelection,
   chooseEverything,
   chooseSystem,
   chooseTalkgroups,
   selectAudibleSelection,
   selectAvoids,
   selectPriority,
+  selectSelection,
   togglePriority,
 } from '@/store/live'
 import {
@@ -94,6 +99,42 @@ const ROW_HEIGHT = 44
  * and a Listener deep inside one open System scrolls up rather than reading a
  * header pinned at the wrong place.
  */
+/**
+ * Listen to what a link says to listen to (#61, spec US 30).
+ *
+ * Applied once, then **taken out of the address bar**, which is the opposite of
+ * what a Call deep link does and deliberately so: a `?call=` is a request that
+ * this Call be played and stays true however often it is opened, where a `?sel=`
+ * is folded into state the browser goes on remembering — so a URL still
+ * claiming it would re-offer the undo on every back-and-forth and would be a
+ * lie the moment the Listener touched a row.
+ *
+ * A link that does not carry a Selection is ignored whole
+ * (`lib/selectionUrl`), because half of somebody else's scanner is not
+ * something they meant to send.
+ */
+function useLinkedSelection() {
+  const dispatch = useAppDispatch()
+  const [params, setParams] = useSearchParams()
+  const encoded = params.get('sel')
+  const applied = useRef<string>(undefined)
+
+  useEffect(() => {
+    if (encoded === null || applied.current === encoded) return
+    applied.current = encoded
+    const selection = decodeSelection(encoded)
+    if (selection) dispatch(applyLinkedSelection({ selection, at: Date.now() }))
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current)
+        next.delete('sel')
+        return next
+      },
+      { replace: true },
+    )
+  }, [dispatch, encoded, setParams])
+}
+
 export function TalkgroupsScreen() {
   const dispatch = useAppDispatch()
   // What the listener will actually *hear*: the selection with their avoids
@@ -117,6 +158,12 @@ export function TalkgroupsScreen() {
     refetchOnMountOrArgChange: 60,
   })
   const [filter, setFilter] = useState('')
+  // The Selection itself, not the audible one: a link carries what the Listener
+  // *chose*, where `selectAudibleSelection` has their **Avoids** and any
+  // **Hold** laid over it — reading of the moment, not of the scanner.
+  const chosen = useAppSelector(selectSelection)
+  const [notice, setNotice] = useState<string | null>(null)
+  useLinkedSelection()
 
   const catalog = data ?? EMPTY_CATALOG
   const panel = useMemo(
@@ -193,7 +240,41 @@ export function TalkgroupsScreen() {
               >
                 All off
               </Button>
+              {/* What is selected, as something you can send somebody (#61,
+                  spec US 30) — in the bar with the other whole-panel controls,
+                  because that is what it acts on. */}
+              <Button
+                variant="outline"
+                size="sm"
+                aria-label="Copy link to this selection"
+                className="h-7 px-2"
+                onClick={async () =>
+                  setNotice(
+                    shareNotice(
+                      await shareLink(
+                        linkTo(
+                          '/talkgroups',
+                          `sel=${encodeSelection(chosen)}`,
+                          window.location.origin,
+                        ),
+                        'Radio-Scout selection',
+                        navigator,
+                      ),
+                    ),
+                  )
+                }
+              >
+                <Link2 className="size-3.5" aria-hidden />
+              </Button>
             </div>
+            {notice && (
+              <p
+                role="status"
+                className="mt-1.5 font-mono text-[11px] text-muted-foreground"
+              >
+                {notice}
+              </p>
+            )}
           </div>
 
           {panel.pinned.length > 0 && (

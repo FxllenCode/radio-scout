@@ -16,6 +16,7 @@ import type {
   AdminUnit,
   AdminUnitQuery,
   AdminWebhook,
+  Call,
   Catalog,
   CuratedPage,
   DocumentReport,
@@ -88,6 +89,20 @@ export const api = createApi({
      *  so nothing here needs a follow-up fetch per Call. */
     searchCalls: builder.query<SearchPage, SearchQuery>({
       query: (search) => ({ url: `api/calls?${searchParams(search)}` }),
+      providesTags: ['Call'],
+    }),
+
+    /**
+     * One Call, by id — what a deep link resolves through (#61, spec US 30).
+     *
+     * Deliberately not a search: a link names a Call, and requiring it to also
+     * match the filters on screen would make "open this Call" fail for the
+     * commonest reason there is — the recipient was looking at something else.
+     * The server flattens `CallDetail` over a search row, so what comes back is
+     * a superset of a [`Call`] and needs no separate shape here.
+     */
+    getCall: builder.query<Call, number>({
+      query: (id) => ({ url: `api/call/${id}` }),
       providesTags: ['Call'],
     }),
 
@@ -545,6 +560,7 @@ export const {
   useGetAdminTalkgroupsQuery,
   useGetAdminUnitsQuery,
   useGetApiKeysQuery,
+  useGetCallQuery,
   useGetCatalogQuery,
   useGetQuietSpansQuery,
   useGetDownstreamsQuery,
@@ -562,6 +578,7 @@ export const {
   useImportConfigMutation,
   usePreviewConfigMutation,
   usePreviewFoldMutation,
+  useLazySearchCallsQuery,
   useSearchCallsQuery,
   useSetRangesMutation,
   useUpdateApiKeyMutation,

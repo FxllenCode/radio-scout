@@ -279,6 +279,15 @@ export const handlers = [
   http.get(`${ORIGIN}/api/calls/filters`, () =>
     HttpResponse.json(FILTER_OPTIONS),
   ),
+  // One Call by id — what a deep link resolves through (#61). The server
+  // flattens `CallDetail` over a search row, so a client reading it as a `Call`
+  // is reading a subset of what arrives.
+  http.get(`${ORIGIN}/api/call/:id`, ({ params }) => {
+    const call = ARCHIVE.find((one) => String(one.id) === params.id)
+    return call
+      ? HttpResponse.json({ ...call, frequencies: [], units: [] })
+      : new HttpResponse('call not found\n', { status: 404 })
+  }),
   // Where a window of queued Calls is quiet (#59). Sparse the way the server's
   // is — a Call with nothing to trim is absent, not present and empty — so a
   // test that never overrides this is testing the ordinary case, which is a

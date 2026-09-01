@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   dateTimeLocalToMs,
   downloadUrl,
+  msToDateTimeLocal,
   formatCallTime,
   formatDuration,
   pageSummary,
@@ -55,6 +56,41 @@ describe('dateTimeLocalToMs', () => {
     expect(dateTimeLocalToMs('')).toBeUndefined()
     expect(dateTimeLocalToMs('   ')).toBeUndefined()
     expect(dateTimeLocalToMs('not-a-date')).toBeUndefined()
+  })
+})
+
+/** The other direction, which is what makes the date inputs *controlled* (#61):
+ *  a bound set by a preset, or restored from a link, has to be able to reach
+ *  the input it belongs in. */
+describe('msToDateTimeLocal', () => {
+  it('writes an instant in the shape the input takes', () => {
+    expect(msToDateTimeLocal(Date.parse('2026-07-25T14:30'))).toBe(
+      '2026-07-25T14:30',
+    )
+    // Single-digit parts padded, or the input rejects the value outright.
+    expect(msToDateTimeLocal(Date.parse('2026-01-02T03:04'))).toBe(
+      '2026-01-02T03:04',
+    )
+  })
+
+  it('is empty for no bound at all, which is what clears the input', () => {
+    expect(msToDateTimeLocal(undefined)).toBe('')
+    expect(msToDateTimeLocal(Number.NaN)).toBe('')
+  })
+
+  it('round-trips a bound a listener could have typed', () => {
+    const typed = '2026-07-25T14:30'
+    expect(msToDateTimeLocal(dateTimeLocalToMs(typed))).toBe(typed)
+  })
+
+  /** The control has no seconds field, so a bound carrying them shows the
+   *  minute it falls in. Truncating rather than rounding: a `before` of
+   *  23:59:59.999 is the end of that day, and rounding it up would put the
+   *  input a whole day past the search it is displaying. */
+  it('truncates a bound finer than the control can show', () => {
+    expect(msToDateTimeLocal(Date.parse('2026-07-25T14:30:59'))).toBe(
+      '2026-07-25T14:30',
+    )
   })
 })
 

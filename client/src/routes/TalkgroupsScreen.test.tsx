@@ -1,4 +1,4 @@
-import { act, screen, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { Profiler } from 'react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
@@ -6,7 +6,14 @@ import { axe } from 'vitest-axe'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { EVERYTHING } from '@/lib/selection'
-import { avoid, received, selectPriority, selectSelection } from '@/store/live'
+import {
+  avoid,
+  chooseEverything,
+  chooseTalkgroups,
+  received,
+  selectPriority,
+  selectSelection,
+} from '@/store/live'
 import { selectPinned, showSystem } from '@/store/panel'
 import { makeStore, type AppStore } from '@/store/store'
 import { progressed } from '@/store/transport'
@@ -14,7 +21,7 @@ import { progressed } from '@/store/transport'
 import { TalkgroupsScreen } from './TalkgroupsScreen'
 import { countyCatalog, ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
-import { renderApp, renderWithProviders } from '@/test/utils'
+import { renderApp, renderWithProviders, routerProbe } from '@/test/utils'
 
 /** A store with storage of its own, so no test can inherit another's
  *  selection (and none depends on jsdom having local storage at all). */
@@ -671,5 +678,85 @@ describe('marking a Talkgroup Priority (#58, spec US 27)', () => {
     await user.click(priorityFor('Alpha Fire'))
 
     expect(store.getState().panel.pinned).toEqual([])
+  })
+})
+
+/**
+ * A **Selection** you can send somebody (#61, spec US 30).
+ *
+ * The matrix travels, not a list of what is on (`lib/selectionUrl`), and
+ * opening one replaces something the recipient built by hand — so it carries
+ * the way back, the way an **Avoid** does (#58).
+ */
+describe('TalkgroupsScreen — a Selection you can link to (#61, spec US 30)', () => {
+  it('listens to what the link says', async () => {
+    const store = scannerStore()
+    renderApp('/talkgroups?sel=0_100.2', store)
+    await screen.findByText('Alpha Law')
+
+    expect(selectSelection(store.getState())).toEqual({
+      all: false,
+      sel: { 100: { 2: true } },
+    })
+  })
+
+  /** Applied once and then gone from the address bar: it has been folded into
+   *  state the browser remembers, and a URL still claiming it would re-offer
+   *  the undo on every back-and-forth and go stale the moment the Listener
+   *  touched a row. */
+  it('takes the link out of the address once it has been listened to', async () => {
+    renderApp('/talkgroups?sel=0_100.2')
+    await screen.findByText('Alpha Law')
+
+    await waitFor(() => expect(routerProbe.location).toBe('/talkgroups'))
+  })
+
+  it('offers the way back to the Selection it replaced', async () => {
+    const user = userEvent.setup()
+    const store = scannerStore()
+    store.dispatch(chooseEverything(false))
+    store.dispatch(
+      chooseTalkgroups({ keys: [{ systemRef: 200, talkgroupRef: 1 }], on: true }),
+    )
+    const mine = selectSelection(store.getState())
+    renderApp('/talkgroups?sel=0_100.2', store)
+    await screen.findByText('Alpha Law')
+
+    await user.click(await screen.findByRole('button', { name: 'Undo' }))
+
+    expect(selectSelection(store.getState())).toEqual(mine)
+  })
+
+  it('says nothing about a link that does not carry a Selection', async () => {
+    const store = scannerStore()
+    renderApp('/talkgroups?sel=not-a-selection', store)
+    await screen.findByText('Alpha Law')
+
+    // Refused whole, so the Listener's own Selection is untouched — and there
+    // is nothing to undo, because nothing happened.
+    expect(selectSelection(store.getState())).toEqual(EVERYTHING)
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull()
+  })
+
+  it('hands the platform a link to what is selected', async () => {
+    const user = userEvent.setup()
+    const written: string[] = []
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (text: string) => (written.push(text), Promise.resolve()) },
+    })
+    const store = scannerStore()
+    store.dispatch(chooseEverything(false))
+    store.dispatch(
+      chooseTalkgroups({ keys: [{ systemRef: 100, talkgroupRef: 2 }], on: true }),
+    )
+    renderApp('/talkgroups', store)
+    await screen.findByText('Alpha Law')
+
+    await user.click(screen.getByRole('button', { name: 'Copy link to this selection' }))
+
+    await waitFor(() =>
+      expect(written.at(-1)).toBe('http://localhost/talkgroups?sel=0_100.2'),
+    )
   })
 })

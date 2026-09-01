@@ -77,6 +77,19 @@ const queuePolicy = (priorityOf: PriorityOf): QueuePolicy => ({
 export const AVOID_UNDO_MS = 8_000
 
 /**
+ * How long a **Selection** that arrived in a link can be taken back (#61, spec
+ * US 30).
+ *
+ * Longer than [`AVOID_UNDO_MS`], because the two mistakes are noticed
+ * differently. A mis-tapped Avoid announces itself as silence within seconds;
+ * a link that replaced a Selection is noticed by *reading the panel* — which is
+ * where a Listener opening one is headed, and takes longer than glancing at a
+ * snackbar. What it costs to get wrong is larger too: an Avoid is one channel,
+ * a Selection can be six picked out of four hundred.
+ */
+export const SELECTION_UNDO_MS = 15_000
+
+/**
  * How many Calls the session log keeps (#58, spec US 28).
  *
  * Deep enough to answer "what was that ten minutes ago" on a busy county
@@ -171,6 +184,10 @@ export interface LiveState {
    * happened".
    */
   avoidUndo: AvoidUndo | null
+  /** The **Selection** a link replaced, while it can still be put back
+   *  (#61). `null` almost always: opening a Selection link is a rare thing
+   *  to do, and undoing one rarer still. */
+  selectionUndo: SelectionUndo | null
   /** A **Backfill** could not reach back as far as we asked, so there is a hole
    *  in this listener's history that only archive search can fill (ADR-0004).
    *
@@ -233,6 +250,17 @@ export interface AvoidUndo {
   expiresAt: number
 }
 
+/** A **Selection** replaced by a link, and the one it replaced (#61). */
+export interface SelectionUndo {
+  /** What this browser was listening to before the link was opened. The whole
+   *  matrix, because that is what a Selection *is* — restoring "the Talkgroups
+   *  that were on" would lose what the Listener had decided about the ones they
+   *  had not heard of yet (`lib/selection`, rule 2). */
+  previous: Selection
+  /** When the offer lapses — a moment, for [`AvoidUndo`]'s reason. */
+  expiresAt: number
+}
+
 /** The state a listener who has never touched anything starts from. Exported
  *  so the store can hydrate the persisted selection into it (#12). */
 export const initialLiveState: LiveState = {
@@ -250,6 +278,7 @@ export const initialLiveState: LiveState = {
   missed: 0,
   sessionLog: [],
   avoidUndo: null,
+  selectionUndo: null,
   gap: false,
   // On. A Listener who has never touched the toggle gets audio playing, which
   // is what the app is for.
@@ -848,6 +877,45 @@ const liveSlice = createSlice({
       state.avoidUndo = null
     },
 
+    /**
+     * Listen to what a link says to listen to (#61, spec US 30).
+     *
+     * The **Hold** and the **Avoids** are deliberately left alone: a link
+     * carries a Selection, and those are this Listener's own reading of the
+     * moment — a twenty-minute Avoid placed a minute ago is not something
+     * somebody else's link has an opinion about. Both are layers *over* the
+     * Selection ([`matrixFrom`]), so they keep applying to whatever it becomes.
+     */
+    applyLinkedSelection(
+      state,
+      action: PayloadAction<{ selection: Selection; at: number }>,
+    ) {
+      const { selection, at } = action.payload
+      state.selectionUndo = {
+        previous: state.selection,
+        expiresAt: at + SELECTION_UNDO_MS,
+      }
+      state.selection = selection
+      purge(state)
+    },
+
+    /** Put back the **Selection** the link replaced (#61). The purge is not
+     *  redundant, for [`undoAvoid`]'s reason: restoring may *narrow* the matrix
+     *  again, and the queue has been filling under the linked one since. */
+    undoSelectionLink(state) {
+      const undo = state.selectionUndo
+      if (!undo) return
+      state.selection = undo.previous
+      state.selectionUndo = null
+      purge(state)
+    },
+
+    /** The grace window ran out, or the offer was waved away. The linked
+     *  Selection stands — this is only the offer going. */
+    dismissSelectionUndo(state) {
+      state.selectionUndo = null
+    },
+
     /** Let one Talkgroup back in, from the sheet listing what is silenced (#58,
      *  spec US 25) — where `clearAvoids` is the all-or-nothing instrument this
      *  exists beside. */
@@ -1041,6 +1109,9 @@ export const {
   connecting,
   disconnected,
   dismissAvoidUndo,
+  applyLinkedSelection,
+  undoSelectionLink,
+  dismissSelectionUndo,
   dropQueued,
   engageCatchup,
   expireAvoids,
@@ -1124,6 +1195,10 @@ export const selectSessionLog = (state: WithLive): Call[] => state.live.sessionL
 /** The **Avoid** that can still be taken back, or `null` (#58, spec US 25). */
 export const selectAvoidUndo = (state: WithLive): AvoidUndo | null =>
   state.live.avoidUndo
+
+/** The **Selection** a link replaced, while it can still be put back (#61). */
+export const selectSelectionUndo = (state: WithLive): SelectionUndo | null =>
+  state.live.selectionUndo
 
 export const selectHistory = (state: WithLive): Call[] => state.live.history
 

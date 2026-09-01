@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 
 import { AvoidUndoBar } from '@/components/AvoidUndo'
@@ -5,6 +6,7 @@ import { CallPlayer } from '@/components/CallPlayer'
 import { InstallBanner } from '@/components/InstallBanner'
 import { LiveFeedLink } from '@/components/LiveFeedLink'
 import { MiniPlayer } from '@/components/MiniPlayer'
+import { SelectionUndoBar } from '@/components/SelectionUndo'
 import { UpdateBanner } from '@/components/UpdateBanner'
 import { useAppUpdate } from '@/hooks/useAppUpdate'
 import { useCatchupQuiet } from '@/hooks/useCatchupQuiet'
@@ -44,7 +46,25 @@ export function AppShell() {
   // wherever the Listener happens to be looking — the same reason the audio
   // element and the socket are here (#59).
   useCatchupQuiet()
-  const { pathname } = useLocation()
+  const { pathname, search } = useLocation()
+  /**
+   * Where the Search tab goes back to (#61, spec US 30).
+   *
+   * Since the search *is* the URL, a tab bar linking at a bare `/search` would
+   * throw away filters the Listener set every time they looked at Talkgroups
+   * and came back. Remembered here rather than in the tab bar, because the
+   * shell is what stays mounted across tabs — and a ref rather than state,
+   * since nothing re-renders when it changes: it is read on the next click.
+   *
+   * Deliberately not persisted. A search is where this sitting got to, like the
+   * **Session log** and unlike a **Profile**; a reload lands on whatever URL the
+   * Listener actually reloaded.
+   */
+  const lastSearch = useRef('/search')
+  useEffect(() => {
+    if (pathname === '/search') lastSearch.current = `${pathname}${search}`
+  }, [pathname, search])
+
   const strip = useAppSelector(selectStrip)
   const room = !PLAYS_FOR_ITSELF.includes(pathname)
   const docked = room ? strip : null
@@ -74,9 +94,10 @@ export function AppShell() {
       <div className="pointer-events-none fixed inset-x-0 bottom-16 z-40 mx-auto flex max-w-2xl flex-col gap-2 px-3">
         {update.ready ? <UpdateBanner apply={update.apply} /> : <InstallBanner />}
         <AvoidUndoBar />
+        <SelectionUndoBar />
         {docked && <MiniPlayer strip={docked} />}
       </div>
-      <BottomTabBar />
+      <BottomTabBar searchTo={lastSearch.current} />
       <CallPlayer />
       <LiveFeedLink />
     </div>

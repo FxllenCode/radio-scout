@@ -300,12 +300,48 @@ Tap it to open that radio's history: which talkgroups it uses, when it was first
 its calls. **UNIT** filters the search to one radio directly, if you have the number — and a fleet
 whose operator has grouped its radios answers as the whole apparatus, not just the one you typed.
 
-Each result plays in place, or downloads with the arrow. Encrypted Calls have neither button:
-they are metadata-only records, with a 🔒 badge and no audio behind them. **PLAYBACK MODE**, top right, switches
+Each result plays in place, or downloads with the arrow. Encrypted Calls have no play or download
+button: they are metadata-only records, with a 🔒 badge and no audio behind them. **PLAYBACK MODE**, top right, switches
 from the live feed to playing the search results in sequence — for working through an incident
 after the fact rather than waiting on what arrives next. Live feed and playback mode are
 mutually exclusive: you are in one or the other, and either the strip above the tabs or the
 **BACK TO LIVE** button on the Live screen takes you back.
+
+Beside play is a second button — ⏩ — that plays *forward in time* from that Call instead. The list
+is newest-first, so ordinary play walks backwards through history; this walks the other way, from
+the moment you tapped through everything that came after it. It does not disturb the list you are
+reading: the results stay sorted as you left them, and the run carries on through later pages on
+its own.
+
+### Date presets
+
+**LAST HOUR**, **TODAY**, **YESTERDAY** and **LAST 7 DAYS** fill both date boxes in one tap, and
+**RESET** clears every filter at once. The presets fill in real dates rather than staying "the last
+hour" forever — so what you end up with is a fixed window you can read, keep and send, and the two
+date boxes always show exactly what is being searched.
+
+### Every view is a link
+
+The address bar carries the whole search: every filter, the sort, and which page you are on. So a
+search is a bookmark, the browser's back and forward buttons walk your searches, a reload lands you
+where you were, and switching to another tab and back does not throw your filters away.
+
+Three 🔗 buttons hand a link to your phone's share sheet, or copy it if there isn't one:
+
+| Where | What the link opens |
+| --- | --- |
+| Beside the filters | This search, filters and page and all |
+| On a result row | That one Call, playing, whatever the recipient was looking at |
+| On the Talkgroups panel | Your selected talkgroups, applied to their scanner |
+
+A Call link works even if the person opening it has different filters set, or none — it names the
+Call, not a search that happens to contain it.
+
+A **selection** link replaces what the person opening it is listening to, so it comes with an
+**UNDO** for a few seconds — theirs is not lost by opening yours. What travels is the whole
+selection, defaults included, so a talkgroup neither of you has heard of yet behaves the same way on
+both scanners. It is not a **Profile**: their pins, avoids and holds are untouched, and if you want
+a second scanner rather than a changed one, use `?id=` above.
 
 ---
 

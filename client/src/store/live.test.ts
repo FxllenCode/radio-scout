@@ -5,6 +5,8 @@ import type { Call } from '@/types'
 import { enterLiveFeed, enterPlaybackMode } from './playback'
 import {
   AVOID_UNDO_MS,
+  SELECTION_UNDO_MS,
+  applyLinkedSelection,
   HISTORY_DEPTH,
   QUEUE_LIMIT,
   SESSION_LOG_LIMIT,
@@ -14,6 +16,7 @@ import {
   clearAvoid,
   clearAvoids,
   dismissAvoidUndo,
+  dismissSelectionUndo,
   dropQueued,
   engageCatchup,
   jumpToNewest,
@@ -24,6 +27,7 @@ import {
   togglePriorityShown,
   toggleHoldOn,
   undoAvoid,
+  undoSelectionLink,
   connected,
   connecting,
   disconnected,
@@ -33,6 +37,7 @@ import {
   received,
   replay,
   selectAvoidUndo,
+  selectSelectionUndo,
   selectAvoidedCount,
   selectAvoids,
   selectHistory,
@@ -1765,5 +1770,74 @@ describe('Catch-up (#59, spec US 23)', () => {
       expect(selectLiveCall(rootState(after))?.quiet).toBeUndefined()
     })
   })
+})
 
+/**
+ * A **Selection** that arrived in a link (#61, spec US 30).
+ *
+ * The one gesture in the app that replaces something the Listener built by hand
+ * without them having touched the thing it replaces — so it is the **Avoid**
+ * undo's case exactly (#58), and gets the same answer.
+ */
+describe('applying a Selection from a link (#61, spec US 30)', () => {
+  const LINKED = { all: false, sel: { 11: { 100: true } } }
+
+  it('applies what the link said', () => {
+    const state = liveReducer(undefined, applyLinkedSelection({ selection: LINKED, at: NOW }))
+
+    expect(selectSelection(rootState(state))).toEqual(LINKED)
+  })
+
+  it('offers the way back, holding the Selection it replaced', () => {
+    const mine = reduce(chooseEverything(false), chooseTalkgroups({ keys: [{ systemRef: 11, talkgroupRef: 200 }], on: true }))
+    const linked = liveReducer(mine, applyLinkedSelection({ selection: LINKED, at: NOW }))
+    const offer = selectSelectionUndo(rootState(linked))
+
+    expect(offer?.expiresAt).toBe(NOW + SELECTION_UNDO_MS)
+    expect(liveReducer(linked, undoSelectionLink()).selection).toEqual(mine.selection)
+  })
+
+  it('offers nothing until a link has replaced something', () => {
+    expect(selectSelectionUndo(rootState(reduce(connected())))).toBeNull()
+  })
+
+  /** The queue filled under the Selection that stood before, so a link that
+   *  narrows it leaves Calls waiting that the Listener has just said they do
+   *  not want — the same reason every other Selection reducer purges. */
+  it('drops queued Calls the linked Selection does not want', () => {
+    // The first Call plays; 2 and 3 wait. Only 3 is on the Talkgroup the link
+    // names, so only 3 survives it.
+    const heard = reduce(connected(), ...arrive(call(1), call(2, 11, 200), call(3)))
+    const linked = liveReducer(heard, applyLinkedSelection({ selection: LINKED, at: NOW }))
+
+    expect(selectQueue(rootState(linked)).map((one) => one.id)).toEqual([3])
+  })
+
+  /** And undoing it narrows the matrix *back*, with the queue having filled
+   *  under the wider one meanwhile — `undoAvoid`'s reasoning, one field along. */
+  it('drops queued Calls the restored Selection does not want', () => {
+    const mine = liveReducer(undefined, chooseTalkgroups({ keys: [{ systemRef: 11, talkgroupRef: 200 }], on: false }))
+    const linked = liveReducer(mine, applyLinkedSelection({ selection: { all: true, sel: {} }, at: NOW }))
+    const heard = [connected(), ...arrive(call(1), call(2, 11, 200), call(3))].reduce(
+      liveReducer,
+      linked,
+    )
+
+    expect(
+      selectQueue(rootState(liveReducer(heard, undoSelectionLink()))).map((one) => one.id),
+    ).toEqual([3])
+  })
+
+  it('takes the offer away when it lapses, leaving the Selection the link brought', () => {
+    const linked = liveReducer(undefined, applyLinkedSelection({ selection: LINKED, at: NOW }))
+    const lapsed = liveReducer(linked, dismissSelectionUndo())
+
+    expect(selectSelectionUndo(rootState(lapsed))).toBeNull()
+    expect(selectSelection(rootState(lapsed))).toEqual(LINKED)
+  })
+
+  it('is nothing to undo when no link has been applied', () => {
+    const before = reduce(connected())
+    expect(liveReducer(before, undoSelectionLink())).toBe(before)
+  })
 })

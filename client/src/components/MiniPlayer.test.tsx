@@ -166,7 +166,7 @@ describe('the now-playing strip', () => {
     const list = await screen.findByRole('list', { name: 'Search results' })
     const rows = within(list).getAllByRole('listitem')
 
-    await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
+    await user.click(within(rows[0]).getByRole('button', { name: /^Play (?!forward)/ }))
 
     await waitFor(() =>
       expect(
@@ -188,7 +188,7 @@ describe('the now-playing strip', () => {
     const list = await screen.findByRole('list', { name: 'Search results' })
     const rows = within(list).getAllByRole('listitem')
 
-    await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
+    await user.click(within(rows[0]).getByRole('button', { name: /^Play (?!forward)/ }))
 
     await waitFor(() => expect(strip()).toBeInTheDocument())
     expect(

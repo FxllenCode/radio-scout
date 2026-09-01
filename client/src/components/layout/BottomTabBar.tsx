@@ -12,8 +12,13 @@ const tabs = [
 
 /** The primary navigation (docs/design/brief.md): Live · Talkgroups · Search ·
  *  Settings. Active tab uses the restrained near-white accent; color is
- *  otherwise reserved for LEDs. */
-export function BottomTabBar() {
+ *  otherwise reserved for LEDs.
+ *
+ *  `searchTo` is where the Search tab points: since #61 the search state lives
+ *  in the URL, so a bare `/search` here would discard the filters the Listener
+ *  set on the way past. The shell remembers it; this only follows, because a
+ *  tab bar that unmounts and remounts with each screen could not. */
+export function BottomTabBar({ searchTo = '/search' }: { searchTo?: string }) {
   return (
     <nav
       aria-label="Primary"
@@ -23,7 +28,7 @@ export function BottomTabBar() {
         {tabs.map(({ to, label, icon: Icon, end }) => (
           <li key={to}>
             <NavLink
-              to={to}
+              to={to === '/search' ? searchTo : to}
               end={end}
               className={({ isActive }) =>
                 cn(

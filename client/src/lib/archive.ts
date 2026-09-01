@@ -43,6 +43,31 @@ export function dateTimeLocalToMs(value: string): number | undefined {
   return Number.isNaN(ms) ? undefined : ms
 }
 
+/**
+ * The other direction: an instant in the shape `<input type="datetime-local">`
+ * takes, so the control can be **controlled** (#61).
+ *
+ * Which it has to be, now that a bound can arrive from somewhere other than the
+ * input — a date preset, or a link somebody was sent. An uncontrolled input
+ * would go on showing whatever was last typed into it while the search behind
+ * it said something else.
+ *
+ * Empty for no bound, because that is what clears the control; truncated to the
+ * minute, because that is the finest thing it can show, and truncated rather
+ * than rounded because a `before` of 23:59:59.999 is the end of its day and
+ * rounding would display the next one.
+ */
+export function msToDateTimeLocal(ms: number | undefined): string {
+  if (ms === undefined) return ''
+  const at = new Date(ms)
+  if (Number.isNaN(at.getTime())) return ''
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return (
+    `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}` +
+    `T${pad(at.getHours())}:${pad(at.getMinutes())}`
+  )
+}
+
 /** A Call's time in the listener's timezone, in a fixed `YYYY-MM-DD HH:MM:SS`
  *  shape — a scanner log reads better aligned than localized. */
 export function formatCallTime(ms: number | undefined): string {

@@ -1,12 +1,16 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { delay, http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ARCHIVE, ORIGIN, archivePage } from '@/test/handlers'
 import { server } from '@/test/setup'
-import { renderApp } from '@/test/utils'
+import { renderApp, routerProbe } from '@/test/utils'
+import { msToDateTimeLocal } from '@/lib/archive'
+
+/** How long a link control's confirmation stands, per `SearchScreen`. */
+const NOTICE_MS = 3_000
 
 /** Every `/api/calls` query string the screen sent, in order. */
 let searches: string[] = []
@@ -35,6 +39,23 @@ beforeEach(() => {
 })
 
 const lastSearch = () => new URLSearchParams(searches.at(-1))
+
+/** A browser that can put a link on the clipboard, and a way to read what it
+ *  was handed (#61). Called *after* `userEvent.setup()`, which installs a
+ *  clipboard stub of its own that would otherwise replace this one. */
+function sharesTo({ fails = false } = {}) {
+  const written: string[] = []
+  const writeText = vi.fn((text: string) => {
+    if (fails) return Promise.reject(new Error('denied'))
+    written.push(text)
+    return Promise.resolve()
+  })
+  Object.defineProperty(navigator, 'clipboard', {
+    value: { writeText },
+    configurable: true,
+  })
+  return () => written.at(-1)
+}
 
 /** An archive of `total` Calls — 51 by default, one past a full page, so there
  *  are exactly two pages and a boundary to cross. */
@@ -71,6 +92,13 @@ async function runPosition(text: string) {
 }
 
 /** The result rows, once the first page has landed. */
+/** A row's own **Play** — the one that walks the list in the order it is
+ *  sorted. Told apart from "Play forward from …" (#61), which is the same
+ *  gesture anchored at that Call and pointed the other way. */
+function playIn(row: HTMLElement) {
+  return within(row).getByRole('button', { name: /^Play (?!forward)/ })
+}
+
 async function resultRows() {
   const list = await screen.findByRole('list', { name: 'Search results' })
   return within(list).findAllByRole('listitem')
@@ -310,7 +338,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[0]))
 
       const nowPlaying = screen.getByRole('region', { name: 'Now playing' })
       expect(within(nowPlaying).getByText('1 of 3')).toBeInTheDocument()
@@ -362,7 +390,7 @@ describe('SearchScreen', () => {
       )
       const rows = await resultRows()
       // Start on the last Call of page one.
-      await user.click(within(rows[49]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[49]))
       await runPosition('50 of 51')
 
       screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
@@ -408,7 +436,7 @@ describe('SearchScreen', () => {
       expect(searches.filter((search) => search.includes('offset=50'))).toEqual(
         [],
       )
-      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[47]))
 
       // The next page is requested before playback needs it...
       await waitFor(() =>
@@ -438,7 +466,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[47]))
       await waitFor(() =>
         expect(
           searches.filter((search) => search.includes('offset=50')),
@@ -494,7 +522,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[47]))
 
       const warmed = `/api/call/${many[50].id}/audio`
       await waitFor(() => expect(audioRequests).toContain(warmed))
@@ -519,7 +547,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[47]))
       await waitFor(() =>
         expect(
           searches.filter((search) => search.includes('offset=50')),
@@ -550,7 +578,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[47]))
       await waitFor(() =>
         expect(
           searches.filter((search) => search.includes('offset=50')),
@@ -598,7 +626,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[47]))
       await waitFor(() =>
         expect(
           searches.filter((search) => search.includes('offset=50')),
@@ -679,7 +707,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const first = await resultRows()
-      await user.click(within(first[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(first[47]))
       // The old search's page two is now in hand — this is the page that must
       // not be taken.
       await waitFor(() => expect(audioRequests).toContain('/api/call/1050/audio'))
@@ -694,7 +722,7 @@ describe('SearchScreen', () => {
         ),
       )
       const second = await resultRows()
-      await user.click(within(second[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(second[47]))
       await waitFor(() =>
         expect(screen.getByTestId('call-player')).toHaveAttribute(
           'src',
@@ -734,7 +762,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[49]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[49]))
       await runPosition('50 of 120')
 
       screen.getByTestId('call-player').dispatchEvent(new Event('ended'))
@@ -757,7 +785,7 @@ describe('SearchScreen', () => {
       const rows = await resultRows()
       // The default archive is three Calls on one page, so playing the first
       // already leaves fewer than two behind it.
-      await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[0]))
 
       await runPosition('1 of 3')
       expect(searches.filter((search) => search.includes('offset=3'))).toEqual(
@@ -777,7 +805,7 @@ describe('SearchScreen', () => {
 
       const rows = await resultRows()
       // No Playback-mode click: the live feed still owns the audio.
-      await user.click(within(rows[47]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[47]))
 
       await waitFor(() =>
         expect(screen.getByTestId('call-player')).toHaveAttribute(
@@ -798,7 +826,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[1]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[1]))
       await runPosition('2 of 3')
 
       await user.click(screen.getByRole('button', { name: 'Previous call' }))
@@ -822,7 +850,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[0]))
 
       // The Search screen's own bar, not the shell's mini-player (#56) — both
       // pause the same transport, and this test is about this screen's.
@@ -848,7 +876,7 @@ describe('SearchScreen', () => {
         await screen.findByRole('button', { name: 'Playback mode' }),
       )
       const rows = await resultRows()
-      await user.click(within(rows[0]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[0]))
       await user.click(screen.getByRole('button', { name: 'Stop' }))
 
       expect(
@@ -870,7 +898,7 @@ describe('SearchScreen', () => {
       ).toHaveAttribute('aria-pressed', 'false')
 
       const rows = await resultRows()
-      await user.click(within(rows[1]).getByRole('button', { name: /^Play / }))
+      await user.click(playIn(rows[1]))
 
       const nowPlaying = screen.getByRole('region', { name: 'Now playing' })
       expect(
@@ -947,7 +975,7 @@ describe('SearchScreen', () => {
     // With no calls at all there is no span to show.
     expect(screen.queryByText(/Archive spans/)).not.toBeInTheDocument()
 
-    await user.click(within(row).getByRole('button', { name: /^Play / }))
+    await user.click(playIn(row))
     expect(
       within(screen.getByRole('region', { name: 'Now playing' })).getByText(
         'Talkgroup 54241',
@@ -1275,5 +1303,243 @@ describe('SearchScreen — multi-site coverage (#42, spec US 11)', () => {
 
     expect(within(rows[0]).getByText(/Site 3/)).toBeInTheDocument()
     expect(within(rows[1]).queryByText(/Site/)).toBeNull()
+  })
+})
+
+/**
+ * The Archive as a place you can link to (#61, spec US 30–31).
+ *
+ * The URL *is* the search state, not a copy of it kept in step with one — which
+ * is what makes a reload, a tab switch and the back button one mechanism rather
+ * than three features that each have to remember the others.
+ */
+describe('SearchScreen — URL-addressable search (#61, spec US 30)', () => {
+  it('restores every filter a link carries', async () => {
+    renderApp('/search?tag=Fire&system=100&sort=oldest')
+    await filtersLoaded()
+
+    expect(screen.getByLabelText('Tag')).toHaveValue('Fire')
+    expect(screen.getByLabelText('System')).toHaveValue('100')
+    expect(screen.getByLabelText('Sort')).toHaveValue('oldest')
+    expect(lastSearch().get('tag')).toBe('Fire')
+    expect(lastSearch().get('sort')).toBe('oldest')
+  })
+
+  it('writes a filter change into the URL, so the view is the address', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    await filtersLoaded()
+
+    await user.selectOptions(screen.getByLabelText('Tag'), 'Fire')
+
+    await waitFor(() => expect(routerProbe.location).toBe('/search?tag=Fire'))
+  })
+
+  it('carries the page, so a link lands on the page that was being read', async () => {
+    const user = userEvent.setup()
+    pagedArchive()
+    renderApp('/search')
+    await resultRows()
+
+    await user.click(screen.getByRole('button', { name: 'Next page' }))
+
+    await waitFor(() => expect(routerProbe.location).toBe('/search?offset=50'))
+  })
+
+  it('goes back to the search before it', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    await filtersLoaded()
+    await user.selectOptions(screen.getByLabelText('Tag'), 'Fire')
+    await waitFor(() => expect(routerProbe.location).toBe('/search?tag=Fire'))
+
+    act(() => routerProbe.go(-1))
+
+    // The search that was left is the search that comes back — filters and all.
+    // Deliberately not asserted against the *network*: the unfiltered page is
+    // already cached, and going back to it costing no request is the point of
+    // caching rather than a failure to restore anything.
+    await waitFor(() => expect(routerProbe.location).toBe('/search'))
+    expect(screen.getByLabelText('Tag')).toHaveValue('')
+  })
+})
+
+describe('SearchScreen — date presets and reset (#61, spec US 31)', () => {
+  /** Presets resolve to *instants* (`lib/dateRange`), so what the URL carries
+   *  and what the inputs show is the range actually being searched — which is
+   *  what makes the link a view somebody else can open. */
+  it('fills both date inputs from one tap, and says so in the URL', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    await filtersLoaded()
+
+    await user.click(screen.getByRole('button', { name: 'Today' }))
+
+    const midnight = new Date()
+    midnight.setHours(0, 0, 0, 0)
+    await waitFor(() =>
+      expect(lastSearch().get('after')).toBe(String(midnight.getTime())),
+    )
+    expect(screen.getByLabelText('From')).toHaveValue(
+      msToDateTimeLocal(midnight.getTime()),
+    )
+    expect(screen.getByLabelText('To')).not.toHaveValue('')
+  })
+
+  it('shows the bounds a link carries, rather than an empty box over a filtered list', async () => {
+    const after = Date.parse('2026-07-25T14:00')
+    renderApp(`/search?after=${after}`)
+    await filtersLoaded()
+
+    expect(screen.getByLabelText('From')).toHaveValue('2026-07-25T14:00')
+  })
+
+  it('clears everything at once, which is the eight taps the reset exists to save', async () => {
+    const user = userEvent.setup()
+    renderApp('/search?tag=Fire&system=100&after=1000&sort=oldest&offset=50')
+    await filtersLoaded()
+
+    await user.click(screen.getByRole('button', { name: 'Reset filters' }))
+
+    await waitFor(() => expect(routerProbe.location).toBe('/search'))
+    expect(screen.getByLabelText('Tag')).toHaveValue('')
+    expect(screen.getByLabelText('From')).toHaveValue('')
+    expect(screen.getByLabelText('Sort')).toHaveValue('newest')
+  })
+})
+
+describe('SearchScreen — a Call you can link to (#61, spec US 30)', () => {
+  it('opens playing the Call a link names', async () => {
+    renderApp('/search?call=2')
+
+    // Named in the Run's own bar, and loaded into the one shared `<audio>`
+    // element — the two halves of "opens playing", neither of which the other
+    // proves on its own.
+    const playing = await screen.findByRole('region', { name: 'Now playing' })
+    expect(within(playing).getByText('Alpha Law')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByTestId('call-player')).toHaveAttribute(
+        'src',
+        '/api/call/2/audio',
+      ),
+    )
+  })
+
+  it('plays a Call the current filters would not have found', async () => {
+    // The link is resolved by id, not searched for, so a Call outside the
+    // filters on screen still plays — which is what makes it a *deep* link.
+    renderApp('/search?call=2&tag=Law')
+    const playing = await screen.findByRole('region', { name: 'Now playing' })
+
+    expect(within(playing).getByText('Alpha Law')).toBeInTheDocument()
+  })
+
+  it('says so when the Call a link names is gone', async () => {
+    renderApp('/search?call=9999')
+
+    expect(
+      await screen.findByText(/that call is no longer in the archive/i),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('SearchScreen — playing forward in time from a row (#61)', () => {
+  it('runs oldest-first from the Call that was tapped, whatever the list is sorted by', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    const rows = await resultRows()
+
+    // The list is newest-first, so the middle row's Play would walk *back*
+    // through history. This is the other direction.
+    await user.click(
+      within(rows[1]).getByRole('button', { name: /^Play forward from/ }),
+    )
+
+    await waitFor(() => expect(lastSearch().get('sort')).toBe('oldest'))
+    expect(lastSearch().get('after')).toBe(String(ARCHIVE[1].timestamp))
+  })
+
+  it('says so when the archive will not answer for the run ahead', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    const rows = await resultRows()
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, () => new HttpResponse('nope', { status: 500 })),
+    )
+
+    await user.click(
+      within(rows[1]).getByRole('button', { name: /^Play forward from/ }),
+    )
+
+    expect(await screen.findByText(/could not play forward/i)).toBeInTheDocument()
+  })
+
+  it('leaves the list on screen sorted as the listener left it', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    const rows = await resultRows()
+
+    await user.click(
+      within(rows[1]).getByRole('button', { name: /^Play forward from/ }),
+    )
+    await waitFor(() => expect(lastSearch().get('sort')).toBe('oldest'))
+
+    // A **Run** carries its own window and its own search; browsing is the
+    // screen's (#89). Turning round to play forward must not re-sort the list
+    // the Listener is reading.
+    expect(screen.getByLabelText('Sort')).toHaveValue('newest')
+    expect(routerProbe.location).toBe('/search')
+  })
+})
+
+describe('SearchScreen — sending a link (#61, spec US 30)', () => {
+  it('hands the platform a link to this search', async () => {
+    const user = userEvent.setup()
+    const shared = sharesTo()
+    renderApp('/search?tag=Fire')
+    await filtersLoaded()
+
+    await user.click(screen.getByRole('button', { name: 'Copy link to this search' }))
+
+    await waitFor(() => expect(shared()).toBe('http://localhost/search?tag=Fire'))
+  })
+
+  it('hands the platform a link that opens on one Call', async () => {
+    const user = userEvent.setup()
+    const shared = sharesTo()
+    renderApp('/search')
+    const rows = await resultRows()
+
+    await user.click(within(rows[1]).getByRole('button', { name: /^Copy link to/ }))
+
+    await waitFor(() => expect(shared()).toBe('http://localhost/search?call=2'))
+  })
+
+  /** A notice is a thing that just happened, not a thing that is true — so it
+   *  goes of its own accord rather than sitting under the filters all session. */
+  it('takes its confirmation back down', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    sharesTo()
+    renderApp('/search?tag=Fire')
+    await filtersLoaded()
+    await user.click(screen.getByRole('button', { name: 'Copy link to this search' }))
+    expect(await screen.findByText('Link copied.')).toBeInTheDocument()
+
+    act(() => void vi.advanceTimersByTime(NOTICE_MS))
+
+    expect(screen.queryByText('Link copied.')).toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('says so when the browser will not let it', async () => {
+    const user = userEvent.setup()
+    sharesTo({ fails: true })
+    renderApp('/search?tag=Fire')
+    await filtersLoaded()
+
+    await user.click(screen.getByRole('button', { name: 'Copy link to this search' }))
+
+    expect(await screen.findByText(/could not copy/i)).toBeInTheDocument()
   })
 })

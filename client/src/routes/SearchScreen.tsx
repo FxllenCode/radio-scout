@@ -1,12 +1,16 @@
 import {
   Download,
+  FastForward,
+  Link2,
   Pause,
   Play,
+  RotateCcw,
   SkipBack,
   SkipForward,
   Square,
 } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
@@ -23,11 +27,20 @@ import {
   downloadUrl,
   formatCallTime,
   formatDuration,
+  msToDateTimeLocal,
   pageSummary,
 } from '@/lib/archive'
+import { PRESETS, rangeOf } from '@/lib/dateRange'
+import { linkTo, shareLink, shareNotice } from '@/lib/share'
+import { readSearchUrl, writeSearchUrl, type SearchUrl } from '@/lib/searchUrl'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
 import { cn } from '@/lib/utils'
-import { useGetFilterOptionsQuery, useSearchCallsQuery } from '@/store/api'
+import {
+  useGetCallQuery,
+  useGetFilterOptionsQuery,
+  useLazySearchCallsQuery,
+  useSearchCallsQuery,
+} from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   enterLiveFeed,
@@ -63,6 +76,11 @@ const EMPTY_PAGE: SearchPage = {
 const controlClass =
   'w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground'
 
+/** How long a link control's confirmation stands. Long enough to read on a
+ *  phone, short enough that "Link copied" is not still on screen by the time a
+ *  Listener has pasted it. */
+const NOTICE_MS = 3_000
+
 /**
  * Search (Archive) — filter stored Calls, then play or download them
  * (#13, spec US 24–27).
@@ -74,16 +92,20 @@ const controlClass =
  */
 export function SearchScreen() {
   const dispatch = useAppDispatch()
-  /** The filters and the ordering — never the window, which is why this is a
-   *  [`RunSearch`] rather than a whole `SearchQuery`. A Run's identity is
-   *  exactly this value, so a `limit` or `offset` finding its way in here would
-   *  be a Run that ends whenever the Listener turned a page. */
-  const [filters, setFilters] = useState<RunSearch>({ sort: 'newest' })
-  /** Where the window **on screen** starts. Deliberately not the Run's own
-   *  offset (`Run.from`), which is where the Calls being *played* start: the
-   *  Listener may browse ahead with the paging buttons while a Run walks page
-   *  one, and neither should move the other (#89). */
-  const [windowOffset, setWindowOffset] = useState(0)
+  const [params, setParams] = useSearchParams()
+  /** The whole of what this screen is showing, read off the URL — the filters
+   *  and the ordering (a **Run**'s identity, exactly), the window on screen,
+   *  and a Call somebody linked to.
+   *
+   *  Memoized on the query *string*, so a value that has not changed keeps its
+   *  identity: the filters are an RTK Query argument, an effect dependency and
+   *  the thing a Run compares itself against, and a fresh object every render
+   *  would re-issue all three. */
+  const query = params.toString()
+  const { search: filters, offset: windowOffset, call: linkedCall } = useMemo(
+    () => readSearchUrl(new URLSearchParams(query)),
+    [query],
+  )
 
   const { data: options } = useGetFilterOptionsQuery(filters)
   const { data, isFetching, isError } = useSearchCallsQuery({
@@ -107,19 +129,87 @@ export function SearchScreen() {
 
   const results = page.results
 
-  /** Any filter change moves the window back to the first page, and tells the
-   *  Run — which decides for itself whether it is still walking the search on
-   *  screen. */
-  function updateFilters(patch: Partial<RunSearch>) {
-    const changed = { ...filters, ...patch }
-    setFilters(changed)
-    setWindowOffset(0)
-    dispatch(searchChanged(changed))
+  /** What the last link control did, said out loud — because copying to a
+   *  clipboard is a thing with no visible result of its own, and refusing to is
+   *  a thing a Listener has to be told about rather than left waiting on. */
+  const [notice, setNotice] = useState<string | null>(null)
+
+  /** Where the URL is going next. One writer, so the three things it decides
+   *  cannot drift: a change of *anything* returns to the first page unless it
+   *  says otherwise, and a deep-linked Call is dropped once it has been acted
+   *  on — the address bar then describes what is on screen rather than what
+   *  opened it. */
+  const goTo = (next: Partial<SearchUrl>) =>
+    setParams(writeSearchUrl({ search: filters, offset: 0, ...next }))
+
+  /** Any filter change moves the window back to the first page. Unlike before
+   *  #61 this does *not* tell the Run: the URL is the state, so the Run is told
+   *  where the change is *observed* rather than at every control that could
+   *  cause one — which is the only way the back button gets the same treatment
+   *  as a dropdown (#92's argument, one layer up). */
+  const updateFilters = (patch: Partial<RunSearch>) =>
+    goTo({ search: { ...filters, ...patch } })
+
+  /**
+   * Tell the **Run** the search on screen changed.
+   *
+   * Skipped on the way in, because arriving at this screen is not a Listener
+   * changing anything: a Run started from the per-Unit view (#47) and still
+   * walking would otherwise be disarmed by nothing more than a tab switch.
+   */
+  const lastSearch = useRef(filters)
+  useEffect(() => {
+    if (lastSearch.current === filters) return
+    lastSearch.current = filters
+    dispatch(searchChanged(filters))
+  }, [dispatch, filters])
+
+  // A notice is a thing that just happened, not a thing that is true — so it
+  // goes of its own accord rather than sitting under the filters all session.
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  /** Put a link to `state` wherever this platform puts links (#61, US 30). */
+  async function send(state: SearchUrl, title: string) {
+    setNotice(
+      shareNotice(
+        await shareLink(
+          linkTo('/search', writeSearchUrl(state), window.location.origin),
+          title,
+          navigator,
+        ),
+      ),
+    )
+  }
+
+  /**
+   * Play forward in time from a Call, whatever the list is sorted by (#61).
+   *
+   * A **Run** is one concept with an ordering (CONTEXT.md), so this is not a
+   * new kind of playback — it is the same Run over a search anchored at this
+   * Call and ordered the other way. The list on screen is untouched: browsing
+   * is the screen's and the walk is the Run's, which is exactly the separation
+   * #89 named the two offsets apart for.
+   */
+  const [fetchRun] = useLazySearchCallsQuery()
+  async function playForward(call: Call) {
+    const search: RunSearch = { ...filters, sort: 'oldest', after: call.timestamp }
+    try {
+      const page = await fetchRun({ ...search, limit: PAGE_SIZE, offset: 0 }).unwrap()
+      dispatch(startRun({ search, page, index: 0 }))
+    } catch {
+      setNotice('Could not play forward from there.')
+    }
   }
 
   // The page the Run is about to need, fetched and handed over (#32, US 25).
   // Every screen that starts a Run owes this; #47's per-Unit view is the other.
   useRunPageAhead()
+
+  const linkMissing = useDeepLinkedCall(linkedCall, filters)
 
   return (
     <Screen
@@ -148,26 +238,18 @@ export function SearchScreen() {
         className="grid grid-cols-2 gap-2"
         onSubmit={(event) => event.preventDefault()}
       >
-        <Field label="From" htmlFor="filter-after">
-          <input
-            id="filter-after"
-            type="datetime-local"
-            className={controlClass}
-            onChange={(event) =>
-              updateFilters({ after: dateTimeLocalToMs(event.target.value) })
-            }
-          />
-        </Field>
-        <Field label="To" htmlFor="filter-before">
-          <input
-            id="filter-before"
-            type="datetime-local"
-            className={controlClass}
-            onChange={(event) =>
-              updateFilters({ before: dateTimeLocalToMs(event.target.value) })
-            }
-          />
-        </Field>
+        <DateField
+          label="From"
+          id="filter-after"
+          ms={filters.after}
+          onChange={(after) => updateFilters({ after })}
+        />
+        <DateField
+          label="To"
+          id="filter-before"
+          ms={filters.before}
+          onChange={(before) => updateFilters({ before })}
+        />
 
         <Field label="System" htmlFor="filter-system">
           <select
@@ -350,6 +432,49 @@ export function SearchScreen() {
           </select>
         </Field>
 
+        {/* The eight taps a date range costs, as one (#61, spec US 31). Each
+            resolves to *instants* and fills the two inputs above, so what the
+            URL carries is the range being searched rather than a word that
+            would mean something different tomorrow (`lib/dateRange`).
+
+            `type="button"`, all of them: `Button` renders a bare `<button>`,
+            which inside a form submits it — the trap #49 got caught by. */}
+        <div className="col-span-2 flex flex-wrap items-center gap-1.5">
+          {PRESETS.map((preset) => (
+            <Button
+              key={preset.id}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+              onClick={() => updateFilters(rangeOf(preset.id, Date.now()))}
+            >
+              {preset.label}
+            </Button>
+          ))}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-label="Reset filters"
+            className="h-7 gap-1 px-2 font-mono text-[10px] uppercase tracking-wider"
+            onClick={() => setParams('')}
+          >
+            <RotateCcw className="size-3" aria-hidden />
+            Reset
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-label="Copy link to this search"
+            className="ml-auto h-7 px-2"
+            onClick={() => send({ search: filters, offset: windowOffset }, 'Radio-Scout search')}
+          >
+            <Link2 className="size-3.5" aria-hidden />
+          </Button>
+        </div>
+
         {options?.dateStartMs !== undefined && (
           <p className="col-span-2 font-mono text-[11px] text-muted-foreground/70">
             Archive spans {formatCallTime(options.dateStartMs)} –{' '}
@@ -357,6 +482,18 @@ export function SearchScreen() {
           </p>
         )}
       </form>
+
+      {/* What a link control just did, and why the Call a link named is not
+          here. Both are things that happened rather than states of the
+          archive, so they share one live region under the filters. */}
+      {(notice || linkMissing) && (
+        <p
+          role="status"
+          className="mt-3 rounded-md border border-border bg-card px-3 py-2 font-mono text-[11px] text-muted-foreground"
+        >
+          {notice ?? 'That call is no longer in the archive.'}
+        </p>
+      )}
 
       {current && (
         <NowPlaying
@@ -402,6 +539,10 @@ export function SearchScreen() {
               call={call}
               isCurrent={current?.id === call.id}
               onPlay={() => dispatch(startRun({ search: filters, page, index }))}
+              onPlayForward={() => playForward(call)}
+              onCopyLink={() =>
+                send({ search: {}, offset: 0, call: call.id }, talkgroupName(call))
+              }
             />
           ))}
         </ul>
@@ -412,7 +553,7 @@ export function SearchScreen() {
           variant="outline"
           size="sm"
           disabled={windowOffset === 0}
-          onClick={() => setWindowOffset(Math.max(0, windowOffset - PAGE_SIZE))}
+          onClick={() => goTo({ offset: Math.max(0, windowOffset - PAGE_SIZE) })}
         >
           Previous page
         </Button>
@@ -420,7 +561,7 @@ export function SearchScreen() {
           variant="outline"
           size="sm"
           disabled={!page.hasMore}
-          onClick={() => setWindowOffset(windowOffset + PAGE_SIZE)}
+          onClick={() => goTo({ offset: windowOffset + PAGE_SIZE })}
         >
           Next page
         </Button>
@@ -470,16 +611,101 @@ function Field({
   )
 }
 
+/**
+ * A date bound as a control (#61).
+ *
+ * Controlled, because a bound can now arrive from somewhere other than this
+ * input — a preset, or a link — and an uncontrolled box would go on showing
+ * whatever was last typed while the search behind it said something else.
+ *
+ * It keeps the *text* rather than deriving it, and re-derives only when the
+ * bound it is shown is not the one the text already means. Both halves matter:
+ * without the local text, a half-typed date would be parsed, rejected and wiped
+ * on every keystroke; without the guard, a partially-typed date that happens to
+ * parse (`2026-07-25` is a valid instant — at UTC midnight) would be rewritten
+ * under the Listener's cursor mid-word.
+ */
+function DateField({
+  label,
+  id,
+  ms,
+  onChange,
+}: {
+  label: string
+  id: string
+  ms: number | undefined
+  onChange: (ms: number | undefined) => void
+}) {
+  const [text, setText] = useState(() => msToDateTimeLocal(ms))
+  useEffect(() => {
+    setText((typed) => (dateTimeLocalToMs(typed) === ms ? typed : msToDateTimeLocal(ms)))
+  }, [ms])
+
+  return (
+    <Field label={label} htmlFor={id}>
+      <input
+        id={id}
+        type="datetime-local"
+        className={controlClass}
+        value={text}
+        onChange={(event) => {
+          setText(event.target.value)
+          onChange(dateTimeLocalToMs(event.target.value))
+        }}
+      />
+    </Field>
+  )
+}
+
+/**
+ * Play the Call a link named (#61, spec US 30), and say so when it is gone.
+ *
+ * Resolved **by id** rather than searched for: a link names one Call, and
+ * requiring it to also match the filters on screen would fail for the
+ * commonest reason there is — the recipient was looking at something else. The
+ * Run it starts is that Call alone, because a shared moment is a moment; the
+ * row's own control is how a Listener asks to carry on from it.
+ *
+ * Started once per Call, so a re-render, a filter change or the back button
+ * does not replay something already playing.
+ */
+function useDeepLinkedCall(id: number | undefined, search: RunSearch): boolean {
+  const dispatch = useAppDispatch()
+  const { data: call, isError } = useGetCallQuery(id as number, { skip: id === undefined })
+  const started = useRef<number>(undefined)
+
+  useEffect(() => {
+    if (!call || started.current === call.id) return
+    started.current = call.id
+    dispatch(
+      startRun({
+        search,
+        page: { results: [call], count: 1, limit: 1, offset: 0, hasMore: false },
+        index: 0,
+      }),
+    )
+    // `search` is deliberately not a dependency: it is what the Run is *labelled*
+    // with, and re-running this because a filter moved would replay the Call.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch, call])
+
+  return isError
+}
+
 /** How a Call reads in a list: LED, Talkgroup, System·Tag·Group, time,
  *  duration. */
 function ResultRow({
   call,
   isCurrent,
   onPlay,
+  onPlayForward,
+  onCopyLink,
 }: {
   call: Call
   isCurrent: boolean
   onPlay: () => void
+  onPlayForward: () => void
+  onCopyLink: () => void
 }) {
   const name = talkgroupName(call)
   const system = systemName(call)
@@ -526,6 +752,16 @@ function ResultRow({
       {/* An encrypted Call has no audio at all — the server sends no
           `audioUrl` for one — so it gets no controls rather than controls
           that 404 (spec US 9). */}
+      {/* Linkable whether or not there is anything to play: an encrypted Call
+          is still a thing worth pointing somebody at (spec US 9). */}
+      <Button
+        variant="outline"
+        size="icon"
+        aria-label={`Copy link to ${description}`}
+        onClick={onCopyLink}
+      >
+        <Link2 className="size-4" aria-hidden />
+      </Button>
       {call.audioUrl && (
         <>
           <Button
@@ -536,6 +772,21 @@ function ResultRow({
           >
             <Play className="size-4" aria-hidden />
           </Button>
+          {/* The same gesture the other way round (#61): the list is newest
+              first, so Play walks back through history and this walks forward
+              from here. Offered only where there is an instant to anchor on —
+              a Call whose time was never recorded would anchor a forward run at
+              the beginning of the archive. */}
+          {call.timestamp !== undefined && (
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label={`Play forward from ${description}`}
+              onClick={onPlayForward}
+            >
+              <FastForward className="size-4" aria-hidden />
+            </Button>
+          )}
           <a
             href={downloadUrl(call.id)}
             download
