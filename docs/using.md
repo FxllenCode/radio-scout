@@ -313,6 +313,25 @@ the moment you tapped through everything that came after it. It does not disturb
 reading: the results stay sorted as you left them, and the run carries on through later pages on
 its own.
 
+### The activity chart
+
+Above the results is a bar per slice of time, across the whole of whatever the current filters
+reach — a picture of when it was busy. Set a Talkgroup filter and it becomes that channel's: this is
+where "when does Fire Dispatch actually run" is a shape rather than a guess.
+
+**Drag along it to travel.** The results jump to that moment, one gesture instead of forty taps on
+*Next page*. The filters do not change and neither does anything you have playing — the bar in
+white is where the page on screen is, and it follows you as you page normally. Arrow keys work too,
+with Home and End for either end of the range.
+
+**BY HOUR** flips the same numbers into a week: seven rows, twenty-four columns, darker where it is
+busier. That answers the other question — not when it *was* busy, but when it *usually* is. It reads
+in your own clock, wherever the instance happens to be, and it covers the last four weeks of
+whatever you have filtered to.
+
+Both are drawn from the same filters as the results, so the bars always add up to the count above
+them. rdio-scanner has neither: time travel there is the Previous button, one page at a time.
+
 ### Date presets
 
 **LAST HOUR**, **TODAY**, **YESTERDAY** and **LAST 7 DAYS** fill both date boxes in one tap, and

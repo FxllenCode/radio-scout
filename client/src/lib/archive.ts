@@ -2,8 +2,10 @@
  *  into a request, and turning a Call into something a listener can read.
  *  Mirrors the backend's `src/archive.rs`. */
 import type {
+  ActivityQuery,
   AdminTalkgroupQuery,
   AdminUnitQuery,
+  ListenerQuery,
   LogQuery,
   SearchQuery,
 } from '@/types'
@@ -17,7 +19,13 @@ import type {
  *  listings (#49): every one of those back ends reads a blank value as "no
  *  filter", so every front may drop it. */
 export function searchParams(
-  query: AdminTalkgroupQuery | AdminUnitQuery | LogQuery | SearchQuery,
+  query:
+    | ActivityQuery
+    | AdminTalkgroupQuery
+    | AdminUnitQuery
+    | ListenerQuery
+    | LogQuery
+    | SearchQuery,
 ): string {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {

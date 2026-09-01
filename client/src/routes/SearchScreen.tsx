@@ -12,7 +12,9 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
+import { ActivityHeatmap } from '@/components/ActivityHeatmap'
 import { CallFlags } from '@/components/CallFlags'
+import { DensityRibbon } from '@/components/DensityRibbon'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
@@ -31,11 +33,14 @@ import {
   pageSummary,
 } from '@/lib/archive'
 import { PRESETS, rangeOf } from '@/lib/dateRange'
+import { RIBBON_BUCKETS, offsetOfBucket, totalOf } from '@/lib/density'
+import { HOUR_MS, heatmapWindow } from '@/lib/heatmap'
 import { readSearchUrl, writeSearchUrl, type SearchUrl } from '@/lib/searchUrl'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
 import { useShareLink } from '@/hooks/useShareLink'
 import { cn } from '@/lib/utils'
 import {
+  useGetActivityQuery,
   useGetCallQuery,
   useGetFilterOptionsQuery,
   useLazySearchCallsQuery,
@@ -63,6 +68,13 @@ import { MARKS, type Call, type Mark, type SearchPage, type SearchQuery } from '
 /** Results per page. Small enough to stay snappy on a Pi over a phone
  *  connection, large enough that scrolling beats paging. */
 const PAGE_SIZE = 50
+
+/** The two views of the same numbers (#62): where it was busy, and when it
+ *  usually is. */
+const CHARTS = [
+  { id: 'ribbon', label: 'Timeline' },
+  { id: 'heatmap', label: 'By hour' },
+] as const
 
 /** Stands in for the page until the first search lands. */
 const EMPTY_PAGE: SearchPage = {
@@ -113,6 +125,26 @@ export function SearchScreen() {
    *  Run with — `isFetching` and `isError` are what tell the two apart, and
    *  they already do. */
   const page = data ?? EMPTY_PAGE
+
+  /** How busy the archive was under these filters (#62, spec US 34–35).
+   *
+   *  Keyed on the filters alone — no `limit`, no `offset` — so paging through
+   *  the results never refetches it, which is what makes a second aggregate per
+   *  search affordable on a Pi. */
+  const { data: activity } = useGetActivityQuery({
+    ...filters,
+    buckets: RIBBON_BUCKETS,
+  })
+  /** Which of the two views of that the Listener is looking at. */
+  const [chart, setChart] = useState<'ribbon' | 'heatmap'>('ribbon')
+  /** The heatmap's own request: hourly buckets over a bounded window, so the
+   *  server never widens them underneath the fold into local hours. Skipped
+   *  entirely while the ribbon is showing — a chart nobody is looking at is a
+   *  round trip nobody asked for. */
+  const { data: hourly } = useGetActivityQuery(
+    { ...filters, ...(activity ? heatmapWindow(activity) : {}), bucketMs: HOUR_MS },
+    { skip: chart !== 'heatmap' || !activity },
+  )
 
   const mode = useAppSelector(selectPlaybackMode)
   const current = useAppSelector(selectCurrentCall)
@@ -501,6 +533,64 @@ export function SearchScreen() {
           onTogglePause={() => dispatch(togglePause())}
           onStop={() => dispatch(stop())}
         />
+      )}
+
+      {/* How busy the archive was under these filters, and when it usually is
+          (#62, spec US 34–35). Drawn only when there is traffic to draw: an
+          empty ribbon over "no calls match these filters" says nothing the
+          sentence below it does not. */}
+      {activity && totalOf(activity) > 0 && (
+        <section aria-label="Activity" className="mt-5 space-y-2">
+          <div className="flex items-baseline justify-between font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+            <span>Activity</span>
+            <div className="flex gap-1">
+              {CHARTS.map((view) => (
+                <Button
+                  key={view.id}
+                  type="button"
+                  variant={chart === view.id ? 'secondary' : 'outline'}
+                  size="sm"
+                  aria-pressed={chart === view.id}
+                  className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+                  onClick={() => setChart(view.id)}
+                >
+                  {view.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+          {chart === 'ribbon' ? (
+            <DensityRibbon
+              series={activity}
+              ordering={filters.sort}
+              offset={windowOffset}
+              onJump={(bucket) =>
+                goTo(
+                  {
+                    offset: offsetOfBucket(
+                      activity.values,
+                      bucket,
+                      filters.sort,
+                      PAGE_SIZE,
+                    ),
+                  },
+                  // Always replaces, unlike the paging buttons. A scrub is not
+                  // a new view — the search has not changed — so Back should
+                  // return to where the Listener was before they started
+                  // dragging, not walk them back through every bucket the drag
+                  // passed over.
+                  true,
+                )
+              }
+            />
+          ) : hourly ? (
+            <ActivityHeatmap series={hourly} />
+          ) : (
+            <p className="font-mono text-[11px] text-muted-foreground">
+              Reading the archive…
+            </p>
+          )}
+        </section>
       )}
 
       <div

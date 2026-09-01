@@ -645,6 +645,10 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 async fn handle_socket(socket: impl Socket, state: AppState, scope: AccessScope) {
     info!("live-feed listener connected");
     let connected_at = Instant::now();
+    // Counted here rather than inside the loop, and as a guard rather than a
+    // pair of calls (#62): a connection is a Listener for exactly as long as
+    // this function runs, however it ends.
+    let _present = state.listeners.arrive();
     run_connection(socket, state, scope).await;
     // `connected_ms`, not `duration_ms`: a Call already has a `duration_ms` (its
     // audio length) and the request line has a `duration_us`. One grep, one

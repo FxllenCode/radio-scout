@@ -5,6 +5,7 @@
 //! router the binary serves and the integration harness drives in-process over
 //! its real HTTP + WS boundary (ADR-0009).
 
+pub mod activity;
 pub mod admin;
 pub mod archive;
 pub mod audio_meta;
@@ -22,6 +23,7 @@ pub mod http_log;
 pub mod import;
 pub mod ingest;
 pub mod instance;
+pub mod listeners;
 pub mod live;
 pub mod logsink;
 pub mod logview;
@@ -99,6 +101,10 @@ pub struct AppState {
     /// only be answered by looking, so the switch is `[quiet] enabled` and
     /// nothing else.
     pub quiet: crate::quiet::Quiet,
+    /// How many people are listening (#62, spec US 41) — the count a live-feed
+    /// connection joins, and the one a status page (#70) reads. Counts only:
+    /// there is nothing in it that could name anybody.
+    pub listeners: crate::listeners::Listeners,
     /// What time it is, for everything a handler stamps or expires (#90).
     pub clock: Clock,
     /// What every background Worker owes right now (#93) — the reading half, so
@@ -125,6 +131,7 @@ impl AppState {
             webhooks: crate::webhook::Webhooks::default(),
             tones: crate::tone::Tones::default(),
             quiet: crate::quiet::Quiet::default(),
+            listeners: crate::listeners::Listeners::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
         }
@@ -182,6 +189,9 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/calls", get(archive::search))
         .route("/api/calls/filters", get(archive::filters))
         .route("/api/calls/quiet", get(archive::quiet))
+        // How busy the Archive was under a search (#62, spec US 34–35) —
+        // the density ribbon over its results, and the hour-by-day heatmap.
+        .route("/api/calls/activity", get(archive::activity))
         // What a listener can select from (#12) — Systems + Talkgroups, whether
         // or not any of their Calls are still in the archive.
         .route("/api/catalog", get(catalog::catalog))
@@ -227,6 +237,10 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
         // The operator log surface (#30): what the server has been saying, for
         // an operator who has no shell to read `journalctl` from.
         .route("/api/admin/logs", get(logview::search))
+        // Peak Listeners over time (#62, spec US 41). The one chart that is not
+        // a Listener's — how many people take an open archive up is the
+        // Operator's business, and it is counts alone either way.
+        .route("/api/admin/listeners", get(listeners::history))
         .route(
             "/api/admin/talkgroups/import",
             post(import::import_talkgroups),

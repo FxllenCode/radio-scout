@@ -7,6 +7,7 @@ import type {
   LogEvent,
   LogPage,
   SearchPage,
+  Series,
   UnitHistory,
 } from '@/types'
 
@@ -197,6 +198,41 @@ export function archivePage(url: URL, rows: Call[] = ARCHIVE) {
   }
 }
 
+/**
+ * How busy an archive was, bucketed the way `src/archive.rs` buckets it (#62).
+ *
+ * Real arithmetic rather than a canned array, because what the ribbon promises
+ * is that its bars add up to the results above them — an invented series would
+ * make that assertion about the fixture instead of about the screen. Filters
+ * are ignored for [`archivePage`]'s reason: neither handler applies them, so
+ * the two stay consistent with each other.
+ */
+export function activitySeries(url: URL, rows: Call[] = ARCHIVE): Series {
+  // A Call whose recorder sent no time is not on any timeline — the server
+  // drops it from the aggregate the same way, by having nothing to bucket.
+  const times = rows.flatMap((call) =>
+    call.timestamp === undefined ? [] : [call.timestamp],
+  )
+  const number = (key: string) => {
+    const raw = url.searchParams.get(key)
+    return raw === null || raw === '' ? undefined : Number(raw)
+  }
+
+  const from = number('after') ?? (times.length ? Math.min(...times) : 0)
+  const last = number('before') ?? (times.length ? Math.max(...times) : from)
+  const span = Math.max(1, last - from + 1)
+  const bucketMs =
+    number('bucketMs') ?? Math.max(1, Math.ceil(span / (number('buckets') ?? 120)))
+  const buckets = Math.ceil(span / bucketMs)
+
+  const values = new Array<number>(buckets).fill(0)
+  for (const at of times) {
+    const bucket = Math.floor((at - from) / bucketMs)
+    if (bucket >= 0 && bucket < buckets) values[bucket] += 1
+  }
+  return { fromMs: from, toMs: from + buckets * bucketMs, bucketMs, values }
+}
+
 /** What the operator log surface serves (#30), newest first — one event of
  *  each level, with the structured fields and the correlation ref that make an
  *  event more than a sentence. */
@@ -278,6 +314,11 @@ export const handlers = [
   ),
   http.get(`${ORIGIN}/api/calls/filters`, () =>
     HttpResponse.json(FILTER_OPTIONS),
+  ),
+  // How busy the archive was under a search (#62) — bucketed for real, so the
+  // ribbon's bars really do add up to the page's own count.
+  http.get(`${ORIGIN}/api/calls/activity`, ({ request }) =>
+    HttpResponse.json(activitySeries(new URL(request.url))),
   ),
   // One Call by id — what a deep link resolves through (#61). The server
   // flattens `CallDetail` over a search row, so a client reading it as a `Call`

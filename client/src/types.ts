@@ -119,6 +119,53 @@ export interface SearchQuery {
   offset?: number
 }
 
+/**
+ * One number per bucket across a stretch of time (#62, spec US 34–35, 41).
+ *
+ * Two charts are drawn from this shape and it says nothing about which: the
+ * density ribbon over search results and the hour-by-day heatmap read Calls per
+ * bucket, and the operator's chart reads peak Listeners per bucket. The axis
+ * rides with the values because the client has to place them — and it is the
+ * axis the server *resolved*, which may be coarser than the one asked for.
+ */
+export interface Series {
+  /** The first instant covered, inclusive. */
+  fromMs: number
+  /** The first instant past the end, exclusive. */
+  toMs: number
+  bucketMs: number
+  /** One value per bucket, oldest first. Never empty. */
+  values: number[]
+}
+
+/**
+ * What a chart asks for: a search's own filters, plus how finely to cut them.
+ *
+ * The filters are exactly `SearchQuery`'s, because the ribbon has to describe
+ * the results above it rather than something that resembles them. `limit` and
+ * `offset` are deliberately never sent — a window into a page says nothing
+ * about how many Calls there were, and leaving them off is also what keeps the
+ * ribbon out of the refetch a page turn causes.
+ */
+export interface ActivityQuery extends Omit<SearchQuery, "limit" | "offset"> {
+  /** Buckets exactly this wide. What the heatmap needs: folding into local
+   *  hours is only exact when a bucket is an hour. */
+  bucketMs?: number
+  /** About this many buckets across the range. What the ribbon needs, because
+   *  what it really has is a width in pixels. */
+  buckets?: number
+}
+
+/** What the operator's listener chart asks for (#62, spec US 41): a range and a
+ *  grain, and no filters at all — there is nothing to filter a count by, which
+ *  is the point. */
+export interface ListenerQuery {
+  after?: number
+  before?: number
+  bucketMs?: number
+  buckets?: number
+}
+
 /** One page of `GET /api/calls`. Results are fully denormalized, so a page
  *  renders and plays without a follow-up request per Call. */
 export interface SearchPage {

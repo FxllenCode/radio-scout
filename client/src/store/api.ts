@@ -4,6 +4,7 @@ import { loginFailure, statusOf } from '@/lib/adminError'
 import { searchParams } from '@/lib/archive'
 import type { QuietSpan } from '@/lib/catchup'
 import type {
+  ActivityQuery,
   AdminApiKey,
   AdminAssignment,
   AdminDownstream,
@@ -22,6 +23,7 @@ import type {
   DocumentReport,
   FilterOptions,
   IssuedApiKey,
+  ListenerQuery,
   Listing,
   LogPage,
   LogQuery,
@@ -35,6 +37,7 @@ import type {
   RangeReport,
   SearchPage,
   SearchQuery,
+  Series,
   Span,
   UnitHistory,
 } from '@/types'
@@ -114,6 +117,19 @@ export const api = createApi({
     }),
 
     /**
+     * How busy the Archive was under a search (#62, spec US 34–35).
+     *
+     * The same filters the results came from, so the ribbon above them is a
+     * picture of *those* results — and deliberately **without** `limit` and
+     * `offset`, which is what keeps turning a page from refetching it. One
+     * cache entry per search, however far into it the Listener has walked.
+     */
+    getActivity: builder.query<Series, ActivityQuery>({
+      query: (activity) => ({ url: `api/calls/activity?${searchParams(activity)}` }),
+      providesTags: ['Call'],
+    }),
+
+    /**
      * Where a window of queued Calls is quiet (#59, spec US 23).
      *
      * **The only way a Call in the listening queue can get its spans.** It was
@@ -189,6 +205,18 @@ export const api = createApi({
     getLogs: builder.query<LogPage, LogQuery>({
       query: (filters) => ({ url: `api/admin/logs?${searchParams(filters)}` }),
       providesTags: ['Log'],
+    }),
+
+    /**
+     * Peak Listeners over time (#62, spec US 41).
+     *
+     * Behind the admin session, unlike every other read here: the Archive is
+     * open because listening is open, and how many people take that up is the
+     * Operator's own business. Untagged — nothing a browser does invalidates
+     * it, and it is a chart of the past.
+     */
+    getListenerHistory: builder.query<Series, ListenerQuery>({
+      query: (range) => ({ url: `api/admin/listeners?${searchParams(range)}` }),
     }),
 
     // -- Curation (#49, spec US 45–46) ------------------------------------
@@ -556,12 +584,14 @@ export const {
   useDeleteTalkgroupMutation,
   useDeleteUnitMutation,
   useFoldMembersMutation,
+  useGetActivityQuery,
   useGetAdminSessionQuery,
   useGetAdminTalkgroupsQuery,
   useGetAdminUnitsQuery,
   useGetApiKeysQuery,
   useGetCallQuery,
   useGetCatalogQuery,
+  useGetListenerHistoryQuery,
   useGetQuietSpansQuery,
   useGetDownstreamsQuery,
   useGetToneProfilesQuery,

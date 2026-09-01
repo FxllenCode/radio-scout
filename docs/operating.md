@@ -103,14 +103,15 @@ recorder stops too. Two independent bounds, and you can use either or both:
 
 ```toml
 [retention]
-days = 7          # 0 keeps them forever
-max_size_gb = 10  # omit entirely for no cap
-log_days = 30     # stored log events, on their own window
+days = 7            # 0 keeps them forever
+max_size_gb = 10    # omit entirely for no cap
+log_days = 30       # stored log events, on their own window
+listener_days = 90  # listener counts, on theirs
 ```
 
 A **sweep** runs at startup and on an interval: age Calls out, then prune oldest-first until
-the size cap is met, then prune stored log events past `log_days`, then reclaim audio no Call
-points at.
+the size cap is met, then prune stored log events past `log_days`, then listener counts past
+`listener_days`, then reclaim audio no Call points at.
 
 Two details that matter in practice:
 
@@ -431,6 +432,37 @@ what happens for any individual call the scan could not read.
 off, are never re-read: switching a feature on must not pull a county's worth of objects back off
 your disk at the next boot. `[quiet] queue_depth` is how many calls may be waiting to be scanned;
 past that they keep whatever they arrived as, which is logged.
+
+## Listener counts
+
+Settings → Admin → **Listeners** charts how many people have been connected, and when. It answers
+one question — *peak listeners, with a timestamp* — because that is the only question a record of
+counts can answer, and counts are all there is:
+
+```toml
+[listeners]
+enabled = true
+interval_secs = 60
+```
+
+Every minute the instance writes down the **highest number of listeners that were on at once**
+since the previous sample. A peak rather than a reading at the tick, so somebody who arrived and
+left inside one minute is still counted; a chart that quietly under-reported its own peaks would
+look exactly like one that did not.
+
+**Nothing identity-shaped is stored, and there is nowhere for it to go.** The table has three
+columns — a row id, an instant, and a number. No address, no session, no user agent, and
+deliberately no per-talkgroup breakdown: on a quiet channel with one listener, "who was on Fire
+Dispatch at 3am" is precisely the record this instance must not keep. It is the same rule that
+keeps a listener's IP out of the log above `debug`.
+
+It is **on by default**, because history cannot be recovered afterwards — an operator who has to
+find a setting first has already lost whatever happened before they found it. A day is 1,440 rows
+of a few bytes each. Turn it off if you would rather keep nothing, or raise `interval_secs` if a
+coarser chart will do. How long the rows survive is `[retention] listener_days` above.
+
+The chart is behind the admin password, unlike everything else a browser can read here. Listening
+is open; how many people take that up is yours.
 
 ### Tidying up talkgroup names
 

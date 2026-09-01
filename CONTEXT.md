@@ -171,6 +171,14 @@ _Avoid_: catch-up (the Listener draining a queue, not the server refilling one),
 A **Call**'s place in the order Calls went out on the **live feed** — what a **Backfill** is read in and what a **Listener**'s cursor names. Deliberately distinct from the Call's identifier, which is the order rows were *stored*: the two coincide until something holds a Call back, and a **Delay** is exactly that. A Call that has been stored but not yet emitted has no emission at all, which is the honest reading — nobody has heard it.
 _Avoid_: sequence number, offset, cursor (a Listener *holds* a cursor; its value is an emission), call id.
 
+**Activity**:
+How much traffic a stretch of time held, counted bucket by bucket. Read under exactly the filters a search was made with, so the **density ribbon** drawn over a page of results describes *those* results and its bars add up to their total — and so a chart of one channel is the same read with a **Talkgroup** filter set. Two pictures of it: the ribbon, which is when it *was* busy and is scrubbable, and the hour-by-day heatmap, which is when it *usually* is. The bucketing is the server's; the fold into an hour of the day is the browser's, because only the browser knows what timezone the **Listener** is in.
+_Avoid_: volume, traffic (fine in prose, wrong for the measurement), stats, metrics (a **Metric** is what an Operator scrapes).
+
+**Listener count**:
+How many **Listeners** were connected at once, sampled onto an interval and kept as a series. A count and an instant and nothing else: no address, no session, no per-**Talkgroup** breakdown, because on a quiet channel that would be a record of *who* was listening ([ADR-0011](docs/adr/0011-observability-logging-policy.md) rule 5). Each sample is the **peak** since the one before it rather than a reading taken at the tick, so somebody who arrived and left between two ticks is still somebody who was there. The **Operator's**, not the Listener's — an open Archive does not make an Instance's audience public.
+_Avoid_: audience, traffic, users, sessions, analytics.
+
 **DVR**:
 The archive surface that plays one talkgroup (or a **Selection**) gaplessly across a time range, scrubbable on a call-density timeline. Oldest-first by construction — a DVR that plays backwards is a search result, not a DVR.
 _Avoid_: time machine, rewind mode, tape.
@@ -295,7 +303,7 @@ One running Radio-Scout: a process, its **Archive**, its configuration and its *
 _Avoid_: scanner, server, deployment, node, site (Site is a tower).
 
 **Worker**:
-A background task an **Instance** owns and can account for. There are six — the **Retention** sweeper, the **enhancement** worker, the **Mining** backfill, the **Downstream** sender, the **Webhook** sender, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
+A background task an **Instance** owns and can account for. There are nine — the **Retention** sweeper, the **enhancement** worker, the **Mining** backfill, the **Downstream** sender, the **Webhook** sender, the tone-out detector, the **Quiet span** scanner, the **listener sampler**, and the operator log writer — and every one has the same envelope: started exactly once, stoppable, joinable, and readable as a **depth** (work admitted and not yet settled) plus a count of what it has finished. The loops themselves differ and are meant to: a ticker, a bounded queue, a broadcast subscription and a batching drain are not one shape. Work is owed from where it is *handed over*, never from where it is picked up — which is what makes "this Instance has settled" a fact an **Operator** can be shown and a test can wait on.
 
 What one *unit* of that work is belongs to the Worker, and is not always one item: the Downstream sender's is "I have caught up with what was handed to me", because a delivery waiting out a retry is owed by nobody — and a Worker that stayed non-idle through a peer's outage would make "this Instance has settled" unanswerable for as long as the outage lasted. The **Webhook** sender is the same Worker shape drained by the same code (`crate::delivery`): the two differ in what one delivery *is*, not in how a queue is drained.
 _Avoid_: job, task, background thread, daemon (a **Service** is the operating system's).

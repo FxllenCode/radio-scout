@@ -43,6 +43,7 @@ use sea_orm::{
 };
 
 use crate::AppState;
+use crate::activity::{Axis, Grain, Series};
 use crate::call::{CallDetail, CallId, Emission, StoredCall};
 use crate::db::entities::{
     call, call_frequency, call_patch, call_unit, group, site, system, tag, talkgroup,
@@ -500,6 +501,122 @@ async fn search_rows<C: ConnectionTrait>(
 /// paginator reports and the client uses to size its page controls.
 async fn count<C: ConnectionTrait>(db: &C, filters: &Filters) -> Result<u64, DbErr> {
     filtered(filters).count(db).await
+}
+
+// ---------------------------------------------------------------------------
+// How busy the Archive was (#62, spec US 34–35)
+// ---------------------------------------------------------------------------
+
+/// The range a series covers when the filters match nothing at all and the
+/// caller named no bounds of their own.
+///
+/// A day, because that is what a Listener means by "recently" — the same
+/// reading [`crate::catalog::ACTIVITY_WINDOW_MS`] takes, kept separate because
+/// that one bounds a *query* and this one only decides what an empty chart is
+/// labelled. Answering with an axis rather than with nothing is deliberate:
+/// every consumer would otherwise need an arm for a series with no buckets in
+/// it, to draw the same flat nothing this draws.
+const EMPTY_SPAN_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// One bucket of a grouped activity query, as the database answers it.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct ActivityBucket {
+    bucket: i64,
+    calls: i64,
+}
+
+/// The extent of a filtered search, when a bound has to be discovered rather
+/// than given.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct Extent {
+    first_ms: Option<i64>,
+    last_ms: Option<i64>,
+}
+
+/// **How busy the Archive was, bucket by bucket** (#62, spec US 34–35) — the
+/// read behind `GET /api/calls/activity`.
+///
+/// The same [`Filters`] the page and its total are built from, answered as
+/// counts instead of rows. That is the whole design: a density ribbon drawn
+/// over search results has to describe *those* results, and the only way to be
+/// sure of it is for the two to be one filter rather than two that agree today.
+/// It is also what makes this the per-Talkgroup activity chart — a chart of one
+/// channel is this with a Talkgroup filter set — and what #63's DVR will read
+/// its timeline from.
+///
+/// **The axis is resolved before the aggregate, and only then.** A search that
+/// names both bounds has said where its axis is, and costs one statement; a
+/// search that names one or neither costs a second to ask the Archive how far
+/// it reaches under those filters. Deriving it that way rather than always
+/// charting "the last day" is what makes the ribbon describe the search instead
+/// of describing the clock.
+pub async fn call_activity<C: ConnectionTrait>(
+    db: &C,
+    search: &CallSearch,
+    grain: Grain,
+    now_ms: i64,
+) -> Result<Series, DbErr> {
+    let filters = Filters::resolve(db, search).await?;
+    let axis = axis_over(db, &filters, grain, now_ms).await?;
+
+    // Bounded to the axis explicitly, rather than trusting the search's own
+    // `after`/`before` to have done it. Two things rest on it: no row can
+    // produce a bucket index off the end of the array, and every offset the
+    // division sees is non-negative — which is what makes truncating and
+    // flooring the same operation, and so what makes the two dialects agree
+    // (`crate::activity`).
+    let rows = CallQuery::new()
+        .filtered_by(&filters)
+        .and_where(call::Column::CallAtMs.gte(axis.from_ms()))
+        .and_where(call::Column::CallAtMs.lt(axis.to_ms()))
+        .grouped()
+        .column_as(
+            crate::activity::bucket_expr(call::Column::CallAtMs, &axis),
+            "bucket",
+        )
+        .column_as(call::Column::Id.count(), "calls")
+        .group_by(crate::activity::bucket_expr(call::Column::CallAtMs, &axis))
+        .into_model::<ActivityBucket>()
+        .all(db)
+        .await?;
+
+    Ok(axis.series(rows.into_iter().map(|row| (row.bucket, row.calls))))
+}
+
+/// Where a series' axis sits: what the search asked for, else how far the
+/// Archive reaches under it, else the last day.
+///
+/// The second statement is issued **only when a bound is missing**, which is
+/// why this is a function and not two lines inside the aggregate: the dated
+/// search — a preset, a heatmap, a tapped bucket — is the common one, and it
+/// should not pay to be told what it already said.
+async fn axis_over<C: ConnectionTrait>(
+    db: &C,
+    filters: &Filters,
+    grain: Grain,
+    now_ms: i64,
+) -> Result<Axis, DbErr> {
+    let search = &filters.search;
+    if let (Some(after), Some(before)) = (search.after_ms, search.before_ms) {
+        return Ok(Axis::over(after, before, grain));
+    }
+
+    let extent = CallQuery::new()
+        .filtered_by(filters)
+        .grouped()
+        .column_as(call::Column::CallAtMs.min(), "first_ms")
+        .column_as(call::Column::CallAtMs.max(), "last_ms")
+        .into_model::<Extent>()
+        .one(db)
+        .await?
+        .and_then(|extent| Some((extent.first_ms?, extent.last_ms?)));
+
+    let (first_ms, last_ms) = extent.unwrap_or((now_ms - EMPTY_SPAN_MS + 1, now_ms));
+    Ok(Axis::over(
+        search.after_ms.unwrap_or(first_ms),
+        search.before_ms.unwrap_or(last_ms),
+        grain,
+    ))
 }
 
 /// The Calls a reconnecting Listener missed — everything emitted after `since`,
@@ -1523,6 +1640,31 @@ fn parse_ids(raw: Option<&str>) -> Result<Vec<CallId>, Reason> {
         )));
     }
     Ok(ids)
+}
+
+/// `GET /api/calls/activity` — how busy the Archive was under this search
+/// (#62, spec US 34–35).
+///
+/// Every filter `GET /api/calls` takes, read by the same parser, so the ribbon
+/// a Listener sees above their results is a picture of *those* results and not
+/// of a search that merely resembles them. `sort`, `limit` and `offset` are
+/// read and ignored: a window into a page says nothing about how many Calls
+/// there were, and refusing them would mean the client stripping three keys off
+/// the object it already has in hand.
+///
+/// The grain rides beside them — `bucketMs` for a caller that needs an exact
+/// width (the hour-by-day heatmap), `buckets` for one that only knows how wide
+/// its chart is (the ribbon).
+pub async fn activity(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Series, Failure> {
+    let search = parse_search(&params)?;
+    let grain = crate::activity::parse_grain(&params)?;
+
+    call_activity(&state.db, &search, grain, state.clock.now_ms())
+        .await
+        .map_err(Stage::LoadActivity.failed())
 }
 
 /// `GET /api/call/{id}` — one Call, with everything the recorder said about it

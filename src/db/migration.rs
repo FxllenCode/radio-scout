@@ -8,8 +8,8 @@ use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
-    downstream_delivery, group, log_event, site, system, tag, talkgroup, talkgroup_group,
-    talkgroup_ref, tone_profile, unit, unit_ref, webhook, webhook_delivery,
+    downstream_delivery, group, listener_sample, log_event, site, system, tag, talkgroup,
+    talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook, webhook_delivery,
 };
 
 pub struct Migrator;
@@ -35,6 +35,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0015_webhooks::Migration),
             Box::new(m0016_tone_profiles::Migration),
             Box::new(m0017_quiet_spans::Migration),
+            Box::new(m0018_listener_samples::Migration),
         ]
     }
 }
@@ -1773,6 +1774,57 @@ mod m0017_quiet_spans {
                     .await?;
             }
             Ok(())
+        }
+    }
+}
+
+/// Listener counts over time (#62, spec US 41).
+///
+/// A table of its own rather than a column anywhere, because what is being
+/// recorded is not a property of anything the Archive already holds — it is the
+/// Instance's own audience, sampled. Three columns and no more: ADR-0011 rule 5
+/// forbids accumulating a record of *who* listened, and a count is what an
+/// Operator actually wants ("were there twenty people on at the fire?").
+///
+/// Unguarded `create_table`, unlike the column-adding migrations above:
+/// `m0001_init` names the tables it creates, so this one has never existed on
+/// any database and cannot already be there. `m0007_logs` is the precedent.
+///
+/// The index is what both readers need — the bucketed chart, which bounds on
+/// `at_ms`, and the retention sweep, which deletes below a cutoff oldest-first.
+mod m0018_listener_samples {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0018_listener_samples"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(listener_sample::Entity))
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_listener_samples_time")
+                        .table(listener_sample::Entity)
+                        .col(listener_sample::Column::AtMs)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(listener_sample::Entity).to_owned())
+                .await
         }
     }
 }

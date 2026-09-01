@@ -14,6 +14,7 @@ pub mod call_unit;
 pub mod downstream;
 pub mod downstream_delivery;
 pub mod group;
+pub mod listener_sample;
 pub mod log_event;
 pub mod site;
 pub mod system;

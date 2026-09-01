@@ -81,6 +81,14 @@ pub struct RetentionConfig {
     /// a month of audio is not — and an operator keeping Calls forever
     /// (`days = 0`) must still not accumulate an unbounded logs table.
     pub log_days: u32,
+    /// Prune listener-count samples (#62) older than this many days. `0` keeps
+    /// them forever, matching [`RetentionConfig::days`]'s reading.
+    ///
+    /// Its own window again, and longer than the archive's for
+    /// [`RetentionConfig::log_days`]'s reason twice over: a sample is sixteen
+    /// bytes where a Call is a megabyte of audio, and "was last winter busier
+    /// than this one" is a question about a period whose audio went months ago.
+    pub listener_days: u32,
     /// How often [`Sweeper`]'s background task runs a [`sweep`]. Zero is read as
     /// "unset" and falls back to the default cadence.
     #[serde(rename = "interval_secs", with = "crate::config::secs")]
@@ -106,6 +114,10 @@ impl Default for RetentionConfig {
             // the question they answer ("when did my recorder stop?") is often
             // asked about a period whose audio has already been pruned.
             log_days: 30,
+            // A quarter, so a season is comparable with the one before it — the
+            // shape of the question this table exists to answer. Still under
+            // 130,000 rows at the default cadence.
+            listener_days: 90,
             interval: DEFAULT_INTERVAL,
             batch_size: 500,
             orphan_grace: Duration::from_secs(3600),
@@ -123,6 +135,12 @@ impl RetentionConfig {
     /// The same, for stored log events and [`RetentionConfig::log_days`] (#30).
     pub fn log_cutoff_ms(&self, now_ms: i64) -> Option<i64> {
         cutoff_for(self.log_days, now_ms)
+    }
+
+    /// The same again, for listener samples and
+    /// [`RetentionConfig::listener_days`] (#62).
+    pub fn listener_cutoff_ms(&self, now_ms: i64) -> Option<i64> {
+        cutoff_for(self.listener_days, now_ms)
     }
 
     /// The cadence [`Sweeper`] will actually sweep on. A zero interval is read as
@@ -147,6 +165,7 @@ impl RetentionConfig {
             days = self.days,
             max_size_bytes = ?self.max_size_bytes,
             log_days = self.log_days,
+            listener_days = self.listener_days,
             interval_secs,
             batch_size = self.batch_size,
             "retention policy"
@@ -242,6 +261,8 @@ pub struct SweepReport {
     pub bytes_freed: u64,
     /// Stored log events pruned for being older than the log window (#30).
     pub logs_pruned: u64,
+    /// Listener samples pruned for being older than their own window (#62).
+    pub samples_pruned: u64,
     /// Objects whose delete failed. The row is already gone, so the Call is
     /// pruned as far as listeners are concerned; the object is now an orphan and
     /// a later sweep retries it. Counted rather than fatal so one unhappy object
@@ -352,6 +373,19 @@ pub async fn sweep(
                 break;
             }
             report.logs_pruned += pruned;
+        }
+    }
+
+    // Listener counts (#62), on the same terms as the logs above: its own
+    // window, a row and never an object.
+    if let Some(cutoff_ms) = config.listener_cutoff_ms(now_ms) {
+        loop {
+            let pruned =
+                repo::delete_listener_samples_older_than(db, cutoff_ms, config.batch_size).await?;
+            if pruned == 0 {
+                break;
+            }
+            report.samples_pruned += pruned;
         }
     }
 
@@ -476,6 +510,7 @@ fn log_sweep(outcome: &Result<SweepReport, SweepError>) {
                 orphans = report.orphans,
                 bytes_freed = report.bytes_freed,
                 logs_pruned = report.logs_pruned,
+                samples_pruned = report.samples_pruned,
                 // Not zero means audio is still on disk that nothing points at;
                 // a later sweep retries it, but an operator should know.
                 object_errors = report.object_errors,
@@ -856,6 +891,42 @@ mod tests {
         assert_eq!(stored_log_count(&db).await, 3);
     }
 
+    /// `listener_days = 0` is "keep forever" too — the third window, and the
+    /// third time the same reading has to hold, because an Operator who wants
+    /// an unbounded chart says so the same way everywhere.
+    #[tokio::test]
+    async fn a_zero_listener_window_keeps_every_sample() {
+        use crate::db::entities::listener_sample;
+        use sea_orm::{EntityTrait, PaginatorTrait, Set};
+
+        let (db, store, _tmp) = empty_archive().await;
+        listener_sample::Entity::insert(listener_sample::ActiveModel {
+            at_ms: Set(0),
+            listeners: Set(4),
+            ..Default::default()
+        })
+        .exec(&db)
+        .await
+        .expect("a sample");
+        let config = RetentionConfig {
+            listener_days: 0,
+            ..Default::default()
+        };
+
+        let report = sweep(&db, store.as_ref(), &config, NOW)
+            .await
+            .expect("sweep");
+
+        assert_eq!(report.samples_pruned, 0);
+        assert_eq!(
+            listener_sample::Entity::find()
+                .count(&db)
+                .await
+                .expect("count samples"),
+            1
+        );
+    }
+
     /// Pruning is batched like the archive's, so a Pi that has been logging for
     /// a month never holds one write lock for the whole delete.
     #[tokio::test]
@@ -903,6 +974,7 @@ mod tests {
             bytes_freed: 40,
             object_errors: 2,
             logs_pruned: 9,
+            samples_pruned: 4,
         }));
 
         let logged = capture.text();
@@ -915,6 +987,7 @@ mod tests {
             "bytes_freed=40",
             "object_errors=2",
             "logs_pruned=9",
+            "samples_pruned=4",
         ] {
             assert!(logged.contains(field), "{field} missing from:\n{logged}");
         }

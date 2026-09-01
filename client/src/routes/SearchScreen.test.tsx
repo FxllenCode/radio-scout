@@ -4,7 +4,7 @@ import { delay, http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { ARCHIVE, ORIGIN, archivePage } from '@/test/handlers'
+import { ARCHIVE, ORIGIN, activitySeries, archivePage } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderApp, routerProbe } from '@/test/utils'
 import { msToDateTimeLocal } from '@/lib/archive'
@@ -1585,5 +1585,207 @@ describe('SearchScreen — sending a link (#61, spec US 30)', () => {
     await user.click(screen.getByRole('button', { name: 'Copy link to this search' }))
 
     expect(await screen.findByText(/could not copy/i)).toBeInTheDocument()
+  })
+})
+
+describe('SearchScreen — the density ribbon and the heatmap (#62, spec US 34–35)', () => {
+  /** The ribbon, once the aggregate has landed. */
+  const ribbon = () => screen.findByTestId('density-ribbon')
+
+  /** Every `/api/calls/activity` query string the screen sent, in order. */
+  let activity: string[] = []
+
+  /**
+   * An archive spread across `total` hours, newest first.
+   *
+   * [`pagedArchive`] stamps every row with the same instant, which is fine for
+   * paging and useless here: a ribbon over one instant is a single bucket, and
+   * every jump would be a jump to where the Listener already is.
+   */
+  function spreadArchive(total = 51) {
+    const rows = Array.from({ length: total }, (_, index) => ({
+      ...ARCHIVE[0],
+      id: 2000 + index,
+      timestamp: Date.parse('2026-07-25T14:00:00') - index * 3_600_000,
+      audioUrl: `/api/call/${2000 + index}/audio`,
+    }))
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) => {
+        const url = new URL(request.url)
+        searches.push(url.search)
+        return HttpResponse.json(archivePage(url, rows))
+      }),
+      http.get(`${ORIGIN}/api/calls/activity`, ({ request }) => {
+        const url = new URL(request.url)
+        activity.push(url.search)
+        return HttpResponse.json(activitySeries(url, rows))
+      }),
+    )
+    return rows
+  }
+
+  beforeEach(() => {
+    activity = []
+    server.use(
+      http.get(`${ORIGIN}/api/calls/activity`, ({ request }) => {
+        const url = new URL(request.url)
+        activity.push(url.search)
+        return HttpResponse.json(activitySeries(url))
+      }),
+    )
+  })
+
+  /**
+   * **The bars describe the results above them.** That is the ribbon's one
+   * claim, and it is only true because both come from the same filters — so
+   * the request is asserted to carry them.
+   */
+  it('asks for the activity of the search that is on screen', async () => {
+    renderApp('/search?tag=Fire&system=100')
+    await ribbon()
+
+    const asked = new URLSearchParams(activity.at(-1))
+    expect(asked.get('tag')).toBe('Fire')
+    expect(asked.get('system')).toBe('100')
+    // ...and never the window, which is what keeps a page turn from refetching
+    // the whole aggregate.
+    expect(asked.get('offset')).toBeNull()
+    expect(asked.get('limit')).toBeNull()
+  })
+
+  it('draws a bar for every bucket the server answered with', async () => {
+    renderApp('/search')
+
+    const drawn = await ribbon()
+    const series = activitySeries(
+      new URL(`${ORIGIN}/api/calls/activity${activity.at(-1)}`),
+    )
+    expect(drawn.querySelectorAll('span')).toHaveLength(series.values.length)
+  })
+
+  /** Turning a page must not re-issue the aggregate: it is a second grouped
+   *  query over the whole filtered archive, and paying for one per page turn
+   *  is exactly what a Pi cannot afford. */
+  it('does not refetch the activity when the window moves', async () => {
+    const user = userEvent.setup()
+    spreadArchive()
+    renderApp('/search')
+    await ribbon()
+    const asked = activity.length
+
+    await user.click(await screen.findByRole('button', { name: 'Next page' }))
+    await screen.findByText('51–51 of 51')
+
+    expect(activity).toHaveLength(asked)
+  })
+
+  /**
+   * **Jumping is a window move, not a filter change** — the search in the URL
+   * is untouched, so a **Run** that is walking keeps walking (#89).
+   */
+  it('moves the window without touching the search', async () => {
+    const user = userEvent.setup()
+    spreadArchive()
+    renderApp('/search?tag=Fire')
+    const drawn = await ribbon()
+
+    // Home is the oldest bucket; newest-first results put it at the far end.
+    drawn.focus()
+    await user.keyboard('{Home}')
+
+    await waitFor(() => expect(routerProbe.location).toMatch(/offset=/))
+    expect(routerProbe.location).toContain('tag=Fire')
+    expect(lastSearch().get('offset')).not.toBe('0')
+  })
+
+  /** The other end of the same control: End is the newest bucket, which is
+   *  page one — so a Listener can always get back. */
+  it('goes back to the first page from the newest end', async () => {
+    const user = userEvent.setup()
+    spreadArchive()
+    renderApp('/search?offset=50')
+    const drawn = await ribbon()
+    await screen.findByText('51–51 of 51')
+
+    drawn.focus()
+    await user.keyboard('{End}')
+
+    await waitFor(() => expect(lastSearch().get('offset')).toBe('0'))
+    expect(routerProbe.location).not.toContain('offset')
+  })
+
+  /** A drag: press somewhere along the ribbon and the window follows the
+   *  pointer, which is what "drag/jump-to-date" asks for. */
+  it('follows a pointer dragged along it', async () => {
+    spreadArchive()
+    const drawn = await (async () => {
+      renderApp('/search')
+      return ribbon()
+    })()
+    drawn.getBoundingClientRect = () =>
+      ({ left: 0, width: 100, top: 0, height: 40 }) as DOMRect
+    drawn.setPointerCapture = () => {}
+
+    fireEvent.pointerDown(drawn, { clientX: 2, pointerId: 1 })
+
+    await waitFor(() => expect(lastSearch().get('offset')).not.toBe(null))
+  })
+
+  /** Nothing to draw is nothing drawn: an empty ribbon over "no calls match
+   *  these filters" says nothing the sentence below it does not. */
+  it('is absent when the search found nothing', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, () =>
+        HttpResponse.json({ results: [], count: 0, limit: 50, offset: 0, hasMore: false }),
+      ),
+      http.get(`${ORIGIN}/api/calls/activity`, () =>
+        HttpResponse.json({ fromMs: 0, toMs: 1000, bucketMs: 1000, values: [0] }),
+      ),
+    )
+    renderApp('/search')
+    await screen.findByText('No calls match these filters.')
+
+    expect(screen.queryByTestId('density-ribbon')).toBeNull()
+  })
+
+  /**
+   * The heatmap is the second view of the same search, and it is **not**
+   * fetched until somebody looks at it — a chart nobody opened is a round trip
+   * nobody asked for.
+   */
+  it('fetches the hourly buckets only when the heatmap is opened', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    await ribbon()
+    expect(activity.some((query) => query.includes('bucketMs'))).toBe(false)
+
+    await user.click(screen.getByRole('button', { name: 'By hour' }))
+
+    await screen.findByRole('table')
+    expect(activity.some((query) => query.includes('bucketMs=3600000'))).toBe(true)
+  })
+
+  it('shows a week of hours, in the listener`s own clock', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    await ribbon()
+
+    await user.click(screen.getByRole('button', { name: 'By hour' }))
+
+    const grid = await screen.findByRole('table')
+    expect(within(grid).getByRole('rowheader', { name: 'Mon' })).toBeInTheDocument()
+    expect(within(grid).getByRole('rowheader', { name: 'Sun' })).toBeInTheDocument()
+    // Seven day rows plus the hour header.
+    expect(within(grid).getAllByRole('row')).toHaveLength(8)
+  })
+
+  it('has no accessibility violations with the charts on screen', async () => {
+    const user = userEvent.setup()
+    const { container } = renderApp('/search')
+    await ribbon()
+    await user.click(screen.getByRole('button', { name: 'By hour' }))
+    await screen.findByRole('table')
+
+    expect(await axe(container)).toHaveNoViolations()
   })
 })

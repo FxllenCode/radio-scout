@@ -62,6 +62,7 @@ use crate::blob::{Backend, Storage, StorageConfig};
 use crate::downstream::DownstreamConfig;
 use crate::enhance::{EnhancementConfig, Output};
 use crate::ingest::IngestConfig;
+use crate::listeners::ListenerConfig;
 use crate::logsink;
 use crate::mining::MiningConfig;
 use crate::observability::{self, LogConfig};
@@ -409,6 +410,7 @@ pub struct Config {
     pub webhook: WebhookConfig,
     pub tone: ToneConfig,
     pub quiet: QuietConfig,
+    pub listeners: ListenerConfig,
     pub log: LogConfig,
 }
 
@@ -1110,6 +1112,38 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "listeners.enabled",
+        var: "RADIO_SCOUT_LISTENERS_ENABLED",
+        expected: "true or false",
+        // `false`, because recording is on by default and switching it off is
+        // the only reason to write this variable at all.
+        example: "false",
+        set: |setting, config, value| {
+            config.listeners.enabled = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "listeners.interval_secs",
+        var: "RADIO_SCOUT_LISTENERS_INTERVAL_SECS",
+        expected: "a number of seconds",
+        example: "300",
+        set: |setting, config, value| {
+            config.listeners.interval = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "retention.listener_days",
+        var: "RADIO_SCOUT_RETENTION_LISTENER_DAYS",
+        expected: "a number of days",
+        example: "30",
+        set: |setting, config, value| {
+            config.retention.listener_days = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
         key: "webhook.timeout_secs",
         var: "RADIO_SCOUT_WEBHOOK_TIMEOUT_SECS",
         expected: "a number of seconds",
@@ -1528,6 +1562,12 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # the question they answer is often about a day whose audio has already gone.
 # log_days = 30
 
+# Prune listener-count samples (the [listeners] section below) older than this
+# many days. 0 keeps them forever. Longer again than the two above: a sample is
+# sixteen bytes, and "was last winter busier than this one" is a question about
+# a period whose audio went months ago.
+# listener_days = 90
+
 # How often the sweeper runs, how many Calls it deletes per batch (a small
 # batch keeps each write-lock short on a Pi), and how long an audio object with
 # no Call row is left alone before it is reclaimed. The same sweep prunes logs.
@@ -1742,6 +1782,23 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # arrived as and are not scanned, which is logged; a listener catching up on one
 # of those hears it at the raised rate, untrimmed.
 # queue_depth = 512
+
+[listeners]
+# Listener counts over time (#62): how many people were connected, written down
+# every so often so that "peak listeners, and when" is a chart rather than a
+# guess. It records *counts and nothing else* — no address, no session, no user
+# agent, and no per-talkgroup breakdown, because on a quiet channel that would be
+# a record of who was listening. See [retention] listener_days for how long the
+# rows are kept.
+#
+# On by default, because history cannot be recovered afterwards: an operator who
+# has to find a setting first has already lost whatever happened before they
+# found it. Turn it off if you would rather keep nothing.
+# enabled = true
+
+# How often to write a row. One a minute is 1,440 rows a day, which is nothing;
+# raise it if you are on very constrained storage and a coarser chart will do.
+# interval_secs = 60
 
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a

@@ -127,10 +127,16 @@ stages! {
     LoadCallDetail => "load-call-detail",
     /// One radio's history — where it talks, and since when (#47).
     LoadUnitHistory => "load-unit-history",
+    /// How busy the Archive was, bucket by bucket (#62) — the density ribbon
+    /// and the hour-by-day heatmap.
+    LoadActivity => "load-activity",
     /// Where a window of queued Calls is quiet, for **Catch-up** (#59).
     LoadQuietSpans => "load-quiet-spans",
     /// The Systems and Talkgroups a listener can select.
     LoadCatalog => "load-catalog",
+    /// Peak Listeners over time (#62) — the one chart behind the admin session,
+    /// because an Instance's audience is the Operator's own business.
+    LoadListenerHistory => "load-listener-history",
     // -- The admin surface -------------------------------------------------
     /// One page of the operator log (#30).
     SearchLogs => "search-logs",

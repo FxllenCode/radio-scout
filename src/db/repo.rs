@@ -28,8 +28,8 @@ use crate::blob::StoredAudio;
 use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
-    downstream_delivery, group, log_event, site, system, tag, talkgroup, talkgroup_group,
-    talkgroup_ref, tone_profile, unit, unit_ref, webhook, webhook_delivery,
+    downstream_delivery, group, listener_sample, log_event, site, system, tag, talkgroup,
+    talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook, webhook_delivery,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -3126,6 +3126,36 @@ pub async fn delete_logs_older_than<C: ConnectionTrait>(
     }
     Ok(log_event::Entity::delete_many()
         .filter(log_event::Column::Id.is_in(ids))
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// Delete up to `limit` listener samples older than `cutoff_ms`, returning how
+/// many went — one page of retention's listener prune (#62).
+///
+/// [`delete_logs_older_than`]'s shape and its reasons: a dense table paged so
+/// that no one `DELETE` holds a SQLite write lock over a quarter of rows, and
+/// `limit = 0` deleting nothing rather than spinning.
+pub async fn delete_listener_samples_older_than<C: ConnectionTrait>(
+    db: &C,
+    cutoff_ms: i64,
+    limit: u64,
+) -> Result<u64, DbErr> {
+    let ids: Vec<i64> = listener_sample::Entity::find()
+        .select_only()
+        .column(listener_sample::Column::Id)
+        .filter(listener_sample::Column::AtMs.lt(cutoff_ms))
+        .order_by_asc(listener_sample::Column::Id)
+        .limit(limit)
+        .into_tuple::<i64>()
+        .all(db)
+        .await?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    Ok(listener_sample::Entity::delete_many()
+        .filter(listener_sample::Column::Id.is_in(ids))
         .exec(db)
         .await?
         .rows_affected)

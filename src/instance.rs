@@ -630,6 +630,21 @@ async fn assemble(
     // their hardware does not do this, and nothing can change it without a
     // restart.
     running.extend(crate::quiet::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
+    // Listener counts (#62), the only Worker here that reads nothing an ingest
+    // produced: it writes down how many people were connected, so an Operator
+    // can be shown peaks with timestamps rather than asked to guess. Counts and
+    // nothing else, which is what keeps ADR-0011 rule 5 true of a feature whose
+    // obvious shape would break it.
+    running.extend(
+        crate::listeners::Sampler::new(
+            db.clone(),
+            state.listeners.clone(),
+            config.listeners.clone(),
+            parts.clock,
+        )
+        .start()
+        .map(|worker| workers.adopt(worker)),
+    );
     let app = build_app(state.clone());
 
     let bind = parts

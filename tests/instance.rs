@@ -392,7 +392,7 @@ async fn stopping_an_instance_stops_and_joins_every_worker() {
         .iter()
         .map(|reading| reading.name)
         .collect();
-    assert_eq!(names.len(), 8, "all eight Workers are running: {names:?}");
+    assert_eq!(names.len(), 9, "all nine Workers are running: {names:?}");
 
     instance.stop().await;
 

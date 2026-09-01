@@ -631,6 +631,191 @@ async fn blank_filter_values_mean_no_filter() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// How busy the Archive was (#62, spec US 34–35)
+// ---------------------------------------------------------------------------
+
+/// The ribbon over a search is a picture of *that* search, so the bars have to
+/// add up to the number of results above them — the one claim a density chart
+/// makes and the only one that can be wrong without looking wrong.
+#[tokio::test]
+async fn the_bars_of_a_density_series_add_up_to_the_searchs_own_total() {
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+
+    for query in ["", "?tag=Fire", "?system=100", "?group=Emergency"] {
+        let page = app.get_json(&format!("/api/calls{query}")).await;
+        let series = app.get_json(&format!("/api/calls/activity{query}")).await;
+
+        let total: i64 = series["values"]
+            .as_array()
+            .expect("values")
+            .iter()
+            .map(|v| v.as_i64().expect("a count"))
+            .sum();
+        assert_eq!(
+            total,
+            page["count"].as_i64().expect("count"),
+            "GET /api/calls/activity{query}"
+        );
+    }
+}
+
+/// A named width is honoured exactly, because the heatmap folds these buckets
+/// into local hours and that is only right when a bucket really is an hour.
+#[tokio::test]
+async fn a_named_bucket_width_is_what_comes_back() {
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+
+    let series = app
+        .get_json("/api/calls/activity?after=1000&before=4999&bucketMs=1000")
+        .await;
+
+    assert_eq!(series["fromMs"], 1000);
+    assert_eq!(series["toMs"], 5000);
+    assert_eq!(series["bucketMs"], 1000);
+    assert_eq!(series["values"], serde_json::json!([1, 1, 1, 1]));
+}
+
+/// **A dated search does not pay to be told where it is.** The extra statement
+/// exists to discover an axis, so a search that named both bounds — a preset, a
+/// heatmap, a tapped bucket — must not issue it.
+#[tokio::test]
+async fn a_dated_series_costs_one_statement_fewer_than_an_undated_one() {
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+    app.settle().await;
+
+    let before = app.statements_issued();
+    app.get_json("/api/calls/activity?after=1000&before=4999")
+        .await;
+    let dated = app.statements_issued() - before;
+
+    let before = app.statements_issued();
+    app.get_json("/api/calls/activity").await;
+    let undated = app.statements_issued() - before;
+
+    assert!(dated > 0, "a series reads the archive");
+    assert_eq!(
+        undated,
+        dated + 1,
+        "an undated series pays exactly one statement to find its own extent"
+    );
+}
+
+/// The cost does not grow with the archive: a grouped count is one statement
+/// whether it folds four Calls or four hundred.
+#[tokio::test]
+async fn a_density_series_costs_the_same_however_many_calls_it_folds() {
+    assert_eq!(
+        density_statements(3).await,
+        density_statements(40).await,
+        "a series is grouped in the database, never walked in Rust"
+    );
+}
+
+async fn density_statements(calls: i64) -> u64 {
+    let app = TestApp::spawn().await;
+    for n in 0..calls {
+        seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &["Emergency"], 1000 + n).await;
+    }
+    app.settle().await;
+
+    let before = app.statements_issued();
+    let series = app.get_json("/api/calls/activity").await;
+    assert!(!series["values"].as_array().expect("values").is_empty());
+    app.statements_issued() - before
+}
+
+/// An empty archive answers with an axis carrying nothing, rather than with an
+/// empty array every consumer would need an arm for.
+#[tokio::test]
+async fn a_density_series_over_an_empty_archive_is_a_flat_one() {
+    let app = TestApp::spawn().await;
+
+    let series = app.get_json("/api/calls/activity").await;
+
+    let values = series["values"].as_array().expect("values");
+    assert!(!values.is_empty(), "an axis, even with nothing on it");
+    assert!(values.iter().all(|v| v == 0));
+    assert!(series["toMs"].as_i64().expect("toMs") > series["fromMs"].as_i64().expect("fromMs"));
+}
+
+/// A bar count is what a ribbon really asks for — it knows how wide it is and
+/// not how long the search's range is — and it is honoured.
+#[tokio::test]
+async fn a_named_bar_count_is_what_comes_back() {
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+
+    let series = app.get_json("/api/calls/activity?buckets=8").await;
+
+    let values = series["values"].as_array().expect("values");
+    assert!(
+        !values.is_empty() && values.len() <= 8,
+        "{} bars",
+        values.len()
+    );
+}
+
+/// ...and a count nobody could draw is bounded rather than refused, the same
+/// bargain a page size gets.
+#[tokio::test]
+async fn an_unreasonable_bar_count_is_bounded() {
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+
+    let series = app
+        .get_json("/api/calls/activity?after=0&before=100000000&buckets=99999")
+        .await;
+
+    let buckets = series["values"].as_array().expect("values").len();
+    assert!(buckets <= radio_scout::activity::MAX_BUCKETS, "{buckets}");
+}
+
+/// A grain finer than the response may carry is widened, and the response says
+/// which width it used — so a client draws bars it can label rather than being
+/// refused or, worse, mislabeling them.
+#[tokio::test]
+async fn an_impossibly_fine_grain_is_widened_and_reported() {
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+
+    let series = app
+        .get_json("/api/calls/activity?after=0&before=100000000&bucketMs=1")
+        .await;
+
+    let buckets = series["values"].as_array().expect("values").len();
+    assert!(buckets <= radio_scout::activity::MAX_BUCKETS, "{buckets}");
+    assert!(
+        series["bucketMs"].as_i64().expect("bucketMs") > 1,
+        "widened, and the response says so"
+    );
+}
+
+/// The same parser as the search page, so the same typo is refused the same way
+/// — and the grain gets the same treatment.
+#[tokio::test]
+async fn malformed_activity_parameters_are_rejected_with_a_reason() {
+    let app = TestApp::spawn().await;
+
+    for (query, expect) in [
+        ("?system=abc", "system"),
+        ("?after=not-a-date", "after"),
+        ("?bucketMs=wide", "bucketMs"),
+        ("?buckets=-4", "buckets"),
+    ] {
+        let resp = app.get(&format!("/api/calls/activity{query}")).await;
+        assert_eq!(resp.status(), 400, "GET /api/calls/activity{query}");
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains(expect),
+            "GET /api/calls/activity{query} -> {body:?} should name {expect:?}"
+        );
+    }
+}
+
 /// A limit past the ceiling is clamped rather than refused, and the response
 /// reports the limit actually applied so the client's paging stays correct.
 #[tokio::test]

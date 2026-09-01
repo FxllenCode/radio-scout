@@ -12,6 +12,7 @@ import { AdminScreen } from '@/routes/admin/AdminScreen'
 import { AdminTalkgroupsScreen } from '@/routes/admin/AdminTalkgroupsScreen'
 import { ApiKeysScreen } from '@/routes/admin/ApiKeysScreen'
 import { DownstreamsScreen } from '@/routes/admin/DownstreamsScreen'
+import { ListenersScreen } from '@/routes/admin/ListenersScreen'
 import { WebhooksScreen } from '@/routes/admin/WebhooksScreen'
 import { GroupsScreen, TagsScreen } from '@/routes/admin/LabelsScreen'
 import { SystemsScreen } from '@/routes/admin/SystemsScreen'
@@ -58,6 +59,9 @@ export default function App() {
           element={<DownstreamsScreen />}
         />
         <Route path="settings/admin/webhooks" element={<WebhooksScreen />} />
+        {/* How many people have been listening (#62, spec US 41). Behind the
+            same gate as the rest: counts are the Operator's business. */}
+        <Route path="settings/admin/listeners" element={<ListenersScreen />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

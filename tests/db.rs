@@ -566,6 +566,92 @@ async fn run_search_suite(db: &Db) {
     assert_sort_and_count(db, a, b, c, d).await;
     assert_batched_call_view(db, a, b, c, d).await;
     assert_cascading_filter_options(db).await;
+    assert_activity_buckets(db).await;
+}
+
+/// **The bucket a Call falls in is the same number in SQL as it is in Rust**
+/// (#62).
+///
+/// `crate::activity` keeps that arithmetic written twice on purpose — the
+/// grouping has to happen in the database, and the client has to be able to
+/// place a bucket without asking again — so the only thing that can catch the
+/// two drifting is running one against the other. On both dialects, because
+/// integer division is precisely what a `GROUP BY` on a computed column rests
+/// on here: a dialect that rounded the other way would put every Call one
+/// bucket out and answer with a perfectly plausible chart.
+///
+/// The dataset is the search suite's: four Calls at 1000, 2000, 3000 and 4000.
+async fn assert_activity_buckets(db: &Db) {
+    use radio_scout::activity::{Axis, Grain};
+
+    // A bucket per second across the four, so which Call lands where is
+    // arithmetic anyone can check by reading the seed.
+    let dated = archive::CallSearch {
+        after_ms: Some(1000),
+        before_ms: Some(4999),
+        ..archive::CallSearch::default()
+    };
+    let series = archive::call_activity(db, &dated, Grain::Width(1000), NOW)
+        .await
+        .expect("a series");
+    assert_eq!(series.from_ms, 1000);
+    assert_eq!(series.to_ms, 5000);
+    assert_eq!(series.bucket_ms, 1000);
+    assert_eq!(series.values, vec![1, 1, 1, 1]);
+
+    // And SQL agrees with `Axis::index_of` about every one of them, which is
+    // the claim the module makes and cannot check on its own.
+    let axis = Axis::over(1000, 4999, Grain::Width(1000));
+    for (at_ms, bucket) in [(1000, 0), (2000, 1), (3000, 2), (4000, 3)] {
+        assert_eq!(axis.index_of(at_ms), Some(bucket));
+    }
+
+    // A wider bucket folds them together rather than losing them: the total is
+    // conserved, whatever the grain.
+    let coarse = archive::call_activity(db, &dated, Grain::Width(2000), NOW)
+        .await
+        .expect("a coarser series");
+    assert_eq!(coarse.values, vec![2, 2]);
+    assert_eq!(coarse.total(), series.total());
+
+    // The filters are the search's own, so a series describes exactly the rows
+    // its page would have carried — the property the ribbon rests on.
+    let tagged = archive::CallSearch {
+        tag_name: Some("Fire".into()),
+        ..dated.clone()
+    };
+    let tagged_series = archive::call_activity(db, &tagged, Grain::Width(1000), NOW)
+        .await
+        .expect("a filtered series");
+    assert_eq!(tagged_series.values, vec![1, 0, 1, 1]);
+    assert_eq!(
+        tagged_series.total() as u64,
+        page(db, &tagged).await.count,
+        "the bars add up to the total above them"
+    );
+
+    // With no bounds given the axis is the Archive's own extent under the
+    // filters — the ribbon over an undated search.
+    let undated = archive::CallSearch::default();
+    let whole = archive::call_activity(db, &undated, Grain::Count(4), NOW)
+        .await
+        .expect("an undiscovered axis");
+    assert_eq!(whole.from_ms, 1000, "the oldest Call under the filters");
+    assert!(whole.to_ms > 4000, "and past the newest");
+    assert_eq!(whole.total() as u64, page(db, &undated).await.count);
+
+    // A search matching nothing is a flat chart, not an error and not an empty
+    // array a client would have to have an arm for.
+    let nothing = archive::CallSearch {
+        system_ref: Some(999),
+        ..archive::CallSearch::default()
+    };
+    let empty = archive::call_activity(db, &nothing, Grain::Count(6), NOW)
+        .await
+        .expect("an empty series");
+    assert_eq!(empty.total(), 0);
+    assert!(!empty.values.is_empty(), "an axis, even with nothing on it");
+    assert!(empty.to_ms > empty.from_ms);
 }
 
 /// The dataset every search assertion below reads:

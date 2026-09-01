@@ -44,6 +44,11 @@ const SECTIONS = [
     hint: 'addresses that get your flagged calls',
   },
   {
+    to: '/settings/admin/listeners',
+    label: 'Listeners',
+    hint: 'how many people have been on',
+  },
+  {
     to: '/settings/logs',
     label: 'Logs',
     hint: 'what the server has been doing',

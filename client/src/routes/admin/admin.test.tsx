@@ -13,6 +13,7 @@ import { AdminTalkgroupsScreen } from './AdminTalkgroupsScreen'
 import { ApiKeysScreen } from './ApiKeysScreen'
 import { DownstreamsScreen } from './DownstreamsScreen'
 import { GroupsScreen, TagsScreen } from './LabelsScreen'
+import { ListenersScreen } from './ListenersScreen'
 import { SystemsScreen } from './SystemsScreen'
 import { UnitsScreen } from './UnitsScreen'
 import { WebhooksScreen } from './WebhooksScreen'
@@ -108,6 +109,7 @@ describe('the admin gate', () => {
       '/settings/admin/api-keys',
       '/settings/admin/downstreams',
       '/settings/admin/webhooks',
+      '/settings/admin/listeners',
       '/settings/logs',
     ])
   })
@@ -3255,6 +3257,113 @@ describe("a channel's tone profiles", () => {
 
     expect(
       await screen.findByText(/a tone profile needs at least one tone/),
+    ).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Listener counts (#62, spec US 41)
+// ---------------------------------------------------------------------------
+
+describe('listener history', () => {
+  const HOUR = 3_600_000
+
+  /** Every `/api/admin/listeners` query string the screen sent, in order. */
+  let asked: string[] = []
+
+  /** A peak-listener series, answered for whatever range was asked for. */
+  function serving(values: number[]) {
+    server.use(
+      http.get(`${ORIGIN}/api/admin/listeners`, ({ request }) => {
+        const url = new URL(request.url)
+        asked.push(url.search)
+        const bucketMs = Number(url.searchParams.get('bucketMs') ?? HOUR)
+        const fromMs = Number(url.searchParams.get('after') ?? 0)
+        return HttpResponse.json({
+          fromMs,
+          toMs: fromMs + values.length * bucketMs,
+          bucketMs,
+          values,
+        })
+      }),
+    )
+  }
+
+  beforeEach(() => {
+    asked = []
+  })
+
+  /** The headline spec US 41 asks for: peak listeners, with a timestamp — said
+   *  in a sentence rather than left for an Operator to squint at bars for. */
+  it('says how many were on at once, and when', async () => {
+    serving([0, 3, 9, 2])
+    signedIn(<ListenersScreen />)
+
+    expect(await screen.findByText(/Peak 9 listeners/)).toBeInTheDocument()
+  })
+
+  /** Nobody-ever is a different fact from a peak of zero, and reads
+   *  differently: an instance nobody has found has no peak to report. */
+  it('says so when nobody has listened', async () => {
+    serving([0, 0, 0])
+    signedIn(<ListenersScreen />)
+
+    expect(
+      await screen.findByText('Nobody has listened in this window.'),
+    ).toBeInTheDocument()
+  })
+
+  it('draws a bar per bucket', async () => {
+    serving([1, 2, 3, 4, 5])
+    signedIn(<ListenersScreen />)
+
+    const chart = await screen.findByRole('img', { name: /Peak listeners/ })
+    expect(chart.querySelectorAll('span')).toHaveLength(5)
+  })
+
+  /** Each range asks at its own grain, so the labels are never describing
+   *  buckets the server widened underneath them. */
+  it('asks at the grain of the range that was picked', async () => {
+    const user = userEvent.setup()
+    serving([1])
+    signedIn(<ListenersScreen />)
+    await screen.findByRole('img', { name: /Peak listeners/ })
+    expect(new URLSearchParams(asked.at(-1)).get('bucketMs')).toBe(String(HOUR))
+
+    await user.click(screen.getByRole('button', { name: '30 days' }))
+
+    await waitFor(() =>
+      expect(new URLSearchParams(asked.at(-1)).get('bucketMs')).toBe(
+        String(24 * HOUR),
+      ),
+    )
+  })
+
+  /** The gate is the screen's, not the endpoint's alone: a browser with no
+   *  session is shown the password form rather than an empty chart it would
+   *  read as "nobody has ever listened". */
+  it('is behind the admin session', async () => {
+    server.use(
+      http.get(
+        `${ORIGIN}/api/admin/session`,
+        () => new HttpResponse(null, { status: 401 }),
+      ),
+    )
+    renderWithProviders(<ListenersScreen />)
+
+    expect(
+      await screen.findByRole('button', { name: 'Sign in' }),
+    ).toBeInTheDocument()
+    expect(asked).toEqual([])
+  })
+
+  /** The one thing this screen must never grow. */
+  it('says what is and is not recorded', async () => {
+    serving([2])
+    signedIn(<ListenersScreen />)
+
+    expect(
+      await screen.findByText(/no addresses, no sessions/i),
     ).toBeInTheDocument()
   })
 })

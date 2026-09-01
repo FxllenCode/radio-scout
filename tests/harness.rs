@@ -920,8 +920,14 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // a roster: it looks at every Call, so what starts it is
             // `[quiet] enabled`, and it ships on.
             radio_scout::quiet::WORKER,
+            // ...and listener counting (#62), the one that reads nothing an
+            // ingest produced. Like quiet-span scanning it is a switch rather
+            // than a roster, and it ships on: history cannot be recovered
+            // afterwards, so an Operator who has to find a setting first has
+            // already lost what happened before they found it.
+            radio_scout::listeners::WORKER,
         ],
-        "the shipped default runs seven: enhancement is off, the rest are on"
+        "the shipped default runs eight: enhancement is off, the rest are on"
     );
 
     let mut app = app;
@@ -943,6 +949,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::webhook::WORKER,
             radio_scout::tone::WORKER,
             radio_scout::quiet::WORKER,
+            radio_scout::listeners::WORKER,
         ],
     );
 }
