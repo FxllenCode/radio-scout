@@ -856,6 +856,16 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "retention.listener_days",
+        var: "RADIO_SCOUT_RETENTION_LISTENER_DAYS",
+        expected: "a number of days",
+        example: "30",
+        set: |setting, config, value| {
+            config.retention.listener_days = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
         key: "retention.interval_secs",
         var: "RADIO_SCOUT_RETENTION_INTERVAL_SECS",
         expected: "a number of seconds",
@@ -1130,16 +1140,6 @@ pub const SETTINGS: &[Setting] = &[
         example: "300",
         set: |setting, config, value| {
             config.listeners.interval = Duration::from_secs(setting.parse(value)?);
-            Ok(())
-        },
-    },
-    Setting {
-        key: "retention.listener_days",
-        var: "RADIO_SCOUT_RETENTION_LISTENER_DAYS",
-        expected: "a number of days",
-        example: "30",
-        set: |setting, config, value| {
-            config.retention.listener_days = setting.parse(value)?;
             Ok(())
         },
     },

@@ -1,4 +1,4 @@
-import { DAY_LABELS, heatmapOf } from '@/lib/heatmap'
+import { DAY_LABELS, heatmapOf, isHourly } from '@/lib/heatmap'
 import type { Series } from '@/types'
 
 /**
@@ -16,6 +16,19 @@ import type { Series } from '@/types'
  * because the server has no idea what timezone the Listener is in.
  */
 export function ActivityHeatmap({ series }: { series: Series }) {
+  // The server widens a grain that would not fit its own bound and says so in
+  // the answer. Folding a widened series would attribute three hours of traffic
+  // to whichever hour it began in — a confidently wrong grid with nothing on
+  // screen to say so — so a range this build did not expect gets a sentence
+  // instead of a picture.
+  if (!isHourly(series))
+    return (
+      <p className="font-mono text-[11px] text-muted-foreground">
+        That range is too long to break into hours. Narrow the dates to see when
+        it is busy.
+      </p>
+    )
+
   const { cells, busiest } = heatmapOf(series)
 
   return (

@@ -1714,21 +1714,74 @@ describe('SearchScreen — the density ribbon and the heatmap (#62, spec US 34�
     expect(routerProbe.location).not.toContain('offset')
   })
 
-  /** A drag: press somewhere along the ribbon and the window follows the
-   *  pointer, which is what "drag/jump-to-date" asks for. */
-  it('follows a pointer dragged along it', async () => {
-    spreadArchive()
-    const drawn = await (async () => {
-      renderApp('/search')
-      return ribbon()
-    })()
+  /** A ribbon a test can drag: the element has no layout under jsdom, so it is
+   *  given one. */
+  async function draggable() {
+    const drawn = await ribbon()
     drawn.getBoundingClientRect = () =>
       ({ left: 0, width: 100, top: 0, height: 40 }) as DOMRect
     drawn.setPointerCapture = () => {}
+    return drawn
+  }
+
+  /**
+   * **A drag moves the marker; releasing moves the window.**
+   *
+   * The whole gesture, and the assertion that matters is the *middle* one: a
+   * ribbon that jumped live would issue a fresh page query for every bucket the
+   * thumb crossed — a slow drag across a hundred and twenty bars is a hundred
+   * and twenty searches, on the Pi this is written for.
+   */
+  it('moves the window when a drag ends, not while it is happening', async () => {
+    // Four pages deep, so a jump to the far end is a window move the URL can
+    // actually show: over one page every bucket is offset zero.
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await draggable()
+    const before = searches.length
+
+    fireEvent.pointerDown(drawn, { clientX: 98, pointerId: 1 })
+    fireEvent.pointerMove(drawn, { clientX: 50, pointerId: 1 })
+    fireEvent.pointerMove(drawn, { clientX: 2, pointerId: 1 })
+
+    expect(searches).toHaveLength(before)
+    expect(routerProbe.location).not.toContain('offset')
+
+    fireEvent.pointerUp(drawn, { clientX: 2, pointerId: 1 })
+
+    await waitFor(() => expect(routerProbe.location).toContain('offset='))
+  })
+
+  /** ...and the readout says where the drag is going, which is the only thing
+   *  on screen that makes "jump to date" a date rather than a guess. */
+  it('says which moment the thumb is over while dragging', async () => {
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await draggable()
+    const readout = () => screen.getByTestId('ribbon-at').textContent ?? ''
+    const instant = (text: string) => Date.parse(text.split(' · ')[0])
+    // The window starts at the newest page, so the marker starts at the newest
+    // end of the ribbon.
+    const newest = readout()
+
+    fireEvent.pointerDown(drawn, { clientX: 0, pointerId: 1 })
+
+    expect(readout()).not.toBe(newest)
+    expect(instant(readout())).toBeLessThan(instant(newest))
+    expect(readout()).toMatch(/calls?$/)
+  })
+
+  /** A pointer taken away — a browser claiming the gesture for a scroll — is
+   *  not a decision, so nothing moves. */
+  it('abandons a drag the browser cancels', async () => {
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await draggable()
 
     fireEvent.pointerDown(drawn, { clientX: 2, pointerId: 1 })
+    fireEvent.pointerCancel(drawn, { clientX: 2, pointerId: 1 })
 
-    await waitFor(() => expect(lastSearch().get('offset')).not.toBe(null))
+    expect(routerProbe.location).not.toContain('offset')
   })
 
   /** Nothing to draw is nothing drawn: an empty ribbon over "no calls match
@@ -1777,6 +1830,132 @@ describe('SearchScreen — the density ribbon and the heatmap (#62, spec US 34�
     expect(within(grid).getByRole('rowheader', { name: 'Sun' })).toBeInTheDocument()
     // Seven day rows plus the hour header.
     expect(within(grid).getAllByRole('row')).toHaveLength(8)
+  })
+
+  /** A pointer moving over the ribbon with no button down is somebody's thumb
+   *  passing by, not a scrub. */
+  it('ignores a pointer that is not dragging', async () => {
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await draggable()
+    const before = screen.getByTestId('ribbon-at').textContent
+
+    fireEvent.pointerMove(drawn, { clientX: 2, pointerId: 1 })
+    fireEvent.pointerUp(drawn, { clientX: 2, pointerId: 1 })
+
+    expect(screen.getByTestId('ribbon-at')).toHaveTextContent(before ?? '')
+    expect(routerProbe.location).not.toContain('offset')
+  })
+
+  /** An element with no layout — which is what a ribbon is before the browser
+   *  has measured it — has no coordinates to read a bucket out of, so a press
+   *  on it means nothing rather than `NaN`. */
+  it('reads nothing from a ribbon the browser has not laid out', async () => {
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await ribbon()
+    drawn.setPointerCapture = () => {}
+    const before = screen.getByTestId('ribbon-at').textContent
+
+    fireEvent.pointerDown(drawn, { clientX: 40, pointerId: 1 })
+    fireEvent.pointerUp(drawn, { clientX: 40, pointerId: 1 })
+
+    expect(screen.getByTestId('ribbon-at')).toHaveTextContent(before ?? '')
+    expect(routerProbe.location).not.toContain('offset')
+  })
+
+  /** Jumping to where you already are is not a navigation, so the address bar
+   *  does not gain an entry for it. */
+  it('does nothing when the jump is to the bucket already on screen', async () => {
+    const user = userEvent.setup()
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await ribbon()
+    const before = searches.length
+
+    drawn.focus()
+    // The window starts at the newest page, so End is already where it is.
+    await user.keyboard('{End}')
+
+    expect(searches).toHaveLength(before)
+    expect(routerProbe.location).not.toContain('offset')
+  })
+
+  /** Arrowing along it moves one bucket at a time — the ARIA slider contract,
+   *  so the ribbon is usable with no pointer at all. */
+  it('scrubs one bucket at a time with the arrow keys', async () => {
+    const user = userEvent.setup()
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await ribbon()
+    const at = () => Number(drawn.getAttribute('aria-valuenow'))
+    drawn.focus()
+    await user.keyboard('{Home}')
+    await waitFor(() => expect(at()).toBe(0))
+
+    await user.keyboard('{ArrowRight}{ArrowRight}')
+
+    // The thumb moves a bucket a press, and stays where it was put: the window
+    // is a page, so the offset behind it cannot represent a single bucket.
+    expect(at()).toBe(2)
+    await user.keyboard('{ArrowLeft}')
+    expect(at()).toBe(1)
+  })
+
+  /** ...and putting the ribbon down puts the thumb back on the window, so one
+   *  that nobody is touching always says where the Listener actually is. */
+  it('returns the thumb to the window when it loses focus', async () => {
+    const user = userEvent.setup()
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await ribbon()
+    const at = () => Number(drawn.getAttribute('aria-valuenow'))
+    drawn.focus()
+    await user.keyboard('{Home}')
+    expect(at()).toBe(0)
+
+    fireEvent.blur(drawn)
+
+    expect(at()).toBeGreaterThan(0)
+  })
+
+  /** Keys the ribbon does not use are left to the page — a slider that
+   *  swallowed Tab would trap a keyboard listener inside it. */
+  it('leaves keys it does not use alone', async () => {
+    const user = userEvent.setup()
+    spreadArchive(200)
+    renderApp('/search')
+    const drawn = await ribbon()
+
+    drawn.focus()
+    await user.keyboard('a')
+
+    expect(routerProbe.location).not.toContain('offset')
+  })
+
+  /** A range the server had to widen is a grid this could only draw wrongly —
+   *  three-hour totals filed under whichever hour they began in — so it says so
+   *  instead. */
+  it('refuses to draw a heatmap the server could not answer hourly', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get(`${ORIGIN}/api/calls/activity`, ({ request }) => {
+        const url = new URL(request.url)
+        const series = activitySeries(url)
+        return HttpResponse.json(
+          url.searchParams.has('bucketMs')
+            ? { ...series, bucketMs: 3 * 3_600_000 }
+            : series,
+        )
+      }),
+    )
+    renderApp('/search')
+    await ribbon()
+
+    await user.click(screen.getByRole('button', { name: 'By hour' }))
+
+    expect(await screen.findByText(/too long to break into hours/i)).toBeInTheDocument()
+    expect(screen.queryByRole('table')).toBeNull()
   })
 
   it('has no accessibility violations with the charts on screen', async () => {

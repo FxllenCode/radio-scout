@@ -1782,8 +1782,8 @@ mod m0017_quiet_spans {
 ///
 /// A table of its own rather than a column anywhere, because what is being
 /// recorded is not a property of anything the Archive already holds — it is the
-/// Instance's own audience, sampled. Three columns and no more: ADR-0011 rule 5
-/// forbids accumulating a record of *who* listened, and a count is what an
+/// Instance's own listener count, sampled. Three columns and no more: ADR-0011
+/// rule 5 forbids accumulating a record of *who* listened, and a count is what an
 /// Operator actually wants ("were there twenty people on at the fire?").
 ///
 /// Unguarded `create_table`, unlike the column-adding migrations above:

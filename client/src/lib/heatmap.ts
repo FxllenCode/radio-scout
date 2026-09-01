@@ -58,13 +58,45 @@ export interface Heatmap {
  * The range an hourly heatmap should ask for, given what the ribbon found.
  *
  * The most recent [`HEATMAP_DAYS`] of the search's own extent, or the whole of
- * it when that is shorter. `before` is inclusive, which is what the archive's
- * own `before` filter means, so this is handed straight to the request.
+ * it when that is shorter.
+ *
+ * **`after` is snapped back to a local hour, and that is the whole point of
+ * this function.** The server buckets from the origin it is *given* — nothing
+ * about `[from, from + 3600000)` makes it an hour of anybody's day — and the
+ * extent a ribbon reports is the oldest matching Call's exact millisecond. So
+ * asking with the extent verbatim produces cells that hold 09:37–10:37 and a
+ * grid labelled 09:00, shifted by an arbitrary sub-hour offset that nothing on
+ * screen could reveal. Snapping is what makes the label true.
+ *
+ * Built with `setMinutes(0, 0, 0)` rather than by rounding the instant, because
+ * a local hour boundary is not always a whole number of hours from UTC: a
+ * half-hour timezone would be thirty minutes out for every cell.
  */
 export function heatmapWindow(series: Series): { after: number; before: number } {
   const before = series.toMs - 1
-  const after = Math.max(series.fromMs, before - HEATMAP_DAYS * 24 * HOUR_MS + 1)
-  return { after, before }
+  const from = Math.max(series.fromMs, before - HEATMAP_DAYS * 24 * HOUR_MS + 1)
+  return { after: localHourStart(from), before }
+}
+
+/** The start of the local hour holding `at` — the origin an hourly bucket has
+ *  to run from for "Tuesday 09:00" to mean 09:00. */
+function localHourStart(at: number): number {
+  const start = new Date(at)
+  start.setMinutes(0, 0, 0)
+  return start.getTime()
+}
+
+/** Whether a series really is hourly, which is what [`heatmapOf`]'s fold needs
+ *  to be exact.
+ *
+ *  It can be false: the server widens a grain that would not fit its own bound
+ *  and says so in the answer, so a range wider than [`HEATMAP_DAYS`] — or a
+ *  server whose bound is lower than this build assumes — comes back coarser.
+ *  Checked rather than assumed, because folding three-hour totals into whichever
+ *  hour they began in draws a confidently wrong picture with nothing on screen
+ *  to say so. */
+export function isHourly(series: Series): boolean {
+  return series.bucketMs === HOUR_MS
 }
 
 /**

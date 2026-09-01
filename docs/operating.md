@@ -433,36 +433,7 @@ off, are never re-read: switching a feature on must not pull a county's worth of
 your disk at the next boot. `[quiet] queue_depth` is how many calls may be waiting to be scanned;
 past that they keep whatever they arrived as, which is logged.
 
-## Listener counts
-
-Settings → Admin → **Listeners** charts how many people have been connected, and when. It answers
-one question — *peak listeners, with a timestamp* — because that is the only question a record of
-counts can answer, and counts are all there is:
-
-```toml
-[listeners]
-enabled = true
-interval_secs = 60
-```
-
-Every minute the instance writes down the **highest number of listeners that were on at once**
-since the previous sample. A peak rather than a reading at the tick, so somebody who arrived and
-left inside one minute is still counted; a chart that quietly under-reported its own peaks would
-look exactly like one that did not.
-
-**Nothing identity-shaped is stored, and there is nowhere for it to go.** The table has three
-columns — a row id, an instant, and a number. No address, no session, no user agent, and
-deliberately no per-talkgroup breakdown: on a quiet channel with one listener, "who was on Fire
-Dispatch at 3am" is precisely the record this instance must not keep. It is the same rule that
-keeps a listener's IP out of the log above `debug`.
-
-It is **on by default**, because history cannot be recovered afterwards — an operator who has to
-find a setting first has already lost whatever happened before they found it. A day is 1,440 rows
-of a few bytes each. Turn it off if you would rather keep nothing, or raise `interval_secs` if a
-coarser chart will do. How long the rows survive is `[retention] listener_days` above.
-
-The chart is behind the admin password, unlike everything else a browser can read here. Listening
-is open; how many people take that up is yours.
+## Curating the catalog
 
 ### Tidying up talkgroup names
 
@@ -663,6 +634,37 @@ arriving too late to count.
 
 Every rejected copy leaves a line saying `reason=duplicate` and naming the call that beat it, so
 "why is this call not in the archive?" has an answer.
+
+## Listener counts
+
+Settings → Admin → **Listeners** charts how many people have been connected, and when. It answers
+one question — *peak listeners, with a timestamp* — because that is the only question a record of
+counts can answer, and counts are all there is:
+
+```toml
+[listeners]
+enabled = true
+interval_secs = 60
+```
+
+Every minute the instance writes down the **highest number of listeners that were on at once**
+since the previous sample. A peak rather than a reading at the tick, so somebody who arrived and
+left inside one minute is still counted; a chart that quietly under-reported its own peaks would
+look exactly like one that did not.
+
+**Nothing identity-shaped is stored, and there is nowhere for it to go.** The table has three
+columns — a row id, an instant, and a number. No address, no session, no user agent, and
+deliberately no per-talkgroup breakdown: on a quiet channel with one listener, "who was on Fire
+Dispatch at 3am" is precisely the record this instance must not keep. It is the same rule that
+keeps a listener's IP out of the log above `debug`.
+
+It is **on by default**, because history cannot be recovered afterwards — an operator who has to
+find a setting first has already lost whatever happened before they found it. A day is 1,440 rows
+of a few bytes each. Turn it off if you would rather keep nothing, or raise `interval_secs` if a
+coarser chart will do. How long the rows survive is `[retention] listener_days` above.
+
+The chart is behind the admin password, unlike everything else a browser can read here. Listening
+is open; how many people take that up is yours.
 
 ## Logging
 

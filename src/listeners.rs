@@ -38,6 +38,7 @@
 //! with no samples in it is a stretch where this Instance was not running, and
 //! an Instance that is not running has nobody listening to it.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -310,12 +311,12 @@ pub async fn read<C: ConnectionTrait>(db: &C, axis: Axis) -> Result<Series, DbEr
 ///
 /// **Behind the admin session**, unlike every other read surface in this
 /// process. The Archive is open because listening is open (ADR-0008); how many
-/// people take it up is the Operator's own business, and publishing an
-/// Instance's audience to anyone who asks is not a decision a Listener should
-/// be able to make on the Operator's behalf.
+/// people take it up is the Operator's own business, and publishing that to
+/// anyone who asks is not a decision a Listener should be able to make on the
+/// Operator's behalf.
 pub async fn history(
     State(state): State<AppState>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Series, Failure> {
     let axis = crate::activity::parse_axis(&params, state.clock.now_ms(), DEFAULT_SPAN_MS)?;
 

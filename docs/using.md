@@ -319,10 +319,12 @@ Above the results is a bar per slice of time, across the whole of whatever the c
 reach — a picture of when it was busy. Set a Talkgroup filter and it becomes that channel's: this is
 where "when does Fire Dispatch actually run" is a shape rather than a guess.
 
-**Drag along it to travel.** The results jump to that moment, one gesture instead of forty taps on
-*Next page*. The filters do not change and neither does anything you have playing — the bar in
-white is where the page on screen is, and it follows you as you page normally. Arrow keys work too,
-with Home and End for either end of the range.
+**Drag along it to travel.** The date under your thumb is shown as you move, and the results jump
+there when you let go — one gesture instead of forty taps on *Next page*. Letting go is what moves
+them on purpose: a list that reloaded under your thumb for every bar you crossed would be a hundred
+searches for one journey, which on a Pi you would feel. The filters do not change and neither does
+anything you have playing. The bar in white is where the page on screen is, and it follows you as
+you page normally. Arrow keys work too, with Home and End for either end of the range.
 
 **BY HOUR** flips the same numbers into a week: seven rows, twenty-four columns, darker where it is
 busier. That answers the other question — not when it *was* busy, but when it *usually* is. It reads

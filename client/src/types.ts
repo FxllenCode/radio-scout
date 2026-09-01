@@ -147,7 +147,7 @@ export interface Series {
  * about how many Calls there were, and leaving them off is also what keeps the
  * ribbon out of the refetch a page turn causes.
  */
-export interface ActivityQuery extends Omit<SearchQuery, "limit" | "offset"> {
+export interface ActivityQuery extends Omit<SearchQuery, 'limit' | 'offset'> {
   /** Buckets exactly this wide. What the heatmap needs: folding into local
    *  hours is only exact when a bucket is an hour. */
   bucketMs?: number

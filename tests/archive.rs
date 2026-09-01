@@ -739,7 +739,12 @@ async fn a_density_series_over_an_empty_archive_is_a_flat_one() {
     let values = series["values"].as_array().expect("values");
     assert!(!values.is_empty(), "an axis, even with nothing on it");
     assert!(values.iter().all(|v| v == 0));
-    assert!(series["toMs"].as_i64().expect("toMs") > series["fromMs"].as_i64().expect("fromMs"));
+    // A day, ending now: what a Listener means by "recently", and what an empty
+    // chart is labelled with rather than being labelled with nothing.
+    assert_eq!(
+        series["toMs"].as_i64().expect("toMs") - series["fromMs"].as_i64().expect("fromMs"),
+        24 * 60 * 60 * 1000
+    );
 }
 
 /// A bar count is what a ribbon really asks for — it knows how wide it is and

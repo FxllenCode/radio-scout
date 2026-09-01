@@ -105,7 +105,12 @@ impl Axis {
         Axis {
             from_ms,
             bucket_ms,
-            buckets: ceil_div(span, bucket_ms) as usize,
+            // The `min` is the *allocation* bound, not the arithmetic: this
+            // value decides the length of a `Vec` and is reached from a query
+            // string, so it must be bounded by something that does not depend
+            // on the division above being right. With the division right it
+            // never binds.
+            buckets: (ceil_div(span, bucket_ms) as usize).min(MAX_BUCKETS).max(1),
         }
     }
 

@@ -5,8 +5,8 @@
 //! **Three columns, and that is the whole feature.** ADR-0011 rule 5 says a
 //! Listener's address never appears above DEBUG and a public Instance must not
 //! accumulate a record of who listened and when; a table of *counts* is what
-//! satisfies both halves of that at once — an Operator learns their audience's
-//! shape, and nothing here can be turned back into a person. There is
+//! satisfies both halves of that at once — an Operator learns how busy their
+//! Instance has been, and nothing here can be turned back into a person. There is
 //! deliberately no session id, no address, no user agent, and no per-Talkgroup
 //! breakdown (which on a quiet channel with one listener would be exactly the
 //! identity-shaped fact this avoids).

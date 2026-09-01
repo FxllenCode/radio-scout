@@ -176,7 +176,7 @@ How much traffic a stretch of time held, counted bucket by bucket. Read under ex
 _Avoid_: volume, traffic (fine in prose, wrong for the measurement), stats, metrics (a **Metric** is what an Operator scrapes).
 
 **Listener count**:
-How many **Listeners** were connected at once, sampled onto an interval and kept as a series. A count and an instant and nothing else: no address, no session, no per-**Talkgroup** breakdown, because on a quiet channel that would be a record of *who* was listening ([ADR-0011](docs/adr/0011-observability-logging-policy.md) rule 5). Each sample is the **peak** since the one before it rather than a reading taken at the tick, so somebody who arrived and left between two ticks is still somebody who was there. The **Operator's**, not the Listener's — an open Archive does not make an Instance's audience public.
+How many **Listeners** were connected at once, sampled onto an interval and kept as a series. A count and an instant and nothing else: no address, no session, no per-**Talkgroup** breakdown, because on a quiet channel that would be a record of *who* was listening ([ADR-0011](docs/adr/0011-observability-logging-policy.md) rule 5). Each sample is the **peak** since the one before it rather than a reading taken at the tick, so somebody who arrived and left between two ticks is still somebody who was there. The **Operator's**, not the Listener's — an open Archive does not make how many people listen to an Instance public.
 _Avoid_: audience, traffic, users, sessions, analytics.
 
 **DVR**:

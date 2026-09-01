@@ -3,8 +3,8 @@ import { useState } from 'react'
 import { AdminGate, Placeholder, SignOutButton } from '@/components/admin/AdminUi'
 import { Screen } from '@/components/layout/Screen'
 import { Button } from '@/components/ui/button'
+import { SeriesBars, SeriesExtent } from '@/components/SeriesBars'
 import { formatCallTime } from '@/lib/archive'
-import { barHeights, bucketStartMs } from '@/lib/density'
 import { useAdminSession } from '@/hooks/useAdminSession'
 import {
   LISTENER_RANGES,
@@ -82,7 +82,6 @@ export function ListenersScreen() {
                 : 'Nobody has listened in this window.'}
             </p>
             <div
-              className="flex h-24 w-full items-end gap-px"
               role="img"
               aria-label={
                 peak
@@ -90,21 +89,9 @@ export function ListenersScreen() {
                   : `Peak listeners over the last ${range.label}: nobody`
               }
             >
-              {barHeights(series.values).map((height, bucket) => (
-                <span
-                  key={bucket}
-                  title={`${formatCallTime(bucketStartMs(series, bucket))} — ${series.values[bucket]}`}
-                  className="min-h-px flex-1 rounded-[1px] bg-muted-foreground/70"
-                  style={{ height: `${Math.round(height * 100)}%` }}
-                />
-              ))}
+              <SeriesBars series={series} className="h-24" />
             </div>
-            <div className="flex justify-between font-mono text-[10px] text-muted-foreground">
-              <span>{formatCallTime(series.fromMs)}</span>
-              {/* `toMs` is exclusive, so the label is the last instant covered —
-                  a millisecond later reads as a whole extra bucket. */}
-              <span>{formatCallTime(series.toMs - 1)}</span>
-            </div>
+            <SeriesExtent series={series} />
           </div>
         )}
 

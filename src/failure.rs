@@ -135,7 +135,8 @@ stages! {
     /// The Systems and Talkgroups a listener can select.
     LoadCatalog => "load-catalog",
     /// Peak Listeners over time (#62) — the one chart behind the admin session,
-    /// because an Instance's audience is the Operator's own business.
+    /// because how many people listen to an Instance is the Operator's own
+    /// business.
     LoadListenerHistory => "load-listener-history",
     // -- The admin surface -------------------------------------------------
     /// One page of the operator log (#30).
