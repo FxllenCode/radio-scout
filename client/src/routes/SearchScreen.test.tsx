@@ -8,9 +8,7 @@ import { ARCHIVE, ORIGIN, archivePage } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderApp, routerProbe } from '@/test/utils'
 import { msToDateTimeLocal } from '@/lib/archive'
-
-/** How long a link control's confirmation stands, per `SearchScreen`. */
-const NOTICE_MS = 3_000
+import { NOTICE_MS } from '@/hooks/useShareLink'
 
 /** Every `/api/calls` query string the screen sent, in order. */
 let searches: string[] = []
@@ -1346,6 +1344,22 @@ describe('SearchScreen — URL-addressable search (#61, spec US 30)', () => {
     await waitFor(() => expect(routerProbe.location).toBe('/search?offset=50'))
   })
 
+  /** A dropdown is one decision and earns one history entry; a number typed
+   *  into a box is not four. Back has to return to the search *before* the
+   *  typing, not walk it digit by digit. */
+  it('does not put a history entry behind every keystroke', async () => {
+    const user = userEvent.setup()
+    renderApp('/search?tag=Fire')
+    await filtersLoaded()
+
+    await user.type(screen.getByLabelText('Unit'), '1234')
+    await waitFor(() => expect(routerProbe.location).toBe('/search?tag=Fire&unit=1234'))
+
+    act(() => routerProbe.go(-1))
+
+    await waitFor(() => expect(routerProbe.location).toBe('/search?tag=Fire'))
+  })
+
   it('goes back to the search before it', async () => {
     const user = userEvent.setup()
     renderApp('/search')
@@ -1432,6 +1446,36 @@ describe('SearchScreen — a Call you can link to (#61, spec US 30)', () => {
     const playing = await screen.findByRole('region', { name: 'Now playing' })
 
     expect(within(playing).getByText('Alpha Law')).toBeInTheDocument()
+  })
+
+  /** The link has been *acted on*, so it leaves the address bar — where the
+   *  filters stay, because they describe what is on screen. Without this, the
+   *  shell remembers `?call=2` as where the Search tab was and re-plays the
+   *  Call every time the Listener comes back to it. */
+  it('does not play it again when the listener comes back to the tab', async () => {
+    const user = userEvent.setup()
+    renderApp('/search?call=2')
+    await screen.findByRole('region', { name: 'Now playing' })
+    await waitFor(() => expect(routerProbe.location).toBe('/search'))
+
+    await user.click(within(screen.getByRole('region', { name: 'Now playing' })).getByRole('button', { name: 'Stop' }))
+    expect(screen.queryByRole('region', { name: 'Now playing' })).toBeNull()
+
+    await user.click(screen.getByRole('link', { name: 'Live' }))
+    await screen.findByRole('heading', { name: 'LIVE' })
+    await user.click(screen.getByRole('link', { name: 'Search' }))
+    await screen.findByRole('search', { name: 'Archive filters' })
+
+    expect(screen.queryByRole('region', { name: 'Now playing' })).toBeNull()
+  })
+
+  it('keeps saying so while the Call a link names is gone', async () => {
+    renderApp('/search?call=9999')
+    await screen.findByText(/that call is no longer in the archive/i)
+
+    // Not consumed: nothing was acted on, so the address still describes what
+    // was asked for and the sentence does not vanish on the next render.
+    expect(routerProbe.location).toBe('/search?call=9999')
   })
 
   it('says so when the Call a link names is gone', async () => {

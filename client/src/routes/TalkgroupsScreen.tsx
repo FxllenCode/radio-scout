@@ -5,6 +5,7 @@ import { useSearchParams } from 'react-router-dom'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
+import { useShareLink } from '@/hooks/useShareLink'
 import { useWindowedRows } from '@/hooks/useWindowedRows'
 import { avoidMinutesLeft } from '@/lib/avoiding'
 import {
@@ -19,7 +20,6 @@ import {
 } from '@/lib/panel'
 import type { TriState } from '@/lib/selection'
 import { decodeSelection, encodeSelection } from '@/lib/selectionUrl'
-import { linkTo, shareLink, shareNotice } from '@/lib/share'
 import { cn } from '@/lib/utils'
 import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -162,7 +162,7 @@ export function TalkgroupsScreen() {
   // *chose*, where `selectAudibleSelection` has their **Avoids** and any
   // **Hold** laid over it — reading of the moment, not of the scanner.
   const chosen = useAppSelector(selectSelection)
-  const [notice, setNotice] = useState<string | null>(null)
+  const link = useShareLink()
   useLinkedSelection()
 
   const catalog = data ?? EMPTY_CATALOG
@@ -248,31 +248,23 @@ export function TalkgroupsScreen() {
                 size="sm"
                 aria-label="Copy link to this selection"
                 className="h-7 px-2"
-                onClick={async () =>
-                  setNotice(
-                    shareNotice(
-                      await shareLink(
-                        linkTo(
-                          '/talkgroups',
-                          `sel=${encodeSelection(chosen)}`,
-                          window.location.origin,
-                        ),
-                        'Radio-Scout selection',
-                        navigator,
-                      ),
-                    ),
+                onClick={() =>
+                  link.share(
+                    '/talkgroups',
+                    `sel=${encodeSelection(chosen)}`,
+                    'Radio-Scout selection',
                   )
                 }
               >
                 <Link2 className="size-3.5" aria-hidden />
               </Button>
             </div>
-            {notice && (
+            {link.notice && (
               <p
                 role="status"
                 className="mt-1.5 font-mono text-[11px] text-muted-foreground"
               >
-                {notice}
+                {link.notice}
               </p>
             )}
           </div>

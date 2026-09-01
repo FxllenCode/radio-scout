@@ -22,6 +22,7 @@ import { TalkgroupsScreen } from './TalkgroupsScreen'
 import { countyCatalog, ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderApp, renderWithProviders, routerProbe } from '@/test/utils'
+import { NOTICE_MS } from '@/hooks/useShareLink'
 
 /** A store with storage of its own, so no test can inherit another's
  *  selection (and none depends on jsdom having local storage at all). */
@@ -758,5 +759,29 @@ describe('TalkgroupsScreen — a Selection you can link to (#61, spec US 30)', (
     await waitFor(() =>
       expect(written.at(-1)).toBe('http://localhost/talkgroups?sel=0_100.2'),
     )
+  })
+})
+
+/** The same policy the Search screen states and enforces: a notice is a thing
+ *  that just happened, not a thing that is true. A surface's *shape* may
+ *  differ; the policy underneath may not (#92, one layer up). */
+describe('TalkgroupsScreen — the share notice (#61)', () => {
+  it('takes its confirmation back down', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: () => Promise.resolve() },
+    })
+    renderApp('/talkgroups', scannerStore())
+    await screen.findByText('Alpha Law')
+
+    await user.click(screen.getByRole('button', { name: 'Copy link to this selection' }))
+    expect(await screen.findByText('Link copied.')).toBeInTheDocument()
+
+    act(() => void vi.advanceTimersByTime(NOTICE_MS))
+
+    expect(screen.queryByText('Link copied.')).toBeNull()
+    vi.useRealTimers()
   })
 })

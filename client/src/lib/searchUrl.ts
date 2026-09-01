@@ -100,18 +100,26 @@ export function readSearchUrl(params: URLSearchParams): SearchUrl {
   }
 }
 
+/** Everything that reaches the query string: a `SearchQuery`'s own keys plus
+ *  the linked Call, which is not one of them. Its own type rather than a cast,
+ *  so [`searchParams`] is not handed a lie about what it is serializing. */
+interface SearchLinkParams extends SearchQuery {
+  call?: number
+}
+
 /** This state as a query string — sorted and empties dropped, because
  *  [`searchParams`] is what decides both and a Run's identity is what it
  *  answers. */
 export function writeSearchUrl({ search, offset, call }: SearchUrl): string {
-  return searchParams({
+  const params: SearchLinkParams = {
     ...search,
     // Written only when it is not what a bare URL already means, so the default
     // view's URL is the bare one.
     sort: search.sort === DEFAULT_SORT ? undefined : search.sort,
     ...(offset > 0 ? { offset } : {}),
     ...(call === undefined ? {} : { call }),
-  } as SearchQuery)
+  }
+  return searchParams(params)
 }
 
 /** A parameter read as a finite number, or `undefined` for absent, blank, and

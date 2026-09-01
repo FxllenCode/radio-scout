@@ -42,6 +42,9 @@ export function renderWithProviders(
     store = makeStore(),
   }: { route?: string; store?: AppStore } = {},
 ) {
+  // Cleared per render, so an assertion that a navigation *happened* cannot
+  // pass on the previous test's reading.
+  routerProbe.location = ''
   return {
     store,
     ...render(

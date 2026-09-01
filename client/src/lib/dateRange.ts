@@ -59,7 +59,7 @@ export function rangeOf(preset: PresetId, now: number): DateRange {
     case 'last-hour':
       return { after: now - HOUR_MS, before: now }
     case 'last-7-days':
-      return { after: startOfDaysAgo(now, 7), before: now }
+      return { after: sameTimeDaysAgo(now, 7), before: now }
     case 'today':
       return day(now, 0)
     case 'yesterday':
@@ -85,9 +85,10 @@ function day(now: number, offset: number): DateRange {
   return { after: start.getTime(), before: next.getTime() - 1 }
 }
 
-/** `days` days before `now`, to the same time of day — the rolling window's
- *  start, which is a subtraction across whole local days for [`day`]'s reason. */
-function startOfDaysAgo(now: number, days: number): number {
+/** The same clock time, `days` local days earlier — so "the last 7 days" ends
+ *  where it began seven days ago rather than an hour either side of it. Walked
+ *  across whole local days rather than subtracted, for [`day`]'s reason. */
+function sameTimeDaysAgo(now: number, days: number): number {
   const at = new Date(now)
   at.setDate(at.getDate() - days)
   return at.getTime()

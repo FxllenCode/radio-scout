@@ -20,7 +20,7 @@ import { Button } from '@/components/ui/button'
 import { callCategory, systemName, talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
 import { markName } from '@/lib/webhook'
-import type { RunSearch } from '@/lib/run'
+import { sameSearch, type RunSearch } from '@/lib/run'
 import { playingDetail } from '@/lib/strip'
 import {
   dateTimeLocalToMs,
@@ -31,9 +31,9 @@ import {
   pageSummary,
 } from '@/lib/archive'
 import { PRESETS, rangeOf } from '@/lib/dateRange'
-import { linkTo, shareLink, shareNotice } from '@/lib/share'
 import { readSearchUrl, writeSearchUrl, type SearchUrl } from '@/lib/searchUrl'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
+import { useShareLink } from '@/hooks/useShareLink'
 import { cn } from '@/lib/utils'
 import {
   useGetCallQuery,
@@ -75,11 +75,6 @@ const EMPTY_PAGE: SearchPage = {
 
 const controlClass =
   'w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground'
-
-/** How long a link control's confirmation stands. Long enough to read on a
- *  phone, short enough that "Link copied" is not still on screen by the time a
- *  Listener has pasted it. */
-const NOTICE_MS = 3_000
 
 /**
  * Search (Archive) — filter stored Calls, then play or download them
@@ -129,26 +124,37 @@ export function SearchScreen() {
 
   const results = page.results
 
-  /** What the last link control did, said out loud — because copying to a
-   *  clipboard is a thing with no visible result of its own, and refusing to is
-   *  a thing a Listener has to be told about rather than left waiting on. */
-  const [notice, setNotice] = useState<string | null>(null)
+  /** Every link control on this screen, and what it says afterwards. */
+  const link = useShareLink()
 
-  /** Where the URL is going next. One writer, so the three things it decides
+  /** Where the URL is going next. One writer, so the two things it decides
    *  cannot drift: a change of *anything* returns to the first page unless it
    *  says otherwise, and a deep-linked Call is dropped once it has been acted
    *  on — the address bar then describes what is on screen rather than what
    *  opened it. */
-  const goTo = (next: Partial<SearchUrl>) =>
-    setParams(writeSearchUrl({ search: filters, offset: 0, ...next }))
+  const goTo = (next: Partial<SearchUrl>, replace = false) =>
+    setParams(writeSearchUrl({ search: filters, offset: 0, ...next }), { replace })
+
+  /**
+   * Which control is being *typed* into, if any.
+   *
+   * A dropdown is one decision and earns one history entry. A number typed into
+   * a box is not four, and a date is not sixteen — so the first keystroke in a
+   * field pushes (back returns to the search before the typing) and the rest
+   * replace (back does not walk it digit by digit). Anything that is not typing
+   * clears this, so the next keystroke starts a new entry.
+   */
+  const typing = useRef<string | null>(null)
 
   /** Any filter change moves the window back to the first page. Unlike before
    *  #61 this does *not* tell the Run: the URL is the state, so the Run is told
    *  where the change is *observed* rather than at every control that could
    *  cause one — which is the only way the back button gets the same treatment
    *  as a dropdown (#92's argument, one layer up). */
-  const updateFilters = (patch: Partial<RunSearch>) =>
-    goTo({ search: { ...filters, ...patch } })
+  const updateFilters = (patch: Partial<RunSearch>, typedInto: string | null = null) => {
+    goTo({ search: { ...filters, ...patch } }, typing.current === typedInto && typedInto !== null)
+    typing.current = typedInto
+  }
 
   /**
    * Tell the **Run** the search on screen changed.
@@ -159,31 +165,17 @@ export function SearchScreen() {
    */
   const lastSearch = useRef(filters)
   useEffect(() => {
-    if (lastSearch.current === filters) return
+    // Compared with the predicate the Run itself uses (#89), not by reference:
+    // `filters` is rebuilt whenever *any* of the URL changes, so turning a page
+    // would otherwise mint a new Run for a search that had not moved.
+    if (sameSearch(lastSearch.current, filters)) return
     lastSearch.current = filters
     dispatch(searchChanged(filters))
   }, [dispatch, filters])
 
-  // A notice is a thing that just happened, not a thing that is true — so it
-  // goes of its own accord rather than sitting under the filters all session.
-  useEffect(() => {
-    if (!notice) return
-    const timer = setTimeout(() => setNotice(null), NOTICE_MS)
-    return () => clearTimeout(timer)
-  }, [notice])
-
   /** Put a link to `state` wherever this platform puts links (#61, US 30). */
-  async function send(state: SearchUrl, title: string) {
-    setNotice(
-      shareNotice(
-        await shareLink(
-          linkTo('/search', writeSearchUrl(state), window.location.origin),
-          title,
-          navigator,
-        ),
-      ),
-    )
-  }
+  const send = (state: SearchUrl, title: string) =>
+    link.share('/search', writeSearchUrl(state), title)
 
   /**
    * Play forward in time from a Call, whatever the list is sorted by (#61).
@@ -198,10 +190,10 @@ export function SearchScreen() {
   async function playForward(call: Call) {
     const search: RunSearch = { ...filters, sort: 'oldest', after: call.timestamp }
     try {
-      const page = await fetchRun({ ...search, limit: PAGE_SIZE, offset: 0 }).unwrap()
-      dispatch(startRun({ search, page, index: 0 }))
+      const onward = await fetchRun({ ...search, limit: PAGE_SIZE, offset: 0 }).unwrap()
+      dispatch(startRun({ search, page: onward, index: 0 }))
     } catch {
-      setNotice('Could not play forward from there.')
+      link.say('Could not play forward from there.')
     }
   }
 
@@ -242,13 +234,13 @@ export function SearchScreen() {
           label="From"
           id="filter-after"
           ms={filters.after}
-          onChange={(after) => updateFilters({ after })}
+          onChange={(after) => updateFilters({ after }, 'after')}
         />
         <DateField
           label="To"
           id="filter-before"
           ms={filters.before}
-          onChange={(before) => updateFilters({ before })}
+          onChange={(before) => updateFilters({ before }, 'before')}
         />
 
         <Field label="System" htmlFor="filter-system">
@@ -411,9 +403,10 @@ export function SearchScreen() {
             className={controlClass}
             value={filters.unit ?? ''}
             onChange={(event) =>
-              updateFilters({
-                unit: event.target.value ? Number(event.target.value) : undefined,
-              })
+              updateFilters(
+                { unit: event.target.value ? Number(event.target.value) : undefined },
+                'unit',
+              )
             }
           />
         </Field>
@@ -486,12 +479,12 @@ export function SearchScreen() {
       {/* What a link control just did, and why the Call a link named is not
           here. Both are things that happened rather than states of the
           archive, so they share one live region under the filters. */}
-      {(notice || linkMissing) && (
+      {(link.notice || linkMissing) && (
         <p
           role="status"
           className="mt-3 rounded-md border border-border bg-card px-3 py-2 font-mono text-[11px] text-muted-foreground"
         >
-          {notice ?? 'That call is no longer in the archive.'}
+          {link.notice ?? 'That call is no longer in the archive.'}
         </p>
       )}
 
@@ -671,12 +664,11 @@ function DateField({
  */
 function useDeepLinkedCall(id: number | undefined, search: RunSearch): boolean {
   const dispatch = useAppDispatch()
+  const [, setParams] = useSearchParams()
   const { data: call, isError } = useGetCallQuery(id as number, { skip: id === undefined })
-  const started = useRef<number>(undefined)
 
   useEffect(() => {
-    if (!call || started.current === call.id) return
-    started.current = call.id
+    if (!call) return
     dispatch(
       startRun({
         search,
@@ -684,11 +676,26 @@ function useDeepLinkedCall(id: number | undefined, search: RunSearch): boolean {
         index: 0,
       }),
     )
-    // `search` is deliberately not a dependency: it is what the Run is *labelled*
-    // with, and re-running this because a filter moved would replay the Call.
+    // Acted on, so it leaves the address bar — the filters stay, because they
+    // describe what is on screen, and this described how it was opened.
+    // *Replacing* rather than pushing, so back does not land on the link and
+    // play it again; the shell then remembers a Search tab that is a search,
+    // not one that re-plays a Call every time the Listener returns to it.
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current)
+        next.delete('call')
+        return next
+      },
+      { replace: true },
+    )
+    // `search` is deliberately not a dependency: it is what the Run is
+    // *labelled* with, and re-running because a filter moved would replay it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dispatch, call])
+  }, [dispatch, call, setParams])
 
+  // A Call that is *gone* is not consumed: nothing was acted on, so the address
+  // still says what was asked for and the sentence below does not vanish.
   return isError
 }
 
