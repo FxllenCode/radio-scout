@@ -131,11 +131,19 @@ pub struct CallSearch {
     ///
     /// The DVR's Talkgroup picker mints a one-entry Selection rather than
     /// setting `talkgroup_ref`, so the surface has a single scoping rule
-    /// instead of two that differ on **Patch**es: this one asks
-    /// [`Selection::reaches_channels`]'s question — the live feed's own — where
-    /// `talkgroup_ref` above compares the Call's canonical channel and stops.
-    /// A Listener rewinding a channel through a patch would otherwise find it
-    /// silent exactly when the county was busiest.
+    /// instead of two that differ on **Patch**es: this one answers
+    /// [`Selection::reaches_channels`]'s *question* — the live feed's own —
+    /// where `talkgroup_ref` above compares the Call's canonical channel and
+    /// stops. A Listener rewinding a channel through a patch would otherwise
+    /// find it silent exactly when the county was busiest.
+    ///
+    /// It answers that question with a **second implementation** ([`within`]),
+    /// because a predicate over one Call cannot be a `WHERE` clause. The two
+    /// are held together by
+    /// `tests/archive.rs::the_sql_filter_answers_what_the_selection_itself_would`,
+    /// which enumerates the matrix exhaustively — #62's bucket arithmetic is
+    /// the same shape, and its lesson is that either implementation alone
+    /// answers confidently and wrongly.
     ///
     /// Deliberately not a cascading dimension, for `mark`'s reason: it is the
     /// whole scanner rather than one axis of a form, and no dropdown offers it.
@@ -433,6 +441,12 @@ fn heard_by(scope: &crate::merge::UnitScope) -> sea_orm::Condition {
 /// Which Calls a **Selection** reaches (#63) — `None` when it reaches every
 /// Call there is, so a DVR of an un-narrowed scanner costs no condition and no
 /// joins at all.
+///
+/// **A second implementation of [`Selection::reaches_channels`]**, and there is
+/// no way around that: a predicate over one Call in hand cannot be a `WHERE`
+/// clause over a table. `the_sql_filter_answers_what_the_selection_itself_would`
+/// is what stops the two drifting, by running every shape of matrix through
+/// both.
 ///
 /// The matrix resolves, per System, to one of two shapes and never to a third:
 /// its default is [`Selection::selects`]'s fallback chain (the System's

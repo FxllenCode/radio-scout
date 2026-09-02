@@ -25,11 +25,14 @@ import { systemName, talkgroupName } from '@/lib/call'
 import { PRESETS, rangeOf } from '@/lib/dateRange'
 import { bucketOfInstant, bucketStartMs } from '@/lib/density'
 import {
+  channelOption,
   channelScope,
   dvrActivity,
   dvrSearch,
   playheadMs,
+  readChannelOption,
   readDvrUrl,
+  rescoped,
   soleChannel,
   writeDvrUrl,
   type DvrView,
@@ -162,12 +165,10 @@ export function DvrScreen() {
   const goTo = (patch: Partial<DvrView>, replace = false) =>
     setParams(writeDvrUrl({ ...view, ...patch }), { replace })
 
-  /** Any change of scope or range re-anchors at the start of the new range:
-   *  the old anchor described a stretch of time that may no longer be in it. */
-  const rescope = (patch: Partial<DvrView>) => {
-    const next = { ...view, ...patch }
-    goTo({ ...patch, at: next.from })
-  }
+  /** Any change of scope or range, with the two rules that go with one — the
+   *  re-anchor and the refusal of a range with no width — decided in
+   *  [`rescoped`] rather than here. */
+  const rescope = (patch: Partial<DvrView>) => setParams(writeDvrUrl(rescoped(view, patch)))
 
   /**
    * Tell the **Run** the search changed — observed here rather than dispatched
@@ -204,6 +205,13 @@ export function DvrScreen() {
       // before it began.
       const index = page.results.findIndex((call) => call.audioUrl)
       if (index < 0) {
+        // **Stop, rather than leave the old Run limping.** Moving the anchor
+        // told the Run its search had changed, which disarms it (#89) — so
+        // doing nothing here would play out whatever page it happens to hold
+        // and then stop, minutes later and silently, looking exactly like the
+        // archive having run out. The Listener asked to be somewhere with
+        // nothing in it; that is a definite answer, so give it.
+        dispatch(stop())
         link.say('Nothing to play from there.')
         return
       }
@@ -220,11 +228,7 @@ export function DvrScreen() {
   const playingAt = playheadMs(view, current, playhead.position)
   const channel = soleChannel(view.scope)
   const mine = encodeSelection(view.scope) === encodeSelection(arrivedWith)
-  const scopeValue = channel
-    ? `${channel.systemRef}:${channel.talkgroupRef}`
-    : mine
-      ? ''
-      : SHARED
+  const scopeValue = channel ? channelOption(channel) : mine ? '' : SHARED
 
   return (
     <Screen title="DVR">
@@ -247,13 +251,11 @@ export function DvrScreen() {
               className={controlClass}
               value={scopeValue}
               onChange={(event) => {
-                if (!event.target.value) {
-                  rescope({ scope: arrivedWith })
-                  return
-                }
-                const [systemRef, talkgroupRef] = event.target.value.split(':')
+                const picked = readChannelOption(event.target.value)
                 rescope({
-                  scope: channelScope(Number(systemRef), Number(talkgroupRef)),
+                  scope: picked
+                    ? channelScope(picked.systemRef, picked.talkgroupRef)
+                    : arrivedWith,
                 })
               }}
             >
@@ -271,8 +273,14 @@ export function DvrScreen() {
               <option value="">My scanner</option>
               {options?.talkgroups.map((talkgroup) => (
                 <option
-                  key={`${talkgroup.systemRef}:${talkgroup.ref}`}
-                  value={`${talkgroup.systemRef}:${talkgroup.ref}`}
+                  key={channelOption({
+                    systemRef: talkgroup.systemRef,
+                    talkgroupRef: talkgroup.ref,
+                  })}
+                  value={channelOption({
+                    systemRef: talkgroup.systemRef,
+                    talkgroupRef: talkgroup.ref,
+                  })}
                 >
                   {talkgroup.label ?? talkgroup.ref}
                 </option>
@@ -470,6 +478,11 @@ export function DvrScreen() {
             variant={hurrying ? 'secondary' : 'outline'}
             size="sm"
             aria-pressed={hurrying}
+            // The lever belongs to the Run, and the reducer wrapper clears it
+            // whenever there is no Run — so offered before Play it would set a
+            // flag cleared in the same dispatch, which is a control that
+            // visibly does nothing.
+            disabled={!current}
             className="ml-auto h-9 gap-1 px-2 font-mono text-[10px] uppercase tracking-wider"
             onClick={() => dispatch(toggleHurry())}
           >

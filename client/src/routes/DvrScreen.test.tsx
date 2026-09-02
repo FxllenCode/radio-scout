@@ -424,4 +424,63 @@ describe('the DVR (#63, spec US 39)', () => {
     // and a blank row in the picker would be unchooseable.
     expect(await screen.findByRole('option', { name: '42' })).toBeInTheDocument()
   })
+
+  it('offers no speed control until there is a Run to hurry through', async () => {
+    // The lever belongs to the Run: the reducer wrapper clears it whenever
+    // there is no Run, so a button offered before Play would set a flag that is
+    // cleared in the same dispatch — a control that visibly does nothing.
+    renderApp(`/dvr?${WHOLE_ARCHIVE}`)
+
+    expect(
+      await screen.findByRole('button', { name: /skip quiet/i }),
+    ).toBeDisabled()
+  })
+
+  it('stops rather than limping on when a Listener rewinds into an empty stretch', async () => {
+    const user = userEvent.setup()
+    renderApp(`/dvr?${WHOLE_ARCHIVE}`)
+    await user.click(await screen.findByLabelText('Play from here'))
+    await waitFor(() => expect(player()).toHaveAttribute('src'))
+
+    // Nothing at all from here on.
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, () =>
+        HttpResponse.json({
+          results: [],
+          count: 0,
+          limit: 50,
+          offset: 0,
+          hasMore: false,
+        }),
+      ),
+    )
+    timeline().focus()
+    await user.keyboard('{End}')
+
+    // The scrub told the Run its search had changed, which disarms it — so
+    // leaving it alone would play out the page it happens to hold and then
+    // stop, minutes later, looking like the archive having run out. The
+    // Listener asked to be somewhere with nothing in it; say so, and stop.
+    expect(await screen.findByRole('status')).toHaveTextContent(/nothing to play/i)
+    await waitFor(() =>
+      expect(transport().getByText('Nothing playing')).toBeInTheDocument(),
+    )
+  })
+
+  it('keeps the range when a half-typed date runs backwards', async () => {
+    const user = userEvent.setup()
+    renderApp(`/dvr?${WHOLE_ARCHIVE}`)
+    const to = (await screen.findByLabelText('To')) as HTMLInputElement
+
+    // Retyping a year emits `0002`, `0020`, `0202` on the way to `2027`, each
+    // of which is a range running backwards.
+    await user.clear(to)
+    await user.type(to, '0002-01-01T00:00')
+
+    await waitFor(() => expect(aggregates.length).toBeGreaterThan(0))
+    expect(new URLSearchParams(aggregates.at(-1)).get('after')).toBe(String(OLDEST))
+    expect(new URLSearchParams(aggregates.at(-1)).get('before')).toBe(
+      String(NEWEST + 1),
+    )
+  })
 })

@@ -35,6 +35,7 @@
 import type { Selection, TalkgroupKey } from './selection'
 import { WILDCARD } from './selection'
 import { decodeSelection, encodeSelection } from './selectionUrl'
+import { numberIn } from './searchUrl'
 import { rangeOf } from './dateRange'
 import type { ActivityQuery } from '@/types'
 import type { RunSearch } from './run'
@@ -185,6 +186,29 @@ export function dvrLink(search: RunSearch): string {
   return params.toString()
 }
 
+/**
+ * The DVR after a change of scope or range.
+ *
+ * Two rules, both of which the screen would otherwise have to remember:
+ *
+ * **It re-anchors**, because the old anchor described a stretch of time that
+ * may not be in the new range at all.
+ *
+ * **It refuses a range with no width**, keeping the one it has. A
+ * `datetime-local` emits every intermediate value as it is retyped — `0002`,
+ * `0020`, `0202`, `2027` — so a range momentarily running backwards is the
+ * ordinary case rather than a mistake, and [`readDvrUrl`] would answer one by
+ * throwing *both* bounds away and falling back to its default. The Listener
+ * would watch their whole range vanish and both boxes be rewritten under the
+ * cursor, which is exactly the failure `DateField` exists to prevent one layer
+ * down.
+ */
+export function rescoped(view: DvrView, patch: Partial<DvrView>): DvrView {
+  const next = { ...view, ...patch }
+  if (next.to <= next.from) return view
+  return { ...next, at: next.from }
+}
+
 /** One channel, as the Selection it is. */
 export function channelScope(
   systemRef: number,
@@ -229,14 +253,29 @@ export function playheadMs(
   return playing.timestamp + positionSeconds * 1000
 }
 
-/** A parameter read as a finite number, or `undefined` for absent, blank, and
- *  everything that is not one. */
-function numberIn(params: URLSearchParams, key: string): number | undefined {
-  const raw = params.get(key)
-  if (raw === null || raw.trim() === '') return undefined
-  const value = Number(raw)
-  return Number.isFinite(value) ? value : undefined
-}
 
 const clamp = (value: number, low: number, high: number) =>
   Math.min(Math.max(value, low), high)
+
+/**
+ * A channel as the scope picker's option value, and back.
+ *
+ * Written once because a `<select>` carries strings: three call sites building
+ * `` `${systemRef}:${talkgroupRef}` `` by hand and one parsing it with `split`
+ * is four chances for the spelling to disagree with itself, and the failure
+ * would be a picker that silently selects nothing.
+ */
+export function channelOption(channel: TalkgroupKey): string {
+  return `${channel.systemRef}:${channel.talkgroupRef}`
+}
+
+/** The channel an option value names, or `undefined` for the ones that name
+ *  none — the empty value, the shared-selection placeholder, and anything a
+ *  hand-edited DOM might produce. */
+export function readChannelOption(value: string): TalkgroupKey | undefined {
+  const [systemRef, talkgroupRef] = value.split(':')
+  if (!isRef(systemRef) || !isRef(talkgroupRef)) return undefined
+  return { systemRef: Number(systemRef), talkgroupRef: Number(talkgroupRef) }
+}
+
+const isRef = (value: string | undefined) => value !== undefined && /^\d+$/.test(value)

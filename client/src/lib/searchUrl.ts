@@ -122,9 +122,16 @@ export function writeSearchUrl({ search, offset, call }: SearchUrl): string {
   return searchParams(params)
 }
 
-/** A parameter read as a finite number, or `undefined` for absent, blank, and
- *  everything that is not one. */
-function numberIn(params: URLSearchParams, key: string): number | undefined {
+/**
+ * A parameter read as a finite number, or `undefined` for absent, blank, and
+ * everything that is not one.
+ *
+ * Exported because the **DVR**'s URL reads its bounds the same way (#63), and
+ * the reason it is a function at all is a trap worth having in one place:
+ * `Number('alpha')` is `NaN`, which reaches the wire as `after=NaN` and answers
+ * with nothing, which reads exactly like an archive that is empty.
+ */
+export function numberIn(params: URLSearchParams, key: string): number | undefined {
   const raw = params.get(key)
   if (raw === null || raw.trim() === '') return undefined
   const value = Number(raw)

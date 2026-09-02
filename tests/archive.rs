@@ -557,9 +557,6 @@ async fn a_curated_unit_that_has_never_keyed_is_an_empty_history() {
     assert!(unit.get("firstHeardMs").is_none(), "{unit}");
 }
 
-/// Dates may be unix milliseconds or RFC3339 — the latter so a human or a
-/// script can hand-write a query. rdio-scanner only accepts a single date and
-/// silently searches the surrounding 24 h.
 /// A **DVR**'s scope (#63): the Listener's own Selection, filtering the
 /// Archive by exactly the rule the live feed plays by.
 ///
@@ -676,6 +673,140 @@ async fn a_selection_scopes_the_density_series_too() {
     assert_eq!(total, 2, "the two Calls on System 100 Talkgroup 1");
 }
 
+/// **The SQL filter is a second implementation of the Selection's own rule, and
+/// this is what holds the two together.**
+///
+/// `archive::within` translates the matrix into `Condition` arms; `Selection`
+/// answers the same question in Rust, one Call at a time, and it is the answer
+/// the live feed and every **Downstream** peer already use. Two implementations
+/// of one rule is the shape #62's bucket arithmetic has, and its lesson applies
+/// unchanged: *either alone answers confidently and wrongly*. Four hand-picked
+/// `?sel=` strings prove four arms; they cannot prove there is no fifth.
+///
+/// So this enumerates the matrix **exhaustively** rather than sampling it —
+/// `lib/queue.ts`'s precedent, for its reason: the space is small enough to
+/// cover completely, which beats a proptest seed nobody can reproduce. Two
+/// Talkgroups and the wildcard, each absent / on / off, times the global
+/// default: 54 scanners, every one of them compared whole.
+///
+/// The seeded Calls cover what makes the two implementations able to differ: a
+/// Talkgroup the matrix names, one it does not (so the System's default is
+/// what decides), a **Patch** onto a named channel, and a second System the
+/// matrix says nothing about at all.
+#[tokio::test]
+async fn the_sql_filter_answers_what_the_selection_itself_would() {
+    use radio_scout::selection::Selection;
+    use std::collections::HashMap;
+
+    let app = TestApp::spawn().await;
+
+    // `(id, system, the channels the Call reaches)` — its own, plus its patches.
+    let mut heard: Vec<(i64, i64, Vec<i64>)> = Vec::new();
+    heard.push((
+        seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &[], 1000).await,
+        100,
+        vec![1],
+    ));
+    heard.push((
+        seed_searchable_call(&app, 100, "Alpha", 2, "Law", &[], 2000).await,
+        100,
+        vec![2],
+    ));
+    // Named by nothing in the enumeration, so the System's own default decides
+    // it — and patched onto a channel that *is* named.
+    heard.push((
+        app.seed_call(
+            NewCall {
+                patches: vec![1],
+                ..NewCall::new(100, 3, 3000)
+            },
+            common::audio_at("k/patched.wav"),
+        )
+        .await,
+        100,
+        vec![3, 1],
+    ));
+    // A System no Selection below mentions: the global default is all it has.
+    heard.push((
+        seed_searchable_call(&app, 200, "Beta", 1, "Fire", &[], 4000).await,
+        200,
+        vec![1],
+    ));
+
+    // Absent, explicitly on, explicitly off — the three states one entry has.
+    const STATES: [Option<bool>; 3] = [None, Some(true), Some(false)];
+
+    for all in [false, true] {
+        for wildcard in STATES {
+            for one in STATES {
+                for two in STATES {
+                    let mut entries: HashMap<String, bool> = HashMap::new();
+                    for (key, state) in [("*", wildcard), ("1", one), ("2", two)] {
+                        if let Some(on) = state {
+                            entries.insert(key.to_string(), on);
+                        }
+                    }
+                    let mut sel = HashMap::new();
+                    if !entries.is_empty() {
+                        sel.insert("100".to_string(), entries);
+                    }
+                    let selection = Selection { sel, all };
+
+                    let mut expected: Vec<i64> = heard
+                        .iter()
+                        .filter(|(_, system_ref, channels)| {
+                            selection.reaches_channels(
+                                *system_ref,
+                                channels.iter().copied(),
+                                |_, _| true,
+                            )
+                        })
+                        .map(|(id, _, _)| *id)
+                        .collect();
+                    expected.sort_unstable();
+
+                    let encoded = encode_selection(&selection);
+                    let mut got = search_ids(&app, &format!("?sel={encoded}&sort=oldest")).await;
+                    got.sort_unstable();
+
+                    assert_eq!(
+                        got, expected,
+                        "the SQL and the Selection disagree about {encoded:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A Selection as the link spelling the server reads — the client's encoder,
+/// in the one place a test needs one. Deliberately *not* shipped in `src`: the
+/// server never mints a link, and an encoder nothing calls is one that rots.
+fn encode_selection(selection: &radio_scout::selection::Selection) -> String {
+    let mut systems: Vec<_> = selection.sel.iter().collect();
+    systems.sort_by_key(|(system_ref, _)| system_ref.parse::<i64>().unwrap_or(i64::MAX));
+
+    let mut out = String::from(if selection.all { "1" } else { "0" });
+    for (system_ref, talkgroups) in systems {
+        let mut entries: Vec<_> = talkgroups.iter().collect();
+        // The wildcard first, then Refs in order — what the client writes.
+        entries.sort_by_key(|(key, _)| match key.as_str() {
+            "*" => -1,
+            other => other.parse::<i64>().unwrap_or(i64::MAX),
+        });
+        out.push('_');
+        out.push_str(system_ref);
+        for (key, on) in entries {
+            out.push('.');
+            if !*on {
+                out.push('-');
+            }
+            out.push_str(key);
+        }
+    }
+    out
+}
+
 /// A link is one statement made by somebody else, so half of it is never
 /// applied — the client's own reader takes the same all-or-nothing line.
 #[tokio::test]
@@ -688,6 +819,9 @@ async fn a_selection_that_is_not_one_is_refused_by_name() {
     assert!(body.contains("sel"), "names the parameter: {body}");
 }
 
+/// Dates may be unix milliseconds or RFC3339 — the latter so a human or a
+/// script can hand-write a query. rdio-scanner only accepts a single date and
+/// silently searches the surrounding 24 h.
 #[tokio::test]
 async fn search_accepts_rfc3339_dates() {
     let app = TestApp::spawn().await;

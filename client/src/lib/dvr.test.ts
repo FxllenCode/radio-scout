@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest'
 import { EVERYTHING, type Selection } from './selection'
 import { encodeSelection } from './selectionUrl'
 import {
+  channelOption,
   channelScope,
   dvrActivity,
   dvrLink,
   dvrSearch,
   playheadMs,
+  readChannelOption,
   readDvrUrl,
+  rescoped,
   soleChannel,
   writeDvrUrl,
   type DvrView,
@@ -182,4 +185,55 @@ describe('opening a search in the DVR', () => {
     // make a link that says less than the screen it came from.
     expect(dvrLink({ tag: 'Fire', mark: 'emergency', minDuration: 3 })).toBe('')
   })
+})
+
+describe('changing the scope or the range', () => {
+  const view: DvrView = {
+    scope: { all: false, sel: { 100: { 5: true } } },
+    from: 1000,
+    to: 9000,
+    at: 4000,
+  }
+
+  it('re-anchors at the start of the new range', () => {
+    // The old anchor described a stretch of time that may no longer be in it.
+    expect(rescoped(view, { from: 2000 })).toMatchObject({ from: 2000, at: 2000 })
+  })
+
+  it.each([
+    ['a lower bound dragged past the upper', { from: 99_999 }],
+    ['an upper bound dragged below the lower', { to: 0 }],
+    ['both ends on the same instant', { from: 5000, to: 5000 }],
+  ])('keeps the range it has rather than taking one with no width: %s', (_why, patch) => {
+    // A `datetime-local` emits every intermediate year as it is retyped
+    // (`0002`, `0020`, `0202`, `2027`), so a range momentarily running
+    // backwards is the ordinary case and not a mistake. Taking it would throw
+    // the Listener's whole range away and rewrite both boxes under the cursor.
+    expect(rescoped(view, patch)).toEqual(view)
+  })
+
+  it('takes a range that is merely different', () => {
+    expect(rescoped(view, { from: 2000, to: 3000 })).toEqual({
+      ...view,
+      from: 2000,
+      to: 3000,
+      at: 2000,
+    })
+  })
+})
+
+describe('a channel as a picker option', () => {
+  it('round-trips, so the spelling lives in one place', () => {
+    expect(readChannelOption(channelOption({ systemRef: 100, talkgroupRef: 5 }))).toEqual({
+      systemRef: 100,
+      talkgroupRef: 5,
+    })
+  })
+
+  it.each(['', 'shared', '100', 'alpha:5', '100:alpha'])(
+    'reads %j as no channel at all',
+    (value) => {
+      expect(readChannelOption(value)).toBeUndefined()
+    },
+  )
 })
