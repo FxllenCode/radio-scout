@@ -25,6 +25,20 @@ Every choice below is a place rdio-scanner's `server/admin.go` is worth beating,
 - **The guard is a prefix layer** over the admin router, so a route added beside the others is protected by construction rather than by remembering — which is what made #18's deviation, below, cheap to close.
 - **Policy is configurable without a UI** (`[admin]`, ADR-0012) — necessarily, since the UI it gates is the thing you would need it for. A zero for any of the four windows refuses to boot rather than bricking the surface.
 - **v1 listening is open.** Public exposure is secured externally (reverse proxy / VPN / Cloudflare Access), documented for operators. Full multi-user **access codes** (per-listener PINs with per-system/talkgroup scopes, expiry, connection limits) are a **v2** feature.
+
+### Amendment (#64): one unauthenticated write, and what bounds it
+
+**Share links** (spec US 32) add the first — and, as of this ADR, only — **write** endpoint that takes no credential of any kind: `POST /api/call/{id}/share`, which mints an expiring public URL for one Call. That is a deliberate exception to "the admin surface is always password-gated; recorders always require a per-system key", and it is recorded here rather than only in `src/share/` because it changes this document's shape.
+
+**Why it cannot be gated.** US 32 is a **Listener's** story, and a Listener holds no credential — that is the whole design of this project (CONTEXT.md: "Needs no account and no Session"). Putting minting behind the admin password would mean a Listener who finds a moment worth sending has to ask the Operator for a link.
+
+**What it grants is strictly less than what is already open.** On the posture above, the Archive already serves every Call to anyone who can reach the Instance. A share link therefore exposes nothing new; what it *adds* is a URL that works for somebody who cannot reach the app — which is the point — and it reaches one Call, not the Instance. Its audio is served through the token (`/s/audio`) rather than through `/api/call/{id}/audio`, so when access codes scope listening the link keeps opening exactly one Call rather than inheriting whatever that route then permits.
+
+**What bounds the write.** One row per **Call**, enforced by a unique index: a second mint returns the token already in circulation with its expiry pushed out. So a hostile client POSTing in a loop writes at most one row per Call — a table bounded by **Retention**, which bounds the Archive. There is deliberately no rate limiter and no per-address ledger: the lockout above keys on an address because it guards a *password*, and a per-address record of Listeners is exactly what ADR-0011 rule 5 exists to prevent.
+
+**Two levers, both the Operator's.** `[share] enabled = false` closes the door — including for links already minted — and per-link revocation deletes the row, which kills that URL for good (a token is 128 random bits and is never reissued). An Operator who has closed listening externally should set the first, because a share link bypasses their gate on purpose.
+
+**The token is a bearer credential and is treated as one**: never returned by the admin listing, and never logged — which is why it rides the URL's *query string*, the one part of a request `http_log` has never written down. That is the same reason access codes are a query parameter above.
 - **TLS:** plain HTTP by default with a **reverse proxy recommended** for HTTPS in v1; built-in Let's Encrypt autocert is a v2 convenience.
 
 ## Considered and rejected

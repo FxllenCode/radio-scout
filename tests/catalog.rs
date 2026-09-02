@@ -16,7 +16,11 @@ async fn a_fresh_instance_offers_an_empty_catalog() {
 
     assert_eq!(
         app.get_json("/api/catalog").await,
-        serde_json::json!({ "systems": [], "activityWindowMs": 24 * 60 * 60 * 1000_i64 }),
+        serde_json::json!({
+            "systems": [],
+            "activityWindowMs": 24 * 60 * 60 * 1000_i64,
+            "sharing": true,
+        }),
         "zero-config first run has nothing to select yet"
     );
 }
@@ -69,6 +73,7 @@ async fn a_talkgroup_carries_what_the_panel_groups_and_labels_it_by() {
                 }],
             }],
             "activityWindowMs": 24 * 60 * 60 * 1000_i64,
+            "sharing": true,
         })
     );
 }
@@ -215,12 +220,17 @@ async fn a_talkgroup_carries_how_busy_it_has_been() {
     seed_talkgroup(&app, 100, "Alpha", 1, "Alpha Fire", "Fire", &[]).await;
     seed_call_at(&app, 100, 1, now - 60_000).await;
     seed_call_at(&app, 100, 1, now - 3_600_000).await;
+    // **Yesterday, and therefore outside the window** — the one Call that
+    // proves the cutoff is `now - ACTIVITY_WINDOW_MS` rather than any other
+    // arithmetic over the same two numbers. The seeding Call at epoch 0 cannot:
+    // it is outside every cutoff a mutation could produce.
+    seed_call_at(&app, 100, 1, now - 2 * 24 * 60 * 60 * 1_000).await;
 
     let catalog = catalog(&app).await;
     let talkgroup = &catalog["systems"][0]["talkgroups"][0];
     assert_eq!(
         talkgroup["recentCalls"], 2,
-        "the two inside the window; the seeding Call sits at epoch 0, far outside it"
+        "the two inside the window; the two-day-old Call and the epoch-0 seeding Call are outside it"
     );
     assert_eq!(
         talkgroup["lastCallAtMs"],
@@ -285,4 +295,21 @@ async fn activity_costs_the_same_however_many_talkgroups_there_are() {
         small,
         "ten times the Talkgroups, the same number of round trips"
     );
+}
+
+/// **What this Instance offers, asked once on app open** (#64, spec US 32).
+///
+/// The share control is drawn from this: a control that is offered and then
+/// refused is a control that lies, and an Operator who closed sharing closed it
+/// for a reason. On by default, because an instance as it ships already serves
+/// its whole Archive to anyone who asks.
+#[tokio::test]
+async fn the_catalog_says_whether_this_instance_shares() {
+    let mut app = TestApp::spawn().await;
+    assert_eq!(catalog(&app).await["sharing"], true);
+
+    app.restart_with(|config| config.share.enabled = false)
+        .await;
+
+    assert_eq!(catalog(&app).await["sharing"], false);
 }

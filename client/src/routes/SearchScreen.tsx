@@ -6,6 +6,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Share2,
   SkipBack,
   SkipForward,
   Square,
@@ -43,11 +44,13 @@ import { HOUR_MS, heatmapWindow } from '@/lib/heatmap'
 import { readSearchUrl, writeSearchUrl, type SearchUrl } from '@/lib/searchUrl'
 import { dvrLink } from '@/lib/dvr'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
+import { usePublicShare } from '@/hooks/usePublicShare'
 import { useShareLink } from '@/hooks/useShareLink'
 import { cn } from '@/lib/utils'
 import {
   useGetActivityQuery,
   useGetCallQuery,
+  useGetCatalogQuery,
   useGetFilterOptionsQuery,
   useLazySearchCallsQuery,
   useSearchCallsQuery,
@@ -211,6 +214,13 @@ export function SearchScreen() {
   /** Put a link to `state` wherever this platform puts links (#61, US 30). */
   const send = (state: SearchUrl, title: string) =>
     link.share('/search', writeSearchUrl(state), title)
+
+  // ...and the *public* one (#64, US 32), which is a different offer: that link
+  // needs no app, expires, and reaches this one Call and nothing else. Offered
+  // only where the Instance actually mints them — a control that is offered and
+  // then refused is a control that lies.
+  const sharePublicly = usePublicShare(link)
+  const { data: catalog } = useGetCatalogQuery()
 
   /**
    * Play forward in time from a Call, whatever the list is sorted by (#61).
@@ -646,6 +656,7 @@ export function SearchScreen() {
               onCopyLink={() =>
                 send({ search: {}, offset: 0, call: call.id }, talkgroupName(call))
               }
+              onShare={catalog?.sharing ? () => sharePublicly(call) : undefined}
             />
           ))}
         </ul>
@@ -749,12 +760,16 @@ function ResultRow({
   onPlay,
   onPlayForward,
   onCopyLink,
+  onShare,
 }: {
   call: Call
   isCurrent: boolean
   onPlay: () => void
   onPlayForward: () => void
   onCopyLink: () => void
+  /** Mint a public link, or nothing at all where this Instance does not mint
+   *  them (`[share] enabled = false`). */
+  onShare?: () => void
 }) {
   const name = talkgroupName(call)
   const system = systemName(call)
@@ -811,6 +826,21 @@ function ResultRow({
       >
         <Link2 className="size-4" aria-hidden />
       </Button>
+      {/* Two links, deliberately, because they are two different offers: the
+          one above opens this Call *in the app* and never expires, and this one
+          opens it for somebody who has never heard of this instance and stops
+          working. Offered on an encrypted Call too — that the channel was busy
+          is still a thing worth sending (spec US 9). */}
+      {onShare && (
+        <Button
+          variant="outline"
+          size="icon"
+          aria-label={`Share ${description} publicly`}
+          onClick={onShare}
+        >
+          <Share2 className="size-4" aria-hidden />
+        </Button>
+      )}
       {call.audioUrl && (
         <>
           <Button

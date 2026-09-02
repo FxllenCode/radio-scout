@@ -150,12 +150,11 @@ fn absolute(call: &StoredCall, public_url: Option<&str>) -> StoredCall {
 /// A Call's audio as somewhere else can fetch it, or `None` if this Instance has
 /// not been told where it lives.
 ///
-/// The trailing slash is trimmed off the base rather than assumed absent: an
-/// Operator pastes what their browser shows them, and `https://scan.example/`
-/// with `/api/call/1/audio` would otherwise produce a double slash — which most
-/// servers tolerate and some proxies do not.
+/// [`crate::config::absolute_url`]'s answer — the same join a **Share link**'s
+/// preview card makes (#64), written once so the two cannot come to disagree
+/// about what a base with a trailing slash means.
 fn audio_url(path: &str, public_url: Option<&str>) -> Option<String> {
-    Some(format!("{}{path}", public_url?.trim_end_matches('/')))
+    crate::config::absolute_url(path, public_url)
 }
 
 /// The Discord message for one marked Call.

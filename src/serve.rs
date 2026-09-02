@@ -292,6 +292,22 @@ pub async fn audio(
     Path(id): Path<CallId>,
     headers: HeaderMap,
 ) -> Result<Audio, Failure> {
+    serve_call(&state, id, &headers).await
+}
+
+/// The same, for a caller that arrived at the Call some other way.
+///
+/// **The seam a Share link comes through** (#64): its token names one Call, and
+/// what happens next — presign or proxy, whole or ranged, `immutable` or not —
+/// must be identical to what the Archive's own route decides, or one storage
+/// backend or one cache header would be right on one door and wrong on the
+/// other. A parameter rather than a copy is what makes "works on both storage
+/// backends" a property of this module rather than a thing #64 had to rebuild.
+pub async fn serve_call(
+    state: &AppState,
+    id: CallId,
+    headers: &HeaderMap,
+) -> Result<Audio, Failure> {
     let call = repo::get_call_audio(&state.db, id)
         .await
         .map_err(Stage::LookUpCall.failed())?

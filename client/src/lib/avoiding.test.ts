@@ -6,6 +6,7 @@ import { avoidMinutesLeft, avoidedRows } from './avoiding'
 
 const CATALOG: Catalog = {
   activityWindowMs: 86_400_000,
+  sharing: true,
   systems: [
     {
       ref: 11,

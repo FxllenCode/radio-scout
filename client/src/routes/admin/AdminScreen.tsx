@@ -44,6 +44,11 @@ const SECTIONS = [
     hint: 'addresses that get your flagged calls',
   },
   {
+    to: '/settings/admin/shares',
+    label: 'Share links',
+    hint: 'public links to a single call',
+  },
+  {
     to: '/settings/admin/listeners',
     label: 'Listeners',
     hint: 'how many people have been on',

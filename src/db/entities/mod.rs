@@ -16,6 +16,7 @@ pub mod downstream_delivery;
 pub mod group;
 pub mod listener_sample;
 pub mod log_event;
+pub mod share_link;
 pub mod site;
 pub mod system;
 pub mod tag;

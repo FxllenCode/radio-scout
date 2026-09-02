@@ -393,6 +393,26 @@ selection, defaults included, so a talkgroup neither of you has heard of yet beh
 both scanners. It is not a **Profile**: their pins, avoids and holds are untouched, and if you want
 a second scanner rather than a changed one, use `?id=` above.
 
+### Sending a call to someone who does not use this
+
+All three of those links open the app. The ⤴ button — on a search result row, and in the
+press-and-hold menu on the **session log**, which is where you go when you just *heard* something —
+does something different: it mints a **public link** to that one call — a plain page with the call on it and a play button, which
+works in any browser, on any phone, for somebody who has never heard of this instance. Paste it into
+a message and it comes up as a preview card naming the talkgroup, the system and when it was.
+
+Three things are worth knowing:
+
+- **It reaches that one call and nothing else.** No search, no talkgroup list, no other audio.
+- **It expires.** A week, unless the operator has set something else; after that the page says so.
+  Sharing the same call again hands you the same link with a fresh week on it, so you can re-send
+  one without collecting a drawer full of URLs.
+- **The operator can revoke it**, and can turn the whole feature off — on an instance that has, the
+  ⤴ button is simply not there.
+
+An encrypted call can be shared too. There is nothing to play, but that the channel was busy at that
+moment is often the point.
+
 ---
 
 ## On your phone

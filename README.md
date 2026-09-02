@@ -153,6 +153,11 @@ run two independent setups — a "truck" and a "desk" that share nothing.
 playable in place or downloadable. Range requests are served properly, which is what lets iOS
 seek without re-downloading.
 
+**Sharing.** Any Call can be handed to somebody who does not use this — one tap mints an
+expiring public link to that Call alone, which plays in any browser, comes up as a preview card
+in a messaging app, and reaches nothing else on your instance. Revocable per link, and it can be
+switched off entirely.
+
 **On your phone.** Installable to the home screen, and works offline for the app shell.
 Radio-Scout does not send notifications — it never asks for the permission and never wakes
 your device ([ADR-0014](docs/adr/0014-no-notifications.md)).

@@ -68,6 +68,7 @@ use crate::mining::MiningConfig;
 use crate::observability::{self, LogConfig};
 use crate::quiet::QuietConfig;
 use crate::retention::{self, RetentionConfig};
+use crate::share::ShareConfig;
 use crate::tone::ToneConfig;
 use crate::webhook::WebhookConfig;
 
@@ -410,6 +411,7 @@ pub struct Config {
     pub webhook: WebhookConfig,
     pub tone: ToneConfig,
     pub quiet: QuietConfig,
+    pub share: ShareConfig,
     pub listeners: ListenerConfig,
     pub log: LogConfig,
 }
@@ -577,11 +579,13 @@ impl Config {
                 "a duration in milliseconds, 0 to disable",
             ));
         }
-        // Each of these bricks the admin surface at zero rather than merely
-        // behaving oddly: a session that has already expired when it is issued,
-        // or an address locked out before its first attempt. There is no
-        // "0 disables it" reading to guess at — refusing to boot is the only
-        // answer that doesn't lock an operator out of their own scanner.
+        // Each of these is a window that at zero produces something already
+        // expired rather than something merely odd: a session that has run out
+        // when it is issued, an address locked out before its first attempt, a
+        // **Share link** dead the instant it is minted. None has a
+        // "0 disables it" reading to guess at — and for `[admin]`'s three,
+        // refusing to boot is the only answer that does not lock an Operator out
+        // of their own scanner.
         for (key, value, expected) in [
             (
                 "admin.session_idle_secs",
@@ -602,6 +606,18 @@ impl Config {
                 "admin.lockout_attempts",
                 self.admin.lockout_attempts as u64,
                 "a positive number of attempts",
+            ),
+            // A share link that has expired at the instant it is minted is a
+            // control that hands a Listener a dead URL every time — the
+            // `[admin]` windows' failure, on a smaller surface. **Refused
+            // rather than read as "never expires"**, which is what `0` means
+            // three settings up in `[retention]`: an unexpiring public link is
+            // the one thing this feature promises not to be, so guessing that
+            // reading would be guessing the opposite of what it says.
+            (
+                "share.link_ttl_secs",
+                self.share.link_ttl.as_secs(),
+                "a positive number of seconds",
             ),
         ] {
             if value == 0 {
@@ -1122,6 +1138,28 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "share.enabled",
+        var: "RADIO_SCOUT_SHARE_ENABLED",
+        expected: "true or false",
+        // `false`, because minting is on by default and closing it is the only
+        // reason to write this variable at all.
+        example: "false",
+        set: |setting, config, value| {
+            config.share.enabled = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "share.link_ttl_secs",
+        var: "RADIO_SCOUT_SHARE_LINK_TTL_SECS",
+        expected: "a number of seconds",
+        example: "3600",
+        set: |setting, config, value| {
+            config.share.link_ttl = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
         key: "listeners.enabled",
         var: "RADIO_SCOUT_LISTENERS_ENABLED",
         expected: "true or false",
@@ -1240,6 +1278,23 @@ pub mod secs {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
         u64::deserialize(deserializer).map(Duration::from_secs)
     }
+}
+
+/// A path made absolute against `[server] public_url`, or nothing at all when
+/// this Instance has not been told where it lives.
+///
+/// **Written once**, because two features send a URL somewhere it cannot be
+/// resolved: a **Webhook**'s payload (#54) and a **Share link**'s preview card
+/// (#64). Here rather than in either of them because it is the one function
+/// that knows what that *setting* means, and neither caller holds anything but
+/// the string it resolved to — where `webhook::is_postable_url`, which this
+/// module imports rather than owns, is a rule about a **Webhook**'s URL that
+/// boot happens to check. The trailing slash is trimmed off the base rather than assumed absent
+/// — an Operator pastes what their browser shows them, and `https://scan.example/`
+/// with `/api/call/1/audio` would otherwise produce a double slash, which most
+/// servers tolerate and some proxies do not.
+pub fn absolute_url(path: &str, public_url: Option<&str>) -> Option<String> {
+    Some(format!("{}{path}", public_url?.trim_end_matches('/')))
 }
 
 /// The SQLite file zero-config creates inside `base_dir`.
@@ -1799,6 +1854,30 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # How often to write a row. One a minute is 1,440 rows a day, which is nothing;
 # raise it if you are on very constrained storage and a coarser chart will do.
 # interval_secs = 60
+
+[share]
+# Per-Call public share links (#64): a listener who finds a moment worth sending
+# mints a link, and whoever they send it to gets a page with that one Call on it
+# — playable in any browser, with a preview card in a messaging app, and no way
+# through to anything else on this instance. Sharing a moment does not mean
+# sharing the instance.
+#
+# On by default, because an instance as it ships already serves its whole archive
+# to anyone who asks and a share link therefore exposes nothing new. Turn it off
+# if you have *closed* listening — behind a VPN, behind an authenticating proxy —
+# where a link that bypasses the gate on purpose should be your decision rather
+# than an inherited default. Turning it off also stops the links already minted,
+# which is what makes it usable as a lever.
+#
+# A link is revocable one at a time in Settings -> Admin -> Share links.
+# enabled = true
+
+# How long a minted link stays usable. A week is long enough that a link sent on
+# Friday still plays on Monday, and short enough that a URL pasted into a group
+# chat is not a permanent public endpoint. There is one link per call, so sharing
+# a call that is already shared hands back the same link with its window pushed
+# out rather than minting a second one.
+# link_ttl_secs = 604800
 
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a
@@ -2664,17 +2743,23 @@ mod tests {
         assert!(error.to_string().contains("push"), "{error}");
     }
 
-    /// Every one of these bricks the admin surface at zero — a session already
-    /// expired when it is issued, or an address locked out before its first
-    /// attempt. There is no "0 disables it" reading to guess at, so the boot
-    /// stops and names the key (ADR-0012). rdio would have taken the value and
-    /// locked the operator out of their own scanner.
+    /// Every one of these is a window that at zero has already run out — a
+    /// session expired when it is issued, an address locked out before its first
+    /// attempt, a **Share link** dead the instant it is minted. There is no
+    /// "0 disables it" reading to guess at, so the boot stops and names the key
+    /// (ADR-0012). rdio would have taken the value and locked the operator out
+    /// of their own scanner.
     #[rstest]
     #[case("[admin]\nsession_idle_secs = 0\n", "admin.session_idle_secs")]
     #[case("[admin]\nsession_max_secs = 0\n", "admin.session_max_secs")]
     #[case("[admin]\nlockout_attempts = 0\n", "admin.lockout_attempts")]
     #[case("[admin]\nlockout_secs = 0\n", "admin.lockout_secs")]
-    fn an_impossible_admin_policy_refuses_to_boot(#[case] text: &str, #[case] key: &str) {
+    // A **Share link** that has expired at the instant it is minted, which is
+    // the same failure on a smaller surface (#64) — and deliberately *not* read
+    // as "never expires", the meaning `0` has in `[retention]`: an unexpiring
+    // public link is what this feature promises not to be.
+    #[case("[share]\nlink_ttl_secs = 0\n", "share.link_ttl_secs")]
+    fn an_impossible_window_refuses_to_boot(#[case] text: &str, #[case] key: &str) {
         let error =
             resolve(&cli(&[]), no_env, Some(&file(text))).expect_err("an impossible policy");
 

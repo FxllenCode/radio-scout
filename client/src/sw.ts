@@ -38,10 +38,18 @@ cleanupOutdatedCaches()
  * except the server's own namespace. A cached API response would be stale, a
  * cached `/healthz` would lie about the server being up, and cached Call audio
  * would fill a phone with an archive nobody asked for.
+ *
+ * **`/s` is on that list, and it is the one entry that is not an API** (#64). A
+ * **Share link** is a page the *server* renders — the whole promise is that it
+ * plays without the app — so a worker that answered it with the app shell would
+ * break every share link opened in a browser that has this instance installed,
+ * and only in that browser. Anchored so the three client-side routes that begin
+ * with an `s` (`/search`, `/session`, `/settings`) still get the shell: what is
+ * denied is `/s` exactly, and anything under `/s/`.
  */
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('/index.html'), {
-    denylist: [/^\/api\//, /^\/healthz$/, /^\/rdio-scanner/],
+    denylist: [/^\/api\//, /^\/healthz$/, /^\/rdio-scanner/, /^\/s(\/|\?|$)/],
   }),
 )
 

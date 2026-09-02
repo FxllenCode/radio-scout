@@ -101,4 +101,39 @@ test.describe('PWA', () => {
       expect(failed, `${path} must not be served from the cache`).toBe(true)
     }
   })
+
+  /**
+   * **A share link is the server's page, not the app's** (#64, spec US 32).
+   *
+   * The whole promise is that it plays without the app — so the one browser it
+   * must not break in is the one that has this instance installed, where a
+   * navigation handler answering every route with the app shell would render
+   * the SPA at a share URL. Only Playwright can see this: jsdom has no service
+   * worker, and the worker only exists in a build.
+   */
+  test('never answers a share link with the app shell', async ({
+    page,
+    context,
+  }) => {
+    await page.goto('/')
+    await controlled(page)
+    await context.setOffline(true)
+
+    // First the three client-side routes that begin with an `s` — they still
+    // *do* get the shell, which is what the anchoring in `sw.ts` protects.
+    for (const path of ['/search', '/session', '/settings']) {
+      await page.goto(path)
+      await expect(
+        page.getByRole('navigation', { name: 'Primary' }),
+      ).toBeVisible()
+    }
+
+    // Then the share link. A **navigation**, not a `fetch`: `NavigationRoute`
+    // matches on `request.mode === 'navigate'`, so a `fetch()` would prove
+    // nothing about it either way. Offline and denylisted, this reaches for the
+    // network and fails — where a worker answering it with the shell would
+    // succeed, which is the bug. Last, because a failed navigation leaves the
+    // page on an error document.
+    await expect(page.goto('/s?t=nope')).rejects.toThrow()
+  })
 })

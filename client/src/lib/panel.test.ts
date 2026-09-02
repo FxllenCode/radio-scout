@@ -21,6 +21,7 @@ import {
  *  category rows exist for. */
 const CATALOG: Catalog = {
   activityWindowMs: DAY,
+  sharing: true,
   systems: [
     {
       ref: 100,
@@ -95,6 +96,7 @@ describe('the Talkgroups panel, derived once (#91)', () => {
     const panel = draw({
       catalog: {
         activityWindowMs: DAY,
+        sharing: true,
         systems: [{ ref: 42, talkgroups: [{ ref: 7, groups: [] }] }],
       },
     })
@@ -214,6 +216,7 @@ describe('the Talkgroups panel, derived once (#91)', () => {
       const panel = draw({
         catalog: {
         activityWindowMs: DAY,
+        sharing: true,
         systems: [{ ref: 42, talkgroups: [{ ref: 7, groups: [] }] }],
       },
       })
@@ -347,6 +350,7 @@ describe('the Talkgroups panel at county scale (#57)', () => {
     it('puts the busiest Talkgroup first', () => {
       const catalog: Catalog = {
         activityWindowMs: DAY,
+        sharing: true,
         systems: [
           {
             ref: 1,
@@ -371,6 +375,7 @@ describe('the Talkgroups panel at county scale (#57)', () => {
     it('breaks a tie on which spoke most recently, then on catalog order', () => {
       const catalog: Catalog = {
         activityWindowMs: DAY,
+        sharing: true,
         systems: [
           {
             ref: 1,

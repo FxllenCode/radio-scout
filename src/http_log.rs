@@ -123,9 +123,15 @@ impl RouteClass {
     }
 }
 
-/// `GET /api/call/{id}/audio`, which a media element re-requests by range.
+/// A Call's audio, by either door — `GET /api/call/{id}/audio` and a **Share
+/// link**'s `/s/audio` (#64) — which a media element re-requests by range.
 fn is_call_audio(path: &str) -> bool {
-    path.starts_with("/api/call/") && path.ends_with("/audio")
+    (path.starts_with("/api/call/") && path.ends_with("/audio"))
+        // A **Share link**'s audio (#64) is the same bytes through a different
+        // door, and a browser range-requests it exactly as often — so it rests
+        // at the same level, or a Pi writes a line per range request for every
+        // shared Call (rule 8).
+        || path == crate::share::SHARE_AUDIO_PATH
 }
 
 /// An embedded SPA asset: anything outside the API namespace whose last segment

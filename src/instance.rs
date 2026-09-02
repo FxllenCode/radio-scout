@@ -585,6 +585,8 @@ async fn assemble(
     state.downstreams = crate::downstream::Downstreams::new(config.downstream.clone());
     state.webhooks =
         crate::webhook::Webhooks::new(config.webhook.clone(), config.server.public_url.clone());
+    state.shares =
+        crate::share::Shares::new(config.share.clone(), config.server.public_url.clone());
     state.tones = crate::tone::Tones::new(config.tone.clone());
     state.quiet = crate::quiet::Quiet::new(config.quiet.clone());
     // Read once at boot whether there is anything to look for (#55), so an

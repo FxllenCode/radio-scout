@@ -25,7 +25,7 @@
  * not decoration: this list grows at the top as Calls are heard, so the row
  * under a thumb genuinely moves mid-gesture.
  */
-import { Ban, Download, Radio, RotateCcw } from 'lucide-react'
+import { Ban, Download, Radio, RotateCcw, Share2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -35,11 +35,14 @@ import { Sheet } from '@/components/Sheet'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
 import { useLongPress } from '@/hooks/useLongPress'
+import { usePublicShare } from '@/hooks/usePublicShare'
+import { useShareLink } from '@/hooks/useShareLink'
 import { downloadUrl, formatCallTime } from '@/lib/archive'
 import { systemName, talkgroupName } from '@/lib/call'
 import { feedPlays } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
 import { cn } from '@/lib/utils'
+import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   avoidTalkgroup,
@@ -61,6 +64,11 @@ export function SessionScreen() {
   // rows are built around.
   const plays = feedPlays(useAppSelector(selectFeedStatus))
   const [acting, setActing] = useState<Call | null>(null)
+  // Minting a public link is two steps that are one gesture (#64), and the
+  // catalog is what says whether this Instance mints them at all.
+  const link = useShareLink()
+  const sharePublicly = usePublicShare(link)
+  const { data: catalog } = useGetCatalogQuery()
 
   // **`aria-disabled`, never `disabled`.** A disabled button fires no pointer
   // events, so gating the row that way would take *Hold*, *Avoid* and
@@ -85,9 +93,22 @@ export function SessionScreen() {
     >
       <p className="mb-4 text-xs text-muted-foreground/70">
         Everything heard since this app was opened.{' '}
-        {plays ? 'Tap to replay; press' : 'Press'} and hold for hold, avoid and
-        download.
+        {plays ? 'Tap to replay; press' : 'Press'} and hold for hold, avoid,
+        share and download.
       </p>
+
+      {/* What a share control just did. Copying has no visible result at all
+          and failing to copy leaves somebody waiting for a link that is not
+          coming, so both are said — and `useShareLink` takes the saying back
+          down again, which is the half a second copy of this forgot (#61). */}
+      {link.notice && (
+        <p
+          role="status"
+          className="mb-3 rounded-md border border-border bg-card px-3 py-2 font-mono text-[11px] text-muted-foreground"
+        >
+          {link.notice}
+        </p>
+      )}
 
       {calls.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-border bg-card px-6 py-12 text-center">
@@ -185,6 +206,24 @@ export function SessionScreen() {
             >
               Avoid this talkgroup
             </Action>
+            {/* **Where a moment is shared from** (#64, spec US 32). This screen
+                is what a Listener reaches for after hearing something — the
+                Archive is where you go when you have to *look* for it — so the
+                public link belongs here as much as on a search result. Offered
+                on an encrypted Call too: that the channel was busy is the fact
+                worth sending. Absent where the Instance does not mint links,
+                because a control that is offered and then refused lies. */}
+            {catalog?.sharing && (
+              <Action
+                icon={<Share2 className="size-4" aria-hidden />}
+                onClick={() => {
+                  void sharePublicly(acting)
+                  setActing(null)
+                }}
+              >
+                Share a public link
+              </Action>
+            )}
             {/* An anchor, not a button: the browser owns saving a file, and an
                 encrypted Call has no audio to offer (#42). */}
             {acting.audioUrl && (

@@ -36,6 +36,7 @@ pub mod retention;
 pub mod selection;
 pub mod serve;
 pub mod service;
+pub mod share;
 pub mod startup;
 pub mod tone;
 pub mod web;
@@ -101,6 +102,11 @@ pub struct AppState {
     /// only be answered by looking, so the switch is `[quiet] enabled` and
     /// nothing else.
     pub quiet: crate::quiet::Quiet,
+    /// Expiring public links to a single Call (#64, spec US 32) — the policy,
+    /// and where this Instance can be reached from outside, which is what a
+    /// preview card's absolute URLs are built on. A link is a **row**, so like
+    /// a Webhook there is no disabled form beyond the switch itself.
+    pub shares: crate::share::Shares,
     /// How many people are listening (#62, spec US 41) — the count a live-feed
     /// connection joins, and the one a status page (#70) reads. Counts only:
     /// there is nothing in it that could name anybody.
@@ -131,6 +137,7 @@ impl AppState {
             webhooks: crate::webhook::Webhooks::default(),
             tones: crate::tone::Tones::default(),
             quiet: crate::quiet::Quiet::default(),
+            shares: crate::share::Shares::default(),
             listeners: crate::listeners::Listeners::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
@@ -203,12 +210,23 @@ pub fn build_app(state: AppState) -> Router {
         // when. A Ref is unique only within its System, so both ride the path.
         .route("/api/unit/{system}/{ref}", get(archive::unit))
         .route("/api/call/{id}/audio", get(serve::audio))
+        // Minting a Call's expiring public link (#64, spec US 32). Listener-
+        // facing and unauthenticated, because a Listener holds no credential —
+        // the abuse bound is one live link per Call, not a gate.
+        .route("/api/call/{id}/share", post(share::create))
         .route("/api/call/{id}/download", get(archive::download))
         // The way in to the admin surface, and the only route under
         // `/api/admin/` outside the session guard — there is no session yet.
         .route("/api/admin/login", post(admin::login))
         .merge(admin_routes(state.admin.clone()))
         .route("/healthz", get(healthz))
+        // **The share surface, outside `/api` on purpose** (#64, spec US 32): it
+        // is a page a stranger opens, and a short URL is the thing being pasted
+        // into a message. The token rides the *query string* rather than the
+        // path because `http_log` logs paths and never queries — so "a share
+        // token is never logged" is true by construction (ADR-0011 rule 2).
+        .route(share::SHARE_PATH, get(share::open))
+        .route(share::SHARE_AUDIO_PATH, get(share::audio))
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.
         .fallback(web::spa_handler)

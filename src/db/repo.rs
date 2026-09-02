@@ -28,8 +28,9 @@ use crate::blob::StoredAudio;
 use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
-    downstream_delivery, group, listener_sample, log_event, site, system, tag, talkgroup,
-    talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook, webhook_delivery,
+    downstream_delivery, group, listener_sample, log_event, share_link, site, system, tag,
+    talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
+    webhook_delivery,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -2838,6 +2839,16 @@ pub async fn delete_calls<C: ConnectionTrait>(db: &C, ids: &[CallId]) -> Result<
         .filter(call_tone::Column::CallId.is_in(ids.iter().copied()))
         .exec(db)
         .await?;
+    // A **Share link** is a child of its Call too (#64), and a foreign key here
+    // is `RESTRICT`: a table left out of this list passes every test that
+    // stores and reads, and then fails the **retention sweep** — which walks
+    // oldest-first, so from the moment the oldest shared Call comes due every
+    // sweep fails at the same row forever and an Operator's disk quietly stops
+    // being bounded. That is #55's lesson, and this is where it is paid.
+    share_link::Entity::delete_many()
+        .filter(share_link::Column::CallId.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?;
     Ok(call::Entity::delete_many()
         .filter(call::Column::Id.is_in(ids.iter().copied()))
         .exec(db)
@@ -4027,6 +4038,151 @@ pub async fn tone_matches_for<C: ConnectionTrait>(
         .filter(call_tone::Column::CallId.is_in(ids.iter().copied()))
         .order_by_asc(call_tone::Column::AtMs)
         .order_by_asc(call_tone::Column::Id)
+        .all(db)
+        .await
+}
+
+// ---------------------------------------------------------------------------
+// Share links (#64, spec US 32)
+// ---------------------------------------------------------------------------
+
+/// The link a token names **and the Call behind it**, or nothing.
+///
+/// Two facts in one statement, and the pairing is what keeps an impossible case
+/// out of the handler: a share row cannot outlive its Call (the foreign key is
+/// `RESTRICT` and [`delete_calls`] takes the link with it), so a Call that is
+/// not there means the token names nothing — which is an answer the caller
+/// already has an arm for.
+///
+/// Whether the link is still *live* is [`crate::share::live_at`]'s answer, not
+/// this one: a lookup that filtered on the expiry could only ever say "no such
+/// link", and an expired link has to be able to say that it expired.
+pub async fn share_by_token<C: ConnectionTrait>(
+    db: &C,
+    token: &str,
+) -> Result<Option<(share_link::Model, call::Model)>, DbErr> {
+    Ok(share_link::Entity::find()
+        .filter(share_link::Column::Token.eq(token))
+        .find_also_related(call::Entity)
+        .one(db)
+        .await?
+        .and_then(|(link, call)| call.map(|call| (link, call))))
+}
+
+/// The link already minted for a Call, or nothing.
+pub async fn share_for_call<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+) -> Result<Option<share_link::Model>, DbErr> {
+    share_link::Entity::find()
+        .filter(share_link::Column::CallId.eq(call_id))
+        .one(db)
+        .await
+}
+
+/// Write down a link for a Call that has never been shared.
+pub async fn insert_share<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+    token: &str,
+    expires_at_ms: i64,
+    now_ms: i64,
+) -> Result<share_link::Model, DbErr> {
+    share_link::ActiveModel {
+        call_id: Set(call_id),
+        token: Set(token.to_owned()),
+        expires_at_ms: Set(expires_at_ms),
+        created_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+}
+
+/// Give an existing link a fresh window, and — where `token` says so — a fresh
+/// secret.
+///
+/// **One write for both endings** ([`crate::share::Mint`]): a live link keeps
+/// the token already in circulation and only its expiry moves; an expired one is
+/// re-issued, so the URL that ran out stays dead rather than coming back to life
+/// (an expiry is a promise about the link that was handed out). One row per Call
+/// is kept either way, which is the abuse bound — see [`share_link`]'s module
+/// note.
+///
+/// `created_at_ms` is deliberately untouched: the listing's "shared since" is
+/// about when this Call started being shared, not when somebody last asked for
+/// the link again.
+pub async fn renew_share<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    token: Option<&str>,
+    expires_at_ms: i64,
+) -> Result<(), DbErr> {
+    let mut update = share_link::Entity::update_many().col_expr(
+        share_link::Column::ExpiresAtMs,
+        sea_orm::sea_query::Expr::value(expires_at_ms),
+    );
+    if let Some(token) = token {
+        update = update.col_expr(
+            share_link::Column::Token,
+            sea_orm::sea_query::Expr::value(token),
+        );
+    }
+    update
+        .filter(share_link::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// One page of the links an Operator could revoke, newest first, and the total
+/// behind it.
+///
+/// **Paged rather than capped**, because minting takes no credential: anybody
+/// who can reach the Instance can mint one link per **Call**, so this table is
+/// bounded by the Archive rather than by how often an Operator's Listeners press
+/// a button. A listing that showed the newest N and stopped would leave every
+/// older link invisible *and* unrevocable, which is the one thing the screen
+/// exists for.
+///
+/// Ordered by the instant a Call started being shared, tie-broken by Id so a
+/// page boundary is stable — `curate::talkgroups`' rule and for its reason: an
+/// unstable order drops rows out of a listing as it is walked.
+pub async fn shares<C: ConnectionTrait>(
+    db: &C,
+    limit: u64,
+    offset: u64,
+) -> Result<(Vec<share_link::Model>, u64), DbErr> {
+    let query = share_link::Entity::find()
+        .order_by_desc(share_link::Column::CreatedAtMs)
+        .order_by_desc(share_link::Column::Id);
+    // The window is applied to the rows and nowhere else, so the total keeps
+    // describing every link while the page walks them (#98's rule).
+    let count = PaginatorTrait::count(query.clone(), db).await?;
+    Ok((query.offset(offset).limit(limit).all(db).await?, count))
+}
+
+/// Revoke one link: the row goes, and the URL that named it is dead for good,
+/// because a token is random and never reissued to the same value.
+pub async fn delete_share<C: ConnectionTrait>(db: &C, id: i64) -> Result<u64, DbErr> {
+    Ok(share_link::Entity::delete_by_id(id)
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// The Call rows behind a set of ids, for a listing that then denormalizes them
+/// through [`crate::archive::stored_calls`] — the one denormalizer there is
+/// (#98), rather than a second join written here.
+pub async fn find_calls<C: ConnectionTrait>(
+    db: &C,
+    ids: &[CallId],
+) -> Result<Vec<call::Model>, DbErr> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    call::Entity::find()
+        .filter(call::Column::Id.is_in(ids.iter().copied()))
         .all(db)
         .await
 }

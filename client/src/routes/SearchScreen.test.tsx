@@ -1588,6 +1588,85 @@ describe('SearchScreen — sending a link (#61, spec US 30)', () => {
   })
 })
 
+describe('SearchScreen — the public share link (#64, spec US 32)', () => {
+  /** Every `POST /api/call/{id}/share` this screen made, and what the server
+   *  answered with. */
+  function mints({ fails = false } = {}) {
+    const asked: string[] = []
+    server.use(
+      http.post(`${ORIGIN}/api/call/:id/share`, ({ params }) => {
+        asked.push(String(params.id))
+        if (fails) {
+          return HttpResponse.text('share link not found\n', { status: 404 })
+        }
+        return HttpResponse.json({
+          url: `/s?t=tok${params.id}`,
+          expiresAtMs: 1_700_600_000_000,
+        })
+      }),
+    )
+    return () => asked
+  }
+
+  /**
+   * **The whole gesture, in one tap.** The link's spelling is the server's —
+   * what the browser adds is the origin it actually reached this Instance on,
+   * which is the one thing the server cannot know.
+   */
+  it('mints a public link and hands it to the platform', async () => {
+    const user = userEvent.setup()
+    const shared = sharesTo()
+    const asked = mints()
+    renderApp('/search')
+    const rows = await resultRows()
+
+    await user.click(within(rows[1]).getByRole('button', { name: /^Share .* publicly$/ }))
+
+    await waitFor(() => expect(shared()).toBe('http://localhost/s?t=tok2'))
+    expect(asked()).toEqual(['2'])
+  })
+
+  /** Two links, deliberately, because they are two different offers: one opens
+   *  the Call in the app and never expires, the other opens it for somebody who
+   *  has never heard of this instance and stops working. */
+  it('is a second control beside the in-app link', async () => {
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(within(rows[1]).getByRole('button', { name: /^Copy link to/ })).toBeInTheDocument()
+    expect(within(rows[1]).getByRole('button', { name: /publicly$/ })).toBeInTheDocument()
+  })
+
+  /** **A control that is offered and then refused is a control that lies.** An
+   *  Instance with `[share] enabled = false` says so in its catalog, and the
+   *  control is simply not there. */
+  it('is not offered where the instance does not mint links', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/catalog`, () =>
+        HttpResponse.json({ systems: [], activityWindowMs: 86_400_000, sharing: false }),
+      ),
+    )
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(within(rows[1]).queryByRole('button', { name: /publicly$/ })).toBeNull()
+  })
+
+  /** A Call that has since been pruned, or an Operator who closed sharing while
+   *  this page was open: nothing was copied, and somebody is waiting to paste. */
+  it('says so when a link could not be minted', async () => {
+    const user = userEvent.setup()
+    sharesTo()
+    mints({ fails: true })
+    renderApp('/search')
+    const rows = await resultRows()
+
+    await user.click(within(rows[1]).getByRole('button', { name: /^Share .* publicly$/ }))
+
+    expect(await screen.findByText('Could not create a share link.')).toBeInTheDocument()
+  })
+})
+
 describe('SearchScreen — the density ribbon and the heatmap (#62, spec US 34–35)', () => {
   /** The ribbon, once the aggregate has landed. */
   const ribbon = () => screen.findByTestId('density-ribbon')

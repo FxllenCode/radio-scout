@@ -274,3 +274,46 @@ async fn a_stored_object_carries_the_cache_control_a_prefetch_needs() {
         "an ingested Call's object is as cacheable as the proxied path says it is"
     );
 }
+
+/// **A Share link works on the object-store backend too** (#64, spec US 32).
+///
+/// The acceptance criterion is "works on both storage backends", and the way it
+/// is met is that there is no second implementation: the share route reaches
+/// `serve::serve_call`, the Archive's own decision, through a different door. So
+/// what this proves is the *wiring* — that a token really redirects, and that
+/// the signature it hands over is one the store honours. `tests/share.rs` covers
+/// the same link against a filesystem store, where the bytes are proxied
+/// instead.
+#[tokio::test]
+async fn a_share_link_redirects_to_the_real_audio() {
+    let Some(store) = common::s3::test_bucket().await else {
+        return;
+    };
+    let audio = Bytes::from_static(b"RIFF....WAVEfmt shared-bytes");
+    let app = TestApp::builder().store(store).spawn().await;
+    app.put_object("cd/shared.m4a", &audio).await;
+    let id = app
+        .seed_call(
+            NewCall {
+                audio_mime: Some("audio/mp4".to_string()),
+                ..NewCall::new(11, 54241, 1000)
+            },
+            common::audio_at("cd/shared.m4a"),
+        )
+        .await;
+
+    let link = app.mint_share(id).await;
+
+    let redirect = app.get_without_redirects(&link.audio).await;
+
+    assert_eq!(redirect.status(), 307, "the store signs its own URLs");
+    let location = header_of(&redirect, "location").expect("a Location header");
+    let direct = app
+        .client()
+        .get(location)
+        .send()
+        .await
+        .expect("follow the presigned URL");
+    assert_eq!(direct.status(), 200, "the store honoured the signature");
+    assert_eq!(direct.bytes().await.unwrap(), audio);
+}

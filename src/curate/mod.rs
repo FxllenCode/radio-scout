@@ -40,6 +40,7 @@ pub mod downstreams;
 pub mod keys;
 pub mod labels;
 pub mod members;
+pub mod shares;
 pub mod systems;
 pub mod talkgroups;
 pub mod tones;
@@ -90,6 +91,15 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/admin/talkgroups/{id}/tones",
             get(tones::list).post(tones::create),
+        )
+        // Every expiring public link a Listener has minted (#64, spec US 32),
+        // and the one thing an Operator does about one. No create and no edit:
+        // minting is the Listener's, and a link that has run out is re-shared
+        // rather than extended.
+        .route("/api/admin/shares", get(shares::list))
+        .route(
+            "/api/admin/shares/{id}",
+            axum::routing::delete(shares::remove),
         )
         .route(
             "/api/admin/groups",
@@ -162,6 +172,7 @@ pub enum What {
     Downstream,
     Webhook,
     ToneProfile,
+    ShareLink,
 }
 
 impl What {
@@ -177,6 +188,7 @@ impl What {
             What::Downstream => "downstream",
             What::Webhook => "webhook",
             What::ToneProfile => "tone profile",
+            What::ShareLink => "share link",
         }
     }
 
@@ -194,6 +206,7 @@ impl What {
             What::Downstream => "downstream-not-found",
             What::Webhook => "webhook-not-found",
             What::ToneProfile => "tone-profile-not-found",
+            What::ShareLink => "share-link-not-found",
         }
     }
 
@@ -210,7 +223,8 @@ impl What {
             | What::ApiKey
             | What::Downstream
             | What::Webhook
-            | What::ToneProfile => "ref-taken",
+            | What::ToneProfile
+            | What::ShareLink => "ref-taken",
         }
     }
 
@@ -225,7 +239,8 @@ impl What {
             | What::ApiKey
             | What::ToneProfile
             | What::Downstream
-            | What::Webhook => "has-calls",
+            | What::Webhook
+            | What::ShareLink => "has-calls",
         }
     }
 }

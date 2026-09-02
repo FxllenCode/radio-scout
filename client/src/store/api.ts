@@ -10,6 +10,7 @@ import type {
   AdminDownstream,
   AdminLabel,
   AdminSession,
+  AdminShareLink,
   AdminSystem,
   AdminTalkgroup,
   AdminTalkgroupQuery,
@@ -38,6 +39,7 @@ import type {
   SearchPage,
   SearchQuery,
   Series,
+  ShareLink,
   Span,
   UnitHistory,
 } from '@/types'
@@ -82,6 +84,7 @@ export const api = createApi({
     'Downstream',
     'Webhook',
     'ToneProfile',
+    'ShareLink',
   ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
@@ -517,6 +520,36 @@ export const api = createApi({
       invalidatesTags: ['Webhook'],
     }),
 
+    /**
+     * Mint (or re-mint) a Call's expiring public link (#64, spec US 32).
+     *
+     * A **mutation** rather than a query, because it writes: there is one live
+     * link per Call, so asking for one either issues a token or pushes an
+     * existing window out. Unauthenticated on purpose — a Listener holds no
+     * credential, and the abuse bound is that one row rather than a gate.
+     *
+     * It invalidates the Operator's listing, which is the screen that would
+     * otherwise be stale about what this Instance is currently sharing.
+     */
+    shareCall: builder.mutation<ShareLink, number>({
+      query: (id) => ({ url: `api/call/${id}/share`, method: 'POST' }),
+      invalidatesTags: ['ShareLink'],
+    }),
+
+    /** Every link a Listener has minted, for the one thing an Operator does
+     *  about one. No create and no edit — minting is the Listener's, and a link
+     *  that has run out is re-shared rather than extended. */
+    getShareLinks: builder.query<CuratedPage<AdminShareLink>, { limit: number; offset: number }>({
+      query: (window) => ({
+        url: `api/admin/shares?limit=${window.limit}&offset=${window.offset}`,
+      }),
+      providesTags: ['ShareLink'],
+    }),
+    deleteShareLink: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/shares/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['ShareLink'],
+    }),
+
     /** **Tone profiles** (#55, spec US 20) — a sub-resource of the Talkgroup
      *  they are paged on, because a profile that named no channel would be
      *  looked for in every Call this Instance takes.
@@ -579,6 +612,7 @@ export const {
   useDeleteToneProfileMutation,
   useDeleteWebhookMutation,
   useDeleteGroupMutation,
+  useDeleteShareLinkMutation,
   useDeleteSystemMutation,
   useDeleteTagMutation,
   useDeleteTalkgroupMutation,
@@ -602,6 +636,7 @@ export const {
   useGetLogsQuery,
   useGetMembersQuery,
   useGetRangesQuery,
+  useGetShareLinksQuery,
   useGetSystemsQuery,
   useGetTagsQuery,
   useGetUnitHistoryQuery,
@@ -610,6 +645,7 @@ export const {
   usePreviewFoldMutation,
   useLazySearchCallsQuery,
   useSearchCallsQuery,
+  useShareCallMutation,
   useSetRangesMutation,
   useUpdateApiKeyMutation,
   useUpdateDownstreamMutation,

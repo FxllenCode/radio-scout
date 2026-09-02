@@ -21,7 +21,11 @@ import { linkTo, shareLink, shareNotice } from '@/lib/share'
  *  Listener has pasted it. */
 export const NOTICE_MS = 3_000
 
-export interface ShareLink {
+/** The control, not the link. **Share link** is CONTEXT.md's word for the
+ *  expiring public URL a Listener mints for one Call (#64), and `@/types` owns
+ *  that name; this is what a *control* that hands any link to the platform
+ *  offers a screen. */
+export interface ShareControl {
   /** What the last link control did, or `null` — the two outcomes that speak
    *  for themselves say nothing ([`shareNotice`]). */
   notice: string | null
@@ -31,7 +35,7 @@ export interface ShareLink {
   say: (notice: string) => void
 }
 
-export function useShareLink(): ShareLink {
+export function useShareLink(): ShareControl {
   const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {

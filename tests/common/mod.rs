@@ -328,6 +328,47 @@ impl TestApp {
             .expect("multipart POST")
     }
 
+    /// `POST path` with no body at all — a request that is a *verb* rather than
+    /// a payload, which is what minting a **Share link** (#64) is.
+    pub async fn post(&self, path: &str) -> reqwest::Response {
+        self.client
+            .post(self.url(path))
+            .send()
+            .await
+            .expect("bodyless POST")
+    }
+
+    /// Mint a **Share link** for a Call and take it apart (#64, spec US 32).
+    ///
+    /// Here rather than in a test file because two suites need it — `share.rs`
+    /// against a filesystem store and `s3.rs` against a real bucket — and
+    /// because the two halves of a link are the *server's* spelling: rebuilding
+    /// the audio URL by string surgery in a test would be a second, private
+    /// implementation of `share::audio_link_to`, quietly right until it is not.
+    pub async fn mint_share(&self, id: i64) -> SharedLink {
+        let response = self.post(&format!("/api/call/{id}/share")).await;
+        assert_eq!(response.status(), 200, "minting a share link for {id}");
+        let minted: serde_json::Value = response.json().await.expect("a minted link");
+        let page = minted["url"].as_str().expect("a url").to_owned();
+        let token = page
+            .rsplit_once('=')
+            .expect("a token in the link")
+            .1
+            .to_owned();
+
+        SharedLink {
+            // Asserted rather than assumed: the harness is claiming the token it
+            // pulled out of the URL really is the one the server put in.
+            page: {
+                assert_eq!(page, radio_scout::share::link_to(&token));
+                page
+            },
+            audio: radio_scout::share::audio_link_to(&token),
+            expires_at_ms: minted["expiresAtMs"].as_i64().expect("an expiry"),
+            token,
+        }
+    }
+
     /// POST a JSON body to `path`, keeping the whole response — the admin
     /// surface (#19) speaks JSON, and its interesting half is in the headers.
     pub async fn post_json(&self, path: &str, body: serde_json::Value) -> reqwest::Response {
@@ -1744,4 +1785,13 @@ pub fn request_id_of(response: &reqwest::Response) -> String {
         .and_then(|value| value.to_str().ok())
         .expect("every response carries an x-request-id")
         .to_owned()
+}
+
+/// A minted **Share link**, taken apart (#64) — the page a recipient opens, the
+/// audio behind it, its secret, and when it stops working.
+pub struct SharedLink {
+    pub page: String,
+    pub audio: String,
+    pub token: String,
+    pub expires_at_ms: i64,
 }

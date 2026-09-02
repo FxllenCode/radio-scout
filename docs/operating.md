@@ -635,6 +635,52 @@ arriving too late to count.
 Every rejected copy leaves a line saying `reason=duplicate` and naming the call that beat it, so
 "why is this call not in the archive?" has an answer.
 
+## Public share links
+
+A listener who finds a moment worth sending taps ⤴ — on a search result, or in the press-and-hold
+menu on their session log — and gets a **public link to that one call** — a plain page with a play button on it, a preview card in a messaging app, and no
+way through to anything else on this instance. Sharing a moment does not mean sharing the instance.
+
+```toml
+[share]
+enabled = true
+link_ttl_secs = 604800
+```
+
+**It is on by default**, and the reason is the posture rather than the feature: an instance as it
+ships already serves its whole archive to anyone who can reach it, so a share link gives away
+nothing new. If you have *closed* listening — a VPN, an authenticating proxy in front — set
+`enabled = false`, because a share link bypasses that gate on purpose. Turning it off also stops
+the links already minted, so it works as a lever rather than as a hidden button; the ⤴ control
+disappears from the app at the same time.
+
+**One live link per call.** Sharing a call that is already shared hands back the link already in
+circulation with a fresh window on it, rather than minting a second one. That is what bounds the
+table: minting needs no credential — a listener does not have one — so the number of rows is the
+number of calls, which retention already bounds. Two listeners sharing the same call share one
+link.
+
+**Revoking is per link**, in Settings → Admin → **Share links**. It deletes the row, which kills
+the URL that was handed out for good: a token is 128 random bits and is never reissued. Somebody
+can share the same call again afterwards, and what they get is a *different* link — which is
+exactly what revoking a leaked URL should mean. That screen lists the **call** each link opens
+rather than the link itself: the URL is the credential, so the server never returns it and there is
+nowhere on that page for it to leak from.
+
+**The link expires**, and an expired one says so rather than 404ing. A week is the default: long
+enough that a link sent on Friday still plays on Monday, short enough that a URL pasted into a
+group chat is not a permanent public endpoint. `link_ttl_secs = 0` refuses to boot rather than
+being read as "never" — an unexpiring public link is the one thing this is not.
+
+**The preview card needs `[server] public_url`** to carry an image. Without it the card still
+renders — the title and the description are what a messaging app actually shows — but `og:image`
+and `og:url` are left off rather than guessed at, for the same reason a webhook sends no audio link
+until you have said where this instance lives.
+
+The audio behind a share link is served exactly as the app's own is: proxied with range support on
+the filesystem backend, or redirected to a short-lived presigned URL on S3. Nothing new is stored
+and nothing is transcoded.
+
 ## Listener counts
 
 Settings → Admin → **Listeners** charts how many people have been connected, and when. It answers

@@ -155,6 +155,11 @@ stages! {
     /// **object store**, and "the database refused" and "the bucket refused"
     /// send an Operator to different places.
     PurgeCalls => "purge-calls",
+    // -- Share links (`crate::share`, #64) ----------------------------------
+    /// Minting the expiring public link for one Call.
+    MintShare => "mint-share",
+    /// Reading the Call a share token names — the page and its audio alike.
+    OpenShare => "open-share",
 }
 
 impl Stage {
@@ -278,6 +283,20 @@ pub enum Reason {
     /// be an *open* arm in a closed vocabulary, and #70 is about to put these
     /// slugs behind a metric label.
     BadImport(crate::import::ParseError),
+    // -- Share links (#64, spec US 32) --------------------------------------
+    /// No **Share link** by that token: never minted, revoked, or superseded by
+    /// a re-mint after it expired.
+    ShareNotFound,
+    /// The link existed and its window has closed. Its own arm rather than a
+    /// flavour of the one above, because the ticket asks that an expired link
+    /// *say so* — and because "you were too slow" and "that was never a link"
+    /// are things a recipient does different things about.
+    ShareExpired,
+    /// `[share] enabled` is off. Answered exactly as [`Reason::ShareNotFound`]
+    /// is — an Operator who closed the door owes whoever is knocking no map of
+    /// it — and distinguished in the **log**, which is where the Operator whose
+    /// links stopped working goes to find out why.
+    SharingDisabled,
     // -- Curation (#49) -----------------------------------------------------
     /// A curation write the admin surface refused — a blank field, a name or a
     /// Ref already taken, a row that is not there, or a delete that would have
@@ -426,6 +445,18 @@ impl Reason {
         self.refusal().slug
     }
 
+    /// What the caller is answered with.
+    ///
+    /// A window onto the same single decision [`Reason::into_response`] renders,
+    /// for the one surface that records a refusal and then answers it in a shape
+    /// of its own — [`crate::share::page`], which puts HTML in front of a human
+    /// rather than a recorder's `text/plain`. Reading the status back from here
+    /// is what stops that page and every other refusal drifting apart about what
+    /// a dead link *is*.
+    pub(crate) fn status(&self) -> StatusCode {
+        self.refusal().status
+    }
+
     /// What the caller is told, in words — the body, without its trailing
     /// newline.
     ///
@@ -571,6 +602,28 @@ impl Reason {
             )
             .attempted_from(*client_addr)
             .retry_after(*retry_after_secs),
+            // **DEBUG, all three.** Somebody clicked a dead link, which an
+            // Operator does not act on and which the request log's own 4xx line
+            // already covers (rule 3). The two that mean different things say so
+            // in the slug, not in the body — see [`Reason::SharingDisabled`].
+            Reason::ShareNotFound => Refusal::new(
+                "share-not-found",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("share link not found\n"),
+            ),
+            Reason::ShareExpired => Refusal::new(
+                "share-expired",
+                Level::DEBUG,
+                StatusCode::GONE,
+                text("share link expired\n"),
+            ),
+            Reason::SharingDisabled => Refusal::new(
+                "sharing-disabled",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("share link not found\n"),
+            ),
             Reason::BadImport(error) => Refusal::new(
                 error.reason(),
                 Level::DEBUG,

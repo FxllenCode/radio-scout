@@ -100,6 +100,18 @@ pub struct Catalog {
     /// How long "recently" is, for every [`CatalogTalkgroup::recent_calls`]
     /// above — see [`ACTIVITY_WINDOW_MS`].
     pub activity_window_ms: i64,
+    /// Whether this Instance mints **Share links** (#64, spec US 32) — `[share]
+    /// enabled`.
+    ///
+    /// Here rather than on a surface of its own because it is the same question
+    /// the window above answers: *what does this Instance offer?*, asked once on
+    /// app open. A control that is offered and then refused is a control that
+    /// lies, and an Operator who closed sharing closed it for a reason.
+    ///
+    /// Set by the **handler**, not by [`read`]: this is configuration rather
+    /// than something in the database, and `read` is what a test drives against
+    /// rows.
+    pub sharing: bool,
 }
 
 // How a catalog reaches a listener, decided beside the type rather than at the
@@ -108,9 +120,13 @@ crate::answers_json!(Catalog);
 
 /// `GET /api/catalog` — the Systems and Talkgroups a listener can select.
 pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> {
-    read(&state.db, state.clock.now_ms() - ACTIVITY_WINDOW_MS)
+    let catalog = read(&state.db, state.clock.now_ms() - ACTIVITY_WINDOW_MS)
         .await
-        .map_err(Stage::LoadCatalog.failed())
+        .map_err(Stage::LoadCatalog.failed())?;
+    Ok(Catalog {
+        sharing: state.shares.enabled(),
+        ..catalog
+    })
 }
 
 /// One Talkgroup's traffic since a cutoff, as the grouped query answers it.
@@ -208,6 +224,8 @@ pub async fn read<C: ConnectionTrait>(db: &C, since_ms: i64) -> Result<Catalog, 
     Ok(Catalog {
         systems,
         activity_window_ms: ACTIVITY_WINDOW_MS,
+        // Configuration, which this function does not read — see the field.
+        ..Catalog::default()
     })
 }
 

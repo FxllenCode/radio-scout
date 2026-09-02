@@ -14,6 +14,7 @@ import { ApiKeysScreen } from './ApiKeysScreen'
 import { DownstreamsScreen } from './DownstreamsScreen'
 import { GroupsScreen, TagsScreen } from './LabelsScreen'
 import { ListenersScreen } from './ListenersScreen'
+import { SharesScreen } from './SharesScreen'
 import { SystemsScreen } from './SystemsScreen'
 import { UnitsScreen } from './UnitsScreen'
 import { WebhooksScreen } from './WebhooksScreen'
@@ -57,6 +58,7 @@ describe('the admin gate', () => {
     ['api keys', () => <ApiKeysScreen />],
     ['downstreams', () => <DownstreamsScreen />],
     ['webhooks', () => <WebhooksScreen />],
+    ['share links', () => <SharesScreen />],
   ])('asks for the password on the %s screen', async (_name, ui) => {
     // The default handlers answer `/api/admin/session` with a 401.
     renderWithProviders(ui())
@@ -109,6 +111,7 @@ describe('the admin gate', () => {
       '/settings/admin/api-keys',
       '/settings/admin/downstreams',
       '/settings/admin/webhooks',
+      '/settings/admin/shares',
       '/settings/admin/listeners',
       '/settings/logs',
     ])
@@ -3365,5 +3368,111 @@ describe('listener history', () => {
     expect(
       await screen.findByText(/no addresses, no sessions/i),
     ).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Share links (#64, spec US 32)
+// ---------------------------------------------------------------------------
+
+describe('share links', () => {
+  /** **What is being shared, and what it opens.** The Operator's question is
+   *  not "which tokens exist" — it is "what of mine is public right now", so
+   *  the row is the Call. */
+  it('lists what each link opens', async () => {
+    instance.shareLink()
+    signedIn(<SharesScreen />)
+
+    const row = await screen.findByText('Fire Dispatch')
+
+    expect(row).toBeInTheDocument()
+    expect(screen.getByText(/Fulton/)).toBeInTheDocument()
+  })
+
+  /** **The token is never on this screen.** The link *is* the credential, so
+   *  the server has no field for it — and neither has anything here, which is
+   *  what stops a later edit starting to render one. */
+  it('never renders a token', async () => {
+    instance.shareLink()
+    const { container } = signedIn(<SharesScreen />)
+
+    await screen.findByText('Fire Dispatch')
+
+    expect(container.textContent).not.toMatch(/\/s\?t=/)
+  })
+
+  /** An expired link is still listed — it is a row an Operator may want gone —
+   *  and says which it is. */
+  it('says when a link has already run out', async () => {
+    instance.shareLink({ expired: true })
+    signedIn(<SharesScreen />)
+
+    expect(await screen.findByText(/expired/)).toBeInTheDocument()
+  })
+
+  it('shows nothing being shared when nothing is', async () => {
+    signedIn(<SharesScreen />)
+
+    expect(await screen.findByText('Nothing is being shared.')).toBeInTheDocument()
+  })
+
+  /** Revoking takes the row away, which is the whole feature: the URL that was
+   *  handed out stops working. */
+  it('revokes one', async () => {
+    const link = instance.shareLink()
+    signedIn(<SharesScreen />)
+    await screen.findByText('Fire Dispatch')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+
+    await waitFor(() =>
+      expect(screen.queryByText('Fire Dispatch')).not.toBeInTheDocument(),
+    )
+    expect(wrote()).toContainEqual({
+      method: 'DELETE',
+      path: `/api/admin/shares/${link.id}`,
+      body: undefined,
+    })
+  })
+
+  /** **Every link is reachable, so every link is revocable.** Minting takes no
+   *  credential, so this table is as big as the archive — a screen that showed
+   *  the newest fifty and stopped would leave the rest invisible *and*
+   *  unrevocable, which is the one thing it is for. */
+  it('pages rather than stopping', async () => {
+    for (let i = 0; i < 51; i += 1) {
+      instance.shareLink({
+        call: { ...instance.shares[0]?.call, id: 100 + i, talkgroupLabel: `Channel ${i}` },
+      })
+    }
+    signedIn(<SharesScreen />)
+    await screen.findByText('Channel 0')
+
+    expect(screen.getByText('1–50 of 51')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    expect(await screen.findByText('51–51 of 51')).toBeInTheDocument()
+    expect(screen.getByText('Channel 50')).toBeInTheDocument()
+    expect(screen.queryByText('Channel 0')).not.toBeInTheDocument()
+
+    // ...and back, because a walk that only goes one way is not a walk.
+    await userEvent.click(screen.getByRole('button', { name: 'Previous' }))
+
+    expect(await screen.findByText('1–50 of 51')).toBeInTheDocument()
+    expect(screen.getByText('Channel 0')).toBeInTheDocument()
+  })
+
+  /** A link somebody else revoked from another tab is a refusal this screen
+   *  renders rather than swallows — the two-open-tabs case `curate` exists for. */
+  it('says so when the link is already gone', async () => {
+    const link = instance.shareLink()
+    signedIn(<SharesScreen />)
+    await screen.findByText('Fire Dispatch')
+    instance.shares = []
+
+    await userEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no such share link/)
+    expect(link.id).toBeGreaterThan(0)
   })
 })

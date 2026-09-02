@@ -2,6 +2,7 @@ import { http, HttpResponse } from 'msw'
 
 import type {
   AdminApiKey,
+  AdminShareLink,
   AdminDownstream,
   AdminWebhook,
   AdminLabel,
@@ -40,6 +41,7 @@ export class FakeInstance {
   keys: AdminApiKey[] = []
   downstreams: AdminDownstream[] = []
   webhooks: AdminWebhook[] = []
+  shares: AdminShareLink[] = []
   /** Member Refs, by owning Talkgroup id (#50). Kept beside the rows rather
    *  than on them because the server deliberately keeps them off the listing —
    *  a query per row on a page of five hundred, for a column it cannot edit. */
@@ -170,6 +172,30 @@ export class FakeInstance {
       ...row,
     }
     this.webhooks.push(created)
+    return created
+  }
+
+  /** One share link (#64). No token, for the real listing's reason: the link
+   *  *is* the credential, so the server never returns it. */
+  shareLink(row: Partial<AdminShareLink> = {}): AdminShareLink {
+    const created: AdminShareLink = {
+      id: this.id(),
+      expiresAtMs: 1_700_600_000_000,
+      createdAtMs: 1_700_000_000_000,
+      expired: false,
+      call: {
+        id: 42,
+        systemRef: 11,
+        systemLabel: 'Fulton',
+        talkgroupRef: 54241,
+        talkgroupLabel: 'Fire Dispatch',
+        talkgroupTag: 'Dispatch',
+        timestamp: 1_699_999_000_000,
+        audioUrl: '/api/call/42/audio',
+      },
+      ...row,
+    }
+    this.shares.push(created)
     return created
   }
 
@@ -749,6 +775,38 @@ export function curationHandlers(instance: FakeInstance) {
       instance.webhooks = instance.webhooks.filter(
         (it) => String(it.id) !== params.id,
       )
+      return new HttpResponse(null, { status: 204 })
+    }),
+
+    // **Share links** (#64). A listing and a revoke, because that is the whole
+    // surface: minting is the Listener's. The token never comes back — see
+    // `FakeInstance.shareLink`.
+    http.get(`${ORIGIN}/api/admin/shares`, ({ request }) => {
+      const url = new URL(request.url)
+      const limit = Number(url.searchParams.get('limit') ?? 50)
+      const offset = Number(url.searchParams.get('offset') ?? 0)
+      const results = instance.shares.slice(offset, offset + limit)
+      return HttpResponse.json({
+        results,
+        count: instance.shares.length,
+        limit,
+        offset,
+        hasMore: offset + results.length < instance.shares.length,
+      })
+    }),
+    http.delete(`${ORIGIN}/api/admin/shares/:id`, ({ params }) => {
+      instance.wrote.push({
+        method: 'DELETE',
+        path: `/api/admin/shares/${params.id}`,
+        body: undefined,
+      })
+      const before = instance.shares.length
+      instance.shares = instance.shares.filter(
+        (it) => String(it.id) !== params.id,
+      )
+      if (instance.shares.length === before) {
+        return refusal(404, 'share-link-not-found', 'no such share link')
+      }
       return new HttpResponse(null, { status: 204 })
     }),
   ]

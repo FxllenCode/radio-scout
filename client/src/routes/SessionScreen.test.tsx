@@ -3,7 +3,11 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 
+import { http, HttpResponse } from 'msw'
+
 import { LONG_PRESS_MS } from '@/hooks/useLongPress'
+import { ORIGIN } from '@/test/handlers'
+import { server } from '@/test/setup'
 import {
   advance,
   received,
@@ -255,6 +259,59 @@ describe('the session log (#58, spec US 28)', () => {
       hold('TG 1')
 
       expect(screen.queryByRole('link', { name: 'Download' })).not.toBeInTheDocument()
+    })
+
+    /**
+     * **Where a moment is shared from** (#64, spec US 32).
+     *
+     * This is the screen a Listener reaches for after *hearing* something —
+     * the Archive is where you go when you have to look for it — so the public
+     * link belongs here, and it says what happened rather than copying in
+     * silence.
+     */
+    it('mints a public link from the sheet', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const minted: string[] = []
+      server.use(
+        http.post(`${ORIGIN}/api/call/:id/share`, ({ params }) => {
+          minted.push(String(params.id))
+          return HttpResponse.json({
+            url: `/s?t=tok${params.id}`,
+            expiresAtMs: 1_700_600_000_000,
+          })
+        }),
+      )
+      const written: string[] = []
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText: (text: string) => (written.push(text), Promise.resolve()) },
+        configurable: true,
+      })
+      await heard(call(1))
+      hold('TG 1')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Share a public link' }))
+
+      expect(await screen.findByText('Link copied.')).toBeInTheDocument()
+      expect(minted).toEqual(['1'])
+      expect(written).toEqual(['http://localhost/s?t=tok1'])
+    })
+
+    /** **A control that is offered and then refused is a control that lies.**
+     *  An Instance with `[share] enabled = false` says so in its catalog. */
+    it('offers no public link where the instance does not mint them', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      server.use(
+        http.get(`${ORIGIN}/api/catalog`, () =>
+          HttpResponse.json({ systems: [], activityWindowMs: 86_400_000, sharing: false }),
+        ),
+      )
+      await heard(call(1))
+
+      hold('TG 1')
+
+      expect(
+        screen.queryByRole('button', { name: 'Share a public link' }),
+      ).not.toBeInTheDocument()
     })
 
     /** A press that opened the sheet must not also have replayed the Call on

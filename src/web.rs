@@ -34,10 +34,16 @@ pub async fn spa_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
 
     // Reserved server namespaces never fall through to the SPA. Everything real
-    // lives under `/api/*` (covered generically); `healthz` is the one top-level
-    // exception. A new top-level route outside `/api` must be added here too, or
-    // the SPA shell would shadow it.
-    if path == "healthz" || path == "api" || path.starts_with("api/") {
+    // lives under `/api/*` (covered generically); `healthz` and the share
+    // surface (#64) are the top-level exceptions. A new top-level route outside
+    // `/api` must be added here too, or the SPA shell would shadow it.
+    //
+    // `s/` and not `s`: the share **page** is `/s` itself and is an explicit
+    // route, which wins over this fallback; what this reserves is everything
+    // *under* it, so `/s/anything` is a clean 404 rather than the whole app
+    // served at a share URL. The trailing slash also keeps `/search`,
+    // `/session` and `/settings` — three real client-side routes — out of it.
+    if path == "healthz" || path == "api" || path.starts_with("api/") || path.starts_with("s/") {
         return (StatusCode::NOT_FOUND, "not found\n").into_response();
     }
 

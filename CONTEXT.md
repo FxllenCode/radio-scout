@@ -334,6 +334,32 @@ _Avoid_: history, library, database, back catalogue.
 The policy that bounds the **Archive**: an age window (in days) plus an optional cap on total stored audio, overridable per System/Talkgroup (unset inherits). Expressed as configuration; enforced by sweeps. **Starred** calls and **Event** members are exempt.
 _Avoid_: expiry, TTL, cleanup.
 
+**Share link**:
+An expiring public URL for one **Call**, minted by a **Listener** and opening a page with that Call
+on it and nothing else — no search, no catalog, no other audio. What it exists for is that sharing a
+moment should not mean sharing the **Instance**.
+
+**One live link per Call, and that is the abuse bound rather than a convenience.** Minting needs no
+credential, because a Listener holds none — so a table keyed on anything but the Call could be
+filled by anybody who can POST in a loop. Keyed on the Call it is bounded by the Archive, which
+**Retention** already bounds. Sharing a Call that is already shared therefore hands back *the link
+already in circulation* with its window pushed out, and two Listeners sharing one Call share one
+link.
+
+**The link is the credential**, the way a **Webhook**'s URL is: never returned by the admin listing,
+never logged — which is why the token rides a URL's *query string*, the one part of a request that
+has never been written down (ADR-0011 rule 2). Revoking deletes the row, so that URL is dead for
+good; sharing the Call again mints a different one, which is exactly what revoking a leaked URL
+should mean. An expiry is a promise about the link that was handed out, so an expired one is
+replaced rather than resurrected, and a recipient is told which of "expired" and "never existed"
+they have hit.
+
+Deliberately not an **Event** (a curated collection frozen against Retention) and not an **Access
+code** (a scoped credential for the whole Instance): a Share link is one Call, for a while, to
+whoever holds it.
+_Avoid_: public link (fine in prose, wrong for the entity), permalink (it expires), token (the
+secret *inside* one), embed (#75's iframe page is a different thing).
+
 **Star**:
 A **Listener's** per-browser mark on a **Call**, filterable in search and exempt from **Retention** where the **Operator** allows.
 _Avoid_: favorite, bookmark, like.

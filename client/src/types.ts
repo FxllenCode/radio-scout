@@ -219,6 +219,10 @@ export interface Catalog {
    *  rather than spelled again here, so "12 calls in the last 24 hours" stays
    *  true if the server's window ever moves. */
   activityWindowMs: number
+  /** Whether this Instance mints **Share links** (#64, spec US 32). The share
+   *  control is drawn from this: a control that is offered and then refused is
+   *  a control that lies. */
+  sharing: boolean
 }
 
 export interface SystemOption {
@@ -530,6 +534,41 @@ export interface AdminWebhook {
   lastFailure?: string | null
   consecutiveFailures: number
   createdAtMs: number
+}
+
+/**
+ * A minted **Share link** (#64, spec US 32), as the Listener who asked for it is
+ * handed it back.
+ *
+ * `url` is a **path with its query** — `/s?t=…` — not an absolute URL: the
+ * browser is the side that knows which origin it reached this Instance on, and
+ * an Instance may not know its own address at all. `lib/share`'s `linkTo` makes
+ * it absolute against `window.location.origin`, which is what a Listener pastes.
+ */
+export interface ShareLink {
+  url: string
+  expiresAtMs: number
+}
+
+/**
+ * One share link as the Operator's screen lists it.
+ *
+ * **There is no token**, and the omission is the point — the [`AdminWebhook`]
+ * rule, one row along: the link *is* the credential, and a screen that showed it
+ * would be a place it could leak from that has nothing to do with sharing a
+ * Call. What is shown instead is the Call it opens, which is the thing an
+ * Operator is actually asking about.
+ */
+export interface AdminShareLink {
+  id: number
+  expiresAtMs: number
+  /** When this Call first started being shared — untouched by a re-share, so the
+   *  column answers "since when" rather than "who clicked most recently". */
+  createdAtMs: number
+  /** Whether it has already run out, decided against the **Instance's** clock
+   *  rather than the browser's. */
+  expired: boolean
+  call: Call
 }
 
 /** What a new webhook needs. `url` is write-only, for [`AdminWebhook`]'s

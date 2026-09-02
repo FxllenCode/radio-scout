@@ -8,8 +8,9 @@ use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
-    downstream_delivery, group, listener_sample, log_event, site, system, tag, talkgroup,
-    talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook, webhook_delivery,
+    downstream_delivery, group, listener_sample, log_event, share_link, site, system, tag,
+    talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
+    webhook_delivery,
 };
 
 pub struct Migrator;
@@ -37,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0017_quiet_spans::Migration),
             Box::new(m0018_listener_samples::Migration),
             Box::new(m0019_patched_channel_index::Migration),
+            Box::new(m0020_share_links::Migration),
         ]
     }
 }
@@ -1886,6 +1888,40 @@ mod m0019_patched_channel_index {
                         .table(call_patch::Entity)
                         .to_owned(),
                 )
+                .await
+        }
+    }
+}
+
+/// The expiring public link a **Listener** minted for one **Call** (#64, spec
+/// US 32).
+///
+/// `call_id` and `token` are both unique, and the entity's `#[sea_orm(unique)]`
+/// already emits both — so no index is added here. One row per Call is the
+/// abuse bound on an unauthenticated mint; see [`share_link`]'s module note.
+mod m0020_share_links {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0020_share_links"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(share_link::Entity))
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(share_link::Entity).to_owned())
                 .await
         }
     }
