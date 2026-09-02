@@ -110,7 +110,7 @@ impl Axis {
             // string, so it must be bounded by something that does not depend
             // on the division above being right. With the division right it
             // never binds.
-            buckets: (ceil_div(span, bucket_ms) as usize).min(MAX_BUCKETS).max(1),
+            buckets: (ceil_div(span, bucket_ms) as usize).clamp(1, MAX_BUCKETS),
         }
     }
 
@@ -231,6 +231,32 @@ where
         .into_simple_expr()
         .sub(axis.from_ms())
         .div(axis.bucket_ms())
+}
+
+/// What [`bucket_expr`] is selected as, and what an aggregate over it groups by.
+pub const BUCKET: &str = "bucket";
+
+/// The grouping key, as the **output column's name** rather than as the
+/// expression again.
+///
+/// This is a dialect difference and it cost a release to find. sea-orm renders
+/// `bucket_expr`'s origin and width as *bound parameters*, so repeating the
+/// expression in the `GROUP BY` emits `(at - $3) / $4` against a select list
+/// holding `(at - $1) / $2`. SQLite compares those as equal and answers; Postgres
+/// compares parameter *nodes*, decides the grouped expression is a different
+/// one, and refuses the whole query with `column "…" must appear in the GROUP BY
+/// clause` — so every chart in the app 500s on one of the two supported
+/// databases and works perfectly on the other.
+///
+/// Grouping by the name sidesteps it entirely: both dialects resolve a bare name
+/// in `GROUP BY` against the select list's aliases, and there is one expression
+/// in the statement rather than two that have to be recognised as the same.
+/// Neither `calls` nor `listener_samples` has a column called `bucket`, which is
+/// the only thing that could shadow it.
+pub fn bucket_group() -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::sea_query::{Alias, Expr};
+
+    Expr::col(Alias::new(BUCKET)).into()
 }
 
 // ---------------------------------------------------------------------------

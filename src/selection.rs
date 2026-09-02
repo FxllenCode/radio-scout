@@ -24,7 +24,7 @@ use crate::call::StoredCall;
 /// holding a System can't enumerate its Talkgroups — it only knows the ones it
 /// has heard — and rdio only avoids the problem by shipping its whole config to
 /// the client, so the matrix gets a wildcard instead.
-const TALKGROUP_WILDCARD: &str = "*";
+pub(crate) const TALKGROUP_WILDCARD: &str = "*";
 
 /// The listener's subscription matrix: `systemRef -> talkgroupRef -> enabled`.
 /// JSON object keys are strings, so refs are compared as strings. `all` is the
@@ -106,6 +106,73 @@ impl Selection {
     pub fn admits(&self, call: &StoredCall) -> bool {
         self.reaches(call, |_, _| true)
     }
+
+    /// The Selection a link carries, or `None` if it does not carry one.
+    ///
+    /// The spelling is the client's (`client/src/lib/selectionUrl.ts`):
+    /// `<default>`, then a `_`-separated System per exception, each
+    /// `<systemRef>` followed by `.`-separated entries — `*` for the System's
+    /// wildcard, a Ref otherwise, prefixed `-` when it is off. Only
+    /// `[0-9*._-]`, which is what a query string carries unescaped.
+    ///
+    /// It is read here because a **DVR**'s scope is a Selection the browser
+    /// encodes and the Archive filters on (#63), where before it only ever
+    /// travelled between two browsers (#61). Neither side's own round trip can
+    /// notice the two drifting apart, so
+    /// `client/src/lib/selectionEncoding.json` is a table **both** are held to
+    /// — the same reason #62 runs its bucket SQL against its bucket Rust.
+    ///
+    /// **All or nothing**, like the client's reader and for its reason: a link
+    /// is one statement made by somebody else, and applying half of it would
+    /// answer with a scanner nobody asked for. Refused here means the request
+    /// is refused, naming the parameter.
+    pub fn decode(encoded: &str) -> Option<Selection> {
+        let mut parts = encoded.split('_');
+        let all = match parts.next()? {
+            "1" => true,
+            "0" => false,
+            _ => return None,
+        };
+
+        let mut sel: HashMap<String, HashMap<String, bool>> = HashMap::new();
+        for system in parts {
+            let mut fields = system.split('.');
+            let system_ref = canonical_ref(fields.next()?)?;
+
+            let mut talkgroups = HashMap::new();
+            for entry in fields {
+                let (on, key) = match entry.strip_prefix('-') {
+                    Some(rest) => (false, rest),
+                    None => (true, entry),
+                };
+                let key = if key == TALKGROUP_WILDCARD {
+                    TALKGROUP_WILDCARD.to_string()
+                } else {
+                    canonical_ref(key)?
+                };
+                talkgroups.insert(key, on);
+            }
+            // A System named with nothing to say about it is not an exception
+            // to anything — and is how a trailing `_` reads.
+            if talkgroups.is_empty() {
+                return None;
+            }
+            sel.insert(system_ref, talkgroups);
+        }
+
+        Some(Selection { sel, all })
+    }
+}
+
+/// A Ref as the matrix keys it: digits only, and **normalized through the
+/// number it names**, because the client's reader does the same (`Number()`) —
+/// so a hand-typed `0100` addresses System 100 at both ends rather than a
+/// System whose key nothing will ever match.
+fn canonical_ref(value: &str) -> Option<String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(value.parse::<i64>().ok()?.to_string())
 }
 
 #[cfg(test)]
@@ -161,5 +228,61 @@ mod tests {
             Selection::default()
         );
         assert!(Selection::default().is_all_off());
+    }
+
+    /// The link spelling, held to the table the client is held to.
+    ///
+    /// This file and `client/src/lib/selectionUrl.ts` are one format written
+    /// twice in two languages, and a drift between them is not a crash: the
+    /// server answers a **DVR** with a perfectly ordinary page of somebody
+    /// else's channels. Each side's own round trip is happily green through
+    /// that, which is why the cases live in a file neither owns.
+    #[derive(serde::Deserialize)]
+    struct EncodingCases {
+        readable: Vec<ReadableCase>,
+        unreadable: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ReadableCase {
+        encoded: String,
+        all: bool,
+        sel: HashMap<String, HashMap<String, bool>>,
+    }
+
+    fn encoding_cases() -> EncodingCases {
+        serde_json::from_str(include_str!("../client/src/lib/selectionEncoding.json"))
+            .expect("the shared encoding table parses")
+    }
+
+    #[test]
+    fn every_link_the_client_writes_reads_back_as_the_selection_it_meant() {
+        let cases = encoding_cases();
+        assert!(
+            cases.readable.len() >= 8,
+            "the shared table is the only thing holding the two spellings together"
+        );
+        for case in cases.readable {
+            assert_eq!(
+                Selection::decode(&case.encoded),
+                Some(Selection {
+                    sel: case.sel,
+                    all: case.all,
+                }),
+                "decoding {:?}",
+                case.encoded
+            );
+        }
+    }
+
+    #[test]
+    fn a_link_that_is_not_one_is_refused_whole() {
+        for encoded in encoding_cases().unreadable {
+            assert_eq!(
+                Selection::decode(&encoded),
+                None,
+                "{encoded:?} is not a Selection"
+            );
+        }
     }
 }

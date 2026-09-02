@@ -5,12 +5,18 @@ import type { Call } from '@/types'
 
 import {
   advance,
+  engageCatchup,
   received,
   selectLiveCall,
   selectHistory,
   turnFeedOff,
 } from './live'
-import { enterPlaybackMode, selectCurrentCall, startRun } from './playback'
+import {
+  enterPlaybackMode,
+  selectCurrentCall,
+  startRun,
+  toggleHurry,
+} from './playback'
 import { makeStore, type AppStore } from './store'
 import {
   nextCall,
@@ -21,8 +27,11 @@ import {
   keepAliveExpired,
   selectIsBridging,
   selectIsPaused,
+  selectIsHurrying,
   selectNowPlaying,
   selectProgress,
+  selectSeek,
+  seekTo,
   selectSubscription,
   sourceChanged,
   togglePause,
@@ -306,6 +315,95 @@ describe('transport', () => {
       store.dispatch(enterPlaybackMode())
 
       expect(selectSubscription(store.getState())).toEqual({ all: false, sel: {} })
+    })
+  })
+
+  /**
+   * The two levers `lib/catchup` owns — a raised rate and the **Quiet span**
+   * trim — belong to whichever source owns the element (#59, #63).
+   *
+   * There are two flags because there are two things being hurried through:
+   * **Catch-up** drains the listening queue and ends when it empties, and the
+   * **DVR**'s runs to the end of a range. Asking one question of the transport
+   * is what stops the player caring which.
+   */
+  describe('hurrying, whichever source owns the element', () => {
+    it('is off with nothing asked for', () => {
+      expect(selectIsHurrying(listening(call(1)).getState())).toBe(false)
+    })
+
+    it('is Catch-up while the feed owns the audio', () => {
+      const store = listening(call(1), call(2))
+      store.dispatch(engageCatchup())
+
+      expect(selectIsHurrying(store.getState())).toBe(true)
+    })
+
+    it('is the Run\'s own lever while an archived Call owns it', () => {
+      const store = listening(call(1))
+      store.dispatch(enterPlaybackMode())
+      store.dispatch(startRun({ search: {}, page: searchPage(), index: 0 }))
+
+      expect(selectIsHurrying(store.getState())).toBe(false)
+      store.dispatch(toggleHurry())
+      expect(selectIsHurrying(store.getState())).toBe(true)
+    })
+
+    it("never lets one source's answer reach the other", () => {
+      // A Listener catching up on the queue who opens a DVR must not find it
+      // already running at 1.5x, and a DVR left hurrying must not speed up the
+      // live feed it hands back to.
+      const store = listening(call(1), call(2))
+      store.dispatch(engageCatchup())
+      store.dispatch(enterPlaybackMode())
+      store.dispatch(startRun({ search: {}, page: searchPage(), index: 0 }))
+
+      expect(selectIsHurrying(store.getState())).toBe(false)
+    })
+  })
+
+  /**
+   * Seeking inside a Call (#63) — the half of "seeking lands within calls" the
+   * client owns. The other half is the range request the element makes, which
+   * `src/serve.rs` has answered since #10.
+   */
+  describe('seeking within the Call on the element', () => {
+    it('carries the second asked for, and moves the readout at once', () => {
+      // Without moving `position` here the control would snap back to where the
+      // element last reported until the next `timeupdate` — a scrubber that
+      // fights the thumb.
+      const store = listening(call(1))
+      store.dispatch(progressed({ position: 1, duration: 30 }))
+
+      store.dispatch(seekTo(12))
+
+      expect(selectSeek(store.getState())?.toSeconds).toBe(12)
+      expect(selectProgress(store.getState())).toBeCloseTo(12 / 30)
+    })
+
+    it('is a fresh request every time, even to the same second', () => {
+      const store = listening(call(1))
+      store.dispatch(seekTo(12))
+      const first = selectSeek(store.getState())?.nonce
+      store.dispatch(seekTo(12))
+
+      expect(selectSeek(store.getState())?.nonce).not.toBe(first)
+    })
+
+    it('never lands on the Call after the one it was asked about', () => {
+      const store = listening(call(1))
+      store.dispatch(seekTo(12))
+
+      store.dispatch(sourceChanged())
+
+      expect(selectSeek(store.getState())).toBeNull()
+    })
+
+    it('cannot ask for a moment before the Call began', () => {
+      const store = listening(call(1))
+      store.dispatch(seekTo(-5))
+
+      expect(selectSeek(store.getState())?.toSeconds).toBe(0)
     })
   })
 })

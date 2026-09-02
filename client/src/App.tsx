@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from '@/components/layout/AppShell'
 import { LiveScreen } from '@/routes/LiveScreen'
 import { TalkgroupsScreen } from '@/routes/TalkgroupsScreen'
+import { DvrScreen } from '@/routes/DvrScreen'
 import { SearchScreen } from '@/routes/SearchScreen'
 import { SessionScreen } from '@/routes/SessionScreen'
 import { LogsScreen } from '@/routes/LogsScreen'
@@ -30,6 +31,11 @@ export default function App() {
         <Route index element={<LiveScreen />} />
         <Route path="talkgroups" element={<TalkgroupsScreen />} />
         <Route path="search" element={<SearchScreen />} />
+        {/* The **DVR** (#63, spec US 39). A route rather than a fifth tab: it
+            is the archive played rather than searched, and it is reached from
+            the Search screen with the filters already set — which is the
+            gesture, "rewind *this*". The four tabs stay the Listener's. */}
+        <Route path="dvr" element={<DvrScreen />} />
         {/* One radio's history (#47, spec US 44), reached by tapping a unit
             label anywhere it renders. A route rather than a tab: it is always
             arrived at *from* a Call, never browsed to. */}

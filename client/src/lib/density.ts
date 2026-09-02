@@ -137,6 +137,30 @@ export function bucketStartMs(series: Series, index: number): number {
 }
 
 /**
+ * Which bucket an instant falls in — [`bucketStartMs`]'s inverse, and what
+ * places the **DVR**'s playhead (#63).
+ *
+ * The ribbon over search results asks [`bucketOfOffset`] instead, because a
+ * page of results has a row number and not a time. A DVR has the opposite: its
+ * position *is* an instant, so the two markers are placed from two different
+ * facts and this is the second of them.
+ *
+ * Clamped rather than refused, [`bucketAt`]'s rule: an instant outside the
+ * series is a marker at the end it left by, which is where the Listener
+ * actually is.
+ */
+export function bucketOfInstant(series: Series, ms: number): number {
+  // A series with no width to divide by is one bucket wide as far as anyone
+  // looking at it is concerned — the server never sends one, and a `NaN`
+  // reaching a `style` attribute is a marker that silently stops being drawn.
+  if (series.bucketMs <= 0) return 0
+  return clampIndex(
+    Math.floor((ms - series.fromMs) / series.bucketMs),
+    series.values.length,
+  )
+}
+
+/**
  * Which bucket a pointer `fraction` of the way across the ribbon addresses.
  *
  * Clamped rather than refused: a drag that leaves the element still means

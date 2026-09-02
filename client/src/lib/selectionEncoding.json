@@ -1,0 +1,26 @@
+{
+  "_comment": "The Selection link spelling, as a table both languages are held to. `client/src/lib/selectionUrl.ts` writes and reads it; `src/selection.rs` reads it, because a DVR's scope (#63) is a Selection the browser encodes and the server filters on. A drift between the two is a silently wrong answer — the server would return somebody else's channels — so neither side's tests prove it alone.",
+  "readable": [
+    { "encoded": "1", "all": true, "sel": {} },
+    { "encoded": "0", "all": false, "sel": {} },
+    { "encoded": "1_100.-5", "all": true, "sel": { "100": { "5": false } } },
+    { "encoded": "1_100.-*", "all": true, "sel": { "100": { "*": false } } },
+    { "encoded": "0_100.*.-5", "all": false, "sel": { "100": { "*": true, "5": false } } },
+    { "encoded": "0_100.*.5.12_200.7", "all": false, "sel": { "100": { "*": true, "5": true, "12": true }, "200": { "7": true } } },
+    { "encoded": "0_100.*.-5_200.7", "all": false, "sel": { "100": { "*": true, "5": false }, "200": { "7": true } } },
+    { "encoded": "0_0100.05", "all": false, "sel": { "100": { "5": true } } }
+  ],
+  "unreadable": [
+    "",
+    "2",
+    "yes",
+    "0_",
+    "0_100",
+    "0_abc.1",
+    "0_100.x",
+    "0_100.-",
+    "0_100.--5",
+    "0_100.5.",
+    "0_.5"
+  ]
+}

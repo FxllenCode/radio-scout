@@ -126,6 +126,20 @@ pub struct CallSearch {
     /// emergency would be paying a real price for that. `minDuration` and `unit`
     /// are out for the same reason.
     pub mark: Option<crate::webhook::Mark>,
+    /// Only Calls a **Selection** reaches (#63, spec US 39) — the **DVR**'s
+    /// scope, and the one it has.
+    ///
+    /// The DVR's Talkgroup picker mints a one-entry Selection rather than
+    /// setting `talkgroup_ref`, so the surface has a single scoping rule
+    /// instead of two that differ on **Patch**es: this one asks
+    /// [`Selection::reaches_channels`]'s question — the live feed's own — where
+    /// `talkgroup_ref` above compares the Call's canonical channel and stops.
+    /// A Listener rewinding a channel through a patch would otherwise find it
+    /// silent exactly when the county was busiest.
+    ///
+    /// Deliberately not a cascading dimension, for `mark`'s reason: it is the
+    /// whole scanner rather than one axis of a form, and no dropdown offers it.
+    pub selection: Option<crate::selection::Selection>,
     pub sort: CallSort,
     pub limit: u64,
     pub offset: u64,
@@ -320,6 +334,9 @@ impl CallQuery {
         if let Some(scope) = &filters.unit {
             self = self.and_where(heard_by(scope));
         }
+        if let Some(reached) = search.selection.as_ref().and_then(within) {
+            self = self.join_system().join_talkgroup().and_where(reached);
+        }
         self
     }
 
@@ -411,6 +428,167 @@ fn heard_by(scope: &crate::merge::UnitScope) -> sea_orm::Condition {
         );
     }
     matching
+}
+
+/// Which Calls a **Selection** reaches (#63) — `None` when it reaches every
+/// Call there is, so a DVR of an un-narrowed scanner costs no condition and no
+/// joins at all.
+///
+/// The matrix resolves, per System, to one of two shapes and never to a third:
+/// its default is [`Selection::selects`]'s fallback chain (the System's
+/// wildcard, else the global `all`), and every entry that *agrees* with that
+/// default says nothing. So a System is either **everything except a list** or
+/// **exactly a list**, which is what makes this expressible as SQL rather than
+/// as a `CASE` per row.
+fn within(selection: &crate::selection::Selection) -> Option<sea_orm::Condition> {
+    let scopes = system_scopes(selection);
+
+    // A System whose default is on with nothing excepted admits every Call on
+    // it, which is what `all` already says — so a scanner made only of those is
+    // an unfiltered search.
+    if selection.all
+        && scopes
+            .iter()
+            .all(|scope| scope.default_on && scope.exceptions.is_empty())
+    {
+        return None;
+    }
+
+    let mut arms: Vec<sea_orm::Condition> = Vec::new();
+    for scope in &scopes {
+        let named = system::Column::Ref.eq(scope.system_ref);
+        match (scope.default_on, scope.exceptions.is_empty()) {
+            // Everything on this System.
+            (true, true) => arms.push(sea_orm::Condition::all().add(named)),
+            // Everything except the exceptions.
+            (true, false) => arms.push(
+                sea_orm::Condition::all()
+                    .add(named)
+                    .add(reaching_other_than(&scope.exceptions)),
+            ),
+            // Exactly the exceptions.
+            (false, false) => arms.push(
+                sea_orm::Condition::all()
+                    .add(named)
+                    .add(reaching(&scope.exceptions)),
+            ),
+            // Nothing at all on this System — no arm, rather than an arm that
+            // can never be true.
+            (false, true) => {}
+        }
+    }
+
+    // Systems the matrix says nothing about fall through to the global
+    // default. Only reachable with `all` set, since the everything case
+    // returned above.
+    if selection.all {
+        arms.push(
+            sea_orm::Condition::all().add(
+                system::Column::Ref.is_not_in(
+                    scopes
+                        .iter()
+                        .map(|scope| scope.system_ref)
+                        .collect::<Vec<_>>(),
+                ),
+            ),
+        );
+    }
+
+    // Every arm dropped out: a scanner with nothing on. An honest empty page,
+    // not an error — switching everything off is an ordinary thing to have
+    // said.
+    if arms.is_empty() {
+        return Some(never());
+    }
+    Some(
+        arms.into_iter()
+            .fold(sea_orm::Condition::any(), sea_orm::Condition::add),
+    )
+}
+
+/// One System of a Selection, reduced to a default and the Refs that differ
+/// from it.
+struct SystemScope {
+    system_ref: i64,
+    default_on: bool,
+    /// The Refs whose state is *not* `default_on`. Refs agreeing with it are
+    /// dropped: they change nothing, and carrying them would put a county's
+    /// worth of ticked boxes into an `IN` list for no effect.
+    exceptions: Vec<i64>,
+}
+
+fn system_scopes(selection: &crate::selection::Selection) -> Vec<SystemScope> {
+    let mut scopes: Vec<SystemScope> = selection
+        .sel
+        .iter()
+        .filter_map(|(system_ref, talkgroups)| {
+            let system_ref = system_ref.parse::<i64>().ok()?;
+            let default_on = talkgroups
+                .get(crate::selection::TALKGROUP_WILDCARD)
+                .copied()
+                .unwrap_or(selection.all);
+            let mut exceptions: Vec<i64> = talkgroups
+                .iter()
+                .filter(|(_, on)| **on != default_on)
+                .filter_map(|(ref_, _)| ref_.parse::<i64>().ok())
+                .collect();
+            // Ordered, so the SQL a given Selection produces is one statement
+            // rather than one per hash iteration — which is what lets a
+            // prepared statement be reused and a test read.
+            exceptions.sort_unstable();
+            Some(SystemScope {
+                system_ref,
+                default_on,
+                exceptions,
+            })
+        })
+        .collect();
+    scopes.sort_unstable_by_key(|scope| scope.system_ref);
+    scopes
+}
+
+/// A Call reaching any of `refs` — its own channel, or one it was **patched**
+/// onto. The System is the caller's to pin, which is why this says nothing
+/// about one: a Ref means something only inside a System, and `call_patches`
+/// carries no System of its own.
+fn reaching(refs: &[i64]) -> sea_orm::Condition {
+    sea_orm::Condition::any()
+        .add(talkgroup::Column::Ref.is_in(refs.to_vec()))
+        .add(call::Column::Id.in_subquery(calls_patched_onto(
+            call_patch::Column::TalkgroupRef.is_in(refs.to_vec()),
+        )))
+}
+
+/// A Call reaching any channel that is *not* one of `refs` — the other reading
+/// of the same question, for a System whose default is on.
+fn reaching_other_than(refs: &[i64]) -> sea_orm::Condition {
+    sea_orm::Condition::any()
+        .add(talkgroup::Column::Ref.is_not_in(refs.to_vec()))
+        .add(call::Column::Id.in_subquery(calls_patched_onto(
+            call_patch::Column::TalkgroupRef.is_not_in(refs.to_vec()),
+        )))
+}
+
+/// The Call ids carrying a patch row that `matching` accepts.
+fn calls_patched_onto(
+    matching: sea_orm::sea_query::SimpleExpr,
+) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::Query as SeaQuery;
+
+    SeaQuery::select()
+        .column(call_patch::Column::CallId)
+        .from(call_patch::Entity)
+        .cond_where(matching)
+        .to_owned()
+}
+
+/// Matches no Call at all — what a scanner with everything switched off asks
+/// for. Written as an expression rather than an empty `Condition::any()`,
+/// which sea-query renders as no condition and therefore as *every* Call: the
+/// exact inversion of what a Listener said.
+fn never() -> sea_orm::Condition {
+    use sea_orm::sea_query::Expr;
+    sea_orm::Condition::all().add(Expr::val(1).eq(0))
 }
 
 /// The Call ids any of `spans` was heard on.
@@ -572,10 +750,10 @@ pub async fn call_activity<C: ConnectionTrait>(
         .grouped()
         .column_as(
             crate::activity::bucket_expr(call::Column::CallAtMs, &axis),
-            "bucket",
+            crate::activity::BUCKET,
         )
         .column_as(call::Column::Id.count(), "calls")
-        .group_by(crate::activity::bucket_expr(call::Column::CallAtMs, &axis))
+        .group_by(crate::activity::bucket_group())
         .into_model::<ActivityBucket>()
         .all(db)
         .await?;
@@ -1542,6 +1720,16 @@ fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
             .transpose()?,
         unit_ref: params.number("unit")?,
         mark,
+        // All or nothing, the way the client's own reader takes it: a link is
+        // one statement made by somebody else, and applying half of it would
+        // answer with a scanner nobody asked for.
+        selection: params
+            .raw("sel")
+            .map(|raw| {
+                crate::selection::Selection::decode(raw)
+                    .ok_or_else(|| bad("sel must be a selection, as the share link spells one"))
+            })
+            .transpose()?,
         sort,
         limit: params.limit(DEFAULT_LIMIT, MAX_LIMIT)?,
         offset: params.offset()?,

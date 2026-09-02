@@ -30,13 +30,23 @@ async fn sampling_app() -> TestApp {
         .await
 }
 
-/// Wait until the sampler has written `n` rows.
+/// Wait until the sampler has taken `n` **further** samples.
+///
+/// From *now*, never from the Worker's own start, and the difference is a real
+/// dialect-dependent failure rather than tidiness. The sampler ticks throughout
+/// boot; a SQLite boot is a few milliseconds and a Postgres one is a few
+/// hundred, so on Postgres a dozen samples are already settled by the time
+/// `spawn()` returns. An absolute `settled_at_least(2)` is then satisfied
+/// *immediately* — before whatever the test just arranged has been seen once —
+/// and the test reads its answer out of the window before its own arrangement.
+/// It is deterministic on each dialect and opposite on the two, which is the
+/// hardest shape of wrong to notice.
 async fn samples_taken(app: &TestApp, n: u64) {
-    app.workers()
+    let meter = app
+        .workers()
         .meter(WORKER)
-        .expect("the sampler is a registered Worker")
-        .settled_at_least(n)
-        .await;
+        .expect("the sampler is a registered Worker");
+    meter.settled_at_least(meter.load().done + n).await;
 }
 
 /// The peaks a chart is drawn from.
@@ -314,14 +324,9 @@ async fn a_listener_who_hangs_up_stops_being_counted() {
     }
 
     // Long enough after the socket closed that several windows have been and
-    // gone with nobody on them.
-    let taken = app
-        .workers()
-        .meter(WORKER)
-        .expect("the sampler")
-        .load()
-        .done;
-    samples_taken(&app, taken + 4).await;
+    // gone with nobody on them — which is what `samples_taken` counting from
+    // *now* already means.
+    samples_taken(&app, 4).await;
     app.login().await;
 
     let quiet = listener_sample::Entity::find()

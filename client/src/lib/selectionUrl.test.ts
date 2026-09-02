@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import { EVERYTHING, isSelected, setSystem, setTalkgroups, type Selection } from './selection'
@@ -77,6 +80,38 @@ describe('a link that says something unusable', () => {
     ['a bare minus', '1_100.-'],
     ['something from a different app entirely', '{"all":true}'],
   ])('refuses %s', (_what, encoded) => {
+    expect(decodeSelection(encoded)).toBeUndefined()
+  })
+})
+
+/**
+ * The spelling itself, held to a table the server is held to as well.
+ *
+ * `src/selection.rs` reads these links now (#63): a **DVR**'s scope is a
+ * Selection this module encodes and the Archive filters on. Two readers in two
+ * languages that drift apart do not crash — the server answers with a page of
+ * somebody else's channels, which looks exactly like an ordinary answer — and
+ * neither side's own round trip can notice, because each is consistent with
+ * itself. So the cases live in a file neither owns.
+ *
+ * Read off disk rather than imported, the way `led.test.ts` reads the
+ * stylesheet: the fixture is a shared *document*, and importing it would put it
+ * in this project's module graph and in `typecheck.test.ts`'s file set for no
+ * gain.
+ */
+describe('the spelling both languages read', () => {
+  const table = JSON.parse(
+    readFileSync(resolve('src/lib/selectionEncoding.json'), 'utf8'),
+  ) as {
+    readable: { encoded: string; all: boolean; sel: Selection['sel'] }[]
+    unreadable: string[]
+  }
+
+  it.each(table.readable)('reads $encoded', ({ encoded, all, sel }) => {
+    expect(decodeSelection(encoded)).toEqual({ all, sel })
+  })
+
+  it.each(table.unreadable)('refuses %j whole', (encoded) => {
     expect(decodeSelection(encoded)).toBeUndefined()
   })
 })

@@ -181,7 +181,11 @@ _Avoid_: audience, traffic, users, sessions, analytics.
 
 **DVR**:
 The archive surface that plays one talkgroup (or a **Selection**) gaplessly across a time range, scrubbable on a call-density timeline. Oldest-first by construction — a DVR that plays backwards is a search result, not a DVR.
-_Avoid_: time machine, rewind mode, tape.
+
+It is a **Run**, configured differently, and what it configures differently is that **its position is a time**. Scrubbing the **Activity** ribbon on the search screen moves the window of *results* and deliberately leaves the Run alone; scrubbing a DVR re-anchors the Run itself, because "rewind the county to 2am" names an instant rather than a row number. Its scope is always a **Selection** — a single talkgroup is a one-entry matrix — so a channel reached only through a **Patch** is one it plays, which the archive's own talkgroup filter is not.
+
+**Catch-up**'s two levers apply inside one and the *state* deliberately does not: a DVR ends at the end of a range where Catch-up ends when the **listening queue** empties, so a Listener catching up cannot find a DVR already hurrying and a DVR cannot speed up the live feed it hands back to.
+_Avoid_: time machine, rewind mode, tape, playlist (the word for what a DVR plays is a **Run**, and the "playlist" of #63 is the ordered Calls themselves, never a media format).
 
 **Station stream**:
 A continuous audio stream of a **Selection** — calls in order, silence-filled — for players that can't run the app (smart speakers, stream URLs, car radios).

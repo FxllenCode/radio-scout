@@ -18,9 +18,11 @@ import {
   selectNextCall,
   selectPlaybackMode,
   selectPlaybackPosition,
+  selectRunHurrying,
   selectWantedPage,
   startRun,
   stop,
+  toggleHurry,
   type PlaybackState,
 } from './playback'
 
@@ -220,5 +222,52 @@ describe('playback slice', () => {
     )
 
     expect(selectWantedPage(state)).toBe(selectWantedPage(state))
+  })
+})
+
+/**
+ * The **DVR**'s two levers (#63), which are Catch-up's mechanisms and not
+ * Catch-up: CONTEXT.md reserves that word for draining the *listening queue*,
+ * which ends when the queue empties. A Run ends at a range boundary.
+ */
+describe('hurrying through a Run', () => {
+  // A DVR is walked with the live feed off, which is what makes it a Run of
+  // results rather than one Call interrupting the feed.
+  const walking = (index = 0, hasMore = true) => [
+    enterPlaybackMode(),
+    startRun({ search: NEWEST, page: page({ hasMore }), index }),
+  ]
+
+  it('is off until the Listener asks', () => {
+    expect(selectRunHurrying({ playback: reduce(...walking()) })).toBe(false)
+    expect(
+      selectRunHurrying({ playback: reduce(...walking(), toggleHurry()) }),
+    ).toBe(true)
+  })
+
+  it('goes back off when it is turned off again', () => {
+    expect(
+      selectRunHurrying({
+        playback: reduce(...walking(), toggleHurry(), toggleHurry()),
+      }),
+    ).toBe(false)
+  })
+
+  it.each([
+    ['the Listener stopped', stop()],
+    ['the archive stopped being what plays', enterLiveFeed()],
+  ])('drops when the Run ends because %s', (_why, ending) => {
+    // The reducer wrapper's rule, one slice over from #59's: a Run can end
+    // several ways and a seventh added later is covered without anybody
+    // remembering. A rate left set would otherwise follow the Listener to a
+    // Search result they played at 1.5x with no control on screen to undo it.
+    const state = reduce(...walking(), toggleHurry(), ending)
+    expect(selectRunHurrying({ playback: state })).toBe(false)
+  })
+
+  it('drops when the Run simply runs out', () => {
+    const walked = reduce(...walking(2, false), toggleHurry(), next())
+    expect(walked.run).toBeNull()
+    expect(selectRunHurrying({ playback: walked })).toBe(false)
   })
 })

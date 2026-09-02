@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
-use crate::activity::{Axis, Series, bucket_expr};
+use crate::activity::{Axis, BUCKET, Series, bucket_expr, bucket_group};
 use crate::db::Db;
 use crate::db::entities::listener_sample;
 use crate::failure::{Failure, Stage};
@@ -295,11 +295,11 @@ struct PeakBucket {
 pub async fn read<C: ConnectionTrait>(db: &C, axis: Axis) -> Result<Series, DbErr> {
     let rows = listener_sample::Entity::find()
         .select_only()
-        .column_as(bucket_expr(listener_sample::Column::AtMs, &axis), "bucket")
+        .column_as(bucket_expr(listener_sample::Column::AtMs, &axis), BUCKET)
         .column_as(listener_sample::Column::Listeners.max(), "peak")
         .filter(listener_sample::Column::AtMs.gte(axis.from_ms()))
         .filter(listener_sample::Column::AtMs.lt(axis.to_ms()))
-        .group_by(bucket_expr(listener_sample::Column::AtMs, &axis))
+        .group_by(bucket_group())
         .into_model::<PeakBucket>()
         .all(db)
         .await?;

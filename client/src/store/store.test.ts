@@ -414,6 +414,9 @@ describe('makeStore', () => {
         'searchChanged',
         'startRun',
         'stop',
+        // #63's DVR lever. It cannot change `mode` — it only says how fast the
+        // Run on the element plays — so the mirror learns nothing from it.
+        'toggleHurry',
       ])
     })
   })

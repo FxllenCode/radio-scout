@@ -13,6 +13,7 @@ import {
   replay,
   selectFeedStatus,
   selectHistory,
+  selectIsCatchingUp,
   selectLiveCall,
   selectLiveMatrix,
   selectLiveStatus,
@@ -29,6 +30,7 @@ import {
   selectNextCall,
   selectPlaybackMode,
   selectPlaybackPosition,
+  selectRunHurrying,
   type PlaybackState,
 } from './playback'
 import type { AppDispatch } from './store'
@@ -54,6 +56,18 @@ export interface TransportState {
    *  session open and let the OS suspend us (spec US 31). Cleared by the next
    *  Call, because a feed that spoke again is a listener still listening. */
   keepAliveSpent: boolean
+  /**
+   * A seek the Listener asked for that the element has not made yet (#63).
+   *
+   * The element owns where it is, so this is an *intent* and not a position:
+   * the player performs it and the element then reports where it landed, which
+   * is the only reading that survives a stall, a clamp or a short file.
+   *
+   * `nonce` because asking for the same second twice is two requests — a
+   * Listener who scrubs, listens on, and scrubs back to the same place would
+   * otherwise be ignored the second time.
+   */
+  seek: { toSeconds: number; nonce: number } | null
 }
 
 const initialState: TransportState = {
@@ -61,6 +75,7 @@ const initialState: TransportState = {
   position: 0,
   duration: 0,
   keepAliveSpent: false,
+  seek: null,
 }
 
 const transportSlice = createSlice({
@@ -84,6 +99,10 @@ const transportSlice = createSlice({
       state.position = 0
       state.duration = 0
       state.keepAliveSpent = false
+      // A seek belongs to the Call it was asked about. Left standing it would
+      // land on whatever came next, which on a DVR is a different minute of a
+      // different hour.
+      state.seek = null
     },
 
     /** The lull outlasted the keep-alive's budget: stop fighting the OS. What
@@ -99,6 +118,17 @@ const transportSlice = createSlice({
     ) {
       state.position = action.payload.position
       state.duration = action.payload.duration
+    },
+
+    /** Take the element to `toSeconds` of the Call it is playing. The readout
+     *  moves at once rather than waiting for the element to say so, or the
+     *  thumb springs back under the Listener's finger for a quarter of a
+     *  second. Never before the start: a negative second is a control that has
+     *  been dragged off its own left-hand end. */
+    seekTo(state, action: PayloadAction<number>) {
+      const toSeconds = Math.max(0, action.payload)
+      state.seek = { toSeconds, nonce: (state.seek?.nonce ?? 0) + 1 }
+      state.position = toSeconds
     },
   },
 
@@ -118,6 +148,7 @@ export const {
   pause,
   progressed,
   resume,
+  seekTo,
   sourceChanged,
 } = transportSlice.actions
 
@@ -154,6 +185,31 @@ export const selectUpcomingCall = (state: TransportRoot): Call | null =>
 
 export const selectIsPaused = (state: TransportRoot): boolean =>
   state.transport.paused
+
+/** The seek waiting to be made, if one is — see [`TransportState.seek`]. */
+export const selectSeek = (
+  state: TransportRoot,
+): TransportState['seek'] => state.transport.seek
+
+/**
+ * Is the Listener getting through this faster? — the two levers `lib/catchup`
+ * owns, raised rate and **Quiet span** trim, applied to whichever source owns
+ * the element (#59, #63).
+ *
+ * **One question, two flags underneath**, and the two are deliberately not
+ * merged. **Catch-up** is draining the *listening queue* and ends when it
+ * empties (CONTEXT.md); the **DVR**'s lever runs to the end of a range. A
+ * single flag would mean a Listener catching up on the queue finding a DVR
+ * already at 1.5x, and a DVR left hurrying speeding up the live feed it hands
+ * back to.
+ *
+ * Asked here for [`selectNowPlaying`]'s reason: the player must not have to
+ * work out which source it is playing in order to know how fast to play it.
+ */
+export const selectIsHurrying = (state: TransportRoot): boolean =>
+  selectIsLiveSource(state)
+    ? selectIsCatchingUp(state)
+    : selectRunHurrying(state)
 
 /**
  * How long the keep-alive holds the audio session open with nothing to play.
@@ -215,6 +271,30 @@ export const selectIsBridging = (state: TransportRoot): boolean =>
   !state.transport.paused &&
   selectHistory(state).length > 0 &&
   selectNowPlaying(state) === null
+
+/**
+ * Where the element is in the Call it is playing, in seconds — what a seek
+ * control is drawn from (#63).
+ *
+ * Memoized because it is an object and playback dispatches `progressed`
+ * several times a second: an unmemoized one would hand every reader a fresh
+ * identity per tick, which is the trap #91 found in the Talkgroups panel.
+ */
+export const selectPlayhead: (state: TransportRoot) => {
+  position: number
+  duration: number
+} = createSelector(
+  [
+    (state: TransportRoot) => state.transport.position,
+    (state: TransportRoot) => state.transport.duration,
+  ],
+  (position, duration) => ({
+    position,
+    // `NaN` until the element has read the container header, which is every new
+    // source. A control whose `max` is `NaN` silently stops responding.
+    duration: Number.isFinite(duration) && duration > 0 ? duration : 0,
+  }),
+)
 
 /** How far through the current Call, in `[0, 1]` — `0` until the element
  *  reports a duration to measure against. */

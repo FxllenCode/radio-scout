@@ -188,13 +188,21 @@ export function countyCatalog(rows: number, now = Date.now()): Catalog {
 export function archivePage(url: URL, rows: Call[] = ARCHIVE) {
   const limit = Number(url.searchParams.get('limit') ?? 100)
   const offset = Number(url.searchParams.get('offset') ?? 0)
-  const results = rows.slice(offset, offset + limit)
+  // **Ordering is honoured where the filters are not**, and the difference is
+  // the point: a filter narrows *which* rows come back, which a fixture can
+  // ignore without making any assertion about the screen false. `sort` decides
+  // what a page *is* — a **DVR** plays oldest-first by construction (#63), and
+  // a handler that answered newest-first whatever it was asked could not tell
+  // the two apart, so the one test that matters there would pass either way.
+  const ordered =
+    url.searchParams.get('sort') === 'oldest' ? [...rows].reverse() : rows
+  const results = ordered.slice(offset, offset + limit)
   return {
     results,
     count: rows.length,
     limit,
     offset,
-    hasMore: offset + results.length < rows.length,
+    hasMore: offset + results.length < ordered.length,
   }
 }
 

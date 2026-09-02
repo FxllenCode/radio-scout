@@ -1,6 +1,7 @@
 import {
   Download,
   FastForward,
+  History,
   Link2,
   Pause,
   Play,
@@ -10,10 +11,11 @@ import {
   Square,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { ActivityHeatmap } from '@/components/ActivityHeatmap'
 import { CallFlags } from '@/components/CallFlags'
+import { DateField, Field, controlClass } from '@/components/Field'
 import { DensityRibbon } from '@/components/DensityRibbon'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
@@ -25,17 +27,21 @@ import { markName } from '@/lib/webhook'
 import { sameSearch, type RunSearch } from '@/lib/run'
 import { playingDetail } from '@/lib/strip'
 import {
-  dateTimeLocalToMs,
   downloadUrl,
   formatCallTime,
   formatDuration,
-  msToDateTimeLocal,
   pageSummary,
 } from '@/lib/archive'
 import { PRESETS, rangeOf } from '@/lib/dateRange'
-import { RIBBON_BUCKETS, offsetOfBucket, totalOf } from '@/lib/density'
+import {
+  RIBBON_BUCKETS,
+  bucketOfOffset,
+  offsetOfBucket,
+  totalOf,
+} from '@/lib/density'
 import { HOUR_MS, heatmapWindow } from '@/lib/heatmap'
 import { readSearchUrl, writeSearchUrl, type SearchUrl } from '@/lib/searchUrl'
+import { dvrLink } from '@/lib/dvr'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
 import { useShareLink } from '@/hooks/useShareLink'
 import { cn } from '@/lib/utils'
@@ -84,9 +90,6 @@ const EMPTY_PAGE: SearchPage = {
   offset: 0,
   hasMore: false,
 }
-
-const controlClass =
-  'w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground'
 
 /**
  * Search (Archive) — filter stored Calls, then play or download them
@@ -488,6 +491,23 @@ export function SearchScreen() {
             <RotateCcw className="size-3" aria-hidden />
             Reset
           </Button>
+          {/* Into the **DVR** (#63) with what is already filtered. This is the
+              gesture the feature is for — "rewind *this* channel" — and it is
+              why the DVR is reached from here rather than from a fifth tab. A
+              scope is always a Selection, so a Talkgroup filter becomes a
+              one-entry matrix and anything else opens on the Listener's own
+              scanner. */}
+          <Button asChild variant="outline" size="sm" className="h-7 gap-1 px-2">
+            <Link
+              to={`/dvr?${dvrLink(filters)}`}
+              aria-label="Open these results in the DVR"
+            >
+              <History className="size-3" aria-hidden />
+              <span className="font-mono text-[10px] uppercase tracking-wider">
+                DVR
+              </span>
+            </Link>
+          </Button>
           <Button
             type="button"
             variant="outline"
@@ -562,8 +582,8 @@ export function SearchScreen() {
           {chart === 'ribbon' ? (
             <DensityRibbon
               series={activity}
-              ordering={filters.sort}
-              offset={windowOffset}
+              at={bucketOfOffset(activity.values, windowOffset, filters.sort)}
+              label="Jump to a time in these results"
               onJump={(bucket) =>
                 goTo(
                   {
@@ -669,74 +689,6 @@ function Placeholder({
     >
       {children}
     </p>
-  )
-}
-
-function Field({
-  label,
-  htmlFor,
-  children,
-}: {
-  label: string
-  htmlFor: string
-  children: ReactNode
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <label
-        htmlFor={htmlFor}
-        className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
-      >
-        {label}
-      </label>
-      {children}
-    </div>
-  )
-}
-
-/**
- * A date bound as a control (#61).
- *
- * Controlled, because a bound can now arrive from somewhere other than this
- * input — a preset, or a link — and an uncontrolled box would go on showing
- * whatever was last typed while the search behind it said something else.
- *
- * It keeps the *text* rather than deriving it, and re-derives only when the
- * bound it is shown is not the one the text already means. Both halves matter:
- * without the local text, a half-typed date would be parsed, rejected and wiped
- * on every keystroke; without the guard, a partially-typed date that happens to
- * parse (`2026-07-25` is a valid instant — at UTC midnight) would be rewritten
- * under the Listener's cursor mid-word.
- */
-function DateField({
-  label,
-  id,
-  ms,
-  onChange,
-}: {
-  label: string
-  id: string
-  ms: number | undefined
-  onChange: (ms: number | undefined) => void
-}) {
-  const [text, setText] = useState(() => msToDateTimeLocal(ms))
-  useEffect(() => {
-    setText((typed) => (dateTimeLocalToMs(typed) === ms ? typed : msToDateTimeLocal(ms)))
-  }, [ms])
-
-  return (
-    <Field label={label} htmlFor={id}>
-      <input
-        id={id}
-        type="datetime-local"
-        className={controlClass}
-        value={text}
-        onChange={(event) => {
-          setText(event.target.value)
-          onChange(dateTimeLocalToMs(event.target.value))
-        }}
-      />
-    </Field>
   )
 }
 

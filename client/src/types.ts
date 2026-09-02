@@ -113,6 +113,11 @@ export interface SearchQuery {
    *  tone-out. Single-valued because every other filter here combines with AND
    *  and a list would have to mean OR. */
   mark?: Mark
+  /** Only Calls a **Selection** reaches (#63) — the **DVR**'s scope, spelled
+   *  the way a share link spells one (`lib/selectionUrl`). Answered with the
+   *  live feed's own rule, so a channel reached through a **Patch** counts;
+   *  `talkgroup` above compares the Call's canonical channel and stops. */
+  sel?: string
   /** `oldest` is what playback mode walks: forwards through history. */
   sort?: 'newest' | 'oldest'
   limit?: number

@@ -225,3 +225,49 @@ with the failure named in advance: if a backgrounded drain dies at the first spa
 trim is gated to the foreground and only the rate is kept in the background. Nothing in CI can
 answer that question — Playwright's WebKit is not iOS Safari — so it stays where every other
 claim of this kind lives, on the manual gate.
+
+## Amendment (#63) — the DVR is a Run, and its "playlist" is not a media format
+
+Spec US 40 says DVR playback is *"served as a playlist with discontinuity markers over the existing
+per-Call audio objects (no transcoding, no concatenation on the serve path)"*, and #63 asks for
+media-source work that "respects ADR-0005's constraints". Read literally that is an HLS media
+playlist — `#EXT-X-DISCONTINUITY` between Calls — loaded either by native HLS on iOS or by MSE
+elsewhere. **It is the wrong reading, and this ADR already ruled the mechanism out.**
+
+Three reasons, in the order they bite:
+
+- **The objects are not segments.** A recorder uploads whatever it produces: Trunk Recorder writes
+  WAV by default, SDRTrunk MP3, and `[enhancement] output` may rewrite either. A WAV is not a valid
+  HLS segment at all, so a large fraction of a real archive would simply not play — the failure
+  landing on whichever operator happened to run the commoner recorder.
+- **MSE is unreachable here.** The revised ladder above puts Managed Media Source below the
+  server-side continuous stream, because "anything that would make it viable makes option 3 strictly
+  better" — and WebKit ships no MPEG-audio `SourceBufferParser`, so every MP3 Call would need a
+  transcode on the Pi. That is the cost [ADR-0002](0002-audio-object-storage.md) exists to avoid.
+- **Nothing needs it.** The stated goal of the criterion is that the Pi serves what it already
+  serves. A **Run** already does exactly that: the archive answers with an ordered page of Calls,
+  each carrying the URL of an object already being served, and the client plays them through the one
+  `<audio>` element by changing `src`. There is no stitching, no concatenation and no new serve path,
+  because there is no serve path at all.
+
+**So the playlist is data, not a media format**: the ordered Calls themselves, each with its own
+instant — and a "discontinuity" is a wall-clock gap between two of them, which the timeline draws
+and the transport simply plays across. What a Listener hears as *gapless* comes from two mechanisms
+that already existed: #14's prefetch of the Call behind the one playing, and #59's **Quiet span**
+trim removing the recorder's own dead air, which is where the large win actually is.
+
+Two consequences worth stating, because they are what a future reader will want to check:
+
+- **Seeking inside a Call is a range request and nothing more.** `currentTime` is written on the same
+  single element; the browser fetches the bytes it lacks; `src/serve.rs` has answered ranges since
+  #10, and with the S3 backend the request never reaches Radio-Scout at all. The lock screen's own
+  `seekto` is deliberately still unbound — a Call is seconds long, so scrubbing one from a lock
+  screen buys nothing, and a DVR does not change that because it still plays one Call at a time.
+- **The manual gate re-opens, again.** #59 added Step 9 to research §14 for the backgrounded seek; a
+  DVR run makes that seek *routine* rather than occasional, and adds one more question — whether a
+  scrub across Calls (which changes `src`) survives a backgrounded page. Nothing in CI can answer
+  either; Playwright's WebKit is not iOS Safari.
+
+If the literal reading is ever wanted, the honest route is not HLS over these objects but the
+**Station stream** (#74) — option 3 on the ladder — which is a continuous server-side encode and was
+already ranked above MMS for exactly this reason.

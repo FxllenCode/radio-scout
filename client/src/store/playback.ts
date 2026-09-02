@@ -19,9 +19,19 @@ export interface PlaybackState {
    *  hand lives in there ([`@/lib/run`]) — this slice only decides *when* the
    *  Run is told, and holds the answer. */
   run: Run | null
+  /**
+   * The Listener asked to get through this Run faster — the **DVR**'s speed and
+   * silence-trim (#63, spec US 39).
+   *
+   * The mechanisms are `lib/catchup`'s and the *state* is deliberately not:
+   * **Catch-up** is draining the listening queue and "ends when the queue is
+   * empty" (CONTEXT.md), where a Run ends at the end of its results. Two flags,
+   * one per source, and the transport routes whichever owns the element.
+   */
+  hurrying: boolean
 }
 
-const initialState: PlaybackState = { mode: 'live', run: null }
+const initialState: PlaybackState = { mode: 'live', run: null, hurrying: false }
 
 /**
  * Playback mode, and the archive **Run** behind it (#13, spec US 25–26; #89).
@@ -102,6 +112,13 @@ const playbackSlice = createSlice({
       state.run = advance(state.run, { type: 'paged', ...action.payload })
     },
 
+    /** Play this Run faster, skipping what nobody is talking in — or stop.
+     *  One control for both levers, because they are one decision (`drain`'s
+     *  single parameter, one layer up). */
+    toggleHurry(state) {
+      state.hurrying = !state.hurrying
+    },
+
     /** The Listener changed the search on screen. */
     searchChanged(state, action: PayloadAction<RunSearch>) {
       state.run = advance(state.run, {
@@ -121,6 +138,7 @@ export const {
   searchChanged,
   startRun,
   stop,
+  toggleHurry,
 } = playbackSlice.actions
 
 /** Every action this slice has, as a set rather than as eight names. The live
@@ -130,7 +148,25 @@ export const {
  *  mirror silently going stale. */
 export const playbackActions = playbackSlice.actions
 
-export const playbackReducer = playbackSlice.reducer
+/**
+ * The slice, plus the one rule no single reducer owns: **a Run that has ended
+ * is not being hurried through**.
+ *
+ * A Run can end six ways — walking off the last page, the Listener stopping,
+ * leaving playback mode, handing back to the live feed, a search change with
+ * nothing on the air, a page with nothing playable on it — and a seventh added
+ * later is covered here without anybody remembering. #59 put Catch-up's own
+ * "ends at live" in a wrapper for exactly this reason, one slice over.
+ *
+ * What it prevents is specific: the rate is a **DVR** control, so a flag left
+ * set follows the Listener to a Search result they then hear at 1.5x with
+ * nothing on screen to turn it off.
+ */
+export const playbackReducer: typeof playbackSlice.reducer = (state, action) => {
+  const next = playbackSlice.reducer(state, action)
+  if (next.run !== null || !next.hurrying) return next
+  return { ...next, hurrying: false }
+}
 
 /** The slice of the store this module owns. */
 interface WithPlayback {
@@ -139,6 +175,11 @@ interface WithPlayback {
 
 export const selectPlaybackMode = (state: WithPlayback): PlaybackMode =>
   state.playback.mode
+
+/** Is the Listener hurrying through the Run on the element? See
+ *  [`PlaybackState.hurrying`]. */
+export const selectRunHurrying = (state: WithPlayback): boolean =>
+  state.playback.hurrying
 
 const selectRun = (state: WithPlayback): Run | null => state.playback.run
 

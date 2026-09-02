@@ -334,6 +334,35 @@ whatever you have filtered to.
 Both are drawn from the same filters as the results, so the bars always add up to the count above
 them. rdio-scanner has neither: time travel there is the Previous button, one page at a time.
 
+### The DVR
+
+**DVR**, beside the presets, opens the same archive as something to *play* rather than something to
+read: pick a channel — or your whole scanner — pick a stretch of time, and it plays that stretch
+forwards, oldest first, straight through. "Rewind the county to 2am last Friday" is one screen.
+
+It opens with whatever you had already filtered, which is the point: filter to Fire Dispatch and
+last night, press **DVR**, press play, and you are listening to last night on Fire Dispatch.
+
+The timeline across the top is the same activity chart, and here the marker is *where you are* —
+it moves as the calls play. Drag it and playback moves with it, which is the difference from the
+Search screen's chart: there, dragging moves the page you are reading and leaves what you are
+playing alone; here, dragging is rewinding.
+
+The slider under the transport seeks *inside* the call playing, so a long dispatch can be moved
+about in without skipping past it. **1.5× · SKIP QUIET** does both of the things catching up on the
+live queue does: raises the speed with speech still intelligible, and jumps the stretches nobody is
+talking in. Most recorder files end in several seconds of dead air after the last word; skipping it
+is most of why an hour of traffic takes far less than an hour to get through.
+
+Two things it deliberately does not do. It never plays backwards — a run that went the other way
+would be a search result, not a DVR. And it plays what your *selection* would have played, patches
+included: if a channel was patched onto another that night, you hear the traffic that reached it.
+
+The speed setting belongs to the DVR run and nothing else: it does not follow you back to the live
+feed, and catching up on the live queue does not start a DVR already at 1.5×.
+
+The 🔗 button shares the whole thing — the scope, the range and where you had rewound to.
+
 ### Date presets
 
 **LAST HOUR**, **TODAY**, **YESTERDAY** and **LAST 7 DAYS** fill both date boxes in one tap, and

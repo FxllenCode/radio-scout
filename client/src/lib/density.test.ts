@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   barHeights,
   bucketAt,
+  bucketOfInstant,
   bucketOfOffset,
   bucketStartMs,
   offsetOfBucket,
@@ -162,5 +163,34 @@ describe('totalOf (#62)', () => {
   it('adds the bars up, which is the search`s own total', () => {
     expect(totalOf(SERIES)).toBe(15)
     expect(totalOf({ ...SERIES, values: [] })).toBe(0)
+  })
+})
+
+describe('which bucket an instant is in', () => {
+  const series: Series = { fromMs: 1000, toMs: 1500, bucketMs: 100, values: [0, 0, 0, 0, 0] }
+
+  it('is the inverse of where a bucket begins', () => {
+    // The DVR's marker is placed from a *time* where the ribbon's is placed
+    // from an offset (#63), so these two have to agree or the playhead drifts
+    // away from the bar it is drawn over.
+    for (let bucket = 0; bucket < series.values.length; bucket += 1) {
+      expect(bucketOfInstant(series, bucketStartMs(series, bucket))).toBe(bucket)
+    }
+  })
+
+  it('places an instant inside a bucket in that bucket', () => {
+    expect(bucketOfInstant(series, 1099)).toBe(0)
+    expect(bucketOfInstant(series, 1100)).toBe(1)
+  })
+
+  it.each([
+    ['before the series', 0, 0],
+    ['past the end', 99_999, 4],
+  ])('clamps an instant %s into it', (_why, ms, expected) => {
+    expect(bucketOfInstant(series, ms)).toBe(expected)
+  })
+
+  it('never divides by a bucket of no width', () => {
+    expect(bucketOfInstant({ ...series, bucketMs: 0 }, 1300)).toBe(0)
   })
 })

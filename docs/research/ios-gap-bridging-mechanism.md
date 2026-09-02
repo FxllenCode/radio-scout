@@ -657,6 +657,30 @@ sheet and press **CATCH UP**.
 3. Let it drain to the end and confirm it **stops on its own**: the queue empties, the rate
    returns to normal, and the **1.5×** marker beside the **Q** count is gone.
 
+**Step 10 — The DVR, backgrounded ([#63](https://github.com/FxllenCode/radio-scout/issues/63)).**
+Step 9's seek is *occasional*; a DVR run makes it routine, and adds one thing Step 9 does not
+cover — a scrub **across** Calls, which changes `src` rather than `currentTime`. Same gate, same
+reason ([ADR‑0005](../adr/0005-client-audio-media-session-background.md), and its #63 amendment for
+why the DVR is a **Run** rather than a media source).
+Seed something to rewind first: `cargo run --example feed -- --burst 30 --seconds 8`, wait for it,
+then open **Search → DVR**, pick a range covering it and press play.
+1. Foreground: press **1.5× · SKIP QUIET** and confirm the rate rises mid‑Call *and* the
+   lock‑screen scrubber's pace changes with it (pull the Control Centre down without leaving the
+   app).
+2. Drag the seek slider inside the Call playing. Audio should move and keep playing — this is a
+   range request the element makes for bytes it does not have.
+3. Drag the **timeline** to a different hour. Playback should jump there and carry on from the
+   first Call at that moment.
+4. Lock the screen and leave it for several Calls.
+- **PASS:** the run goes on playing forwards from the locked phone, each Call's metadata repaints,
+  and the transport buttons still work afterwards.
+- **FAIL — the one that matters:** audio stops at the first Call boundary crossed while locked, or
+  at the first quiet span skipped. If it is the *span*, Step 9's remedy applies to the DVR too
+  (trim gated to the foreground, rate kept). If it is the *boundary*, that is a much larger finding
+  than the DVR — it is the queue's own advance failing — and belongs back at Step 4.
+5. Unlock and confirm the timeline marker is where the audio actually is, not where it was when
+   the phone was locked.
+
 ---
 
 **Recording the result.** Every run gets: exact iOS build, mechanism variant, pass/fail per step, and the 3‑of‑3 tally for Step 4. This checklist is per‑iOS‑point‑release — a pass on 26.5 says nothing about 26.6 (§3 is the evidence for that).

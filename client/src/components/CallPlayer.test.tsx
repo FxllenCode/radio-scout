@@ -24,6 +24,7 @@ import {
   progressed,
   resume,
   selectIsBridging,
+  seekTo,
   selectIsPaused,
   selectNowPlaying,
   selectProgress,
@@ -752,5 +753,47 @@ describe('Catch-up (#59, spec US 23)', () => {
       position: 4.5,
       playbackRate: 1.5,
     })
+  })
+})
+
+/**
+ * Seeking inside the Call on the element (#63) — the client's half of "seeking
+ * lands within calls". The element issues a range request for the bytes it does
+ * not have; `src/serve.rs` has answered those since #10.
+ */
+describe('seeking within a Call', () => {
+  it('takes the element to the second the Listener asked for', () => {
+    const store = playFrom(0)
+    Object.defineProperty(player(), 'currentTime', {
+      value: 0,
+      configurable: true,
+      writable: true,
+    })
+
+    act(() => {
+      store.dispatch(seekTo(9))
+    })
+
+    expect(player().currentTime).toBe(9)
+  })
+
+  it('asks again when the same second is asked for again', () => {
+    // The nonce is what makes this work; without it React sees an unchanged
+    // value and the second scrub does nothing at all.
+    const store = playFrom(0)
+    act(() => {
+      store.dispatch(seekTo(9))
+    })
+    Object.defineProperty(player(), 'currentTime', {
+      value: 3,
+      configurable: true,
+      writable: true,
+    })
+
+    act(() => {
+      store.dispatch(seekTo(9))
+    })
+
+    expect(player().currentTime).toBe(9)
   })
 })

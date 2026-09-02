@@ -73,9 +73,13 @@ export function decodeSelection(encoded: string): Selection | undefined {
     const talkgroups: Record<string, boolean> = {}
     for (const entry of entries) {
       const on = !entry.startsWith('-')
-      const key = on ? entry : entry.slice(1)
-      if (key !== WILDCARD && !isRef(key)) return undefined
-      talkgroups[key] = on
+      const raw = on ? entry : entry.slice(1)
+      if (raw !== WILDCARD && !isRef(raw)) return undefined
+      // Normalized through the number it names, exactly as the System's Ref is
+      // one line above — so `05` addresses Talkgroup 5 rather than a key
+      // nothing will ever compare equal to. `src/selection.rs` reads these the
+      // same way, and `selectionEncoding.json` is what holds the two to it.
+      talkgroups[raw === WILDCARD ? WILDCARD : String(Number(raw))] = on
     }
     sel[Number(systemRef)] = talkgroups
   }

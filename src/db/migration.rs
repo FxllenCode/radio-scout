@@ -36,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0016_tone_profiles::Migration),
             Box::new(m0017_quiet_spans::Migration),
             Box::new(m0018_listener_samples::Migration),
+            Box::new(m0019_patched_channel_index::Migration),
         ]
     }
 }
@@ -1824,6 +1825,67 @@ mod m0018_listener_samples {
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
                 .drop_table(Table::drop().table(listener_sample::Entity).to_owned())
+                .await
+        }
+    }
+}
+
+/// A **DVR** scoped to a Selection asks `call_patches` which Calls reached a
+/// channel they were patched onto (#63), so that column needs an index —
+/// m0011's argument for `idx_call_units_unit_ref`, one table along.
+///
+/// Without it the subquery is a scan of every patch row ever written, on every
+/// page of a DVR run *and* on the density series above it. `call_patches` is
+/// the one child table that grows without bound on a patch-happy system, which
+/// is precisely the system somebody reaches for a DVR on.
+///
+/// `call_id` rides along so the subquery can be answered from the index alone,
+/// which is why m0011's unit index is two columns as well.
+///
+/// Guarded, because `m0001_init` generates its DDL from the *live* entity: a
+/// database created after this migration may already carry the index.
+mod m0019_patched_channel_index {
+    use super::*;
+
+    const INDEX: &str = "idx_call_patches_talkgroup_ref";
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0019_patched_channel_index"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_index("call_patches", INDEX).await? {
+                return Ok(());
+            }
+            manager
+                .create_index(
+                    Index::create()
+                        .name(INDEX)
+                        .table(call_patch::Entity)
+                        .col(call_patch::Column::TalkgroupRef)
+                        .col(call_patch::Column::CallId)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_index("call_patches", INDEX).await? {
+                return Ok(());
+            }
+            manager
+                .drop_index(
+                    Index::drop()
+                        .name(INDEX)
+                        .table(call_patch::Entity)
+                        .to_owned(),
+                )
                 .await
         }
     }

@@ -15,7 +15,7 @@ import {
 import { prefetchAudio } from '@/lib/prefetch'
 import { keepAliveLoopUrl } from '@/lib/silence'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { selectIsCatchingUp, selectPlayId } from '@/store/live'
+import { selectPlayId } from '@/store/live'
 import {
   KEEP_ALIVE_LIMIT_MS,
   keepAliveExpired,
@@ -26,8 +26,10 @@ import {
   resume,
   selectHasKeepAlive,
   selectIsBridging,
+  selectIsHurrying,
   selectIsPaused,
   selectNowPlaying,
+  selectSeek,
   selectUpcomingCall,
   sourceChanged,
 } from '@/store/transport'
@@ -61,11 +63,15 @@ export function CallPlayer() {
   // Replaying the Call already loaded leaves `src` untouched, so the element
   // needs a separate nudge to start it over (spec US 13).
   const playId = useAppSelector(selectPlayId)
-  // **Catch-up** (#59, spec US 23). The two levers ADR-0005 leaves us —
-  // `playbackRate` and `currentTime` — and nothing else: there is no WebAudio
-  // here and there never will be.
-  const catchingUp = useAppSelector(selectIsCatchingUp)
-  const rate = catchingUp ? CATCHUP_RATE : NORMAL_RATE
+  // The two levers ADR-0005 leaves us — `playbackRate` and `currentTime` — and
+  // nothing else: there is no WebAudio here and there never will be. Asked of
+  // the transport rather than of a source, so this is **Catch-up** draining the
+  // listening queue (#59) or a **DVR** run being hurried through (#63) without
+  // the player having to know which.
+  const hurrying = useAppSelector(selectIsHurrying)
+  const rate = hurrying ? CATCHUP_RATE : NORMAL_RATE
+  /** A seek the Listener asked for and the element has not made yet (#63). */
+  const seek = useAppSelector(selectSeek)
   const element = useRef<HTMLAudioElement>(null)
   /** Bumped on every return to the foreground — what re-binds the lock screen. */
   const [foregrounded, setForegrounded] = useState(0)
@@ -221,6 +227,30 @@ export function CallPlayer() {
     }
   }, [rate, bridging, current, playId])
 
+  // Move the playhead where the Listener put it (#63, spec US 39). The element
+  // fetches whatever bytes it does not have with a range request, which is what
+  // makes "seeking lands within calls" free at the server: `src/serve.rs` has
+  // answered those since #10, and with the S3 backend the request never reaches
+  // Radio-Scout at all.
+  //
+  // Keyed on the **nonce alone**, deliberately. Depending on `rate` or on the
+  // Call would re-apply the last seek whenever either moved — so turning the
+  // speed up mid-Call would drag the Listener back to wherever they last
+  // scrubbed, minutes after they had listened past it.
+  const seekNonce = seek?.nonce
+  useEffect(() => {
+    const audio = element.current
+    if (!audio || !seek || bridging) return
+    audio.currentTime = seek.toSeconds
+    // The OS runs its scrubber off its own clock, so a jump it was not told
+    // about leaves the lock screen wrong by however far the Listener moved.
+    const { duration } = audio
+    if (Number.isFinite(duration) && duration > 0) {
+      setPositionState(duration, seek.toSeconds, rate)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seekNonce])
+
   // Warm the next Call while this one plays (see lib/prefetch), and drop that
   // download if the queue moves somewhere else first.
   useEffect(() => {
@@ -255,11 +285,12 @@ export function CallPlayer() {
         if (bridging) return
         const { currentTime, duration } = event.currentTarget
         dispatch(progressed({ position: currentTime, duration }))
-        // Skip the stretches nobody is talking in (#59). The spans are the
-        // server's — a browser with no WebAudio cannot look at samples — and a
-        // Call that has none simply plays through at the raised rate, which is
-        // the documented fallback and not a failure.
-        if (catchingUp) {
+        // Skip the stretches nobody is talking in (#59, #63). The spans are
+        // the server's — a browser with no WebAudio cannot look at samples —
+        // and a Call that has none simply plays through at the raised rate,
+        // which is the documented fallback and not a failure. An archived Call
+        // carries its own spans, so a DVR needs no equivalent of #59's pull.
+        if (hurrying) {
           const step = stepAt(current?.quiet, currentTime, duration)
           if (step?.do === 'seek') {
             event.currentTarget.currentTime = step.toSeconds

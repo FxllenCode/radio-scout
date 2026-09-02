@@ -560,6 +560,134 @@ async fn a_curated_unit_that_has_never_keyed_is_an_empty_history() {
 /// Dates may be unix milliseconds or RFC3339 — the latter so a human or a
 /// script can hand-write a query. rdio-scanner only accepts a single date and
 /// silently searches the surrounding 24 h.
+/// A **DVR**'s scope (#63): the Listener's own Selection, filtering the
+/// Archive by exactly the rule the live feed plays by.
+///
+/// One rule rather than two — the DVR's Talkgroup picker mints a one-entry
+/// Selection rather than reaching for `?talkgroup=` — so a DVR of one channel
+/// and a DVR of a Selection holding only that channel cannot answer
+/// differently, which they would if one saw **Patch**es and the other did not.
+#[tokio::test]
+async fn a_selection_scopes_a_search_the_way_it_scopes_the_feed() {
+    let app = TestApp::spawn().await;
+    let (a, b, c, d) = seed(&app).await;
+
+    // One channel, spelled as the Selection it is.
+    assert_eq!(
+        search_ids(&app, "?sel=0_100.1&sort=oldest").await,
+        vec![a, d]
+    );
+    // One System's wildcard: every channel on it, including ones nobody has
+    // decided about — which is the whole reason the matrix travels rather than
+    // a list of what is on.
+    assert_eq!(
+        search_ids(&app, "?sel=0_100.*&sort=oldest").await,
+        vec![a, b, d]
+    );
+    // An exception to an otherwise-on scanner.
+    assert_eq!(
+        search_ids(&app, "?sel=1_100.-1&sort=oldest").await,
+        vec![b, c]
+    );
+    // Everything, which is what a scanner nobody has narrowed says.
+    assert_eq!(
+        search_ids(&app, "?sel=1&sort=oldest").await,
+        vec![a, b, c, d]
+    );
+}
+
+/// Nothing selected is an empty page, not an error: a Listener who switched
+/// their whole scanner off has said something perfectly ordinary.
+///
+/// Both spellings of it, because they take different paths through the filter:
+/// a bare `0` names no System at all, where `0_100.-5` names one whose every
+/// entry agrees with an off default — an exception to nothing, which has to
+/// produce *no* condition rather than one that is trivially true.
+#[rstest::rstest]
+#[case::nothing_at_all("0")]
+#[case::a_system_excepting_nothing("0_100.-5")]
+#[tokio::test]
+async fn a_scanner_with_nothing_on_rewinds_to_nothing(#[case] scope: &str) {
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+
+    let page = app.get_json(&format!("/api/calls?sel={scope}")).await;
+    assert_eq!(ids_of(&page), Vec::<i64>::new());
+    assert_eq!(page["count"], 0);
+}
+
+/// A **patched** transmission is stored once, under one canonical channel (#46)
+/// — so a DVR of the channel it was *patched onto* has to reach it through
+/// `call_patches` or go silent exactly when the county is busiest.
+#[tokio::test]
+async fn a_selection_reaches_a_call_patched_onto_a_channel_it_wants() {
+    let app = TestApp::spawn().await;
+    let plain = seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &[], 1000).await;
+    let patched = app
+        .seed_call(
+            NewCall {
+                patches: vec![1],
+                ..NewCall::new(100, 7, 2000)
+            },
+            common::audio_at("k/patched.wav"),
+        )
+        .await;
+    // The same number on another System is another radio system's channel.
+    app.seed_call(
+        NewCall {
+            patches: vec![1],
+            ..NewCall::new(200, 7, 3000)
+        },
+        common::audio_at("k/elsewhere.wav"),
+    )
+    .await;
+
+    assert_eq!(
+        search_ids(&app, "?sel=0_100.1&sort=oldest").await,
+        vec![plain, patched],
+        "a patch onto the wanted channel counts, and only within its System"
+    );
+    // Reaching is *any*, which is the live feed's own reading: switching a
+    // channel off hides the Calls that only reached it, and not a Call that
+    // also reached one still on. So the patched Call survives its patch target
+    // being avoided, because its own channel is not.
+    assert_eq!(
+        search_ids(&app, "?sel=0_100.*.-1&sort=oldest").await,
+        vec![patched],
+        "channel 1 is off; the patched Call's own channel 7 is not"
+    );
+}
+
+/// The ribbon over a DVR describes the DVR (#62's rule, one surface along): the
+/// bars and the results come from one filter or they are two pictures of two
+/// different things.
+#[tokio::test]
+async fn a_selection_scopes_the_density_series_too() {
+    let app = TestApp::spawn().await;
+    seed(&app).await;
+
+    let series: Value = app.get_json("/api/calls/activity?sel=0_100.1").await;
+    let total: i64 = series["values"]
+        .as_array()
+        .expect("values")
+        .iter()
+        .map(|v| v.as_i64().expect("a count"))
+        .sum();
+    assert_eq!(total, 2, "the two Calls on System 100 Talkgroup 1");
+}
+
+/// A link is one statement made by somebody else, so half of it is never
+/// applied — the client's own reader takes the same all-or-nothing line.
+#[tokio::test]
+async fn a_selection_that_is_not_one_is_refused_by_name() {
+    let app = TestApp::spawn().await;
+
+    let response = app.get("/api/calls?sel=0_100.nope").await;
+    assert_eq!(response.status(), 400);
+    let body = response.text().await.expect("body");
+    assert!(body.contains("sel"), "names the parameter: {body}");
+}
+
 #[tokio::test]
 async fn search_accepts_rfc3339_dates() {
     let app = TestApp::spawn().await;
