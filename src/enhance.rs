@@ -274,7 +274,7 @@ const WORK_RATE: u32 = 48_000;
 /// downsampling to it discards nothing that survived the band-pass — and a P25
 /// vocoder never produced anything above it in the first place. Writing 48 kHz
 /// instead would quadruple every stored Call for content that is not there.
-const OUTPUT_RATE: u32 = 8_000;
+pub(crate) const OUTPUT_RATE: u32 = 8_000;
 
 /// The voice band. Below [`BAND_LOW_HZ`] is rumble, hum and CTCSS bleed; above
 /// [`BAND_HIGH_HZ`] is hiss. Neither carries speech, and both cost bits.
@@ -442,7 +442,7 @@ fn append_mono(decoded: &GenericAudioBufferRef<'_>, out: &mut Vec<f32>) {
 
 /// Resample between two rates, or hand the samples straight back when they
 /// already match — which is the common case for a Trunk Recorder writing 8 kHz.
-fn resample(samples: &[f32], from: u32, to: u32) -> Result<Vec<f32>, EnhanceError> {
+pub(crate) fn resample(samples: &[f32], from: u32, to: u32) -> Result<Vec<f32>, EnhanceError> {
     if from == to {
         return Ok(samples.to_vec());
     }

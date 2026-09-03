@@ -6,6 +6,7 @@ import {
   channelOption,
   channelScope,
   dvrActivity,
+  dvrExport,
   dvrLink,
   dvrSearch,
   playheadMs,
@@ -111,6 +112,13 @@ describe('what a DVR asks the archive for', () => {
 
   it('draws the whole range whatever the anchor, or the timeline would shrink under the thumb', () => {
     expect(dvrActivity(view)).toMatchObject({ after: 1000, before: 9000, sel: '0_100.5' })
+  })
+
+  /** An export is the range the Listener chose, not where they happen to be
+   *  listening — or it would silently shrink every time somebody scrubbed
+   *  forward before downloading (#65, spec US 33). */
+  it('exports the whole range, not from the playhead', () => {
+    expect(dvrExport(view)).toEqual({ sel: '0_100.5', after: 1000, before: 9000 })
   })
 })
 

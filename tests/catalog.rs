@@ -20,6 +20,7 @@ async fn a_fresh_instance_offers_an_empty_catalog() {
             "systems": [],
             "activityWindowMs": 24 * 60 * 60 * 1000_i64,
             "sharing": true,
+            "export": { "enabled": true, "maxCalls": 1000 },
         }),
         "zero-config first run has nothing to select yet"
     );
@@ -74,6 +75,7 @@ async fn a_talkgroup_carries_what_the_panel_groups_and_labels_it_by() {
             }],
             "activityWindowMs": 24 * 60 * 60 * 1000_i64,
             "sharing": true,
+            "export": { "enabled": true, "maxCalls": 1000 },
         })
     );
 }

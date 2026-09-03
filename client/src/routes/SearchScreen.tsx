@@ -18,6 +18,7 @@ import { ActivityHeatmap } from '@/components/ActivityHeatmap'
 import { CallFlags } from '@/components/CallFlags'
 import { DateField, Field, controlClass } from '@/components/Field'
 import { DensityRibbon } from '@/components/DensityRibbon'
+import { ExportControl } from '@/components/ExportControl'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
@@ -528,6 +529,10 @@ export function SearchScreen() {
           >
             <Link2 className="size-3.5" aria-hidden />
           </Button>
+          {/* Taking these results away (#65, spec US 33). The *whole* of what
+              matched, not the page on screen — which is why it is handed the
+              filters and the total rather than the window. */}
+          <ExportControl search={filters} count={page.count} catalog={catalog} />
         </div>
 
         {options?.dateStartMs !== undefined && (

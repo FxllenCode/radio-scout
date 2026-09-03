@@ -681,6 +681,47 @@ The audio behind a share link is served exactly as the app's own is: proxied wit
 the filesystem backend, or redirected to a short-lived presigned URL on S3. Nothing new is stored
 and nothing is transcoded.
 
+## Range export
+
+A listener looking at a search — or at a DVR — taps ⤓ and takes it away: a **zip of the calls plus
+a manifest**, or **one stitched audio file**, oldest first.
+
+```toml
+[export]
+enabled = true
+max_calls = 1000
+```
+
+**It is on by default**, for share links' reason: an instance as it ships already serves its whole
+archive to anyone who can reach it, so an export gives away nothing a patient stranger could not
+already have, one call at a time. Turn it off if listening here is *closed*, or if upload bandwidth
+is the thing you are short of. The control disappears from the app when you do, rather than staying
+there and refusing.
+
+**Nothing is buffered.** A zip is written entry by entry as the objects are read, and a stitched
+file states its own length before any audio is touched — so an export of a county's night costs
+this instance one call's audio in memory, not the whole range. Nothing is transcoded on the way
+except the decode a stitched file needs, and no temporary file is written: a Pi's SD card is not
+used as scratch space.
+
+**`max_calls` is the bound that matters.** Above it the export is refused with the count, so a
+listener narrows the range instead of half-receiving it — and they are told *before* the download
+starts, because the cap rides on `/api/catalog` and the control does the arithmetic itself. A
+thousand transmissions is a long incident and roughly a gigabyte of audio. Raise it if you
+routinely hand over whole shifts; lower it on a metered connection. `max_calls = 0` refuses to boot
+rather than being read as "none": `enabled = false` is how you close the door.
+
+**One export runs at a time.** This is the only unauthenticated surface here that will read a
+thousand objects and decode an hour of audio, on a box that is usually also recording, so a second
+one is refused with `429` rather than queued — a queue would only make the instance late for two
+people instead of one.
+
+**What is in a stitched file, and what is not.** Calls with no measured length are left out, and so
+are encrypted ones: the file declares its whole timeline up front, and neither of those can be
+placed on one. Both are still in the zip's manifest. A call whose audio object has gone missing
+since the export began becomes silence of exactly its declared length, so the file stays valid and
+everything after it still plays where it should.
+
 ## Listener counts
 
 Settings → Admin → **Listeners** charts how many people have been connected, and when. It answers

@@ -587,6 +587,7 @@ async fn assemble(
         crate::webhook::Webhooks::new(config.webhook.clone(), config.server.public_url.clone());
     state.shares =
         crate::share::Shares::new(config.share.clone(), config.server.public_url.clone());
+    state.exports = crate::export::Exports::new(config.export.clone());
     state.tones = crate::tone::Tones::new(config.tone.clone());
     state.quiet = crate::quiet::Quiet::new(config.quiet.clone());
     // Read once at boot whether there is anything to look for (#55), so an

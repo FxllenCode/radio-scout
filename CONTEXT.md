@@ -360,6 +360,31 @@ whoever holds it.
 _Avoid_: public link (fine in prose, wrong for the entity), permalink (it expires), token (the
 secret *inside* one), embed (#75's iframe page is a different thing).
 
+**Export**:
+A range of the **Archive** taken away as a file — the **Calls** a search matched, in one of two
+shapes. A **zip** holds each Call as its own file plus a `manifest.json` describing all of them; a
+**stitch** holds all of them end to end as one playable WAV. Oldest first in both, because an
+incident has one useful order and a stitch has one legal one.
+
+**The filters are the search's own**, read by the same parser, so an Export is *what was on screen*
+— including a **Selection**, which is how the **DVR**'s scope exports without the exporter knowing
+what a DVR is.
+
+**A stitch declares its timeline before it reads any audio.** A WAV states its length in its first
+44 bytes, so the length is summed from what the Archive already measured (`duration_ms`) and each
+Call is then *fitted* into the room that sum reserved for it — padded with silence where it fell
+short, trimmed where it ran over. That is what buys a single decode pass, an exact
+`Content-Length`, and a memory cost of one Call. Two consequences: a Call whose length was never
+measured is **not in a stitch at all** (the kerchunk filter's own rule — a threshold cannot be
+tested against an unknown), and neither is an **Encrypted Call**; and an object that has gone
+missing since the pre-pass becomes silence of exactly its declared length, because a valid header
+over a short body does not fail, it plays as every later Call being the wrong one.
+
+Deliberately not a **Sweep**, not a **Backfill** and not a **Downstream**: nothing is stored, queued
+or forwarded — an Export is one request, streamed, that leaves the Instance exactly as it found it.
+_Avoid_: download (one Call's audio, spec US 27), archive (the zip is one; **Archive** is the
+Instance's whole holding), bundle, dump.
+
 **Star**:
 A **Listener's** per-browser mark on a **Call**, filterable in search and exempt from **Retention** where the **Operator** allows.
 _Avoid_: favorite, bookmark, like.

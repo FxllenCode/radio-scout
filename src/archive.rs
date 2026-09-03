@@ -148,6 +148,14 @@ pub struct CallSearch {
     /// Deliberately not a cascading dimension, for `mark`'s reason: it is the
     /// whole scanner rather than one axis of a form, and no dropdown offers it.
     pub selection: Option<crate::selection::Selection>,
+    /// Only Calls with audio behind them (#65) — an **Encrypted Call** is a row
+    /// and no object at all (#42, spec US 9).
+    ///
+    /// The **stitched export**'s, and nothing else's: every other surface shows
+    /// an encrypted Call precisely so that the activity is visible. It is also
+    /// not a query-string filter — nobody types this — which is why it is set by
+    /// the one caller that needs it rather than read by [`parse_search`].
+    pub with_audio: bool,
     pub sort: CallSort,
     pub limit: u64,
     pub offset: u64,
@@ -335,6 +343,9 @@ impl CallQuery {
             self = self
                 .join_group()
                 .and_where(group::Column::Name.eq(group_name.clone()));
+        }
+        if search.with_audio {
+            self = self.and_where(call::Column::Encrypted.eq(false));
         }
         if let Some(mark) = search.mark {
             self = self.and_where(carrying(mark));
@@ -717,10 +728,10 @@ struct ActivityBucket {
     calls: i64,
 }
 
-/// The extent of a filtered search, when a bound has to be discovered rather
+/// How far a filtered search reaches, when a bound has to be discovered rather
 /// than given.
 #[derive(Debug, sea_orm::FromQueryResult)]
-struct Extent {
+struct Bounds {
     first_ms: Option<i64>,
     last_ms: Option<i64>,
 }
@@ -798,7 +809,7 @@ async fn axis_over<C: ConnectionTrait>(
         .grouped()
         .column_as(call::Column::CallAtMs.min(), "first_ms")
         .column_as(call::Column::CallAtMs.max(), "last_ms")
-        .into_model::<Extent>()
+        .into_model::<Bounds>()
         .one(db)
         .await?
         .and_then(|extent| Some((extent.first_ms?, extent.last_ms?)));
@@ -999,6 +1010,161 @@ pub struct Download {
     pub object_key: String,
     pub mime: String,
     pub filename: String,
+}
+
+// ---------------------------------------------------------------------------
+// What an export is about to be (#65, spec US 33)
+// ---------------------------------------------------------------------------
+
+/// One Call as an **export** writes it: the manifest row, the object behind it,
+/// and the name it takes inside the archive (#65).
+#[derive(Debug, Clone)]
+pub struct Exported {
+    /// The Call as a Listener sees it — the manifest's row, and the same wire
+    /// shape a search page answers with, so a script reading a manifest and a
+    /// script reading the API are reading one thing.
+    pub call: StoredCall,
+    /// What this Call is called inside the zip, and what the manifest says it
+    /// is called. Empty for an **Encrypted Call**, which has no file.
+    pub filename: String,
+    /// Where the audio is. Empty for an **Encrypted Call**.
+    pub object_key: String,
+}
+
+/// What an export is about to be, asked **before a byte of it is written**
+/// (#65).
+///
+/// One statement, and everything a refusal or a header needs is in it: how many
+/// Calls (the cap), how many bytes of audio (a ZIP's 32-bit offsets), how long
+/// altogether (the stitched file's declared timeline), and when the range
+/// starts (what the download is named after).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Extent {
+    pub calls: u64,
+    /// Stored audio, summed. Rows whose size was never written down contribute
+    /// nothing, exactly as they do to the retention cap.
+    pub bytes: u64,
+    /// Measured length, summed — what [`crate::export::stitch`] declares.
+    pub duration_ms: i64,
+    /// The instant the range opens at, or `None` when it holds no Calls.
+    pub first_ms: Option<i64>,
+}
+
+/// One aggregate row, as the two dialects hand it back.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct ExtentRow {
+    calls: i64,
+    bytes: Option<i64>,
+    duration_ms: Option<i64>,
+    first_ms: Option<i64>,
+}
+
+/// **How big this export would be**, in one statement over the same filters the
+/// export itself will walk (#65).
+///
+/// The two `SUM`s are cast to `BIGINT` for [`crate::db::repo::total_audio_bytes`]'s
+/// reason: Postgres widens `SUM(bigint)` to `numeric` where SQLite keeps it an
+/// integer, and the cast is what makes one query decode on both dialects.
+pub async fn extent<C: ConnectionTrait>(db: &C, search: &CallSearch) -> Result<Extent, DbErr> {
+    use sea_orm::sea_query::Alias;
+
+    let filters = Filters::resolve(db, search).await?;
+    let row = CallQuery::new()
+        .filtered_by(&filters)
+        .rows()
+        .select_only()
+        .column_as(call::Column::Id.count(), "calls")
+        .column_as(
+            call::Column::AudioSize.sum().cast_as(Alias::new("BIGINT")),
+            "bytes",
+        )
+        .column_as(
+            call::Column::DurationMs.sum().cast_as(Alias::new("BIGINT")),
+            "duration_ms",
+        )
+        .column_as(call::Column::CallAtMs.min(), "first_ms")
+        .into_model::<ExtentRow>()
+        .one(db)
+        .await?
+        .unwrap_or(ExtentRow {
+            calls: 0,
+            bytes: None,
+            duration_ms: None,
+            first_ms: None,
+        });
+
+    Ok(Extent {
+        calls: row.calls.max(0) as u64,
+        bytes: row.bytes.unwrap_or(0).max(0) as u64,
+        duration_ms: row.duration_ms.unwrap_or(0).max(0),
+        // An aggregate over no rows answers `NULL` here, which is exactly the
+        // reading: a range with no Calls in it starts nowhere.
+        first_ms: row.first_ms,
+    })
+}
+
+/// **One page of an export**, in the order it will be written (#65).
+///
+/// [`page`]'s reads plus the two columns a file needs and a view does not — the
+/// object to fetch, and what to call it. It lives here rather than in
+/// [`crate::export`] because the Archive is read by one module (#98), and it is
+/// batched for [`stored_calls`]'s reason: an export of a county's night is the
+/// last place to issue a statement per Call.
+///
+/// **The name a Call takes is a function of that Call alone** — never of its
+/// position in the answer, and never of anything discovered while writing. That
+/// is what lets the zip's manifest be written *first*, from a pass that reads no
+/// audio at all, and still name every file correctly: the two passes are two
+/// reads of a live Archive, and a name derived from a row's *position* would
+/// silently slide by one for every Call retention pruned between them — leaving
+/// a manifest whose `file` named a real file belonging to a different Call.
+pub async fn exportable<C: ConnectionTrait>(
+    db: &C,
+    search: &CallSearch,
+) -> Result<Vec<Exported>, DbErr> {
+    let filters = Filters::resolve(db, search).await?;
+    let rows = search_rows(db, &filters).await?;
+    let views = stored_calls(db, &rows).await?;
+
+    Ok(rows
+        .iter()
+        .zip(views)
+        .map(|(row, call)| Exported {
+            filename: match row.object_key.is_empty() {
+                true => String::new(),
+                false => export_filename(&call, row.audio_name.as_deref()),
+            },
+            object_key: row.object_key.clone(),
+            call,
+        })
+        .collect())
+}
+
+/// What a Call is called inside an export's zip: **when it was**, then the name
+/// a single download would have taken, then its Id.
+///
+/// Three jobs, and only the first is obvious. The stamp leads so that a folder
+/// of extracted files sorts into the order the incident happened, whatever a
+/// filesystem thinks of the labels — fixed width, so it sorts as text. It is
+/// **UTC**, because the Instance's timezone is not the recipient's and a
+/// filename carries no zone to say which was meant. And the Id ends it, so two
+/// Calls a recorder stamped at the same millisecond on the same channel are two
+/// files rather than one.
+fn export_filename(call: &StoredCall, audio_name: Option<&str>) -> String {
+    let at_ms = call.timestamp.unwrap_or_default();
+    let stamp = time::OffsetDateTime::from_unix_timestamp(at_ms.div_euclid(1_000))
+        .ok()
+        .and_then(|at| {
+            at.format(&time::macros::format_description!(
+                "[year][month][day]-[hour][minute][second]"
+            ))
+            .ok()
+        })
+        .unwrap_or_else(|| "00000000-000000".to_string());
+    let named = download_filename(call, audio_name);
+    let (stem, extension) = named.rsplit_once('.').unwrap_or((named.as_str(), "bin"));
+
+    format!("{stamp}-{stem}-{}.{extension}", call.id)
 }
 
 /// Which **Tone profiles** each of these Calls paged (#55), by Call id.
@@ -1682,7 +1848,7 @@ where
 /// Read the archive-search filters out of a query string, or say which
 /// parameter was wrong. Blank is absent and bad input is named — see
 /// [`crate::query`], which both read surfaces share.
-fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
+pub(crate) fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
     let params = Params::new(params);
 
     let sort = match params.raw("sort") {
@@ -1744,6 +1910,9 @@ fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
                     .ok_or_else(|| bad("sel must be a selection, as the share link spells one"))
             })
             .transpose()?,
+        // Nobody types this one: it is the **stitched export**'s (#65), set by
+        // the one caller that needs it.
+        with_audio: false,
         sort,
         limit: params.limit(DEFAULT_LIMIT, MAX_LIMIT)?,
         offset: params.offset()?,

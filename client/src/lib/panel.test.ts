@@ -22,6 +22,7 @@ import {
 const CATALOG: Catalog = {
   activityWindowMs: DAY,
   sharing: true,
+  export: { enabled: true, maxCalls: 1000 },
   systems: [
     {
       ref: 100,
@@ -97,6 +98,7 @@ describe('the Talkgroups panel, derived once (#91)', () => {
       catalog: {
         activityWindowMs: DAY,
         sharing: true,
+        export: { enabled: true, maxCalls: 1000 },
         systems: [{ ref: 42, talkgroups: [{ ref: 7, groups: [] }] }],
       },
     })
@@ -217,6 +219,7 @@ describe('the Talkgroups panel, derived once (#91)', () => {
         catalog: {
         activityWindowMs: DAY,
         sharing: true,
+        export: { enabled: true, maxCalls: 1000 },
         systems: [{ ref: 42, talkgroups: [{ ref: 7, groups: [] }] }],
       },
       })
@@ -351,6 +354,7 @@ describe('the Talkgroups panel at county scale (#57)', () => {
       const catalog: Catalog = {
         activityWindowMs: DAY,
         sharing: true,
+        export: { enabled: true, maxCalls: 1000 },
         systems: [
           {
             ref: 1,
@@ -376,6 +380,7 @@ describe('the Talkgroups panel at county scale (#57)', () => {
       const catalog: Catalog = {
         activityWindowMs: DAY,
         sharing: true,
+        export: { enabled: true, maxCalls: 1000 },
         systems: [
           {
             ref: 1,

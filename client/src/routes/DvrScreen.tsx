@@ -12,6 +12,7 @@ import { useSearchParams } from 'react-router-dom'
 
 import { CallFlags } from '@/components/CallFlags'
 import { DensityRibbon } from '@/components/DensityRibbon'
+import { ExportControl } from '@/components/ExportControl'
 import { DateField, Field, controlClass } from '@/components/Field'
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
@@ -23,11 +24,12 @@ import { formatCallTime, formatDuration } from '@/lib/archive'
 import { CATCHUP_RATE } from '@/lib/catchup'
 import { systemName, talkgroupName } from '@/lib/call'
 import { PRESETS, rangeOf } from '@/lib/dateRange'
-import { bucketOfInstant, bucketStartMs } from '@/lib/density'
+import { bucketOfInstant, bucketStartMs, totalOf } from '@/lib/density'
 import {
   channelOption,
   channelScope,
   dvrActivity,
+  dvrExport,
   dvrSearch,
   playheadMs,
   readChannelOption,
@@ -42,6 +44,7 @@ import { sameSearch } from '@/lib/run'
 import { encodeSelection } from '@/lib/selectionUrl'
 import {
   useGetActivityQuery,
+  useGetCatalogQuery,
   useGetFilterOptionsQuery,
   useLazySearchCallsQuery,
 } from '@/store/api'
@@ -147,6 +150,8 @@ export function DvrScreen() {
    *  narrowed by the scope currently chosen could never be used to choose a
    *  different one. */
   const { data: options } = useGetFilterOptionsQuery({})
+  /** What this instance offers — the export control is drawn from it (#65). */
+  const { data: catalog } = useGetCatalogQuery()
 
   const current = useAppSelector(selectCurrentCall)
   const position = useAppSelector(selectPlaybackPosition)
@@ -328,6 +333,15 @@ export function DvrScreen() {
           >
             <Link2 className="size-3.5" aria-hidden />
           </Button>
+          {/* Taking this rewind away as a file (#65, spec US 33) — the whole
+              range on the timeline, not from the playhead ([`dvrExport`]). The
+              count comes off the timeline this screen already has, so the
+              refusal above the cap costs no extra request. */}
+          <ExportControl
+            search={dvrExport(view)}
+            count={timeline ? totalOf(timeline) : 0}
+            catalog={catalog}
+          />
         </div>
       </form>
 

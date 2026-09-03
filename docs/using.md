@@ -413,6 +413,29 @@ Three things are worth knowing:
 An encrypted call can be shared too. There is nothing to play, but that the channel was busy at that
 moment is often the point.
 
+### Taking an incident with you
+
+The ⤓ button — beside the link button on **Search**, and on the **DVR** — downloads what you are
+looking at. Whatever filters are set is what comes down: a talkgroup, a night, a whole selection,
+the lot. Two shapes to choose from:
+
+- **A zip of calls.** Every call as its own file, named `0001-County-Fire-Dispatch-…` so a folder
+  of them sorts into the order it happened, plus a `manifest.json` listing every call with its
+  talkgroup, system, time, duration, units and which file is which. Encrypted calls are in the
+  manifest — the activity is the point — with no file beside them.
+- **One stitched file.** All of it end to end, oldest first, as a single WAV you can send to
+  somebody who has never heard of Radio-Scout and who will just press play. Calls whose length this
+  instance never measured are left out of it, and so are encrypted ones: neither can be placed on a
+  timeline.
+
+It starts downloading immediately rather than after a wait — a long range is written as it goes, so
+nothing has to be assembled first. There is a limit on how many calls one export may carry (a
+thousand, unless your operator has changed it); over it, the control tells you the count instead of
+handing you a download that was never going to arrive. Narrow the range and try again.
+
+One export runs at a time on an instance. If somebody else is mid-download you are asked to come
+back in a moment, rather than both of you getting a slow one.
+
 ---
 
 ## On your phone

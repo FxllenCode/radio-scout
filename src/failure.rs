@@ -134,6 +134,14 @@ stages! {
     LoadQuietSpans => "load-quiet-spans",
     /// The Systems and Talkgroups a listener can select.
     LoadCatalog => "load-catalog",
+    /// How big a range export would be, asked before a byte of it is written
+    /// (#65) — the one statement every one of that surface's refusals is taken
+    /// from.
+    MeasureExport => "measure-export",
+    /// Reading a page of an export that had already begun streaming. The only
+    /// stage here that cannot become a status code: the `200` and its headers
+    /// have been sent, so the log line is the whole record.
+    ReadExport => "read-export",
     /// Peak Listeners over time (#62) — the one chart behind the admin session,
     /// because how many people listen to an Instance is the Operator's own
     /// business.
@@ -297,6 +305,28 @@ pub enum Reason {
     /// it — and distinguished in the **log**, which is where the Operator whose
     /// links stopped working goes to find out why.
     SharingDisabled,
+    // -- Range export (#65, spec US 33) -------------------------------------
+    /// `[export] enabled` is off.
+    ExportDisabled,
+    /// Nothing matched, so there is nothing to take away. Refused rather than
+    /// answered with an empty archive: a 44-byte WAV or a zip holding one empty
+    /// manifest is a download that *looks* like it worked, and a Listener who
+    /// mistyped a date would find that out on the aeroplane.
+    ExportEmpty,
+    /// More Calls than `[export] max_calls`. Carries both numbers, because
+    /// "narrow the range" is only actionable if you know by how much.
+    ExportTooManyCalls { calls: u64, max: u64 },
+    /// The range is longer than the container can address. Both output formats
+    /// state their sizes in 32 bits — a ZIP's local-header offsets and a WAV's
+    /// two lengths — so the ceiling is the same for both, and it is checked in
+    /// the one statement before anything is written rather than discovered four
+    /// gigabytes into somebody's download.
+    ExportTooLarge { bytes: u64 },
+    /// An export is already running. Refused rather than queued: this is the
+    /// only unauthenticated surface here that reads a thousand objects and
+    /// decodes an hour of audio, and a queue on a Pi that is also recording
+    /// would only make it late for two people instead of one.
+    ExportBusy,
     // -- Curation (#49) -----------------------------------------------------
     /// A curation write the admin surface refused — a blank field, a name or a
     /// Ref already taken, a row that is not there, or a delete that would have
@@ -624,6 +654,50 @@ impl Reason {
                 StatusCode::NOT_FOUND,
                 text("share link not found\n"),
             ),
+            // **DEBUG, all five.** The client is told the count *before* it
+            // offers the control (`GET /api/catalog`), so every one of these is
+            // either a hand-edited URL or a race with an Operator's own
+            // setting — nothing an Operator acts on, and the request log's own
+            // 4xx line already covers it (rule 3).
+            Reason::ExportDisabled => Refusal::new(
+                "export-disabled",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("export is not enabled on this instance\n"),
+            ),
+            Reason::ExportEmpty => Refusal::new(
+                "export-empty",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("nothing to export\n"),
+            ),
+            Reason::ExportTooManyCalls { calls, max } => Refusal::new(
+                "export-too-many-calls",
+                Level::DEBUG,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                text(format!(
+                    "that range holds {calls} calls; at most {max} can be exported at once\n"
+                )),
+            ),
+            Reason::ExportTooLarge { bytes } => Refusal::new(
+                "export-too-large",
+                Level::DEBUG,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                text(format!(
+                    "that range comes to {bytes} bytes, more than one file can address\n"
+                )),
+            ),
+            // **429 and not 503.** The Instance is perfectly healthy and this
+            // is rate limiting, which is what the status means — and a 5xx
+            // would put an ERROR line in the operator log every time two
+            // Listeners exported at once (rule 7).
+            Reason::ExportBusy => Refusal::new(
+                "export-busy",
+                Level::DEBUG,
+                StatusCode::TOO_MANY_REQUESTS,
+                text("another export is running; try again in a moment\n"),
+            )
+            .retry_after(EXPORT_RETRY_AFTER_SECS),
             Reason::BadImport(error) => Refusal::new(
                 error.reason(),
                 Level::DEBUG,
@@ -654,6 +728,11 @@ impl Reason {
 /// deliberately dropped — and one string is the only way the success and the
 /// two silences cannot drift apart.
 pub(crate) const CALL_IMPORTED: &str = "Call imported successfully.\n";
+
+/// How long a Listener is asked to wait when an export is already running — a
+/// guess at the shape of the thing, since the real answer is "as long as the
+/// other one takes" and nothing here knows that.
+const EXPORT_RETRY_AFTER_SECS: u64 = 30;
 
 /// Which of the guard's refusals applied is for the operator's log, not for
 /// whoever is knocking.

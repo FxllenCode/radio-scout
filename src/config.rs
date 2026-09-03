@@ -61,6 +61,7 @@ use crate::admin::AdminConfig;
 use crate::blob::{Backend, Storage, StorageConfig};
 use crate::downstream::DownstreamConfig;
 use crate::enhance::{EnhancementConfig, Output};
+use crate::export::ExportConfig;
 use crate::ingest::IngestConfig;
 use crate::listeners::ListenerConfig;
 use crate::logsink;
@@ -412,6 +413,7 @@ pub struct Config {
     pub tone: ToneConfig,
     pub quiet: QuietConfig,
     pub share: ShareConfig,
+    pub export: ExportConfig,
     pub listeners: ListenerConfig,
     pub log: LogConfig,
 }
@@ -618,6 +620,15 @@ impl Config {
                 "share.link_ttl_secs",
                 self.share.link_ttl.as_secs(),
                 "a positive number of seconds",
+            ),
+            // A cap of zero refuses every export there could ever be, which is
+            // `[export] enabled = false` spelled in a way that answers "413" to
+            // a Listener instead of "there is no such feature here". The
+            // switch already exists; this is a typo.
+            (
+                "export.max_calls",
+                self.export.max_calls,
+                "a positive number of calls",
             ),
         ] {
             if value == 0 {
@@ -1156,6 +1167,28 @@ pub const SETTINGS: &[Setting] = &[
         example: "3600",
         set: |setting, config, value| {
             config.share.link_ttl = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "export.enabled",
+        var: "RADIO_SCOUT_EXPORT_ENABLED",
+        expected: "true or false",
+        // `false`, because exporting is on by default and closing it is the
+        // only reason to write this variable at all.
+        example: "false",
+        set: |setting, config, value| {
+            config.export.enabled = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "export.max_calls",
+        var: "RADIO_SCOUT_EXPORT_MAX_CALLS",
+        expected: "a number of calls",
+        example: "500",
+        set: |setting, config, value| {
+            config.export.max_calls = setting.parse(value)?;
             Ok(())
         },
     },
@@ -1878,6 +1911,23 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # a call that is already shared hands back the same link with its window pushed
 # out rather than minting a second one.
 # link_ttl_secs = 604800
+
+[export]
+# Range export (#65): a talkgroup (or your whole selection) and a time range,
+# downloaded as a zip of the calls with a manifest, or as one stitched audio file
+# you can hand to somebody who has never heard of Radio-Scout.
+#
+# On by default, for share links' reason: an instance as it ships already serves
+# its whole archive to anyone who asks, so an export gives away nothing a patient
+# stranger could not already have. Turn it off if listening here is *closed*, or
+# if upload bandwidth is the thing you are short of.
+# enabled = true
+
+# The most calls one export may carry. A thousand transmissions is a long
+# incident and roughly a gigabyte of audio; above the cap an export is refused
+# with the count, so the range gets narrowed rather than half-delivered. Raise it
+# if you routinely hand over whole shifts, lower it on a metered connection.
+# max_calls = 1000
 
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a

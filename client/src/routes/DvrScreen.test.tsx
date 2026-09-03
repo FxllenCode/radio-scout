@@ -484,3 +484,22 @@ describe('the DVR (#63, spec US 39)', () => {
     )
   })
 })
+
+describe('taking a rewind away (#65, spec US 33)', () => {
+  /** The whole range on the timeline, not from the playhead — a Listener who
+   *  scrubbed forward before downloading must not silently get less than they
+   *  chose. */
+  it('exports the range, not the anchor', async () => {
+    const user = userEvent.setup()
+    renderApp(`/dvr?sel=0_100.1&${WHOLE_ARCHIVE}&at=${NEWEST}`)
+    await screen.findByTestId('density-ribbon')
+
+    await user.click(screen.getByRole('button', { name: 'Export these results' }))
+
+    const stitched = await screen.findByRole('link', { name: /one stitched file/i })
+    const href = new URLSearchParams(stitched.getAttribute('href')!.split('?')[1])
+    expect(href.get('after')).toBe(String(OLDEST))
+    expect(href.get('before')).toBe(String(NEWEST + 1))
+    expect(href.get('sel')).toBe('0_100.1')
+  })
+})

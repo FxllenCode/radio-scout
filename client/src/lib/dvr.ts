@@ -37,7 +37,7 @@ import { WILDCARD } from './selection'
 import { decodeSelection, encodeSelection } from './selectionUrl'
 import { numberIn } from './searchUrl'
 import { rangeOf } from './dateRange'
-import type { ActivityQuery } from '@/types'
+import type { ActivityQuery, SearchQuery } from '@/types'
 import type { RunSearch } from './run'
 
 /** How many bars a DVR timeline asks for — `RIBBON_BUCKETS`' reasoning, and
@@ -132,6 +132,23 @@ export function dvrSearch(view: DvrView): RunSearch {
     after: view.at,
     before: view.to,
     sort: 'oldest',
+  }
+}
+
+/**
+ * Taking this DVR away as a file (#65, spec US 33).
+ *
+ * The **whole range**, not from the anchor — for [`dvrActivity`]'s reason one
+ * control along: the range is what is on the timeline and what the Listener
+ * chose, where the anchor is only where they happen to be listening at this
+ * second. An export that started at the playhead would silently shrink every
+ * time somebody scrubbed forward before downloading.
+ */
+export function dvrExport(view: DvrView): SearchQuery {
+  return {
+    sel: encodeSelection(view.scope),
+    after: view.from,
+    before: view.to,
   }
 }
 

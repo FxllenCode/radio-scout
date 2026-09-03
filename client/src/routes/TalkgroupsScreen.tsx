@@ -44,7 +44,12 @@ import {
 } from '@/store/panel'
 import type { Catalog } from '@/types'
 
-const EMPTY_CATALOG: Catalog = { systems: [], activityWindowMs: 0, sharing: false }
+const EMPTY_CATALOG: Catalog = {
+  systems: [],
+  activityWindowMs: 0,
+  sharing: false,
+  export: { enabled: false, maxCalls: 0 },
+}
 
 /** How often the clock this screen keeps is redrawn. Finer than the minute a
  *  countdown or a last-heard age displays, coarse enough that a phone with the

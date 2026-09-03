@@ -18,6 +18,7 @@ pub mod db;
 pub mod delivery;
 pub mod downstream;
 pub mod enhance;
+pub mod export;
 pub mod failure;
 pub mod http_log;
 pub mod import;
@@ -107,6 +108,11 @@ pub struct AppState {
     /// preview card's absolute URLs are built on. A link is a **row**, so like
     /// a Webhook there is no disabled form beyond the switch itself.
     pub shares: crate::share::Shares,
+    /// Taking a range of the Archive away with you (#65, spec US 33) — the
+    /// policy, and the right to be the one export that is running. Not a
+    /// roster and not a queue: the only state an export has is whether one is
+    /// already in flight.
+    pub exports: crate::export::Exports,
     /// How many people are listening (#62, spec US 41) — the count a live-feed
     /// connection joins, and the one a status page (#70) reads. Counts only:
     /// there is nothing in it that could name anybody.
@@ -138,6 +144,7 @@ impl AppState {
             tones: crate::tone::Tones::default(),
             quiet: crate::quiet::Quiet::default(),
             shares: crate::share::Shares::default(),
+            exports: crate::export::Exports::default(),
             listeners: crate::listeners::Listeners::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
@@ -196,6 +203,9 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/calls", get(archive::search))
         .route("/api/calls/filters", get(archive::filters))
         .route("/api/calls/quiet", get(archive::quiet))
+        // A range of the Archive as a file (#65, spec US 33) — the same
+        // filters, streamed as a zip of Calls or as one stitched WAV.
+        .route("/api/calls/export", get(export::export))
         // How busy the Archive was under a search (#62, spec US 34–35) —
         // the density ribbon over its results, and the hour-by-day heatmap.
         .route("/api/calls/activity", get(archive::activity))

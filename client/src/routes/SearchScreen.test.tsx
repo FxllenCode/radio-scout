@@ -1643,7 +1643,12 @@ describe('SearchScreen — the public share link (#64, spec US 32)', () => {
   it('is not offered where the instance does not mint links', async () => {
     server.use(
       http.get(`${ORIGIN}/api/catalog`, () =>
-        HttpResponse.json({ systems: [], activityWindowMs: 86_400_000, sharing: false }),
+        HttpResponse.json({
+          systems: [],
+          activityWindowMs: 86_400_000,
+          sharing: false,
+          export: { enabled: true, maxCalls: 1000 },
+        }),
       ),
     )
     renderApp('/search')
@@ -1664,6 +1669,42 @@ describe('SearchScreen — the public share link (#64, spec US 32)', () => {
     await user.click(within(rows[1]).getByRole('button', { name: /^Share .* publicly$/ }))
 
     expect(await screen.findByText('Could not create a share link.')).toBeInTheDocument()
+  })
+})
+
+describe('SearchScreen — taking these results away (#65, spec US 33)', () => {
+  /** The whole of what matched, not the page on screen: the control is handed
+   *  the filters and the total, and the window never reaches the URL. */
+  it('exports the search rather than the page', async () => {
+    const user = userEvent.setup()
+    renderApp('/search?talkgroup=1')
+    await resultRows()
+
+    await user.click(screen.getByRole('button', { name: 'Export these results' }))
+
+    const zip = await screen.findByRole('link', { name: /zip of calls/i })
+    expect(zip).toHaveAttribute('href', '/api/calls/export?format=zip&talkgroup=1')
+    expect(zip.getAttribute('href')).not.toContain('offset')
+  })
+
+  /** `[export] enabled = false` says so in the catalog, and the control is
+   *  simply not there — a control offered and then refused is a control that
+   *  lies (#64's rule, one feature along). */
+  it('is not offered where the instance does not export', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/catalog`, () =>
+        HttpResponse.json({
+          systems: [],
+          activityWindowMs: 86_400_000,
+          sharing: true,
+          export: { enabled: false, maxCalls: 0 },
+        }),
+      ),
+    )
+    renderApp('/search')
+    await resultRows()
+
+    expect(screen.queryByRole('button', { name: 'Export these results' })).toBeNull()
   })
 })
 

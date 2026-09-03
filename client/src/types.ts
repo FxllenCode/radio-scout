@@ -223,6 +223,11 @@ export interface Catalog {
    *  control is drawn from this: a control that is offered and then refused is
    *  a control that lies. */
   sharing: boolean
+  /** Whether a range of the archive can be taken away, and how much of one at a
+   *  time (#65, spec US 33). Here for `sharing`'s reason, and one further: the
+   *  *number* is what lets the control say "that range holds 4,312 calls"
+   *  before the wait rather than after it. */
+  export: { enabled: boolean; maxCalls: number }
 }
 
 export interface SystemOption {

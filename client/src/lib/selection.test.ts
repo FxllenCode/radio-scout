@@ -140,6 +140,7 @@ describe('changing the selection', () => {
 const CATALOG: Catalog = {
   activityWindowMs: 24 * 60 * 60 * 1_000,
   sharing: true,
+  export: { enabled: true, maxCalls: 1000 },
   systems: [
     {
       ref: 100,
@@ -236,6 +237,7 @@ describe('reading the catalog against a selection', () => {
     const untagged: Catalog = {
       activityWindowMs: 0,
       sharing: true,
+      export: { enabled: true, maxCalls: 1000 },
       systems: [{ ref: 100, talkgroups: [{ ref: 9, groups: [] }] }],
     }
 
@@ -245,7 +247,12 @@ describe('reading the catalog against a selection', () => {
   })
 
   it('has no categories to offer for an empty catalog', () => {
-    const empty: Catalog = { systems: [], activityWindowMs: 0, sharing: true }
+    const empty: Catalog = {
+      systems: [],
+      activityWindowMs: 0,
+      sharing: true,
+      export: { enabled: true, maxCalls: 1000 },
+    }
 
     expect(categoryViews(empty, EVERYTHING, 'group')).toEqual([])
     expect(summarize(empty, EVERYTHING)).toEqual({ on: 0, total: 0 })

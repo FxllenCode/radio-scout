@@ -112,6 +112,23 @@ pub struct Catalog {
     /// than something in the database, and `read` is what a test drives against
     /// rows.
     pub sharing: bool,
+    /// Whether a range of the Archive can be taken away, and how much of one at
+    /// a time (#65, spec US 33).
+    ///
+    /// On the wire for `sharing`'s reason: a control offered and then refused
+    /// is a control that lies — and here the *number* matters too, because a
+    /// Listener has to be told "that is 4,312 Calls" **before** they wait for a
+    /// download that was never going to arrive.
+    pub export: ExportOffer,
+}
+
+/// What this Instance will let a Listener take away (#65).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportOffer {
+    pub enabled: bool,
+    /// The most Calls one export may carry — `[export] max_calls`.
+    pub max_calls: u64,
 }
 
 // How a catalog reaches a listener, decided beside the type rather than at the
@@ -125,6 +142,10 @@ pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> 
         .map_err(Stage::LoadCatalog.failed())?;
     Ok(Catalog {
         sharing: state.shares.enabled(),
+        export: ExportOffer {
+            enabled: state.exports.enabled(),
+            max_calls: state.exports.max_calls(),
+        },
         ..catalog
     })
 }
