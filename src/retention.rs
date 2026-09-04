@@ -202,7 +202,7 @@ impl RetentionConfig {
         let stars = match self.starred_days {
             None => StarKeep::None,
             Some(0) => StarKeep::Forever,
-            Some(days) => StarKeep::Until(cutoff_for(days, now_ms)?),
+            Some(days) => StarKeep::Until(days_before(days, now_ms)),
         };
         Some(AgePass { cutoff_ms, stars })
     }
@@ -313,13 +313,22 @@ mod gigabytes {
 /// the window is `0` — rdio-scanner's `pruneDays` semantics, which both windows
 /// share so an operator only has to learn them once.
 fn cutoff_for(days: u32, now_ms: i64) -> Option<i64> {
-    if days == 0 {
-        return None;
-    }
-    // `u32::MAX` days is ~3.7e17 ms, comfortably inside i64; only a clock near
-    // i64::MIN could underflow, and saturating there is still "nothing is old
-    // enough", which is the safe direction.
-    Some(now_ms.saturating_sub(i64::from(days) * MS_PER_DAY))
+    (days != 0).then(|| days_before(days, now_ms))
+}
+
+/// The instant `days` before `now_ms` — the arithmetic every window in this
+/// section is measured by, with no reading of `0` attached to it.
+///
+/// Separate from [`cutoff_for`] because a **Star**'s window has already spent
+/// `0` on "for good" by the time it needs this ([`RetentionConfig::age_pass`]),
+/// so it wants the sum and not the option: threading it through `cutoff_for`
+/// would put a `None` arm there that nothing can reach and nothing can kill.
+///
+/// `u32::MAX` days is ~3.7e17 ms, comfortably inside i64; only a clock near
+/// `i64::MIN` could underflow, and saturating there is still "nothing is old
+/// enough", which is the safe direction.
+fn days_before(days: u32, now_ms: i64) -> i64 {
+    now_ms.saturating_sub(i64::from(days) * MS_PER_DAY)
 }
 
 /// What one [`sweep`] did. Zero everywhere means the archive was already within

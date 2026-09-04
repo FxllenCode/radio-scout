@@ -333,7 +333,7 @@ _Avoid_: history, library, database, back catalogue.
 **Retention**:
 The policy that bounds the **Archive**: an age window (in days) plus an optional cap on total stored audio, overridable per System/Talkgroup (unset inherits). Expressed as configuration; enforced by sweeps.
 
-A **Star** buys a Call a *longer age window* where the Operator has configured one (#66) — not an exemption, and never one from the **size cap**, because a cap a Listener can defeat is not a cap and this is the one policy defeasible by somebody holding no credential at all. **Event** members are not exempt either: they are frozen by *copying* their audio at curation time, so the sweep stays one pass over one archive.
+A **Star** buys a Call a *longer age window* where the Operator has configured one (#66) — not an exemption, and never one from the **size cap**, because a cap a Listener can defeat is not a cap and this is the one policy defeasible by somebody holding no credential at all. **Event** members are not exempt either — but that is #67's to build and not this entry's to claim: the plan is that they are frozen by *copying* their audio at curation time, so the sweep stays one pass over one archive. What #66 settled is only that the sweep has one exemption today, and it is the Star's window.
 _Avoid_: expiry, TTL, cleanup.
 
 **Share link**:

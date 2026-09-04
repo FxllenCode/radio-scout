@@ -128,10 +128,17 @@ export function writeSearchUrl({ search, offset, call }: SearchUrl): string {
   return searchParams(params)
 }
 
-/** The spellings a yes/no parameter is read by — the server's own
- *  (`Params::flag`), because a URL is typed by hand as often as it is
- *  generated. Everything else, including a missing parameter, is *off*: there
- *  is no third state to get wrong. */
+/** The spellings a yes/no parameter is read by (#66).
+ *
+ *  The *accepted* set is the server's (`Params::flag` in `src/query.rs`),
+ *  because a URL is typed by hand as often as it is generated. What it does
+ *  with the rest is deliberately **not** the server's: `Params::flag` refuses
+ *  an unreadable value with a named 400, and this reads everything else — a
+ *  missing parameter included — as *off*. That is `readSearchUrl`'s own rule
+ *  one filter along ("dropping one filter costs the Listener that filter;
+ *  refusing the whole URL would cost them the link"), and it is safe here in a
+ *  way it would not be for a numeric bound: `starred=maybe` asks for the whole
+ *  archive, where `after=NaN` would ask for none of it. */
 function isTruthy(value: string | null): boolean {
   return value !== null && ['true', '1', 'yes'].includes(value.toLowerCase())
 }

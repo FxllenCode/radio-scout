@@ -8,7 +8,6 @@ import {
   Radio,
   RotateCcw,
   SkipForward,
-  Star,
   Zap,
 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
@@ -18,6 +17,8 @@ import { AvoidSheet } from '@/components/AvoidSheet'
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
 import { QueueSheet } from '@/components/QueueSheet'
+import { StarButton } from '@/components/StarButton'
+import { StarMark } from '@/components/StarMark'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
 import { useStar } from '@/hooks/useStar'
@@ -142,7 +143,7 @@ export function LiveScreen() {
   // The **Star** on that same Call (#66, spec US 37) — one rule shared with
   // the row control, so the display and a search row cannot come to disagree
   // about what a Star is or what tapping it does.
-  const { starred, toggle: toggleStar } = useStar(showing)
+  const { starred, verb: starVerb, toggle: toggleStar } = useStar(showing)
   // The live feed's own progress — an archived Call interrupting it (US 26) is
   // on the element instead, and its position isn't this display's to draw.
   const progress = useAppSelector((state) =>
@@ -340,12 +341,15 @@ export function LiveScreen() {
           {prioritized ? 'Priority on' : 'Priority'}
         </Control>
         <Control
-          label={starred ? 'Unstar this call' : 'Star this call'}
+          label={`${starVerb} this call`}
           pressed={starred}
           disabled={!showing}
           onClick={toggleStar}
-          icon={<Star className="size-3.5" aria-hidden />}
+          icon={<StarMark starred={starred} />}
         >
+          {/* The *state* as the body and the *action* in the label, which is
+              what every Control in this grid does — Priority reads "Priority
+              on" over "Clear priority on this talkgroup". */}
           {starred ? 'Starred' : 'Star'}
         </Control>
       </div>
@@ -657,6 +661,21 @@ function History({
                 <CallFlags call={call} />
               </span>
             </button>
+            {/* Keeping one of the last five (#66, spec US 37). A sibling of
+                the row's button and never inside it, the rule the comment above
+                names.
+
+                Dead with the feed off, like everything else on this screen
+                (#88): a Listener who has switched off is shown one thing worth
+                pressing, and a star that stayed live would be the second. The
+                **session log** is where the last two hundred and fifty are
+                starrable whatever the feed is doing, which is the screen for
+                exactly that. */}
+            <StarButton
+              call={call}
+              describedAs={talkgroupName(call)}
+              disabled={disabled}
+            />
             {/* Who keyed it, tappable straight through to that radio's history
                 (#47, spec US 44) — "who was that ten minutes ago" answered from
                 the list it happened in. */}

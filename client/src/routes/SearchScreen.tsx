@@ -852,15 +852,14 @@ function ResultRow({
       <span className="w-12 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
         {formatDuration(call.durationMs)}
       </span>
-      {/* An encrypted Call has no audio at all — the server sends no
-          `audioUrl` for one — so it gets no controls rather than controls
-          that 404 (spec US 9). */}
       {/* Keeping a Call is offered on an encrypted one too (#66): a row with
           no audio is still the record that the channel was busy, and it is
           exactly the kind of thing an incident is assembled out of. */}
       <StarButton call={call} describedAs={description} />
-      {/* Linkable whether or not there is anything to play: an encrypted Call
-          is still a thing worth pointing somebody at (spec US 9). */}
+      {/* Linkable whether or not there is anything to play, for the same
+          reason: an encrypted Call is still a thing worth pointing somebody at
+          (spec US 9). What an encrypted Call has none of is *audio* controls,
+          which is the block at the end of this row. */}
       <Button
         variant="outline"
         size="icon"
@@ -884,6 +883,9 @@ function ResultRow({
           <Share2 className="size-4" aria-hidden />
         </Button>
       )}
+      {/* The audio controls, and the only block on this row an **Encrypted
+          Call** does without: the server sends no `audioUrl` for one, so it
+          gets nothing here rather than controls that 404 (spec US 9). */}
       {call.audioUrl && (
         <>
           <Button

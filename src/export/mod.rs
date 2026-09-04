@@ -389,6 +389,7 @@ const MANIFEST_FILTERS: &[&str] = &[
     "unit",
     "mark",
     "sel",
+    "starred",
     "sort",
 ];
 
@@ -911,6 +912,18 @@ mod tests {
 
     /// ...and everything the search parser reads *is* recognised, or an export
     /// would quietly stop recording what it was asked for.
+    ///
+    /// **The `CallSearch` is destructured exhaustively on purpose**, and that
+    /// is the half of this test that earns its keep. Walking
+    /// [`MANIFEST_FILTERS`] proves only that every *listed* key is a real
+    /// filter — the direction that cannot go wrong. The direction that can, and
+    /// did (#66 added `starred` and this list was not told), is a dimension the
+    /// parser reads and the manifest has never heard of. Nothing in Rust can
+    /// enumerate the fields of a struct, but a destructure that names them all
+    /// stops compiling the moment one is added, which sends whoever added it
+    /// here. `with_audio`, `limit` and `offset` are named and *not* asserted
+    /// for: the first is set by the export itself rather than typed, and the
+    /// other two are the window rather than the search.
     #[test]
     fn every_filter_a_search_takes_is_one_the_manifest_records() {
         let asked = params(
@@ -931,10 +944,39 @@ mod tests {
             MANIFEST_FILTERS.len(),
             "every allowed filter survives"
         );
-        assert!(
-            crate::archive::parse_search(&asked).is_ok(),
-            "and every one of them is a filter a search really takes"
-        );
+
+        let crate::archive::CallSearch {
+            after_ms,
+            before_ms,
+            system_ref,
+            talkgroup_ref,
+            group_name,
+            tag_name,
+            min_duration_ms,
+            unit_ref,
+            mark,
+            selection,
+            starred,
+            with_audio: _,
+            sort: _,
+            limit: _,
+            offset: _,
+        } = crate::archive::parse_search(&asked).expect("every listed key is a real filter");
+
+        // Every dimension the manifest can record, really recorded — so a
+        // filter the list has never been told about is a field left at its
+        // default here and an assertion nobody wrote.
+        assert!(after_ms.is_some(), "after");
+        assert!(before_ms.is_some(), "before");
+        assert!(system_ref.is_some(), "system");
+        assert!(talkgroup_ref.is_some(), "talkgroup");
+        assert!(group_name.is_some(), "group");
+        assert!(tag_name.is_some(), "tag");
+        assert!(min_duration_ms.is_some(), "minDuration");
+        assert!(unit_ref.is_some(), "unit");
+        assert!(mark.is_some(), "mark");
+        assert!(selection.is_some(), "sel");
+        assert!(starred, "starred");
     }
 
     /// Only the stitched export can say how long it will be, and that is the

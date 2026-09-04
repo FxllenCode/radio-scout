@@ -495,11 +495,16 @@ impl Config {
         // A **Star** buys a Call a *longer* life (#66); one that bought a
         // shorter one would be a Listener's bookmark deleting the thing it
         // marked, which nobody would ever mean and nothing would ever report.
-        // `0` is "for good" here as everywhere in this section, and an Operator
-        // keeping everything (`days = 0`) has no age pass to be shorter than.
+        //
+        // Two clauses, and there were three: an Operator keeping everything
+        // (`days = 0`) has no age pass for a Star to be shorter than, and that
+        // needs no test of its own because a positive `starred_days` below a
+        // `days` of zero is not a number — `cargo mutants` is what found the
+        // third clause, by rewriting `> 0` to `>= 0` and nothing failing. `0`
+        // means "for good" here as everywhere in this section, which is the one
+        // that does have to be said out loud.
         if let Some(starred_days) = self.retention.starred_days
             && starred_days > 0
-            && self.retention.days > 0
             && starred_days < self.retention.days
         {
             return Err(ConfigError::invalid_key(

@@ -143,6 +143,21 @@ pub struct StarOffer {
     pub kept_days: u32,
 }
 
+/// The one place `[retention] starred_days`' three readings become the two
+/// fields on the wire.
+///
+/// Here rather than at the handler, which used to ask [`crate::star::Stars`]
+/// twice and derive `kept` from the answer's shape — a fact the option already
+/// held, re-read on the far side of an accessor.
+impl From<Option<u32>> for StarOffer {
+    fn from(kept_days: Option<u32>) -> Self {
+        StarOffer {
+            kept: kept_days.is_some(),
+            kept_days: kept_days.unwrap_or_default(),
+        }
+    }
+}
+
 /// What this Instance will let a Listener take away (#65).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,10 +182,7 @@ pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> 
             enabled: state.exports.enabled(),
             max_calls: state.exports.max_calls(),
         },
-        starred: StarOffer {
-            kept: state.stars.kept_days().is_some(),
-            kept_days: state.stars.kept_days().unwrap_or_default(),
-        },
+        starred: state.stars.kept_days().into(),
         ..catalog
     })
 }

@@ -730,7 +730,7 @@ describe('LiveScreen', () => {
       const history = screen.getByRole('list', { name: 'Recent calls' })
       expect(within(history).getAllByRole('listitem')).toHaveLength(2)
 
-      await user.click(within(history).getByRole('button', { name: /One/ }))
+      await user.click(within(history).getByRole('button', { name: 'One' }))
 
       expect(within(display()).getByText('One')).toBeInTheDocument()
     })
@@ -754,16 +754,18 @@ describe('LiveScreen', () => {
       await user.click(screen.getByRole('button', { name: 'Skip' }))
 
       const history = screen.getByRole('list', { name: 'Recent calls' })
-      await user.click(within(history).getByRole('button', { name: /One/ }))
+      await user.click(within(history).getByRole('button', { name: 'One' }))
 
       // One is playing, so it is not "recently played" any more. Matched on the
-      // rows' accessible names, which is what a listener reads.
+      // rows' accessible names, which is what a listener reads — and matched
+      // *exactly*, because since #66 each row also carries a "Star One", which
+      // a substring would count as a second One.
       expect(within(display()).getByText('One')).toBeInTheDocument()
-      expect(within(history).queryAllByRole('button', { name: /One/ })).toEqual([])
+      expect(within(history).queryAllByRole('button', { name: 'One' })).toEqual([])
 
       // ...and when it finishes, it comes back exactly once.
       await user.click(screen.getByRole('button', { name: 'Skip' }))
-      expect(within(history).getAllByRole('button', { name: /One/ })).toHaveLength(1)
+      expect(within(history).getAllByRole('button', { name: 'One' })).toHaveLength(1)
     })
   })
 
@@ -985,6 +987,36 @@ describe('starring the Call being shown (#66, spec US 37)', () => {
     renderApp('/')
 
     expect(star()).toBeDisabled()
+  })
+})
+
+describe('starring from the RECENT list (#66, spec US 37)', () => {
+  /** "Star from any row" reaches the Live screen's own list too (#66) — five
+   *  rows deep, which is where "that one, just then" lands most often. */
+  it('stars a Call from the RECENT list', async () => {
+    const user = userEvent.setup()
+    listening(call({ id: 1, talkgroupLabel: 'One' }))
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+    const history = screen.getByRole('list', { name: 'Recent calls' })
+
+    await user.click(within(history).getByRole('button', { name: 'Star One' }))
+
+    expect(
+      await within(history).findByRole('button', { name: 'Unstar One' }),
+    ).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  /** ...and dies with the feed, like everything else on this screen (#88). The
+   *  session log is where a Listener who switched off can still keep one. */
+  it('puts that star out of reach with the feed off', async () => {
+    const user = userEvent.setup()
+    listening(call({ id: 1, talkgroupLabel: 'One' }))
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+
+    await user.click(toggle())
+
+    const history = screen.getByRole('list', { name: 'Recent calls' })
+    expect(within(history).getByRole('button', { name: 'Star One' })).toBeDisabled()
   })
 })
 

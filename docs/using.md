@@ -395,11 +395,18 @@ a second scanner rather than a changed one, use `?id=` above.
 
 ### Starring what mattered
 
-The ☆ on a result row keeps a call. There is one on every row — **Search**, a radio's history — on
-the Live screen's control grid beside **PRIORITY**, so you can keep a call while you are still
-hearing it, and in the press-and-hold menu on the **session log**. **STARRED** in the filters is
-then how you get back to them, and it combines with everything else: starred calls on Fire Dispatch
-last Tuesday is one search.
+The ☆ keeps a call. It is on every list of calls you have heard or found — **Search** results, the
+**RECENT** list on Live, a radio's history, the **DVR** — on the Live screen's control grid beside
+**PRIORITY**, so you can keep a call while you are still hearing it, and on the player itself while
+you are walking search results. On the **session log** it is in the press-and-hold menu, beside
+Replay and Hold. **STARRED** in the filters is then how you get back to them, and it combines with
+everything else: starred calls on Fire Dispatch last Tuesday is one search.
+
+Two places deliberately have no star. The **queue** sheet lists calls you have not heard yet, and
+there is nothing to decide about one of those. And the strip above the tabs carries pause and skip
+only — three buttons in a docked strip is a row of targets too small to hit on a phone — so keeping
+what you are hearing from another tab is one tap through to **Live**, where the display is still
+showing it.
 
 Two things about it are worth knowing, and they are unusual enough to say out loud.
 

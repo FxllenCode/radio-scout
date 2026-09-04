@@ -25,13 +25,14 @@
  * not decoration: this list grows at the top as Calls are heard, so the row
  * under a thumb genuinely moves mid-gesture.
  */
-import { Ban, Download, Radio, RotateCcw, Share2, Star } from 'lucide-react'
+import { Ban, Download, Radio, RotateCcw, Share2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
 import { Sheet } from '@/components/Sheet'
+import { StarMark } from '@/components/StarMark'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
 import { useLongPress } from '@/hooks/useLongPress'
@@ -262,16 +263,16 @@ export function SessionScreen() {
  * is exactly the kind of thing an incident is assembled out of.
  */
 function StarAction({ call, onDone }: { call: Call; onDone: () => void }) {
-  const { starred, toggle } = useStar(call)
+  const { starred, verb, toggle } = useStar(call)
   return (
     <Action
-      icon={<Star className={cn('size-4', starred && 'fill-current text-amber-400')} aria-hidden />}
+      icon={<StarMark starred={starred} />}
       onClick={() => {
         toggle()
         onDone()
       }}
     >
-      {starred ? 'Unstar this call' : 'Star this call'}
+      {`${verb} this call`}
     </Action>
   )
 }
