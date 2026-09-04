@@ -300,6 +300,17 @@ pub struct StoredCall {
     /// the same fact, on the one field whose whole defence is that it is small.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quiet: Vec<[i64; 2]>,
+    /// A **Listener** starred this Call (#66, spec US 37) — omitted when
+    /// nobody has, [`StoredCall::emergency`]'s rule and for its reason: nearly
+    /// no Call is, and every live frame pays for a key that is present.
+    ///
+    /// A boolean where the column is an instant, because *when* somebody
+    /// starred it is nobody's business but the Operator's — the Star is the
+    /// Instance's mark, so a client showing one browser's stars differently
+    /// from another's would be showing a distinction that does not exist
+    /// (`crate::star`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub starred: bool,
     /// The Site Ref this Call was heard on, for multi-site Systems (spec
     /// US 11). Absent unless a recorder named one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -719,6 +730,7 @@ mod tests {
             tone: false,
             tones: Vec::new(),
             quiet: Vec::new(),
+            starred: false,
             site_ref: Some(3),
             site_label: Some("Downtown".into()),
             object_key: "ab/secret-internal-key.m4a".into(),
@@ -779,6 +791,7 @@ mod tests {
             tone: false,
             tones: Vec::new(),
             quiet: Vec::new(),
+            starred: false,
             site_ref: None,
             site_label: None,
             object_key: "internal".into(),

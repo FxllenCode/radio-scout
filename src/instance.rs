@@ -588,6 +588,10 @@ async fn assemble(
     state.shares =
         crate::share::Shares::new(config.share.clone(), config.server.public_url.clone());
     state.exports = crate::export::Exports::new(config.export.clone());
+    // The read-only half of `[retention] starred_days` (#66), so the catalog
+    // can tell a Listener what a Star is worth here. The policy itself stays
+    // with the sweeper that acts on it.
+    state.stars = crate::star::Stars::of(&config.retention);
     state.tones = crate::tone::Tones::new(config.tone.clone());
     state.quiet = crate::quiet::Quiet::new(config.quiet.clone());
     // Read once at boot whether there is anything to look for (#55), so an

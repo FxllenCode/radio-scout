@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
+import { StarButton } from '@/components/StarButton'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
@@ -195,6 +196,14 @@ function Calls({
             <span className="w-12 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
               {formatDuration(call.durationMs)}
             </span>
+            {/* Keeping a Call is offered whether or not there is anything to
+                play (#66): an encrypted row is still the record that this
+                radio keyed, which is exactly what a Unit history is read
+                for. */}
+            <StarButton
+              call={call}
+              describedAs={`${talkgroupName(call)} at ${formatCallTime(call.timestamp)}`}
+            />
             {/* An encrypted Call has no audio at all — no `audioUrl` — so it
                 gets no controls rather than controls that 404 (spec US 9). */}
             {call.audioUrl && (

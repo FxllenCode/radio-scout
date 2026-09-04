@@ -8,6 +8,7 @@ const catalog = (over: Partial<Catalog['export']> = {}): Catalog => ({
   activityWindowMs: 0,
   sharing: true,
   export: { enabled: true, maxCalls: 1000, ...over },
+  starred: { kept: false, keptDays: 0 },
 })
 
 describe('exportUrl', () => {

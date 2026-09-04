@@ -30,6 +30,24 @@ describe('reading a search off the URL', () => {
     })
   })
 
+  /** The Star filter (#66) is a *flag*, so it is spelled as one and read
+   *  forgivingly — a URL is typed as often as it is generated. What it must
+   *  never do is arrive as `starred: false`, which would be a different
+   *  **Run** from the search that never mentioned it (`sameSearch`). */
+  it.each(['starred=1', 'starred=true', 'starred=yes', 'starred=TRUE'])(
+    'reads %s as the starred-only filter',
+    (query) => {
+      expect(read(query).search.starred).toBe(true)
+    },
+  )
+
+  it.each(['starred=0', 'starred=false', 'starred=nonsense', ''])(
+    'reads %s as no filter at all, not as "the unstarred ones"',
+    (query) => {
+      expect(read(query).search).not.toHaveProperty('starred')
+    },
+  )
+
   it('reads the page as the window on screen, not as part of the search', () => {
     const { search, offset } = read('offset=100&system=100')
     expect(offset).toBe(100)
@@ -112,7 +130,7 @@ describe('the round trip', () => {
     { search: { system: 100, talkgroup: 54241, sort: 'newest' }, offset: 150 },
     { search: { group: 'Law & Order', tag: 'Fire Dispatch', sort: 'newest' }, offset: 0 },
     {
-      search: { minDuration: 15, unit: 1200, mark: 'tone', sort: 'oldest' },
+      search: { minDuration: 15, unit: 1200, mark: 'tone', starred: true, sort: 'oldest' },
       offset: 50,
       call: 42,
     },

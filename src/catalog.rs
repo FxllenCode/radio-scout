@@ -120,6 +120,27 @@ pub struct Catalog {
     /// Listener has to be told "that is 4,312 Calls" **before** they wait for a
     /// download that was never going to arrive.
     pub export: ExportOffer,
+    /// What a **Star** is worth on this Instance (#66, spec US 37).
+    ///
+    /// On the wire for `sharing`'s reason, one step on: a control that is
+    /// offered and then *refused* is a control that lies, and one that quietly
+    /// means less than a Listener thinks it does is the same lie told more
+    /// slowly. Only the server knows `[retention] starred_days`.
+    pub starred: StarOffer,
+}
+
+/// What starring a Call does here, beyond marking it (#66).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StarOffer {
+    /// Whether a Star holds a Call back from **Retention** at all. `false` is
+    /// what ships: the exemption is a disk commitment, and only an Operator can
+    /// make one.
+    pub kept: bool,
+    /// For how many days past the transmission — `0` being "for good", the
+    /// reading every window in `[retention]` already has. Meaningless when
+    /// `kept` is false, which is the [`ExportOffer`] shape beside it.
+    pub kept_days: u32,
 }
 
 /// What this Instance will let a Listener take away (#65).
@@ -145,6 +166,10 @@ pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> 
         export: ExportOffer {
             enabled: state.exports.enabled(),
             max_calls: state.exports.max_calls(),
+        },
+        starred: StarOffer {
+            kept: state.stars.kept_days().is_some(),
+            kept_days: state.stars.kept_days().unwrap_or_default(),
         },
         ..catalog
     })

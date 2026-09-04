@@ -831,6 +831,7 @@ mod tests {
             tone: false,
             tones: Vec::new(),
             quiet: Vec::new(),
+            starred: false,
             site_ref: None,
             site_label: None,
             object_key: String::new(),

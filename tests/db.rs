@@ -16,6 +16,7 @@ use radio_scout::db::entities::{
 };
 use radio_scout::db::repo::{Disposition, DropReason, NewCall, Resolved};
 use radio_scout::db::{self, Db, repo};
+use radio_scout::retention;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
 
 const NOW: i64 = 1_700_000_000_000;
@@ -510,11 +511,51 @@ async fn run_retention_suite(db: &Db) {
     );
 
     // Oldest-first paging, both by age and unconditionally.
-    let aged = repo::calls_older_than(db, 5_500, 100).await.unwrap();
+    let pass = |stars| retention::AgePass {
+        cutoff_ms: 5_500,
+        stars,
+    };
+    let aged = repo::calls_older_than(db, &pass(retention::StarKeep::None), 100)
+        .await
+        .unwrap();
     assert!(aged.iter().any(|c| c.id == big), "the 5000ms call aged out");
     assert!(
         !aged.iter().any(|c| c.id == small),
         "the 6000ms call did not"
+    );
+
+    // What a **Star** does to that page (#66), on both dialects: `IS NULL` is
+    // what "nobody starred it" is, and the three-valued logic behind the `OR`
+    // is exactly the kind of thing one dialect can answer confidently and
+    // differently.
+    repo::set_star(db, big, Some(4_000)).await.unwrap();
+    for (stars, spared) in [
+        (retention::StarKeep::None, false),
+        (retention::StarKeep::Forever, true),
+        // Inside the Star's own window, so still held back...
+        (retention::StarKeep::Until(4_500), true),
+        // ...and past it, so no longer.
+        (retention::StarKeep::Until(9_000), false),
+    ] {
+        let aged = repo::calls_older_than(db, &pass(stars), 100).await.unwrap();
+        assert_eq!(
+            !aged.iter().any(|c| c.id == big),
+            spared,
+            "a Star under {stars:?}"
+        );
+    }
+    repo::set_star(db, big, None).await.unwrap();
+    assert!(
+        repo::calls_older_than(db, &pass(retention::StarKeep::Forever), 100)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == big),
+        "un-starred, it ages out again"
+    );
+    assert!(
+        !repo::set_star(db, -1, Some(1)).await.unwrap(),
+        "a Call that is not there cannot be starred"
     );
     assert_eq!(
         repo::oldest_calls(db, 1).await.unwrap().len(),

@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { axe } from 'vitest-axe'
@@ -19,6 +19,7 @@ import {
 } from '@/store/live'
 import { makeStore } from '@/store/store'
 import { renderApp } from '@/test/utils'
+import { selectStarred } from '@/store/stars'
 import type { Call } from '@/types'
 
 function call(id: number, talkgroupRef = 1, over: Partial<Call> = {}): Call {
@@ -201,6 +202,25 @@ describe('the session log (#58, spec US 28)', () => {
 
       expect(selectIsAvoided(store.getState(), 100, 1)).toBe(true)
       expect(selectAvoidUndo(store.getState())?.key).toBe('100:1')
+    })
+
+    /** **Where a moment is kept** (#66, spec US 37): this screen is what a
+     *  Listener reaches for after hearing something, and working out that it
+     *  mattered is the same trip. */
+    it('stars the Call that was held', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const { store } = await heard(call(1), call(2, 2))
+      hold('TG 1')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Star this call' }))
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      await waitFor(() => expect(selectStarred(store.getState(), { id: 1 })).toBe(true))
+
+      // ...and the sheet offers the way back, so a Listener who starred the
+      // wrong row is one long press from undoing it.
+      hold('TG 1')
+      expect(screen.getByRole('button', { name: 'Unstar this call' })).toBeInTheDocument()
     })
 
     it('replays from the sheet as well as from the row', async () => {

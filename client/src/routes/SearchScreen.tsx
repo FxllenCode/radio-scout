@@ -20,6 +20,7 @@ import { DateField, Field, controlClass } from '@/components/Field'
 import { DensityRibbon } from '@/components/DensityRibbon'
 import { ExportControl } from '@/components/ExportControl'
 import { Screen } from '@/components/layout/Screen'
+import { StarButton } from '@/components/StarButton'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
@@ -33,6 +34,7 @@ import {
   formatCallTime,
   formatDuration,
   pageSummary,
+  starsKept,
 } from '@/lib/archive'
 import { PRESETS, rangeOf } from '@/lib/dateRange'
 import {
@@ -435,6 +437,38 @@ export function SearchScreen() {
           </select>
         </Field>
 
+        {/* **Starred** (#66, spec US 37). A select rather than a checkbox, so it
+            reads like the four controls beside it — and two options rather than
+            three, because there is no "show me the unstarred ones": that is the
+            whole archive minus a handful, which is what no filter already
+            answers with.
+
+            The line under it is the catalog's (`starred.kept`), and it is here
+            for the reason `sharing` is on the wire at all: a Star that quietly
+            does not outlive the retention window is a control claiming more
+            than it does, and only the server knows the policy. */}
+        <Field label="Starred" htmlFor="filter-starred">
+          <select
+            id="filter-starred"
+            className={controlClass}
+            value={filters.starred ? 'starred' : ''}
+            onChange={(event) =>
+              updateFilters({ starred: event.target.value ? true : undefined })
+            }
+          >
+            {/* "All calls" rather than the Mark filter's "Any call": two
+                controls on one form whose cleared state reads identically is
+                two controls a screen-reader user cannot tell apart. */}
+            <option value="">All calls</option>
+            <option value="starred">Starred only</option>
+          </select>
+          {catalog && (
+            <p className="font-mono text-[10px] text-muted-foreground">
+              {starsKept(catalog.starred)}
+            </p>
+          )}
+        </Field>
+
         {/* Search by radio (#47, spec US 44). A typed Ref rather than a
             dropdown: a county has tens of thousands of radios, so offering them
             as options would put an unbounded list in every filter response —
@@ -821,6 +855,10 @@ function ResultRow({
       {/* An encrypted Call has no audio at all — the server sends no
           `audioUrl` for one — so it gets no controls rather than controls
           that 404 (spec US 9). */}
+      {/* Keeping a Call is offered on an encrypted one too (#66): a row with
+          no audio is still the record that the channel was busy, and it is
+          exactly the kind of thing an incident is assembled out of. */}
+      <StarButton call={call} describedAs={description} />
       {/* Linkable whether or not there is anything to play: an encrypted Call
           is still a thing worth pointing somebody at (spec US 9). */}
       <Button
@@ -932,6 +970,12 @@ function NowPlaying({
           {playingDetail(interrupting ? 'interrupting' : 'archive', position)}
         </p>
       </div>
+      {/* **The player's own star** (#66, spec US 37), and the reason it is here
+          as well as on every row: a Listener walking a **Run** is hearing a
+          Call whose row may be pages away — and the moment they decide it
+          mattered is this moment, not the one where they find it again. The
+          Live display carries the same control for the same reason. */}
+      <StarButton call={call} describedAs={talkgroupName(call)} />
       <Button
         variant="outline"
         size="icon"

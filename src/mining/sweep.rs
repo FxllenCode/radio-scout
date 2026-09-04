@@ -507,6 +507,7 @@ mod tests {
             tone: call::ToneState::NONE.to_string(),
             emitted_seq: None,
             mined_at_ms: None,
+            starred_at_ms: None,
             created_at_ms: 0,
         }
     }

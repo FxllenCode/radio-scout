@@ -393,6 +393,29 @@ selection, defaults included, so a talkgroup neither of you has heard of yet beh
 both scanners. It is not a **Profile**: their pins, avoids and holds are untouched, and if you want
 a second scanner rather than a changed one, use `?id=` above.
 
+### Starring what mattered
+
+The ☆ on a result row keeps a call. There is one on every row — **Search**, a radio's history — on
+the Live screen's control grid beside **PRIORITY**, so you can keep a call while you are still
+hearing it, and in the press-and-hold menu on the **session log**. **STARRED** in the filters is
+then how you get back to them, and it combines with everything else: starred calls on Fire Dispatch
+last Tuesday is one search.
+
+Two things about it are worth knowing, and they are unusual enough to say out loud.
+
+- **A star belongs to the instance, not to your browser.** Anybody listening can leave one, and
+  everybody sees the same starred list. There are no accounts here, so the alternative would have
+  been for the server to keep a record of what each browser kept — which is exactly the kind of
+  record this project does not accumulate. The trade is that the starred list is shared. On a
+  scanner with a handful of listeners that tends to be the point.
+- **Whether it outlasts the retention window is the operator's call**, and the line under the
+  **STARRED** filter says which way it is set here: kept for so many days, kept indefinitely, or not
+  kept at all. On an instance that has not turned it on, a star is a bookmark — useful for finding
+  something again this week, and no protection against the archive rolling over.
+
+Encrypted calls can be starred too. There is nothing to play, but the record that the channel was
+busy at that moment is often exactly what an incident is assembled out of.
+
 ### Sending a call to someone who does not use this
 
 All three of those links open the app. The ⤴ button — on a search result row, and in the

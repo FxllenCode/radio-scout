@@ -1648,6 +1648,7 @@ describe('SearchScreen — the public share link (#64, spec US 32)', () => {
           activityWindowMs: 86_400_000,
           sharing: false,
           export: { enabled: true, maxCalls: 1000 },
+          starred: { kept: false, keptDays: 0 },
         }),
       ),
     )
@@ -1698,6 +1699,7 @@ describe('SearchScreen — taking these results away (#65, spec US 33)', () => {
           activityWindowMs: 86_400_000,
           sharing: true,
           export: { enabled: false, maxCalls: 0 },
+          starred: { kept: false, keptDays: 0 },
         }),
       ),
     )
@@ -2086,5 +2088,100 @@ describe('SearchScreen — the density ribbon and the heatmap (#62, spec US 34�
     await screen.findByRole('table')
 
     expect(await axe(container)).toHaveNoViolations()
+  })
+})
+
+/**
+ * **Starred Calls** (#66, spec US 37) — the cheapest form of memory the Archive
+ * gets, and the one mark on a Call that neither a Recorder nor an Operator put
+ * there.
+ */
+describe('SearchScreen — starring (#66, spec US 37)', () => {
+  it('offers a star on every row, and remembers the tap without a refetch', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    const rows = await resultRows()
+
+    const star = within(rows[1]).getByRole('button', { name: /^Star / })
+    await user.click(star)
+
+    // `/api/calls` answers with the same unstarred rows however often it is
+    // asked, so a row that still reads "starred" after the invalidation is
+    // reading `store/stars` — which is the whole reason that slice exists.
+    expect(
+      await within(rows[1]).findByRole('button', { name: /^Unstar / }),
+    ).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  /** A Listener walking a **Run** is hearing a Call whose row may be pages
+   *  away, and the moment they decide it mattered is this one. */
+  it('offers a star on the player itself', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    const rows = await resultRows()
+    const [play] = within(rows[1]).getAllByRole('button', { name: /^Play / })
+    await user.click(play)
+
+    const player = await screen.findByRole('region', { name: 'Now playing' })
+    await user.click(within(player).getByRole('button', { name: /^Star / }))
+
+    expect(
+      await within(player).findByRole('button', { name: /^Unstar / }),
+    ).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('filters by starred, and says so in the URL', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    await resultRows()
+
+    await user.selectOptions(
+      screen.getByLabelText('Starred'),
+      screen.getByRole('option', { name: 'Starred only' }),
+    )
+
+    await waitFor(() => expect(routerProbe.location).toBe('/search?starred=true'))
+
+    // ...and clearing it leaves *no* parameter rather than `starred=false`,
+    // which would be a structurally different search and therefore a different
+    // **Run** from the one a Listener started with (`sameSearch`).
+    await user.selectOptions(
+      screen.getByLabelText('Starred'),
+      screen.getByRole('option', { name: 'All calls' }),
+    )
+
+    await waitFor(() => expect(routerProbe.location).toBe('/search'))
+  })
+
+  it('opens a link that asked for the starred ones with the filter on', async () => {
+    renderApp('/search?starred=1')
+    await resultRows()
+
+    expect(screen.getByLabelText('Starred')).toHaveValue('starred')
+  })
+
+  /** A control that quietly means less than a Listener thinks it does is the
+   *  same lie a refused control tells, told more slowly — so what a Star is
+   *  worth here comes off the catalog and is said out loud. */
+  it.each([
+    [{ kept: false, keptDays: 0 }, /do not outlast the retention window/i],
+    [{ kept: true, keptDays: 0 }, /kept indefinitely/i],
+    [{ kept: true, keptDays: 90 }, /kept for 90 days/i],
+  ])('says what a star is worth here (%j)', async (starred, sentence) => {
+    server.use(
+      http.get(`${ORIGIN}/api/catalog`, () =>
+        HttpResponse.json({
+          systems: [],
+          activityWindowMs: 86_400_000,
+          sharing: true,
+          export: { enabled: true, maxCalls: 1000 },
+          starred,
+        }),
+      ),
+    )
+    renderApp('/search')
+    await resultRows()
+
+    expect(await screen.findByText(sentence)).toBeInTheDocument()
   })
 })

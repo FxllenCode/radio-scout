@@ -2,6 +2,8 @@ import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
 
 import { loginFailure, statusOf } from '@/lib/adminError'
 import { searchParams } from '@/lib/archive'
+
+import { forgetStar, markStarred } from './stars'
 import type { QuietSpan } from '@/lib/catchup'
 import type {
   ActivityQuery,
@@ -85,6 +87,7 @@ export const api = createApi({
     'Webhook',
     'ToneProfile',
     'ShareLink',
+    'Star',
   ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
@@ -95,7 +98,7 @@ export const api = createApi({
      *  so nothing here needs a follow-up fetch per Call. */
     searchCalls: builder.query<SearchPage, SearchQuery>({
       query: (search) => ({ url: `api/calls?${searchParams(search)}` }),
-      providesTags: ['Call'],
+      providesTags: ['Call', 'Star'],
     }),
 
     /**
@@ -109,7 +112,7 @@ export const api = createApi({
      */
     getCall: builder.query<Call, number>({
       query: (id) => ({ url: `api/call/${id}` }),
-      providesTags: ['Call'],
+      providesTags: ['Call', 'Star'],
     }),
 
     /** The cascading filter options for the filters already chosen — only
@@ -148,6 +151,38 @@ export const api = createApi({
      */
     getQuietSpans: builder.query<Record<string, QuietSpan[]>, number[]>({
       query: (ids) => ({ url: `api/calls/quiet?ids=${ids.join(',')}` }),
+    }),
+
+    /**
+     * Star a Call, or take the Star off again (#66, spec US 37).
+     *
+     * **One endpoint for both verbs**, because the optimistic rule is one rule:
+     * say so immediately, and take it back only if the server refuses. Two
+     * endpoints would be two copies of that, and the second is the one that
+     * gets it wrong.
+     *
+     * The optimistic mark is what makes the tap instant, and it is not an
+     * optimisation — a Call lives in the archive cache, in `live`'s history and
+     * in `playback`'s page at once, and only the first of those can be
+     * refetched (`store/stars`). The invalidation behind it is `Star` alone
+     * rather than `Call`, so un-starring inside a `?starred=1` search still
+     * takes the row away without also re-fetching the catalog, the density
+     * ribbon and the filter options on every tap.
+     */
+    setStar: builder.mutation<{ starred: boolean }, { id: number; starred: boolean }>({
+      query: ({ id, starred }) => ({
+        url: `api/call/${id}/star`,
+        method: starred ? 'POST' : 'DELETE',
+      }),
+      invalidatesTags: ['Star'],
+      async onQueryStarted({ id, starred }, { dispatch, queryFulfilled }) {
+        dispatch(markStarred({ id, starred }))
+        try {
+          await queryFulfilled
+        } catch {
+          dispatch(forgetStar(id))
+        }
+      },
     }),
 
     /** Everything a listener can select from (#12, spec US 19). Unlike the
@@ -200,7 +235,7 @@ export const api = createApi({
      *  names it. */
     getUnitHistory: builder.query<UnitHistory, { systemRef: number; ref: number }>({
       query: ({ systemRef, ref }) => ({ url: `api/unit/${systemRef}/${ref}` }),
-      providesTags: ['Call', 'Unit'],
+      providesTags: ['Call', 'Unit', 'Star'],
     }),
 
     /** The operator log (#30). Newest first, filtered and paged server-side —
@@ -627,6 +662,7 @@ export const {
   useGetCatalogQuery,
   useGetListenerHistoryQuery,
   useGetQuietSpansQuery,
+  useSetStarMutation,
   useGetDownstreamsQuery,
   useGetToneProfilesQuery,
   useGetWebhooksQuery,

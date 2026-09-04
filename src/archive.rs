@@ -148,6 +148,21 @@ pub struct CallSearch {
     /// Deliberately not a cascading dimension, for `mark`'s reason: it is the
     /// whole scanner rather than one axis of a form, and no dropdown offers it.
     pub selection: Option<crate::selection::Selection>,
+    /// Only Calls a **Listener** starred (#66, spec US 37).
+    ///
+    /// A boolean rather than an `Option<bool>`, because there is no third
+    /// question: "show me the starred ones" and "show me everything" are the
+    /// two a Listener asks, and *only the unstarred ones* is not a thing
+    /// anybody wants — it would answer with the whole Archive minus a handful
+    /// and read as an unfiltered page. So `starred=false` and no parameter at
+    /// all mean the same thing, which is also what a checkbox produces when it
+    /// is cleared.
+    ///
+    /// Deliberately not a cascading dimension, for [`CallSearch::mark`]'s
+    /// reason: a two-valued toggle whose meaning does not depend on the other
+    /// filters would buy a facet query per request to tell a Listener that
+    /// nothing has been starred.
+    pub starred: bool,
     /// Only Calls with audio behind them (#65) — an **Encrypted Call** is a row
     /// and no object at all (#42, spec US 9).
     ///
@@ -346,6 +361,11 @@ impl CallQuery {
         }
         if search.with_audio {
             self = self.and_where(call::Column::Encrypted.eq(false));
+        }
+        if search.starred {
+            // A column, so this is a filter and never a join — `carrying`'s
+            // rule, and the reason a Star is not a child table (#66).
+            self = self.and_where(call::Column::StarredAtMs.is_not_null());
         }
         if let Some(mark) = search.mark {
             self = self.and_where(carrying(mark));
@@ -1564,6 +1584,10 @@ pub async fn stored_calls<C: ConnectionTrait>(
                     .into_iter()
                     .map(<[i64; 2]>::from)
                     .collect(),
+                // Off the Call row, like the marks above it: a Star is one
+                // column, which is what keeps it out of `delete_calls`'
+                // reckoning and off this page's statement count (#66).
+                starred: call.starred_at_ms.is_some(),
                 site_ref: call
                     .site_id
                     .and_then(|id| sites.get(&id))
@@ -1910,6 +1934,10 @@ pub(crate) fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSea
                     .ok_or_else(|| bad("sel must be a selection, as the share link spells one"))
             })
             .transpose()?,
+        // Absent and `false` are one answer (#66): a Listener who has never
+        // touched the control and one who has cleared it are asking the same
+        // question, and a checkbox spells the second.
+        starred: params.flag("starred")?.unwrap_or(false),
         // Nobody types this one: it is the **stitched export**'s (#65), set by
         // the one caller that needs it.
         with_audio: false,
@@ -2545,6 +2573,7 @@ mod tests {
             tone: false,
             tones: Vec::new(),
             quiet: Vec::new(),
+            starred: false,
             site_ref: None,
             site_label: None,
             object_key: "ab/opaque-key.m4a".into(),

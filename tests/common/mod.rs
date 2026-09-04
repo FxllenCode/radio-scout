@@ -338,6 +338,16 @@ impl TestApp {
             .expect("bodyless POST")
     }
 
+    /// `DELETE path` with no body — the other half of a verb-shaped request,
+    /// which is what un-starring a Call (#66) is.
+    pub async fn delete(&self, path: &str) -> reqwest::Response {
+        self.client
+            .delete(self.url(path))
+            .send()
+            .await
+            .expect("bodyless DELETE")
+    }
+
     /// Mint a **Share link** for a Call and take it apart (#64, spec US 32).
     ///
     /// Here rather than in a test file because two suites need it — `share.rs`

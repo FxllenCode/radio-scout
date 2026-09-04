@@ -111,6 +111,27 @@ describe('the DVR (#63, spec US 39)', () => {
     )
   })
 
+  /** Keeping what the rewind turned up (#66, spec US 37) — the gesture this
+   *  screen exists for, since going back to 2am means something happened. */
+  it('stars the Call it is playing, and offers the control before it plays one', async () => {
+    const user = userEvent.setup()
+    renderApp(`/dvr?${WHOLE_ARCHIVE}`)
+
+    // A transport that lost a button between Calls would be worse than one that
+    // greys it, so the control is there from the start with nothing under it.
+    expect(await transport().findByRole('button', { name: /^Star / })).toBeDisabled()
+
+    await user.click(await screen.findByLabelText('Play from here'))
+    await waitFor(() =>
+      expect(player()).toHaveAttribute('src', ARCHIVE.at(-1)!.audioUrl),
+    )
+    await user.click(transport().getByRole('button', { name: /^Star / }))
+
+    expect(
+      await transport().findByRole('button', { name: /^Unstar / }),
+    ).toHaveAttribute('aria-pressed', 'true')
+  })
+
   it('warms the Call behind the one playing, which is what gapless costs', async () => {
     const user = userEvent.setup()
     renderApp(`/dvr?${WHOLE_ARCHIVE}`)

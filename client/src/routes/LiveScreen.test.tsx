@@ -940,6 +940,54 @@ describe('Priority on the Call being shown (#58)', () => {
   })
 })
 
+describe('starring the Call being shown (#66, spec US 37)', () => {
+  const star = () => screen.getByRole('button', { name: /star this call$/i })
+
+  /** The moment a Listener decides a transmission mattered is while they are
+   *  hearing it, which is why this control is on the display at all rather than
+   *  only in the archive they would have to go looking through. */
+  it('keeps the Call on the display', async () => {
+    const user = userEvent.setup()
+    listening(call())
+
+    await user.click(star())
+
+    const marked = await screen.findByRole('button', { name: 'Unstar this call' })
+    expect(marked).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('lets it go again', async () => {
+    const user = userEvent.setup()
+    listening(call())
+
+    await user.click(star())
+    await user.click(await screen.findByRole('button', { name: 'Unstar this call' }))
+
+    expect(await screen.findByRole('button', { name: 'Star this call' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    )
+  })
+
+  /** #56's rule again: the display outlives the transmission, so what the
+   *  control marks is the Call still on the card. */
+  it('acts on the Call the display kept up after it ended', async () => {
+    const user = userEvent.setup()
+    listening(call())
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+
+    await user.click(star())
+
+    expect(await screen.findByRole('button', { name: 'Unstar this call' })).toBeInTheDocument()
+  })
+
+  it('is out of reach with nothing on the display', () => {
+    renderApp('/')
+
+    expect(star()).toBeDisabled()
+  })
+})
+
 describe('the way to the session log (#58, spec US 28)', () => {
   /** RECENT reaches back five; the log reaches back to when the app opened. The
    *  way there is from the list it extends. */

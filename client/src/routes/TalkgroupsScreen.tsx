@@ -49,6 +49,7 @@ const EMPTY_CATALOG: Catalog = {
   activityWindowMs: 0,
   sharing: false,
   export: { enabled: false, maxCalls: 0 },
+  starred: { kept: false, keptDays: 0 },
 }
 
 /** How often the clock this screen keeps is redrawn. Finer than the minute a

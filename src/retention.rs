@@ -89,6 +89,26 @@ pub struct RetentionConfig {
     /// bytes where a Call is a megabyte of audio, and "was last winter busier
     /// than this one" is a question about a period whose audio went months ago.
     pub listener_days: u32,
+    /// How much longer a **Star** (#66, spec US 37) keeps a Call than
+    /// [`RetentionConfig::days`] would — the operator policy the ticket asks
+    /// for, and the only thing on this Instance that can hold a Call back from
+    /// the age pass.
+    ///
+    /// **Absent is the default, and it means a Star changes nothing**: "where
+    /// the operator allows" is opt-in, and an Instance shipping with `days = 7`
+    /// and no size cap would otherwise let anybody who can POST in a loop
+    /// commit its disk. `0` keeps a starred Call for good, the reading the
+    /// three windows above already have; `90` keeps it a quarter.
+    ///
+    /// **A window, rather than the boolean the ticket's wording suggests**,
+    /// because that is what bounds the two ways this could go wrong on its own:
+    /// a Listener who stars a thousand Calls, and a Star nobody will ever come
+    /// back for. It is also one number in the units this section already reads.
+    ///
+    /// **The size cap outranks it** — see [`sweep`] — because a cap a Listener
+    /// can defeat is not a cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starred_days: Option<u32>,
     /// How often [`Sweeper`]'s background task runs a [`sweep`]. Zero is read as
     /// "unset" and falls back to the default cadence.
     #[serde(rename = "interval_secs", with = "crate::config::secs")]
@@ -118,6 +138,10 @@ impl Default for RetentionConfig {
             // shape of the question this table exists to answer. Still under
             // 130,000 rows at the default cadence.
             listener_days: 90,
+            // A Star holds nothing back until an Operator says it may. See the
+            // field: the exemption is a disk commitment, and only they can make
+            // one.
+            starred_days: None,
             interval: DEFAULT_INTERVAL,
             batch_size: 500,
             orphan_grace: Duration::from_secs(3600),
@@ -125,11 +149,62 @@ impl Default for RetentionConfig {
     }
 }
 
+/// How long a **Star** holds a Call back from the age pass (#66, spec US 37).
+///
+/// Three states rather than an `Option<i64>`, because there are three and the
+/// two that an option could spell are not the two that matter: *not kept at
+/// all* is what ships, *kept a while longer* is the ordinary policy, and *kept
+/// for good* is the `0` every other window in [`RetentionConfig`] already
+/// means "forever" by. Collapsing the first into "kept until now" would also
+/// spend a `WHERE` clause on every sweep of every Instance that never turned
+/// this on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StarKeep {
+    /// Not at all: a starred Call ages out beside every other one, which is
+    /// what an Instance nobody has configured does.
+    None,
+    /// Until it is older than this instant — `[retention] starred_days` days
+    /// before now.
+    Until(i64),
+    /// For good — `starred_days = 0`.
+    Forever,
+}
+
+/// What one age pass may take: everything older than `cutoff_ms`, except what
+/// a **Star** is still holding back.
+///
+/// A value rather than two arguments, so the sweep and the query that serves it
+/// cannot be given one and not the other — the [`crate::ingest::dedup_window`]
+/// move, one policy along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgePass {
+    /// A Call older than this instant has aged out.
+    pub cutoff_ms: i64,
+    /// What a **Star** does about that.
+    pub stars: StarKeep,
+}
+
 impl RetentionConfig {
     /// The `call_at_ms` below which a Call has aged out, or `None` when
     /// age-based pruning is disabled (`days == 0`).
     pub fn cutoff_ms(&self, now_ms: i64) -> Option<i64> {
         cutoff_for(self.days, now_ms)
+    }
+
+    /// What this sweep's age pass may take at `now_ms`, or `None` when there is
+    /// no age pass at all (`days == 0`, rdio's "keep forever").
+    ///
+    /// The Star window is read only when there is a pass to be spared from,
+    /// which is what keeps an Operator who keeps everything forever from being
+    /// able to configure a Star that *shortens* a Call's life.
+    pub fn age_pass(&self, now_ms: i64) -> Option<AgePass> {
+        let cutoff_ms = self.cutoff_ms(now_ms)?;
+        let stars = match self.starred_days {
+            None => StarKeep::None,
+            Some(0) => StarKeep::Forever,
+            Some(days) => StarKeep::Until(cutoff_for(days, now_ms)?),
+        };
+        Some(AgePass { cutoff_ms, stars })
     }
 
     /// The same, for stored log events and [`RetentionConfig::log_days`] (#30).
@@ -166,6 +241,7 @@ impl RetentionConfig {
             max_size_bytes = ?self.max_size_bytes,
             log_days = self.log_days,
             listener_days = self.listener_days,
+            starred_days = ?self.starred_days,
             interval_secs,
             batch_size = self.batch_size,
             "retention policy"
@@ -326,9 +402,9 @@ pub async fn sweep(
 ) -> Result<SweepReport, SweepError> {
     let mut report = SweepReport::default();
 
-    if let Some(cutoff_ms) = config.cutoff_ms(now_ms) {
+    if let Some(pass) = config.age_pass(now_ms) {
         loop {
-            let batch = repo::calls_older_than(db, cutoff_ms, config.batch_size).await?;
+            let batch = repo::calls_older_than(db, &pass, config.batch_size).await?;
             if batch.is_empty() {
                 break;
             }
@@ -337,6 +413,12 @@ pub async fn sweep(
         }
     }
 
+    // **The size cap outranks a Star** (#66): [`repo::oldest_calls`] does not
+    // ask whether anybody starred anything, because a cap a Listener can defeat
+    // is not a cap — and this is the one policy that can be defeated by
+    // somebody holding no credential at all. The age pass above is where a Star
+    // is honoured; the cap is the disk, and the disk is finite whatever anybody
+    // meant to keep.
     if let Some(cap) = config.max_size_bytes {
         let mut total = repo::total_audio_bytes(db).await?;
         while total > cap {
@@ -648,6 +730,50 @@ mod tests {
     /// How long a scheduler test waits for a sweep's effect. Generous — it only
     /// ever runs out when something is actually wrong.
     const WAIT: Duration = Duration::from_secs(5);
+
+    /// What a **Star** holds back is one reading of two settings, and it is the
+    /// whole of the operator policy #66 asks for.
+    ///
+    /// Three states, and the third is the one an `Option<i64>` would have got
+    /// wrong: *not kept*, *kept a while longer*, and *kept for good* — where
+    /// "for good" is spelled `0`, because that is what every other window in
+    /// this section already means by it.
+    #[rstest]
+    #[case::a_star_is_not_a_reprieve_unless_asked_for(None, StarKeep::None)]
+    #[case::a_star_buys_a_quarter(Some(90), StarKeep::Until(NOW - 90 * MS_PER_DAY))]
+    #[case::a_star_buys_forever(Some(0), StarKeep::Forever)]
+    fn what_a_star_holds_a_call_back_from(
+        #[case] starred_days: Option<u32>,
+        #[case] expected: StarKeep,
+    ) {
+        let config = RetentionConfig {
+            days: 7,
+            starred_days,
+            ..Default::default()
+        };
+
+        let pass = config.age_pass(NOW).expect("an age pass");
+
+        assert_eq!(pass.cutoff_ms, NOW - 7 * MS_PER_DAY);
+        assert_eq!(pass.stars, expected);
+    }
+
+    /// `days = 0` is rdio's "keep forever", and it outranks the Star window
+    /// rather than combining with it: there is no age pass to be spared from.
+    /// Which is also what stops a `starred_days` shorter than an unset `days`
+    /// from *shortening* a starred Call's life.
+    #[rstest]
+    #[case::stars_unset(None)]
+    #[case::stars_kept_a_week(Some(7))]
+    fn keeping_everything_forever_leaves_no_age_pass_to_spare(#[case] starred_days: Option<u32>) {
+        let config = RetentionConfig {
+            days: 0,
+            starred_days,
+            ..Default::default()
+        };
+
+        assert_eq!(config.age_pass(NOW), None);
+    }
 
     /// rdio-scanner's prune ticker first fires an *hour* after start, so an
     /// instance that restarts more often than that never prunes at all. Ours

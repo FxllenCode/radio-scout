@@ -134,6 +134,7 @@ export const CATALOG: Catalog = {
   activityWindowMs: 24 * 60 * 60 * 1_000,
   sharing: true,
   export: { enabled: true, maxCalls: 1000 },
+  starred: { kept: false, keptDays: 0 },
   systems: [
     {
       ref: 100,
@@ -169,6 +170,7 @@ export function countyCatalog(rows: number, now = Date.now()): Catalog {
     activityWindowMs: 24 * 60 * 60 * 1_000,
     sharing: true,
     export: { enabled: true, maxCalls: 1000 },
+    starred: { kept: false, keptDays: 0 },
     systems: [
       {
         ref: 1,
@@ -364,6 +366,21 @@ export const handlers = [
   http.get(
     `${ORIGIN}/api/admin/logs`,
     () => new HttpResponse('admin session required\n', { status: 401 }),
+  ),
+  // Starring a Call (#66), both verbs on one path. Deliberately *not*
+  // stateful: `ARCHIVE` answers every search with the same unstarred rows, so
+  // a screen that still shows the star after the refetch is showing it through
+  // the override in `store/stars` — which is the whole reason that slice
+  // exists, and the thing a stateful stub would hide.
+  http.post(`${ORIGIN}/api/call/:id/star`, ({ params }) =>
+    ARCHIVE.some((one) => String(one.id) === params.id)
+      ? HttpResponse.json({ starred: true })
+      : new HttpResponse('call not found\n', { status: 404 }),
+  ),
+  http.delete(`${ORIGIN}/api/call/:id/star`, ({ params }) =>
+    ARCHIVE.some((one) => String(one.id) === params.id)
+      ? HttpResponse.json({ starred: false })
+      : new HttpResponse('call not found\n', { status: 404 }),
   ),
   /** A Call's audio. Nothing in jsdom decodes it — it is here because the
    *  player prefetches the next Call's audio (#14), and an unhandled request

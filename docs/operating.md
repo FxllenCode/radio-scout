@@ -113,6 +113,36 @@ A **sweep** runs at startup and on an interval: age Calls out, then prune oldest
 the size cap is met, then prune stored log events past `log_days`, then listener counts past
 `listener_days`, then reclaim audio no Call points at.
 
+### Keeping what listeners starred
+
+Listeners can **star** a call from any row (`docs/using.md`). By default that is a bookmark and
+nothing more — the archive rolls over it like anything else. `starred_days` is how you change
+that:
+
+```toml
+[retention]
+days = 7
+starred_days = 90   # a starred Call is aged out at 90 days instead of 7
+                    # 0 keeps starred Calls for good; no key at all is the default
+```
+
+Four things to know before you set it:
+
+- **Starring takes no password.** Anybody who can reach the scanner can leave one — there are no
+  accounts here — so this is a disk commitment you are making on behalf of strangers. That is why
+  it is a *window* rather than an on/off switch, and why it ships off.
+- **A star is the instance's, not a browser's.** Everybody sees the same starred list, and anybody
+  can clear one. The server keeps no record of who starred what, which is deliberate.
+- **The size cap outranks it.** A starred call over `max_size_gb` is pruned like any other: a cap
+  a listener can defeat is not a cap. If you want stars to really mean *kept*, leave the cap off
+  and watch the disk.
+- **The window is measured from the transmission**, like `days` — not from when somebody starred
+  it — so `starred_days` must be at least `days`. A shorter one refuses to boot rather than
+  quietly deleting the calls a listener asked you to keep.
+
+What you have configured rides on the wire, so the star control in the app says which of the three
+it is: kept for so many days, kept indefinitely, or not kept at all.
+
 Two details that matter in practice:
 
 - **`batch_size` exists for the Pi.** Deleting in small batches keeps each write lock short, so

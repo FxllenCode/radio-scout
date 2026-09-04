@@ -39,6 +39,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0018_listener_samples::Migration),
             Box::new(m0019_patched_channel_index::Migration),
             Box::new(m0020_share_links::Migration),
+            Box::new(m0021_starred_calls::Migration),
         ]
     }
 }
@@ -1922,6 +1923,77 @@ mod m0020_share_links {
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
                 .drop_table(Table::drop().table(share_link::Entity).to_owned())
+                .await
+        }
+    }
+}
+
+/// A **Star** is one nullable column on the Call it marks (#66, spec US 37).
+///
+/// The index is what makes "show me the starred ones" affordable: the filter is
+/// `starred_at_ms IS NOT NULL` over an Archive where essentially every row is
+/// `NULL`, which without an index is a scan of the whole table to find a
+/// handful. `call_at_ms` rides along because that is what the search orders by
+/// — m0012's reasoning, one column across: an index on the marker alone finds
+/// the rows and then sorts them, every time.
+mod m0021_starred_calls {
+    use super::*;
+
+    const INDEX: &str = "idx_calls_starred_at_ms";
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0021_starred_calls"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("calls", "starred_at_ms").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(
+                                ColumnDef::new(call::Column::StarredAtMs)
+                                    .big_integer()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_index("calls", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(call::Entity)
+                            .col(call::Column::StarredAtMs)
+                            .col(call::Column::CallAtMs)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // The index first: SQLite refuses to drop a column an index still
+            // names (m0010's note, m0012's again).
+            manager
+                .drop_index(Index::drop().name(INDEX).table(call::Entity).to_owned())
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call::Entity)
+                        .drop_column(call::Column::StarredAtMs)
+                        .to_owned(),
+                )
                 .await
         }
     }

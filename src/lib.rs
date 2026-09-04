@@ -38,6 +38,7 @@ pub mod selection;
 pub mod serve;
 pub mod service;
 pub mod share;
+pub mod star;
 pub mod startup;
 pub mod tone;
 pub mod web;
@@ -108,6 +109,10 @@ pub struct AppState {
     /// preview card's absolute URLs are built on. A link is a **row**, so like
     /// a Webhook there is no disabled form beyond the switch itself.
     pub shares: crate::share::Shares,
+    /// What a **Star** is worth here (#66, spec US 37) — one field off
+    /// `[retention] starred_days`, so the catalog can say whether a Star
+    /// outlives the retention window without the whole policy in hand.
+    pub stars: crate::star::Stars,
     /// Taking a range of the Archive away with you (#65, spec US 33) — the
     /// policy, and the right to be the one export that is running. Not a
     /// roster and not a queue: the only state an export has is whether one is
@@ -144,6 +149,7 @@ impl AppState {
             tones: crate::tone::Tones::default(),
             quiet: crate::quiet::Quiet::default(),
             shares: crate::share::Shares::default(),
+            stars: crate::star::Stars::default(),
             exports: crate::export::Exports::default(),
             listeners: crate::listeners::Listeners::default(),
             clock: Clock::system(),
@@ -224,6 +230,9 @@ pub fn build_app(state: AppState) -> Router {
         // facing and unauthenticated, because a Listener holds no credential —
         // the abuse bound is one live link per Call, not a gate.
         .route("/api/call/{id}/share", post(share::create))
+        // Two verbs on one path, and no credential on either: a **Listener**
+        // holds none, and the mark they leave is the Instance's (#66).
+        .route("/api/call/{id}/star", post(star::star).delete(star::unstar))
         .route("/api/call/{id}/download", get(archive::download))
         // The way in to the admin surface, and the only route under
         // `/api/admin/` outside the session guard — there is no session yet.

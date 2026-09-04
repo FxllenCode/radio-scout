@@ -168,6 +168,9 @@ stages! {
     MintShare => "mint-share",
     /// Reading the Call a share token names — the page and its audio alike.
     OpenShare => "open-share",
+    // -- Stars (`crate::star`, #66) -----------------------------------------
+    /// Marking, or un-marking, one Call as **Starred**.
+    SetStar => "set-star",
 }
 
 impl Stage {

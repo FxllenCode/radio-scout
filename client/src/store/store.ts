@@ -22,6 +22,7 @@ import { createAvoidClock } from './avoids'
 import { expireAvoids, initialLiveState, liveReducer } from './live'
 import { initialPanelState, panelReducer } from './panel'
 import { playbackReducer } from './playback'
+import { starsReducer } from './stars'
 import { transportReducer } from './transport'
 
 /** How a store is told where to remember the selection. Tests pass their own;
@@ -78,6 +79,10 @@ export function makeStore(options: StoreOptions = {}) {
       live: liveReducer,
       panel: panelReducer,
       playback: playbackReducer,
+      // What this session has done to **Stars** (#66) — an override over the
+      // server's own answer, deliberately *not* persisted: the durable record
+      // is the Instance's, so a reload is how this is meant to empty.
+      stars: starsReducer,
       transport: transportReducer,
     },
     middleware: (getDefaultMiddleware) =>

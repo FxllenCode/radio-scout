@@ -2750,17 +2750,62 @@ impl From<call::Model> for PrunableCall {
     }
 }
 
-/// Up to `limit` Calls that happened before `cutoff_ms`, oldest first — one page
-/// of the age-based prune. Paging (rather than one unbounded `DELETE`, as rdio
-/// does) keeps each SQLite write-lock window short so a sweep over a large
-/// archive never stalls ingest on a Pi.
+/// Set or clear a Call's **Star** (#66, spec US 37), reporting whether there
+/// was a Call to mark.
+///
+/// One statement for the whole errand — a [`find_call`] first would be a second
+/// round trip *and* a window in which **Retention** could take the row between
+/// the two, leaving a Listener told "starred" about a Call that has gone.
+pub async fn set_star<C: ConnectionTrait>(
+    db: &C,
+    id: CallId,
+    at_ms: Option<i64>,
+) -> Result<bool, DbErr> {
+    let updated = call::Entity::update_many()
+        .col_expr(call::Column::StarredAtMs, Expr::value(at_ms))
+        .filter(call::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(updated.rows_affected > 0)
+}
+
+/// The Calls an age pass may take, once a **Star** has had its say (#66).
+///
+/// `IS NULL` is what "nobody starred it" is on both dialects, and the `OR` is
+/// what makes a Star a *longer window* rather than a second pass: one
+/// statement, one page, one ordering — where a pass of its own would have to
+/// interleave two oldest-first walks to keep each batch bounded.
+fn spared_from(stars: crate::retention::StarKeep) -> sea_orm::Condition {
+    use crate::retention::StarKeep;
+    use sea_orm::Condition;
+
+    match stars {
+        // No policy, no clause: an Instance nobody configured pays nothing for
+        // a feature it is not using.
+        StarKeep::None => Condition::all(),
+        StarKeep::Forever => Condition::all().add(call::Column::StarredAtMs.is_null()),
+        StarKeep::Until(cutoff_ms) => Condition::any()
+            .add(call::Column::StarredAtMs.is_null())
+            .add(call::Column::CallAtMs.lt(cutoff_ms)),
+    }
+}
+
+/// Up to `limit` Calls the age pass may take, oldest first — one page of it.
+/// Paging (rather than one unbounded `DELETE`, as rdio does) keeps each SQLite
+/// write-lock window short so a sweep over a large archive never stalls ingest
+/// on a Pi.
+///
+/// A **Star** narrows what a page may hold (#66), and by how much is
+/// [`crate::retention::StarKeep`]'s to say — including *not at all*, which is
+/// what ships and which costs no clause at all.
 pub async fn calls_older_than<C: ConnectionTrait>(
     db: &C,
-    cutoff_ms: i64,
+    pass: &crate::retention::AgePass,
     limit: u64,
 ) -> Result<Vec<PrunableCall>, DbErr> {
     Ok(call::Entity::find()
-        .filter(call::Column::CallAtMs.lt(cutoff_ms))
+        .filter(call::Column::CallAtMs.lt(pass.cutoff_ms))
+        .filter(spared_from(pass.stars))
         .order_by_asc(call::Column::CallAtMs)
         .order_by_asc(call::Column::Id)
         .limit(limit)

@@ -85,6 +85,12 @@ export function readSearchUrl(params: URLSearchParams): SearchUrl {
   const mark = params.get('mark')
   if (isMark(mark)) search.mark = mark
 
+  // A flag, and written only when it is on (#66). `starred: false` would be a
+  // structurally different search from one that never mentioned it, and
+  // therefore a different **Run** — so the "off" state has exactly one
+  // spelling, which is absence.
+  if (isTruthy(params.get('starred'))) search.starred = true
+
   const sort = params.get('sort')
   search.sort = sort === 'oldest' || sort === 'newest' ? sort : DEFAULT_SORT
 
@@ -120,6 +126,14 @@ export function writeSearchUrl({ search, offset, call }: SearchUrl): string {
     ...(call === undefined ? {} : { call }),
   }
   return searchParams(params)
+}
+
+/** The spellings a yes/no parameter is read by — the server's own
+ *  (`Params::flag`), because a URL is typed by hand as often as it is
+ *  generated. Everything else, including a missing parameter, is *off*: there
+ *  is no third state to get wrong. */
+function isTruthy(value: string | null): boolean {
+  return value !== null && ['true', '1', 'yes'].includes(value.toLowerCase())
 }
 
 /**

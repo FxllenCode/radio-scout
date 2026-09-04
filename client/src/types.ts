@@ -48,6 +48,15 @@ export interface Call {
   /** The radio set the emergency bit on this transmission. Absent when it
    *  didn't, which is nearly always. */
   emergency?: boolean
+  /** Somebody starred this Call (#66, spec US 37). Absent when nobody has,
+   *  which is nearly every Call there is.
+   *
+   *  **The Instance's mark, not this browser's**: a Star takes no credential to
+   *  leave, so recording *who* left it would mean either a per-browser record
+   *  of what somebody kept or a table anybody could fill by POSTing in a loop
+   *  (`src/star.rs`). What this session has done to it lives in `store/stars`,
+   *  and is read through `selectStarred` rather than off here. */
+  starred?: boolean
   /** The talkgroup was encrypted, so this Call is metadata and nothing else
    *  (spec US 9) — there is no `audioUrl` on one. */
   encrypted?: boolean
@@ -113,6 +122,10 @@ export interface SearchQuery {
    *  tone-out. Single-valued because every other filter here combines with AND
    *  and a list would have to mean OR. */
   mark?: Mark
+  /** Only the Calls somebody starred (#66, spec US 37). Absent and `false` are
+   *  one answer — there is no "show me the unstarred ones", which would be the
+   *  whole archive minus a handful and read as no filter at all. */
+  starred?: boolean
   /** Only Calls a **Selection** reaches (#63) — the **DVR**'s scope, spelled
    *  the way a share link spells one (`lib/selectionUrl`). Answered with the
    *  live feed's own rule, so a channel reached through a **Patch** counts;
@@ -228,6 +241,12 @@ export interface Catalog {
    *  *number* is what lets the control say "that range holds 4,312 calls"
    *  before the wait rather than after it. */
   export: { enabled: boolean; maxCalls: number }
+  /** What a Star is worth here (#66, spec US 37) — whether one holds a Call
+   *  back from Retention, and for how many days past the transmission (`0`
+   *  being for good). Here for `sharing`'s reason, one step on: a control that
+   *  quietly means less than a Listener thinks it does is the same lie told
+   *  more slowly, and only the server knows `[retention] starred_days`. */
+  starred: { kept: boolean; keptDays: number }
 }
 
 export interface SystemOption {

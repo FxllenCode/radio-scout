@@ -25,7 +25,7 @@
  * not decoration: this list grows at the top as Calls are heard, so the row
  * under a thumb genuinely moves mid-gesture.
  */
-import { Ban, Download, Radio, RotateCcw, Share2 } from 'lucide-react'
+import { Ban, Download, Radio, RotateCcw, Share2, Star } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -37,6 +37,7 @@ import { UnitLink } from '@/components/UnitLink'
 import { useLongPress } from '@/hooks/useLongPress'
 import { usePublicShare } from '@/hooks/usePublicShare'
 import { useShareLink } from '@/hooks/useShareLink'
+import { useStar } from '@/hooks/useStar'
 import { downloadUrl, formatCallTime } from '@/lib/archive'
 import { systemName, talkgroupName } from '@/lib/call'
 import { feedPlays } from '@/lib/feed'
@@ -206,6 +207,14 @@ export function SessionScreen() {
             >
               Avoid this talkgroup
             </Action>
+            {/* **Where a moment is kept** (#66, spec US 37), for the reason
+                the share link is here: this screen is what a Listener reaches
+                for after hearing something, and "that one mattered" is the
+                thought they have on the way to it. In the sheet rather than as
+                a sibling of the row's own button, because the row *is* a
+                button — the long-press subject — and a control inside one is
+                what #47 got caught by. */}
+            <StarAction call={acting} onDone={() => setActing(null)} />
             {/* **Where a moment is shared from** (#64, spec US 32). This screen
                 is what a Listener reaches for after hearing something — the
                 Archive is where you go when you have to *look* for it — so the
@@ -241,6 +250,29 @@ export function SessionScreen() {
         </Sheet>
       )}
     </Screen>
+  )
+}
+
+/** Keeping a Call from the session log's action sheet (#66).
+ *
+ * Its own component because [`useStar`] is a hook and the sheet is rendered
+ * inside a conditional — and because the *word* has to change with the state:
+ * an action sheet says what the tap will do, where a row's star says what the
+ * Call is. Offered on an encrypted Call too: the record that a channel was busy
+ * is exactly the kind of thing an incident is assembled out of.
+ */
+function StarAction({ call, onDone }: { call: Call; onDone: () => void }) {
+  const { starred, toggle } = useStar(call)
+  return (
+    <Action
+      icon={<Star className={cn('size-4', starred && 'fill-current text-amber-400')} aria-hidden />}
+      onClick={() => {
+        toggle()
+        onDone()
+      }}
+    >
+      {starred ? 'Unstar this call' : 'Star this call'}
+    </Action>
   )
 }
 

@@ -21,6 +21,9 @@ async fn a_fresh_instance_offers_an_empty_catalog() {
             "activityWindowMs": 24 * 60 * 60 * 1000_i64,
             "sharing": true,
             "export": { "enabled": true, "maxCalls": 1000 },
+            // A Star is a bookmark until an Operator says otherwise (#66), and
+            // saying so is what stops the control claiming more than it does.
+            "starred": { "kept": false, "keptDays": 0 },
         }),
         "zero-config first run has nothing to select yet"
     );
@@ -76,6 +79,7 @@ async fn a_talkgroup_carries_what_the_panel_groups_and_labels_it_by() {
             "activityWindowMs": 24 * 60 * 60 * 1000_i64,
             "sharing": true,
             "export": { "enabled": true, "maxCalls": 1000 },
+            "starred": { "kept": false, "keptDays": 0 },
         })
     );
 }

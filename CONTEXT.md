@@ -331,7 +331,9 @@ Every **Call** an **Instance** currently holds — what a **Listener** searches 
 _Avoid_: history, library, database, back catalogue.
 
 **Retention**:
-The policy that bounds the **Archive**: an age window (in days) plus an optional cap on total stored audio, overridable per System/Talkgroup (unset inherits). Expressed as configuration; enforced by sweeps. **Starred** calls and **Event** members are exempt.
+The policy that bounds the **Archive**: an age window (in days) plus an optional cap on total stored audio, overridable per System/Talkgroup (unset inherits). Expressed as configuration; enforced by sweeps.
+
+A **Star** buys a Call a *longer age window* where the Operator has configured one (#66) — not an exemption, and never one from the **size cap**, because a cap a Listener can defeat is not a cap and this is the one policy defeasible by somebody holding no credential at all. **Event** members are not exempt either: they are frozen by *copying* their audio at curation time, so the sweep stays one pass over one archive.
 _Avoid_: expiry, TTL, cleanup.
 
 **Share link**:
@@ -386,7 +388,13 @@ _Avoid_: download (one Call's audio, spec US 27), archive (the zip is one; **Arc
 Instance's whole holding), bundle, dump.
 
 **Star**:
-A **Listener's** per-browser mark on a **Call**, filterable in search and exempt from **Retention** where the **Operator** allows.
+A mark any **Listener** may leave on a **Call** — filterable in search, and kept past the **Retention** window as far as the **Operator** allows.
+
+**It is the Instance's mark, not a browser's** (#66, reversing this entry's original "per-browser"). Starring takes no credential, because a Listener holds none — and the two ways of making it personal both cost something this project has already refused twice: a `call_stars(call_id, starrer)` table is a per-browser record of what somebody kept, which is the listening history ADR-0011 rule 5 exists to stop an Instance accumulating; and it is a table whose rows are Calls × browsers rather than bounded by the Calls table, which is the **Share link**'s abuse bound inverted. So a Star is one nullable column on the Call, anybody can set or clear it, and "starred" means *somebody here thought this mattered*. The shared shortlist is what that buys, and on the county instance this was designed against it is a handful of people.
+
+**A column and not a child table**, which is the same decision seen from the other side: `call_tones` and `share_links` each had to be remembered in the delete that **Retention** runs, and forgetting one is invisible until the **Sweep** meets its oldest marked Call and fails there forever. A column goes with its row.
+
+**What it is worth is the Operator's** — `[retention] starred_days`, absent by default, so out of the box a Star is a bookmark. A *window* rather than a switch, because that is what bounds the two ways this could go wrong on its own: a Listener who stars a thousand Calls, and a Star nobody will ever come back for. What this Instance will do rides on the catalog beside `sharing`, so the control can say it.
 _Avoid_: favorite, bookmark, like.
 
 **Event**:

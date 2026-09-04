@@ -492,6 +492,22 @@ impl Config {
                 "a positive number of Calls per batch",
             ));
         }
+        // A **Star** buys a Call a *longer* life (#66); one that bought a
+        // shorter one would be a Listener's bookmark deleting the thing it
+        // marked, which nobody would ever mean and nothing would ever report.
+        // `0` is "for good" here as everywhere in this section, and an Operator
+        // keeping everything (`days = 0`) has no age pass to be shorter than.
+        if let Some(starred_days) = self.retention.starred_days
+            && starred_days > 0
+            && self.retention.days > 0
+            && starred_days < self.retention.days
+        {
+            return Err(ConfigError::invalid_key(
+                "retention.starred_days",
+                &starred_days.to_string(),
+                "at least retention.days, or 0 to keep starred Calls for good",
+            ));
+        }
         // ...and the same for the **Mining** sweep (#48), for the mirror-image
         // reason: a batch of zero reads zero Calls per tick, forever, and looks
         // exactly like an Archive that has already been mined. An Operator who
@@ -889,6 +905,16 @@ pub const SETTINGS: &[Setting] = &[
         example: "30",
         set: |setting, config, value| {
             config.retention.listener_days = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "retention.starred_days",
+        var: "RADIO_SCOUT_RETENTION_STARRED_DAYS",
+        expected: "a number of days, or 0 to keep starred Calls for good",
+        example: "90",
+        set: |setting, config, value| {
+            config.retention.starred_days = Some(setting.parse(value)?);
             Ok(())
         },
     },
@@ -1649,6 +1675,13 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # 0 keeps them forever. Its own window, not the one above: logs are small, and
 # the question they answer is often about a day whose audio has already gone.
 # log_days = 30
+
+# How much longer a starred Call is kept than `days` above (#66). No key at all
+# — what ships — means a Star is a bookmark and nothing more, which is the only
+# safe default for a mark anybody can leave without a password. 0 keeps starred
+# Calls for good. The size cap below still outranks it: a cap a listener can
+# defeat is not a cap.
+#   starred_days = 90
 
 # Prune listener-count samples (the [listeners] section below) older than this
 # many days. 0 keeps them forever. Longer again than the two above: a sample is
@@ -2639,6 +2672,45 @@ mod tests {
             resolve(&cli(&[]), no_env, Some(&file(text))).expect_err("an impossible policy");
 
         assert!(error.to_string().contains(key), "{error}");
+    }
+
+    /// A **Star** may lengthen a Call's life and must never shorten it (#66).
+    /// The two ways it could: a window shorter than the ordinary one, and the
+    /// same in a louder layer.
+    #[rstest]
+    #[case::in_the_file(&[], "[retention]\ndays = 30\nstarred_days = 7\n")]
+    #[case::from_the_environment(&[("RADIO_SCOUT_RETENTION_STARRED_DAYS", "7")], "[retention]\ndays = 30\n")]
+    fn a_star_that_would_shorten_a_calls_life_refuses_to_boot(
+        #[case] vars: &[(&str, &str)],
+        #[case] text: &str,
+    ) {
+        let error =
+            resolve(&cli(&[]), env(vars), Some(&file(text))).expect_err("a Star that prunes early");
+
+        let message = error.to_string();
+        assert!(message.contains("retention.starred_days"), "{message}");
+        // The value they wrote, and the *key* they have to look at — which is
+        // in front of them, and is what every other message in this section
+        // names rather than a number that would go stale in the sentence.
+        assert!(message.contains('7'), "{message}");
+        assert!(message.contains("retention.days"), "{message}");
+    }
+
+    /// The two readings that are *not* a mistake: keeping starred Calls for
+    /// good (`0`, the reading every window in the section has), and an archive
+    /// that already keeps everything, where there is no age pass for a Star to
+    /// be shorter than.
+    #[rstest]
+    #[case::forever("[retention]\ndays = 30\nstarred_days = 0\n", Some(0))]
+    #[case::nothing_ages_out_anyway("[retention]\ndays = 0\nstarred_days = 7\n", Some(7))]
+    #[case::the_same_window("[retention]\ndays = 7\nstarred_days = 7\n", Some(7))]
+    fn the_star_windows_that_are_not_mistakes_boot(
+        #[case] text: &str,
+        #[case] expected: Option<u32>,
+    ) {
+        let config = resolve(&cli(&[]), no_env, Some(&file(text))).expect("resolve");
+
+        assert_eq!(config.retention.starred_days, expected);
     }
 
     /// ...but a batch size is only impossible for a sweep that is going to run.

@@ -15,6 +15,7 @@ import { DensityRibbon } from '@/components/DensityRibbon'
 import { ExportControl } from '@/components/ExportControl'
 import { DateField, Field, controlClass } from '@/components/Field'
 import { Screen } from '@/components/layout/Screen'
+import { StarButton } from '@/components/StarButton'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
@@ -434,6 +435,16 @@ export function DvrScreen() {
         </div>
 
         <div className="mt-3 flex items-center gap-2">
+          {/* Keeping what the rewind turned up (#66, spec US 37) — which is the
+              gesture this whole screen exists for: you go back to 2am because
+              something happened, and this is how what you find survives the
+              retention window. The row's control, not a second spelling of it,
+              so a **DVR** and a search result cannot disagree about what a Star
+              is. */}
+          <StarButton
+            call={current}
+            describedAs={current ? talkgroupName(current) : 'this call'}
+          />
           <Button
             variant="outline"
             size="icon"

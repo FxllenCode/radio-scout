@@ -93,6 +93,24 @@ describe('one radio’s history (#47, spec US 44)', () => {
     )
   })
 
+  /** "Star from any row" is a promise about *every* row (#66), and this is a
+   *  list of Calls like any other — it is also where "which of this radio's
+   *  calls was the one" gets answered. */
+  it('stars one of them', async () => {
+    const user = userEvent.setup()
+    renderApp('/unit/100/1200')
+
+    const calls = await screen.findByRole('list', { name: 'Unit calls' })
+    const [first] = within(calls).getAllByRole('button', { name: /^Star / })
+    await user.click(first)
+
+    // Only the row that was tapped: a list control that marked its neighbours
+    // would be a Listener keeping the wrong Call.
+    const marked = await within(calls).findAllByRole('button', { name: /^Unstar / })
+    expect(marked).toHaveLength(1)
+    expect(marked[0]).toHaveAttribute('aria-pressed', 'true')
+  })
+
   /** **A Run started here walks past the end of the page it started on.**
    *
    *  Every screen that starts a Run owes the page-ahead (#32) — the Run names

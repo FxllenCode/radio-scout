@@ -153,6 +153,28 @@ pub struct Model {
     /// nothing (`call_tones`' cost, which a page-out earns by being searchable
     /// and this is not).
     pub quiet: Option<String>,
+    /// When a **Listener** last starred this Call (#66, spec US 37), or `NULL`
+    /// for the Calls nobody has.
+    ///
+    /// **The Instance's mark, not a browser's.** There is no starrer here and
+    /// there is deliberately nowhere to put one: a table keyed on anything but
+    /// the Call could be filled by anybody who can POST in a loop (#64's abuse
+    /// bound), and a per-browser record of what somebody kept is the listening
+    /// history ADR-0011 rule 5 exists to stop this process accumulating. So a
+    /// Star is one row's column, bounded by the Calls table, which **Retention**
+    /// already bounds — and any Listener can set or clear it.
+    ///
+    /// **A column and not a child table**, which is the other half of the same
+    /// choice: `call_tones` and `share_links` each had to be remembered in
+    /// [`crate::db::repo::delete_calls`], and forgetting one is invisible until
+    /// the retention sweep meets its oldest marked Call and fails there
+    /// forever. A column goes with its row.
+    ///
+    /// The *instant* rather than a boolean, because the only thing that reads
+    /// it besides the star itself is a log line — and because "starred" is not
+    /// the same question as "starred when", which an Operator wondering what is
+    /// pinning their archive open would like an answer to.
+    pub starred_at_ms: Option<i64>,
     pub created_at_ms: i64,
 }
 

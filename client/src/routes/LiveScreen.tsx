@@ -8,6 +8,7 @@ import {
   Radio,
   RotateCcw,
   SkipForward,
+  Star,
   Zap,
 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
@@ -19,6 +20,7 @@ import { Screen } from '@/components/layout/Screen'
 import { QueueSheet } from '@/components/QueueSheet'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
+import { useStar } from '@/hooks/useStar'
 import { Button } from '@/components/ui/button'
 import { Waveform } from '@/components/Waveform'
 import { callCategory, formatFrequency, systemName, talkgroupName, unitName } from '@/lib/call'
@@ -137,6 +139,10 @@ export function LiveScreen() {
   const prioritized = useAppSelector((state) =>
     showing ? selectIsPriority(state, showing.systemRef, showing.talkgroupRef) : false,
   )
+  // The **Star** on that same Call (#66, spec US 37) — one rule shared with
+  // the row control, so the display and a search row cannot come to disagree
+  // about what a Star is or what tapping it does.
+  const { starred, toggle: toggleStar } = useStar(showing)
   // The live feed's own progress — an archived Call interrupting it (US 26) is
   // on the element instead, and its position isn't this display's to draw.
   const progress = useAppSelector((state) =>
@@ -315,8 +321,13 @@ export function LiveScreen() {
           while they are hearing it, and the Talkgroups panel is two taps and a
           four-hundred-row list away. Its own row rather than a seventh cell,
           because it is the only control here that changes what plays *later*
-          rather than now, and it says so. */}
-      <div className="mt-2">
+          rather than now — and since #66 it shares that row with the other one
+          that is not about *now*: keeping the Call after it has gone.
+
+          Both act on the Call the display is showing (#56's subject), so a
+          Listener who reaches for either while hearing something is marking the
+          thing they heard. */}
+      <div className="mt-2 grid grid-cols-2 gap-2">
         <Control
           label={
             prioritized ? 'Clear priority on this talkgroup' : 'Give this talkgroup priority'
@@ -327,6 +338,15 @@ export function LiveScreen() {
           icon={<Zap className="size-3.5" aria-hidden />}
         >
           {prioritized ? 'Priority on' : 'Priority'}
+        </Control>
+        <Control
+          label={starred ? 'Unstar this call' : 'Star this call'}
+          pressed={starred}
+          disabled={!showing}
+          onClick={toggleStar}
+          icon={<Star className="size-3.5" aria-hidden />}
+        >
+          {starred ? 'Starred' : 'Star'}
         </Control>
       </div>
 

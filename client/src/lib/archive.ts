@@ -117,3 +117,28 @@ export function pageSummary(
   if (count === 0 || shown === 0) return `No ${noun}`
   return `${offset + 1}–${offset + shown} of ${count}`
 }
+
+/**
+ * What a **Star** is worth on this Instance, in a sentence (#66, spec US 37).
+ *
+ * Here beside [`pageSummary`] because it is the same kind of thing: a fact the
+ * server answered with, said in words a Listener reads. And it is *said* at all
+ * for `sharing`'s reason one step on — a control that quietly means less than a
+ * Listener thinks it does is the same lie a refused control tells, told more
+ * slowly, and only the server knows `[retention] starred_days`.
+ *
+ * Three answers rather than two, because `0` is "for good" here as it is
+ * everywhere in `[retention]`: a Listener told "kept for 0 days" would read the
+ * exact opposite of what the Operator configured.
+ */
+export function starsKept({
+  kept,
+  keptDays,
+}: {
+  kept: boolean
+  keptDays: number
+}): string {
+  if (!kept) return 'Stars do not outlast the retention window here.'
+  if (keptDays === 0) return 'Starred calls are kept indefinitely.'
+  return `Starred calls are kept for ${keptDays} days.`
+}

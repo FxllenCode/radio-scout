@@ -8,6 +8,7 @@ import {
   formatDuration,
   pageSummary,
   searchParams,
+  starsKept,
 } from './archive'
 
 describe('searchParams', () => {
@@ -145,5 +146,21 @@ describe('formatDuration', () => {
   it('shows a dash rather than nonsense for an impossible value', () => {
     expect(formatDuration(Number.NaN)).toBe('—')
     expect(formatDuration(-1)).toBe('—')
+  })
+})
+
+/** What a Star is worth here, said out loud (#66, spec US 37). */
+describe('starsKept', () => {
+  it.each([
+    [{ kept: false, keptDays: 0 }, 'Stars do not outlast the retention window here.'],
+    // `0` is "for good" in every window of `[retention]`, and "kept for 0 days"
+    // would read as the exact opposite of what the Operator configured.
+    [{ kept: true, keptDays: 0 }, 'Starred calls are kept indefinitely.'],
+    [{ kept: true, keptDays: 90 }, 'Starred calls are kept for 90 days.'],
+    // A policy switched off outranks whatever number is left beside it, so an
+    // Operator who turned it off is not told a Call survives for a quarter.
+    [{ kept: false, keptDays: 90 }, 'Stars do not outlast the retention window here.'],
+  ])('reads %j as its sentence', (offer, sentence) => {
+    expect(starsKept(offer)).toBe(sentence)
   })
 })
