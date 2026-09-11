@@ -1170,7 +1170,7 @@ pub async fn exportable<C: ConnectionTrait>(
 /// filename carries no zone to say which was meant. And the Id ends it, so two
 /// Calls a recorder stamped at the same millisecond on the same channel are two
 /// files rather than one.
-fn export_filename(call: &StoredCall, audio_name: Option<&str>) -> String {
+pub(crate) fn export_filename(call: &StoredCall, audio_name: Option<&str>) -> String {
     let at_ms = call.timestamp.unwrap_or_default();
     let stamp = time::OffsetDateTime::from_unix_timestamp(at_ms.div_euclid(1_000))
         .ok()
@@ -2205,7 +2205,13 @@ fn download_filename(call: &StoredCall, audio_name: Option<&str>) -> String {
 
 /// The container extension for a download: the recorder's filename knows best,
 /// the MIME type is the fallback, and `bin` is the last resort.
-fn download_extension(audio_name: Option<&str>, mime: Option<&str>) -> String {
+///
+/// `pub(crate)` for one caller outside: an **Event**'s frozen copy is named after
+/// what is in it (#67), which is the same question asked of the same two facts.
+/// It had a second copy of this match for about an hour and the copy had already
+/// drifted — `audio/x-flac` was in one and not the other — which is exactly what
+/// "written once" exists to stop.
+pub(crate) fn download_extension(audio_name: Option<&str>, mime: Option<&str>) -> String {
     let from_name = audio_name
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, ext)| ext.trim().to_ascii_lowercase())
@@ -2237,6 +2243,18 @@ fn download_extension(audio_name: Option<&str>, mime: Option<&str>) -> String {
 /// every filesystem: ASCII word characters, dots, dashes and underscores, with
 /// everything else collapsed to a single dash.
 fn slug(raw: &str) -> String {
+    slug_named(raw, "call")
+}
+
+/// ...with the caller's own word for a label that survives none of it.
+///
+/// `pub(crate)` for one caller outside: an **Event**'s export is named after the
+/// Event (#67), and that name is an Operator's free text heading for the same
+/// header this already guards. It needs its own fallback because this one's is
+/// `call` — which is the right word for the file a download names and an
+/// actively wrong one for an incident, and a file called `radio-scout-call.zip`
+/// holding four hundred of them is a small lie told to whoever was sent it.
+pub(crate) fn slug_named(raw: &str, fallback: &str) -> String {
     let mut out = String::with_capacity(raw.len().min(MAX_STEM));
     for ch in raw.chars() {
         let keep = ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_');
@@ -2251,7 +2269,7 @@ fn slug(raw: &str) -> String {
     }
     let trimmed = out.trim_matches(['-', '.', '_']);
     if trimmed.is_empty() {
-        "call".to_string()
+        fallback.to_string()
     } else {
         trimmed.to_string()
     }

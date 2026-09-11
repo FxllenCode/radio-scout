@@ -39,17 +39,18 @@ cleanupOutdatedCaches()
  * cached `/healthz` would lie about the server being up, and cached Call audio
  * would fill a phone with an archive nobody asked for.
  *
- * **`/s` is on that list, and it is the one entry that is not an API** (#64). A
- * **Share link** is a page the *server* renders — the whole promise is that it
- * plays without the app — so a worker that answered it with the app shell would
- * break every share link opened in a browser that has this instance installed,
- * and only in that browser. Anchored so the three client-side routes that begin
- * with an `s` (`/search`, `/session`, `/settings`) still get the shell: what is
- * denied is `/s` exactly, and anything under `/s/`.
+ * **`/s` and `/e` are on that list, and they are the entries that are not APIs**
+ * (#64, #67). A **Share link** and an **Event**'s link are pages the *server*
+ * renders — the whole promise is that they play without the app — so a worker
+ * that answered one with the app shell would break every link opened in a
+ * browser that has this instance installed, and only in that browser. Anchored
+ * so the client-side routes beginning with those letters (`/search`, `/session`,
+ * `/settings`, and anything later starting with an `e`) still get the shell:
+ * what is denied is `/s` and `/e` exactly, and anything under `/s/` or `/e/`.
  */
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('/index.html'), {
-    denylist: [/^\/api\//, /^\/healthz$/, /^\/rdio-scanner/, /^\/s(\/|\?|$)/],
+    denylist: [/^\/api\//, /^\/healthz$/, /^\/rdio-scanner/, /^\/[se](\/|\?|$)/],
   }),
 )
 

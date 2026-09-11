@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
 import { ActivityHeatmap } from '@/components/ActivityHeatmap'
+import { AddToEvent } from '@/components/AddToEvent'
 import { CallFlags } from '@/components/CallFlags'
 import { DateField, Field, controlClass } from '@/components/Field'
 import { DensityRibbon } from '@/components/DensityRibbon'
@@ -46,6 +47,7 @@ import {
 import { HOUR_MS, heatmapWindow } from '@/lib/heatmap'
 import { readSearchUrl, writeSearchUrl, type SearchUrl } from '@/lib/searchUrl'
 import { dvrLink } from '@/lib/dvr'
+import { useAdminSession } from '@/hooks/useAdminSession'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
 import { usePublicShare } from '@/hooks/usePublicShare'
 import { useShareLink } from '@/hooks/useShareLink'
@@ -212,7 +214,46 @@ export function SearchScreen() {
     if (sameSearch(lastSearch.current, filters)) return
     lastSearch.current = filters
     dispatch(searchChanged(filters))
+    // **And the selection goes with it** (#67), which is #49's rule one screen
+    // along: a bulk action over rows that scrolled out of the answer is the one
+    // thing multi-select must never do. It lives here rather than at each
+    // control for the reason the line above it does — this is where a change is
+    // *observed*, so the back button gets the same treatment as a dropdown.
+    setSelected([])
+    setEventNotice(null)
   }, [dispatch, filters])
+
+  /**
+   * Which Calls are picked out for an **Event** (#67, spec US 38).
+   *
+   * **Only an Operator sees this at all.** Freezing copies audio that
+   * **Retention** can never reclaim, so it takes the admin session — unlike a
+   * **Star** or a **Share link**, each of which is bounded by something. A
+   * signed-out Listener gets the screen exactly as it was.
+   *
+   * Ids rather than Calls: what the server is handed is a list of ids, and
+   * keeping the rows would mean holding a snapshot of a page that has since
+   * turned.
+   */
+  const signedIn = useAdminSession()
+  const [selected, setSelected] = useState<number[]>([])
+  /** What the last freeze came to, or `null`.
+   *
+   *  It lives **here** rather than in `AddToEvent`, because a successful freeze
+   *  drops the selection and the selection going is what unmounts that control
+   *  — so a report rendered inside it would vanish at the exact moment it was
+   *  worth reading. */
+  const [eventNotice, setEventNotice] = useState<string | null>(null)
+  const toggleSelected = (id: number) =>
+    setSelected((picked) => {
+      // Starting a fresh selection puts the last report away: it described a
+      // batch that is over, and left standing it becomes furniture (the
+      // `useShareLink` rule, one screen along).
+      if (picked.length === 0) setEventNotice(null)
+      return picked.includes(id)
+        ? picked.filter((one) => one !== id)
+        : [...picked, id]
+    })
 
   /** Put a link to `state` wherever this platform puts links (#61, US 30). */
   const send = (state: SearchUrl, title: string) =>
@@ -670,6 +711,24 @@ export function SearchScreen() {
         {isFetching && <span>Searching…</span>}
       </div>
 
+      {signedIn && selected.length > 0 && (
+        <AddToEvent
+          callIds={selected}
+          onResult={({ notice, frozen }) => {
+            setEventNotice(notice)
+            if (frozen) setSelected([])
+          }}
+        />
+      )}
+      {eventNotice && (
+        <p
+          role="status"
+          className="mt-2 px-1 font-mono text-xs text-muted-foreground"
+        >
+          {eventNotice}
+        </p>
+      )}
+
       {isError ? (
         <Placeholder role="alert">
           Search failed. Check that the server is reachable.
@@ -690,6 +749,8 @@ export function SearchScreen() {
               key={call.id}
               call={call}
               isCurrent={current?.id === call.id}
+              selected={signedIn ? selected.includes(call.id) : undefined}
+              onSelect={() => toggleSelected(call.id)}
               onPlay={() => dispatch(startRun({ search: filters, page, index }))}
               onPlayForward={() => playForward(call)}
               onCopyLink={() =>
@@ -800,6 +861,8 @@ function ResultRow({
   onPlayForward,
   onCopyLink,
   onShare,
+  selected,
+  onSelect,
 }: {
   call: Call
   isCurrent: boolean
@@ -809,6 +872,12 @@ function ResultRow({
   /** Mint a public link, or nothing at all where this Instance does not mint
    *  them (`[share] enabled = false`). */
   onShare?: () => void
+  /** Whether this row is picked out for an **Event**, or `undefined` — which
+   *  is not "not picked" but *there is no such control here*, because nobody is
+   *  signed in (#67). Two states in one field for [`offerExport`]'s reason: a
+   *  caller must not be able to conflate "off" with "absent". */
+  selected?: boolean
+  onSelect: () => void
 }) {
   const name = talkgroupName(call)
   const system = systemName(call)
@@ -821,6 +890,19 @@ function ResultRow({
         isCurrent && 'bg-muted/40',
       )}
     >
+      {/* **The Operator's own control, and nobody else's** (#67): freezing an
+          incident spends disk no policy can reclaim, so the checkbox is absent
+          — not disabled — for a Listener, and the row is exactly what it was
+          before this shipped. */}
+      {selected !== undefined && (
+        <input
+          type="checkbox"
+          className="size-4 shrink-0 accent-primary"
+          checked={selected}
+          aria-label={`Select ${description} for an event`}
+          onChange={onSelect}
+        />
+      )}
       <StatusLed
         color={ledForCall(call)}
         size={10}

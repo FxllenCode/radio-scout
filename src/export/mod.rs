@@ -191,29 +191,108 @@ impl Format {
     }
 }
 
+/// **What an export is of.**
+///
+/// Two subjects, one pipeline. Everything downstream of this — the refusals, the
+/// headers, the streaming body, both writers and the manifest — is written once
+/// and asked about whichever this is, because a zip of a range and a zip of an
+/// **Event** differ in *which Calls* and in nothing else (#67).
+#[derive(Debug)]
+enum Source {
+    /// A range of the Archive, as a search (#65, spec US 33).
+    ///
+    /// **Boxed**, because a `CallSearch` is a dozen filters and an Event is two
+    /// fields — so the unboxed enum would make every `Asked` in the process as
+    /// big as the larger arm, for no reason.
+    Range {
+        /// The search the export walks — the Listener's own, with the parts an
+        /// export is not free to honour already overridden.
+        search: Box<CallSearch>,
+        /// The filters, as the manifest records them.
+        filters: String,
+    },
+    /// One **Event**, whole (#67, spec US 38). No filters: an Event *is* its
+    /// members, and there is nothing about it a URL could narrow.
+    Event { id: i64, name: String },
+}
+
+impl Source {
+    /// How big this is going to be, asked **before a byte is written** — the one
+    /// statement every refusal below is taken from.
+    async fn extent(&self, state: &AppState, format: Format) -> Result<Extent, Failure> {
+        match self {
+            Source::Range { search, .. } => crate::archive::extent(&state.db, search)
+                .await
+                .map_err(Stage::MeasureExport.failed()),
+            Source::Event { id, .. } => {
+                crate::event::extent(&state.db, *id, format == Format::Stitched)
+                    .await
+                    .map_err(Stage::MeasureExport.failed())
+            }
+        }
+    }
+
+    /// What the manifest says this export was *of* — the one field of it that
+    /// differs between the two, as a key and a value.
+    fn described(&self) -> (&'static str, serde_json::Value) {
+        match self {
+            Source::Range { filters, .. } => ("search", serde_json::Value::String(filters.clone())),
+            Source::Event { name, .. } => ("event", serde_json::Value::String(name.clone())),
+        }
+    }
+
+    /// What the browser saves it as — a stamp for a range, the incident's own
+    /// name for an Event.
+    ///
+    /// An Event is remembered by what it was called; a range is remembered by
+    /// the night it happened on, which is why [`filename`] leads with the stamp
+    /// and this does not.
+    fn download_name(&self, first_ms: Option<i64>, format: Format) -> String {
+        match self {
+            Source::Range { .. } => filename(first_ms, format),
+            Source::Event { id, name } => format!(
+                "radio-scout-{}.{}",
+                // An Event's **Id** where the name survives no part of the
+                // slug, because `event-7` is a file somebody can find again and
+                // `call` — this slug's own fallback — is the wrong noun for an
+                // incident of four hundred of them.
+                crate::archive::slug_named(name, &format!("event-{id}")),
+                format.extension()
+            ),
+        }
+    }
+}
+
 /// A request, read — everything that comes from the query string and nothing
 /// that comes from the database.
 ///
-/// It is a value because the search is needed **twice**: once to measure the
+/// It is a value because the source is needed **twice**: once to measure the
 /// export and again to walk it, and parsing it twice would be two readings of
 /// one URL that could come to disagree.
 #[derive(Debug)]
 struct Asked {
     format: Format,
-    /// The search the export walks — the Listener's own, with the parts an
-    /// export is not free to honour already overridden.
-    search: CallSearch,
-    /// The filters, as the manifest records them.
-    search_text: String,
+    source: Source,
 }
 
 impl Asked {
+    /// A range of the Archive, from the query string a search page built.
     fn read(params: &HashMap<String, String>) -> Result<Asked, Reason> {
         let format = Format::parse(crate::query::Params::new(params).raw("format"))?;
         Ok(Asked {
             format,
-            search: exported_search(params, format)?,
-            search_text: describe(params),
+            source: Source::Range {
+                search: Box::new(exported_search(params, format)?),
+                filters: describe(params),
+            },
+        })
+    }
+
+    /// ...and one Event, whole.
+    fn for_event(params: &HashMap<String, String>, id: i64, name: String) -> Result<Asked, Reason> {
+        Ok(Asked {
+            format: Format::parse(crate::query::Params::new(params).raw("format"))?,
+            source: Source::Event { id, name },
         })
     }
 }
@@ -246,7 +325,7 @@ impl Plan {
             return Err(Reason::ExportTooLarge { bytes });
         }
         Ok(Plan {
-            filename: filename(extent.first_ms, asked.format),
+            filename: asked.source.download_name(extent.first_ms, asked.format),
             asked,
             extent,
         })
@@ -426,18 +505,59 @@ pub async fn export(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, Failure> {
+    stream_export(state, Asked::read(&params)?).await
+}
+
+/// `GET /api/admin/events/{id}/export` — one **Event** as a file (#67, spec
+/// US 38).
+///
+/// The same two formats, the same refusals, the same streamed body — this is one
+/// [`Source`] rather than the other, which is the whole of what an Event costs
+/// this module.
+pub async fn event(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, Failure> {
+    let row = crate::db::repo::find_event(&state.db, id)
+        .await
+        .map_err(Stage::MeasureExport.failed())?
+        .ok_or(crate::curate::Rejected::NotFound(
+            crate::curate::What::Event,
+        ))?;
+
+    of_event(state, &params, row.id, row.name).await
+}
+
+/// One **Event** as a file, for a caller that arrived some other way (#67).
+///
+/// The share page's download comes through here: its token has already named the
+/// Event, so what is left is the format and the same pipeline every other export
+/// uses. A parameter rather than a copy, for the reason [`crate::serve`] took
+/// one — a second implementation would be right on one door and wrong on the
+/// other the first time either moved.
+pub async fn of_event(
+    state: AppState,
+    params: &HashMap<String, String>,
+    id: i64,
+    name: String,
+) -> Result<Response, Failure> {
+    stream_export(state, Asked::for_event(params, id, name)?).await
+}
+
+/// Decide it, then stream it.
+///
+/// **Every refusal happens before the permit is taken**, so a hand-edited URL
+/// that was never going to produce a file cannot make somebody with a real one
+/// wait — and every refusal happens before the first byte, so nothing downstream
+/// can change its mind about an export that has already begun.
+async fn stream_export(state: AppState, asked: Asked) -> Result<Response, Failure> {
     if !state.exports.enabled() {
         return Err(Reason::ExportDisabled.into());
     }
-    let asked = Asked::read(&params)?;
-
-    let extent = crate::archive::extent(&state.db, &asked.search)
-        .await
-        .map_err(Stage::MeasureExport.failed())?;
+    let extent = asked.source.extent(&state, asked.format).await?;
     let plan = Plan::read(asked, &state.exports, extent)?;
 
-    // Taken **after** every refusal, so a hand-edited URL that was never going
-    // to produce a file cannot make a Listener with a real one wait.
     let permit = state.exports.begin().ok_or(Reason::ExportBusy)?;
 
     let headers = plan.headers();
@@ -554,15 +674,29 @@ impl<'a> Pages<'a> {
         if self.offset >= self.plan.extent.calls {
             return Ok(Vec::new());
         }
-        let page = crate::archive::exportable(
-            &self.state.db,
-            &CallSearch {
-                limit: PAGE,
-                offset: self.offset,
-                ..self.plan.asked.search.clone()
-            },
-        )
-        .await?;
+        let page = match &self.plan.asked.source {
+            Source::Range { search, .. } => {
+                crate::archive::exportable(
+                    &self.state.db,
+                    &CallSearch {
+                        limit: PAGE,
+                        offset: self.offset,
+                        ..(**search).clone()
+                    },
+                )
+                .await?
+            }
+            Source::Event { id, .. } => {
+                crate::event::exportable(
+                    &self.state.db,
+                    *id,
+                    self.plan.asked.format == Format::Stitched,
+                    PAGE,
+                    self.offset,
+                )
+                .await?
+            }
+        };
         self.offset += page.len() as u64;
         Ok(page)
     }
@@ -650,12 +784,12 @@ async fn write_zip(
 
     let (mut open, header) = zip.begin(MANIFEST, stamp);
     send(out, header).await?;
+    let (subject, described) = plan.asked.source.described();
     send(
         out,
         open.chunk(Bytes::from(format!(
-            "{{\"exportedAt\":{},\"search\":{},\"calls\":[",
+            "{{\"exportedAt\":{},\"{subject}\":{described},\"calls\":[",
             state.clock.now_ms(),
-            serde_json::Value::String(plan.asked.search_text.clone())
         ))),
     )
     .await?;
@@ -800,8 +934,22 @@ mod tests {
     fn asked(format: Format) -> Asked {
         Asked {
             format,
-            search: exported_search(&params(&[]), format).expect("a search"),
-            search_text: String::new(),
+            source: Source::Range {
+                search: Box::new(exported_search(&params(&[]), format).expect("a search")),
+                filters: String::new(),
+            },
+        }
+    }
+
+    /// ...and one that is about an **Event** instead, for the handful of rules
+    /// that differ between the two subjects.
+    fn asked_for_an_event(format: Format, name: &str) -> Asked {
+        Asked {
+            format,
+            source: Source::Event {
+                id: 1,
+                name: String::from(name),
+            },
         }
     }
 
@@ -1064,6 +1212,47 @@ mod tests {
             stitch::samples_for(extent.duration_ms) > stitch::MAX_SAMPLES,
             "and it is past the clamp too, which is the pair being asserted"
         );
+    }
+
+    /// **An Event's download is named after the incident**, where a range's is
+    /// named after the night it happened on — because that is how each is
+    /// remembered a year later. The name is an Operator's free text, so it goes
+    /// through the same slug that guards every other `Content-Disposition`.
+    #[rstest]
+    #[case::an_ordinary_name("Mill Street fire", "radio-scout-Mill-Street-fire.zip")]
+    #[case::punctuation_and_spaces(
+        "2026/07/25 — 2nd alarm",
+        "radio-scout-2026-07-25-2nd-alarm.zip"
+    )]
+    #[case::nothing_survives_the_slug("///", "radio-scout-event-1.zip")]
+    fn an_events_download_is_named_after_the_event(#[case] name: &str, #[case] expected: &str) {
+        let extent = Extent {
+            calls: 1,
+            bytes: 10,
+            duration_ms: 10,
+            first_ms: Some(1_700_000_000_000),
+        };
+
+        let plan = Plan::read(
+            asked_for_an_event(Format::Zip, name),
+            &Exports::default(),
+            extent,
+        )
+        .expect("a plan");
+
+        assert_eq!(plan.filename, expected);
+    }
+
+    /// ...and its manifest says it was an **Event**, not a search — a file
+    /// handed to a stranger should say which of the two it describes.
+    #[test]
+    fn an_events_manifest_names_the_event_rather_than_a_search() {
+        let (subject, described) = asked_for_an_event(Format::Zip, "The tornado")
+            .source
+            .described();
+
+        assert_eq!(subject, "event");
+        assert_eq!(described, serde_json::Value::String("The tornado".into()));
     }
 
     /// The slot is a slot: taken once, and back when the export that had it is

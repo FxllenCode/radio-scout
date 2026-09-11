@@ -10,6 +10,8 @@ import type {
   AdminApiKey,
   AdminAssignment,
   AdminDownstream,
+  AdminEvent,
+  AdminEventDetail,
   AdminLabel,
   AdminSession,
   AdminShareLink,
@@ -24,6 +26,8 @@ import type {
   Catalog,
   CuratedPage,
   DocumentReport,
+  EventShare,
+  FrozenEvent,
   FilterOptions,
   IssuedApiKey,
   ListenerQuery,
@@ -34,6 +38,7 @@ import type {
   MemberRef,
   MergeReport,
   NewDownstream,
+  NewEvent,
   NewToneProfile,
   NewWebhook,
   RangeDelta,
@@ -88,6 +93,7 @@ export const api = createApi({
     'ToneProfile',
     'ShareLink',
     'Star',
+    'Event',
   ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
@@ -585,6 +591,70 @@ export const api = createApi({
       invalidatesTags: ['ShareLink'],
     }),
 
+    /**
+     * **Events** (#67, spec US 38) — incidents frozen against **Retention**.
+     *
+     * Every one of these is admin-gated, unlike `shareCall` next door, and the
+     * difference is what the write *costs*: a share link is bounded by the Calls
+     * table, and freezing copies audio that no policy here can ever reclaim.
+     *
+     * One tag for the lot. An Operator works on one incident at a time, and a
+     * per-id tag would buy a cache key that a create could not invalidate.
+     */
+    getEvents: builder.query<CuratedPage<AdminEvent>, { limit: number; offset: number }>({
+      query: (window) => ({
+        url: `api/admin/events?limit=${window.limit}&offset=${window.offset}`,
+      }),
+      providesTags: ['Event'],
+    }),
+    getEvent: builder.query<AdminEventDetail, number>({
+      query: (id) => ({ url: `api/admin/events/${id}` }),
+      providesTags: ['Event'],
+    }),
+    createEvent: builder.mutation<FrozenEvent, NewEvent>({
+      query: (body) => ({ url: 'api/admin/events', method: 'POST', body }),
+      invalidatesTags: ['Event'],
+    }),
+    updateEvent: builder.mutation<
+      AdminEvent,
+      { id: number; patch: Partial<Pick<NewEvent, 'name' | 'notes'>> & { shared?: boolean } }
+    >({
+      query: ({ id, patch }) => ({
+        url: `api/admin/events/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['Event'],
+    }),
+    deleteEvent: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/events/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Event'],
+    }),
+    /** Freeze Calls into an Event. Answers with the **whole Event again**, report
+     *  and all — the same document a create answers with, so "Calls were added"
+     *  has one shape on the wire rather than two. */
+    addEventCalls: builder.mutation<FrozenEvent, { id: number; callIds: number[] }>({
+      query: ({ id, callIds }) => ({
+        url: `api/admin/events/${id}/calls`,
+        method: 'POST',
+        body: { callIds },
+      }),
+      invalidatesTags: ['Event'],
+    }),
+    removeEventCall: builder.mutation<void, { id: number; member: number }>({
+      query: ({ id, member }) => ({
+        url: `api/admin/events/${id}/calls/${member}`,
+        method: 'DELETE',
+      }),
+      invalidatesTags: ['Event'],
+    }),
+    /** The link, fetched **only when an Operator asks to copy it** — which is
+     *  what keeps a credential out of every listing that renders Events. */
+    getEventShare: builder.query<EventShare, number>({
+      query: (id) => ({ url: `api/admin/events/${id}/share` }),
+      providesTags: ['Event'],
+    }),
+
     /** **Tone profiles** (#55, spec US 20) — a sub-resource of the Talkgroup
      *  they are paged on, because a profile that named no channel would be
      *  looked for in every Call this Instance takes.
@@ -632,9 +702,11 @@ export const api = createApi({
 export const {
   useAdminLoginMutation,
   useAdminLogoutMutation,
+  useAddEventCallsMutation,
   useAssignTalkgroupsMutation,
   useCreateApiKeyMutation,
   useCreateDownstreamMutation,
+  useCreateEventMutation,
   useCreateToneProfileMutation,
   useCreateWebhookMutation,
   useCreateGroupMutation,
@@ -644,6 +716,7 @@ export const {
   useCreateUnitMutation,
   useDeleteApiKeyMutation,
   useDeleteDownstreamMutation,
+  useDeleteEventMutation,
   useDeleteToneProfileMutation,
   useDeleteWebhookMutation,
   useDeleteGroupMutation,
@@ -664,6 +737,8 @@ export const {
   useGetQuietSpansQuery,
   useSetStarMutation,
   useGetDownstreamsQuery,
+  useGetEventQuery,
+  useGetEventsQuery,
   useGetToneProfilesQuery,
   useGetWebhooksQuery,
   useGetFilterOptionsQuery,
@@ -673,6 +748,8 @@ export const {
   useGetMembersQuery,
   useGetRangesQuery,
   useGetShareLinksQuery,
+  useLazyGetEventShareQuery,
+  useRemoveEventCallMutation,
   useGetSystemsQuery,
   useGetTagsQuery,
   useGetUnitHistoryQuery,
@@ -685,6 +762,7 @@ export const {
   useSetRangesMutation,
   useUpdateApiKeyMutation,
   useUpdateDownstreamMutation,
+  useUpdateEventMutation,
   useUpdateToneProfileMutation,
   useUpdateWebhookMutation,
   useUpdateGroupMutation,

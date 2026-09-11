@@ -63,6 +63,20 @@ async fn no_session_reaches_no_curation_route() {
         // rewrites it, so this is the pair it would be worst to leave open.
         "/api/admin/config",
         "/api/admin/config/import",
+        // #67's **Events**, and every one of them: freezing spends disk
+        // **Retention** can never reclaim, which is the whole reason this
+        // surface is behind the gate rather than beside the unauthenticated
+        // **Star** and **Share link** it otherwise resembles. The audio and
+        // export routes are here too — they serve an Instance's bytes, and a
+        // route mounted a segment outside the layer would serve them to
+        // anybody.
+        "/api/admin/events",
+        "/api/admin/events/1",
+        "/api/admin/events/1/share",
+        "/api/admin/events/1/calls",
+        "/api/admin/events/1/calls/2",
+        "/api/admin/events/1/calls/2/audio",
+        "/api/admin/events/1/export",
     ] {
         let response = app.get(path).await;
         assert_eq!(response.status(), 401, "GET {path}");

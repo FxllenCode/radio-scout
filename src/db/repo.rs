@@ -28,8 +28,8 @@ use crate::blob::StoredAudio;
 use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
-    downstream_delivery, group, listener_sample, log_event, share_link, site, system, tag,
-    talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
+    downstream_delivery, event, event_call, group, listener_sample, log_event, share_link, site,
+    system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
     webhook_delivery,
 };
 
@@ -2905,14 +2905,35 @@ pub async fn delete_calls<C: ConnectionTrait>(db: &C, ids: &[CallId]) -> Result<
 pub async fn referenced_object_keys<C: ConnectionTrait>(
     db: &C,
 ) -> Result<std::collections::HashSet<String>, DbErr> {
-    Ok(call::Entity::find()
+    let mut keys: std::collections::HashSet<String> = call::Entity::find()
         .select_only()
         .column(call::Column::ObjectKey)
         .into_tuple::<String>()
         .all(db)
         .await?
         .into_iter()
-        .collect())
+        .collect();
+    // **The frozen copies, and forgetting them is invisible** (#67). An
+    // `event_calls` row is a snapshot with no Call behind it — which is exactly
+    // what orphan-GC is built to delete. Left out of this set, every **Event**
+    // is silently emptied one `orphan_grace` after it was curated, and nothing
+    // fails until somebody opens one months later and finds an incident that is
+    // all rows and no audio.
+    //
+    // That is #55's lesson seen from the other side. There, a child table left
+    // out of `delete_calls` made the sweep fail *loudly* and forever; here a
+    // table left out of the keep-set makes it succeed at destroying the one
+    // thing in the Archive meant to outlive it.
+    // `tests/events.rs::orphan_gc_spares_the_frozen_copies` is what would notice.
+    keys.extend(
+        event_call::Entity::find()
+            .select_only()
+            .column(event_call::Column::ObjectKey)
+            .into_tuple::<String>()
+            .all(db)
+            .await?,
+    );
+    Ok(keys)
 }
 
 /// A stored Call's own row, without the denormalizing joins — for the paths
@@ -4230,6 +4251,309 @@ pub async fn find_calls<C: ConnectionTrait>(
         .filter(call::Column::Id.is_in(ids.iter().copied()))
         .all(db)
         .await
+}
+
+// ---------------------------------------------------------------------------
+// Events (#67, spec US 38)
+// ---------------------------------------------------------------------------
+
+/// Every **Event**, newest first.
+///
+/// The member count and the byte total are **not** here and are not columns on
+/// the Event: they are [`event_totals`]'s one `GROUP BY` over the member table,
+/// so a page of Events costs two statements rather than two per row (#86) — and
+/// nothing a crash between two writes can leave wrong.
+pub async fn events<C: ConnectionTrait>(
+    db: &C,
+    limit: u64,
+    offset: u64,
+) -> Result<(Vec<event::Model>, u64), DbErr> {
+    let query = event::Entity::find()
+        .order_by_desc(event::Column::CreatedAtMs)
+        .order_by_desc(event::Column::Id);
+    // The window is applied to the rows and nowhere else, so the total keeps
+    // describing every Event while the page walks them (#98's rule).
+    let count = PaginatorTrait::count(query.clone(), db).await?;
+    Ok((query.offset(offset).limit(limit).all(db).await?, count))
+}
+
+/// How much of an **Event** there is: transmissions, and what they cost.
+///
+/// A named pair rather than a `(u64, u64)`, because the two travel together
+/// through three call sites and a caller that swapped them would report a
+/// county's bytes as its call count with nothing to say otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventTotals {
+    pub calls: u64,
+    /// Frozen audio, summed — the number an Operator is really being shown,
+    /// because **Retention** can never reclaim it.
+    pub bytes: u64,
+}
+
+/// How many Calls each of these Events holds, and how many bytes they come to.
+///
+/// One statement for a whole page. The `SUM` is cast to `BIGINT` for
+/// [`total_audio_bytes`]'s reason: Postgres widens `SUM(bigint)` to `numeric`
+/// where SQLite keeps it an integer, and the cast is what makes one query decode
+/// on both dialects.
+pub async fn event_totals<C: ConnectionTrait>(
+    db: &C,
+    ids: &[i64],
+) -> Result<HashMap<i64, EventTotals>, DbErr> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    #[derive(sea_orm::FromQueryResult)]
+    struct Row {
+        event_id: i64,
+        calls: i64,
+        bytes: Option<i64>,
+    }
+
+    Ok(event_call::Entity::find()
+        .select_only()
+        .column(event_call::Column::EventId)
+        .column_as(event_call::Column::Id.count(), "calls")
+        .column_as(
+            event_call::Column::AudioSize
+                .sum()
+                .cast_as(Alias::new("BIGINT")),
+            "bytes",
+        )
+        .filter(event_call::Column::EventId.is_in(ids.iter().copied()))
+        .group_by(event_call::Column::EventId)
+        .into_model::<Row>()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| {
+            (
+                row.event_id,
+                EventTotals {
+                    calls: row.calls.max(0) as u64,
+                    bytes: row.bytes.unwrap_or(0).max(0) as u64,
+                },
+            )
+        })
+        .collect())
+}
+
+pub async fn find_event<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+) -> Result<Option<event::Model>, DbErr> {
+    event::Entity::find_by_id(id).one(db).await
+}
+
+/// The Event a share token names, or nothing.
+pub async fn event_by_token<C: ConnectionTrait>(
+    db: &C,
+    token: &str,
+) -> Result<Option<event::Model>, DbErr> {
+    event::Entity::find()
+        .filter(event::Column::ShareToken.eq(token))
+        .one(db)
+        .await
+}
+
+pub async fn insert_event<C: ConnectionTrait>(
+    db: &C,
+    name: &str,
+    notes: Option<&str>,
+    now_ms: i64,
+) -> Result<event::Model, DbErr> {
+    event::ActiveModel {
+        name: Set(name.to_owned()),
+        notes: Set(notes.map(str::to_owned)),
+        share_token: Set(None),
+        created_at_ms: Set(now_ms),
+        updated_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+}
+
+/// What a `PATCH` is changing about an Event. Every field is "leave alone" when
+/// absent, and `notes` tells *absent* from `null` one layer up
+/// ([`crate::curate::nullable`]) — a form that could not tell them apart could
+/// set a note and never clear one.
+#[derive(Debug, Default, Clone)]
+pub struct EventEdit {
+    pub name: Option<String>,
+    pub notes: Option<Option<String>>,
+    /// The share token: `Some(Some(token))` starts sharing, `Some(None)` stops.
+    pub share_token: Option<Option<String>>,
+}
+
+pub async fn update_event<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    edit: EventEdit,
+    now_ms: i64,
+) -> Result<Option<event::Model>, DbErr> {
+    let Some(found) = event::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+    let mut row = found.into_active_model();
+    if let Some(name) = edit.name {
+        row.name = Set(name);
+    }
+    if let Some(notes) = edit.notes {
+        row.notes = Set(notes);
+    }
+    if let Some(token) = edit.share_token {
+        row.share_token = Set(token);
+    }
+    row.updated_at_ms = Set(now_ms);
+    Ok(Some(row.update(db).await?))
+}
+
+/// Stamp an Event as changed — what adding or dropping a member does to it.
+///
+/// Its own statement rather than a field on [`EventEdit`], because the two are
+/// different verbs: an edit changes what the Event *is*, and this records that
+/// what it *holds* moved.
+pub async fn touch_event<C: ConnectionTrait>(db: &C, id: i64, now_ms: i64) -> Result<(), DbErr> {
+    event::Entity::update_many()
+        .col_expr(event::Column::UpdatedAtMs, Expr::value(now_ms))
+        .filter(event::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Delete the Event row itself. Its members go first — see
+/// [`crate::event::release`], which owns the objects behind them.
+pub async fn delete_event<C: ConnectionTrait>(db: &C, id: i64) -> Result<u64, DbErr> {
+    Ok(event::Entity::delete_by_id(id)
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// One Event's members, oldest transmission first — the order they are listed,
+/// played and exported in, because an incident has one useful order.
+///
+/// `limit == 0` means "all of them", [`crate::archive::CallSearch`]'s own
+/// convention for an unwindowed read.
+pub async fn event_members<C: ConnectionTrait>(
+    db: &C,
+    event_id: i64,
+    limit: u64,
+    offset: u64,
+) -> Result<Vec<event_call::Model>, DbErr> {
+    let query = event_call::Entity::find()
+        .filter(event_call::Column::EventId.eq(event_id))
+        .order_by_asc(event_call::Column::CallAtMs)
+        .order_by_asc(event_call::Column::Id);
+    match limit {
+        // **No window at all**, which is not the same as a zero-length one. An
+        // `OFFSET` with no `LIMIT` beside it is a syntax error in SQLite, and
+        // an offset into "all of them" means nothing anyway.
+        0 => query.all(db).await,
+        limit => query.limit(limit).offset(offset).all(db).await,
+    }
+}
+
+/// One member, by its own id **and** the Event it must belong to.
+///
+/// Both, so a member id from one Event cannot address another's: this row is the
+/// only thing naming an object the caller is about to delete.
+pub async fn find_event_member<C: ConnectionTrait>(
+    db: &C,
+    event_id: i64,
+    member_id: i64,
+) -> Result<Option<event_call::Model>, DbErr> {
+    event_call::Entity::find_by_id(member_id)
+        .filter(event_call::Column::EventId.eq(event_id))
+        .one(db)
+        .await
+}
+
+/// Which Calls this Event already holds — what makes freezing idempotent.
+pub async fn event_member_call_ids<C: ConnectionTrait>(
+    db: &C,
+    event_id: i64,
+) -> Result<std::collections::HashSet<CallId>, DbErr> {
+    Ok(event_call::Entity::find()
+        .select_only()
+        .column(event_call::Column::CallId)
+        .filter(event_call::Column::EventId.eq(event_id))
+        .into_tuple::<CallId>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect())
+}
+
+/// Freeze one Call into an Event.
+///
+/// Takes a [`StoredAudio`] for [`insert_call`]'s reason (#96): only a completed
+/// write produces one, so "the copy exists before the row that points at it" is a
+/// type rather than a comment. An **Encrypted Call** has nothing to copy and
+/// passes an empty one.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_event_member<C: ConnectionTrait>(
+    db: &C,
+    event_id: i64,
+    call_id: CallId,
+    call_at_ms: i64,
+    duration_ms: Option<i64>,
+    audio: &StoredAudio,
+    snapshot: &str,
+    now_ms: i64,
+) -> Result<event_call::Model, DbErr> {
+    event_call::ActiveModel {
+        event_id: Set(event_id),
+        call_id: Set(call_id),
+        call_at_ms: Set(call_at_ms),
+        duration_ms: Set(duration_ms),
+        object_key: Set(audio.key().to_owned()),
+        audio_size: Set(audio.bytes()),
+        snapshot: Set(snapshot.to_owned()),
+        added_at_ms: Set(now_ms),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+}
+
+/// Drop member rows. The objects behind them are [`crate::event::release`]'s,
+/// which deletes them **after** this has committed — ADR-0002's order, so a
+/// crash in between leaves an **Orphan** the GC reclaims rather than a member
+/// whose audio 404s.
+pub async fn delete_event_members<C: ConnectionTrait>(db: &C, ids: &[i64]) -> Result<u64, DbErr> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    Ok(event_call::Entity::delete_many()
+        .filter(event_call::Column::Id.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// Total bytes of **frozen** audio across every Event.
+///
+/// Counted by **Retention**'s size cap and never pruned by it (#67). A frozen
+/// copy is stored audio on the same disk as everything else, so a cap that could
+/// not see it would stop being true the moment an Operator curates an incident —
+/// which is the one failure `max_size_gb` exists to prevent.
+pub async fn frozen_audio_bytes<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
+    let total: Option<i64> = event_call::Entity::find()
+        .select_only()
+        .column_as(
+            event_call::Column::AudioSize
+                .sum()
+                .cast_as(Alias::new("BIGINT")),
+            "total",
+        )
+        .into_tuple::<Option<i64>>()
+        .one(db)
+        .await?
+        .flatten();
+    Ok(total.unwrap_or(0).max(0) as u64)
 }
 
 #[cfg(test)]

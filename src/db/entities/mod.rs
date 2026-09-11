@@ -13,6 +13,8 @@ pub mod call_tone;
 pub mod call_unit;
 pub mod downstream;
 pub mod downstream_delivery;
+pub mod event;
+pub mod event_call;
 pub mod group;
 pub mod listener_sample;
 pub mod log_event;

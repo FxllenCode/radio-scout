@@ -37,6 +37,7 @@
 
 pub mod document;
 pub mod downstreams;
+pub mod events;
 pub mod keys;
 pub mod labels;
 pub mod members;
@@ -96,6 +97,28 @@ pub fn routes() -> Router<AppState> {
         // and the one thing an Operator does about one. No create and no edit:
         // minting is the Listener's, and a link that has run out is re-shared
         // rather than extended.
+        // **Events** (#67, spec US 38) — the one curation surface that copies
+        // audio, which is why its members are their own routes. Behind the gate
+        // because freezing spends disk **Retention** can never reclaim, where a
+        // Star and a Share link are each bounded by something (`curate::events`).
+        .route("/api/admin/events", get(events::list).post(events::create))
+        .route(
+            "/api/admin/events/{id}",
+            get(events::detail)
+                .patch(events::update)
+                .delete(events::remove),
+        )
+        .route("/api/admin/events/{id}/share", get(events::share))
+        .route("/api/admin/events/{id}/calls", post(events::add))
+        .route(
+            "/api/admin/events/{id}/calls/{member}",
+            axum::routing::delete(events::remove_call),
+        )
+        .route(
+            "/api/admin/events/{id}/calls/{member}/audio",
+            get(events::member_audio),
+        )
+        .route("/api/admin/events/{id}/export", get(crate::export::event))
         .route("/api/admin/shares", get(shares::list))
         .route(
             "/api/admin/shares/{id}",
@@ -173,6 +196,10 @@ pub enum What {
     Webhook,
     ToneProfile,
     ShareLink,
+    Event,
+    /// One **Call** frozen into an Event — addressed by the member's own id,
+    /// never the Call's, because the Call may be long gone (#67).
+    EventCall,
 }
 
 impl What {
@@ -189,6 +216,8 @@ impl What {
             What::Webhook => "webhook",
             What::ToneProfile => "tone profile",
             What::ShareLink => "share link",
+            What::Event => "event",
+            What::EventCall => "call in this event",
         }
     }
 
@@ -207,6 +236,8 @@ impl What {
             What::Webhook => "webhook-not-found",
             What::ToneProfile => "tone-profile-not-found",
             What::ShareLink => "share-link-not-found",
+            What::Event => "event-not-found",
+            What::EventCall => "event-call-not-found",
         }
     }
 
@@ -224,7 +255,9 @@ impl What {
             | What::Downstream
             | What::Webhook
             | What::ToneProfile
-            | What::ShareLink => "ref-taken",
+            | What::ShareLink
+            | What::Event
+            | What::EventCall => "ref-taken",
         }
     }
 
@@ -240,7 +273,9 @@ impl What {
             | What::ToneProfile
             | What::Downstream
             | What::Webhook
-            | What::ShareLink => "has-calls",
+            | What::ShareLink
+            | What::Event
+            | What::EventCall => "has-calls",
         }
     }
 }
@@ -329,6 +364,14 @@ pub enum Rejected {
     /// row, and taking the known marks down with it would silence a webhook that
     /// was working.
     UnknownMark { mark: String },
+    /// More Calls than one request may freeze into an **Event** (#67).
+    ///
+    /// Carries both numbers, [`crate::failure::Reason::ExportTooManyCalls`]'s
+    /// rule: "add fewer" is only actionable if you know how many fewer. It is a
+    /// constant rather than a setting because what it bounds is a Pi copying
+    /// objects one at a time inside one request, not a stranger's appetite —
+    /// see `curate::events::MAX_PER_REQUEST`.
+    TooManyCalls { calls: u64, max: u64 },
     /// A delete that would take Calls with it, and nobody asked it to.
     ///
     /// Retention owns removing Calls end to end — the row, the audio object and
@@ -355,6 +398,7 @@ impl Rejected {
             Rejected::UnknownFormat { .. } => "unknown-format",
             Rejected::UnknownMark { .. } => "unknown-mark",
             Rejected::UnusableToneProfile { .. } => "unusable-tone-profile",
+            Rejected::TooManyCalls { .. } => "too-many-calls",
             Rejected::HasCalls { what, .. } => what.has_calls(),
         }
     }
@@ -372,6 +416,7 @@ impl Rejected {
             | Rejected::UnknownMark { .. }
             | Rejected::UnusableToneProfile { .. } => StatusCode::BAD_REQUEST,
             Rejected::NotFound(_) => StatusCode::NOT_FOUND,
+            Rejected::TooManyCalls { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Rejected::NameTaken { .. }
             | Rejected::RefTaken { .. }
             | Rejected::RangeOverlaps { .. }
@@ -447,6 +492,10 @@ impl std::fmt::Display for Rejected {
                 crate::webhook::MARKS
                     .map(crate::webhook::Mark::slug)
                     .join(", ")
+            ),
+            Rejected::TooManyCalls { calls, max } => write!(
+                f,
+                "that is {calls} calls; at most {max} can be added at once"
             ),
             Rejected::HasCalls { what, calls } => write!(
                 f,

@@ -333,7 +333,7 @@ _Avoid_: history, library, database, back catalogue.
 **Retention**:
 The policy that bounds the **Archive**: an age window (in days) plus an optional cap on total stored audio, overridable per System/Talkgroup (unset inherits). Expressed as configuration; enforced by sweeps.
 
-A **Star** buys a Call a *longer age window* where the Operator has configured one (#66) — not an exemption, and never one from the **size cap**, because a cap a Listener can defeat is not a cap and this is the one policy defeasible by somebody holding no credential at all. **Event** members are not exempt either — but that is #67's to build and not this entry's to claim: the plan is that they are frozen by *copying* their audio at curation time, so the sweep stays one pass over one archive. What #66 settled is only that the sweep has one exemption today, and it is the Star's window.
+A **Star** buys a Call a *longer age window* where the Operator has configured one (#66) — not an exemption, and never one from the **size cap**, because a cap a Listener can defeat is not a cap and this is the one policy defeasible by somebody holding no credential at all. **Event** members are not exempt either, and #67 built what this entry planned: they are frozen by *copying* their audio at curation time, so the sweep stays one pass over one archive and never has to know an Event exists. The sweep therefore still has exactly one exemption, and it is the Star's window — what the copies get instead is to be **counted by the size cap and never taken by it**, so `max_size_gb` keeps describing the disk.
 _Avoid_: expiry, TTL, cleanup.
 
 **Share link**:
@@ -358,7 +358,9 @@ they have hit.
 
 Deliberately not an **Event** (a curated collection frozen against Retention) and not an **Access
 code** (a scoped credential for the whole Instance): a Share link is one Call, for a while, to
-whoever holds it.
+whoever holds it. The contrast with an Event is sharp on every axis and each difference is the same
+difference — who is publishing: a Listener mints this one and an Operator curates that one, so this
+one expires and is bounded by the Calls table where that one is a toggle and bounded by the gate.
 _Avoid_: public link (fine in prose, wrong for the entity), permalink (it expires), token (the
 secret *inside* one), embed (#75's iframe page is a different thing).
 
@@ -399,6 +401,14 @@ _Avoid_: favorite, bookmark, like.
 
 **Event**:
 A named, curated collection of **Calls** — an incident assembled by hand — frozen against **Retention**, shareable by link, exportable as audio. The one thing in the **Archive** that is meant to outlive it.
+
+**A member is a snapshot, not a pointer** (#67). Freezing *copies* the Call's audio under a key of its own and stores the Call's own wire document beside it, so an Event is readable and playable when nothing it was made from survives — and **Retention**'s sweep stays one pass over one archive, which is what the copy buys. The row carries no foreign key to the Call, which is the **Share link**'s rule exactly inverted: a share link is a child that goes *with* its Call, so the prune must name it; a frozen member must *survive* that same prune, so it must not appear there and must carry nothing that would make it fail.
+
+**It is the Operator's, and that is a departure from the story it came from.** Spec US 38 is a **Listener**'s, and every other Listener-facing mark here takes no credential — but a **Star** is bounded by a window the Operator sets and by the size cap that outranks it, and a Share link is bounded by the Calls table. Freezing is bounded by *nothing*: it spends disk permanently and no policy here can reclaim it. So curating one takes the admin session; a Listener still receives, plays and exports a shared Event.
+
+**Frozen bytes are counted by the size cap and never taken by it.** They are stored audio on the same disk, so a cap blind to them would stop being true the moment an incident was curated. When Events alone exceed the cap the sweep empties the Archive around them and then stops, saying so — the visible failure rather than the quiet one.
+
+**The link does not expire**, alone among this project's public links, because neither half of a Share link's reasoning applies: the Operator is the one publishing, and an Event is the durable thing by definition. What replaces the expiry is a **toggle**, and turning it off is a *revoke* — the token is cleared, so that URL is dead for good and sharing again mints a different one. It is the only revoke there is here.
 _Avoid_: incident (the real-world happening, not the collection), playlist, compilation.
 
 **Sweep**:

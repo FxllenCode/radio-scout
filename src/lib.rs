@@ -18,6 +18,7 @@ pub mod db;
 pub mod delivery;
 pub mod downstream;
 pub mod enhance;
+pub mod event;
 pub mod export;
 pub mod failure;
 pub mod http_log;
@@ -246,6 +247,14 @@ pub fn build_app(state: AppState) -> Router {
         // token is never logged" is true by construction (ADR-0011 rule 2).
         .route(share::SHARE_PATH, get(share::open))
         .route(share::SHARE_AUDIO_PATH, get(share::audio))
+        // **An Event's share surface** (#67, spec US 38), a sibling of `/s` and
+        // outside `/api` for its reason: a page a stranger opens, with the token
+        // in the query string so `http_log` never writes it down. Three routes,
+        // because an incident is a list — the page, one member's bytes, and the
+        // whole thing as a file.
+        .route(crate::event::EVENT_PATH, get(crate::event::open))
+        .route(crate::event::EVENT_AUDIO_PATH, get(crate::event::audio))
+        .route(crate::event::EVENT_EXPORT_PATH, get(crate::event::export))
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.
         .fallback(web::spa_handler)

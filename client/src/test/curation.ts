@@ -2,6 +2,9 @@ import { http, HttpResponse } from 'msw'
 
 import type {
   AdminApiKey,
+  AdminEvent,
+  EventMember,
+  FreezeReport,
   AdminShareLink,
   AdminDownstream,
   AdminWebhook,
@@ -42,6 +45,14 @@ export class FakeInstance {
   downstreams: AdminDownstream[] = []
   webhooks: AdminWebhook[] = []
   shares: AdminShareLink[] = []
+  /** Events (#67), with their frozen members beside them for `members`' reason:
+   *  the real listing deliberately keeps them off the rows. */
+  events: AdminEvent[] = []
+  eventCalls = new Map<number, EventMember[]>()
+  /** An Event's share token, by id — kept here rather than on the row because
+   *  the server never returns one from a listing, which is the property the
+   *  screen is built on. */
+  eventTokens = new Map<number, string>()
   /** Member Refs, by owning Talkgroup id (#50). Kept beside the rows rather
    *  than on them because the server deliberately keeps them off the listing —
    *  a query per row on a page of five hundred, for a column it cannot edit. */
@@ -196,6 +207,39 @@ export class FakeInstance {
       ...row,
     }
     this.shares.push(created)
+    return created
+  }
+
+  /** One Event, with however many frozen members it was given. */
+  event(row: Partial<AdminEvent> = {}, members: Partial<EventMember>[] = []): AdminEvent {
+    const id = this.id()
+    const frozen: EventMember[] = members.map((member, index) => ({
+      // The Call's id and the member's own are deliberately different numbers:
+      // a fixture where they matched would model a document the server cannot
+      // send, and would have hidden the collision that made them one key.
+      id: 500 + index,
+      memberId: this.id(),
+      addedAtMs: 1_700_000_100_000,
+      systemRef: 11,
+      systemLabel: 'Fulton',
+      talkgroupRef: 54241,
+      talkgroupLabel: 'Fire Dispatch',
+      timestamp: 1_699_999_000_000 + index * 1_000,
+      audioUrl: `/api/admin/events/${id}/calls/${900 + index}/audio`,
+      ...member,
+    }))
+    this.eventCalls.set(id, frozen)
+    const created: AdminEvent = {
+      id,
+      name: 'Mill Street fire',
+      calls: frozen.length,
+      bytes: frozen.length * 1_000,
+      shared: false,
+      createdAtMs: 1_700_000_000_000,
+      updatedAtMs: 1_700_000_000_000,
+      ...row,
+    }
+    this.events.push(created)
     return created
   }
 
@@ -809,7 +853,187 @@ export function curationHandlers(instance: FakeInstance) {
       }
       return new HttpResponse(null, { status: 204 })
     }),
+
+    // **Events** (#67). Unlike share links this is a full CRUD surface, because
+    // curating an incident is the Operator's — the only write on the Instance
+    // that spends storage **Retention** can never reclaim.
+    http.get(`${ORIGIN}/api/admin/events`, ({ request }) => {
+      const url = new URL(request.url)
+      const limit = Number(url.searchParams.get('limit') ?? 50)
+      const offset = Number(url.searchParams.get('offset') ?? 0)
+      const results = instance.events.slice(offset, offset + limit)
+      return HttpResponse.json({
+        results,
+        count: instance.events.length,
+        limit,
+        offset,
+        hasMore: offset + results.length < instance.events.length,
+      })
+    }),
+    http.get(`${ORIGIN}/api/admin/events/:id`, ({ params }) => {
+      const event = eventOf(instance, params.id)
+      if (!event) return refusal(404, 'event-not-found', 'no such event')
+      return HttpResponse.json({
+        ...event,
+        members: instance.eventCalls.get(event.id) ?? [],
+      })
+    }),
+    http.get(`${ORIGIN}/api/admin/events/:id/share`, ({ params }) => {
+      const event = eventOf(instance, params.id)
+      if (!event) return refusal(404, 'event-not-found', 'no such event')
+      const token = instance.eventTokens.get(event.id)
+      return HttpResponse.json({
+        url: token ? `/e?t=${token}` : undefined,
+        shared: token !== undefined,
+      })
+    }),
+    http.post(`${ORIGIN}/api/admin/events`, async ({ request }) => {
+      const body = (await request.json()) as {
+        name: string
+        notes?: string | null
+        callIds?: number[]
+      }
+      instance.wrote.push({ method: 'POST', path: '/api/admin/events', body })
+      if (body.name.trim() === '') {
+        return refusal(400, 'field-required', 'name is required')
+      }
+      const created = instance.event({ name: body.name, notes: body.notes ?? undefined })
+      return HttpResponse.json(
+        { ...created, members: [], ...frozen(instance, created.id, body.callIds ?? []) },
+        { status: 201 },
+      )
+    }),
+    http.patch(`${ORIGIN}/api/admin/events/:id`, async ({ params, request }) => {
+      const body = (await request.json()) as {
+        name?: string
+        notes?: string | null
+        shared?: boolean
+      }
+      instance.wrote.push({
+        method: 'PATCH',
+        path: `/api/admin/events/${params.id}`,
+        body,
+      })
+      const event = eventOf(instance, params.id)
+      if (!event) return refusal(404, 'event-not-found', 'no such event')
+      if (body.name !== undefined) {
+        if (body.name.trim() === '') {
+          return refusal(400, 'field-required', 'name is required')
+        }
+        event.name = body.name.trim()
+      }
+      if (body.notes !== undefined) event.notes = body.notes ?? undefined
+      if (body.shared !== undefined) {
+        // The server's own rule: off clears the token, so sharing again mints a
+        // *different* link — this toggle is the only revoke there is.
+        if (body.shared && !instance.eventTokens.has(event.id)) {
+          instance.eventTokens.set(event.id, `tok-${instance.id()}`)
+        }
+        if (!body.shared) instance.eventTokens.delete(event.id)
+        event.shared = body.shared
+      }
+      return HttpResponse.json(event)
+    }),
+    http.delete(`${ORIGIN}/api/admin/events/:id`, ({ params }) => {
+      instance.wrote.push({
+        method: 'DELETE',
+        path: `/api/admin/events/${params.id}`,
+        body: undefined,
+      })
+      const event = eventOf(instance, params.id)
+      if (!event) return refusal(404, 'event-not-found', 'no such event')
+      instance.events = instance.events.filter((it) => it.id !== event.id)
+      instance.eventCalls.delete(event.id)
+      instance.eventTokens.delete(event.id)
+      return new HttpResponse(null, { status: 204 })
+    }),
+    http.post(`${ORIGIN}/api/admin/events/:id/calls`, async ({ params, request }) => {
+      const body = (await request.json()) as { callIds: number[] }
+      instance.wrote.push({
+        method: 'POST',
+        path: `/api/admin/events/${params.id}/calls`,
+        body,
+      })
+      const event = eventOf(instance, params.id)
+      if (!event) return refusal(404, 'event-not-found', 'no such event')
+      const report = frozen(instance, event.id, body.callIds)
+      return HttpResponse.json({
+        ...event,
+        members: instance.eventCalls.get(event.id) ?? [],
+        ...report,
+      })
+    }),
+    http.delete(
+      `${ORIGIN}/api/admin/events/:id/calls/:member`,
+      ({ params }) => {
+        instance.wrote.push({
+          method: 'DELETE',
+          path: `/api/admin/events/${params.id}/calls/${params.member}`,
+          body: undefined,
+        })
+        const event = eventOf(instance, params.id)
+        if (!event) return refusal(404, 'event-not-found', 'no such event')
+        const held = instance.eventCalls.get(event.id) ?? []
+        const kept = held.filter((it) => String(it.memberId) !== params.member)
+        if (kept.length === held.length) {
+          return refusal(404, 'event-call-not-found', 'no such call in this event')
+        }
+        instance.eventCalls.set(event.id, kept)
+        event.calls = kept.length
+        return new HttpResponse(null, { status: 204 })
+      },
+    ),
   ]
+}
+
+function eventOf(instance: FakeInstance, id: unknown): AdminEvent | undefined {
+  return instance.events.find((it) => String(it.id) === String(id))
+}
+
+/** Freeze these Calls into an Event, the way the server does: a Call already
+ *  held is counted rather than duplicated, and one over 900 is treated as gone
+ *  so a test can drive the report's other arms. */
+function frozen(
+  instance: FakeInstance,
+  id: number,
+  callIds: number[],
+): { added: FreezeReport } {
+  const held = instance.eventCalls.get(id) ?? []
+  const report: FreezeReport = {
+    frozen: 0,
+    alreadyHeld: 0,
+    missing: 0,
+    unreadable: 0,
+  }
+  for (const callId of callIds) {
+    if (held.some((member) => member.id === callId)) {
+      report.alreadyHeld += 1
+      continue
+    }
+    if (callId >= 900) {
+      report.missing += 1
+      continue
+    }
+    held.push({
+      id: callId,
+      memberId: instance.id(),
+      addedAtMs: 1_700_000_100_000,
+      systemRef: 11,
+      systemLabel: 'Fulton',
+      talkgroupRef: 54241,
+      talkgroupLabel: 'Fire Dispatch',
+      timestamp: 1_699_999_000_000,
+      audioUrl: `/api/admin/events/${id}/calls/${callId}/audio`,
+    })
+    report.frozen += 1
+  }
+  instance.eventCalls.set(id, held)
+  const event = instance.events.find((it) => it.id === id)
+  if (event) {
+    event.calls = held.length
+    event.bytes = held.length * 1_000
+  }
+  return { added: report }
 }
 
 /** One System as a configuration document carries it. */

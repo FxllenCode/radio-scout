@@ -49,6 +49,11 @@ const SECTIONS = [
     hint: 'public links to a single call',
   },
   {
+    to: '/settings/admin/events',
+    label: 'Events',
+    hint: 'incidents kept past retention',
+  },
+  {
     to: '/settings/admin/listeners',
     label: 'Listeners',
     hint: 'how many people have been on',

@@ -41,10 +41,18 @@ pub struct Rendered {
 
 impl Rendered {
     pub fn call(preview: Preview) -> Self {
-        Rendered {
-            html: render(&preview),
-            gone: None,
-        }
+        Rendered::ok(render(&preview))
+    }
+
+    /// A page somebody else built — an **Event**'s (#67), which is a list where
+    /// this is one Call.
+    ///
+    /// Shared rather than re-implemented because what [`Rendered`] carries is
+    /// not the markup: it is the `noindex`, the `no-store`, and the rule that a
+    /// refusal is *recorded here and rendered there*. A second `IntoResponse`
+    /// would be a second chance to forget one of the three.
+    pub fn ok(html: String) -> Self {
+        Rendered { html, gone: None }
     }
 
     pub fn gone(gone: Gone) -> Self {
@@ -192,7 +200,7 @@ impl Preview {
 }
 
 /// What a Call is filed under: its Tag, its Group, or both.
-fn category(call: &StoredCall) -> Option<String> {
+pub(crate) fn category(call: &StoredCall) -> Option<String> {
     match (
         call.talkgroup_group.as_deref(),
         call.talkgroup_tag.as_deref(),
@@ -204,14 +212,14 @@ fn category(call: &StoredCall) -> Option<String> {
 }
 
 /// A duration as `m:ss`, the client's own spelling.
-fn duration(ms: i64) -> String {
+pub(crate) fn duration(ms: i64) -> String {
     let total = ms.max(0) / 1_000;
     format!("{}:{:02}", total / 60, total % 60)
 }
 
 /// An instant in UTC, spelled out — the one timezone a server and a crawler can
 /// agree on. See the module note for what the browser then does with it.
-fn utc(at_ms: i64) -> String {
+pub(crate) fn utc(at_ms: i64) -> String {
     let format =
         time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
     time::OffsetDateTime::from_unix_timestamp_nanos(at_ms as i128 * 1_000_000)
@@ -223,7 +231,7 @@ fn utc(at_ms: i64) -> String {
 }
 
 /// ...and as the machine-readable attribute beside it.
-fn iso(at_ms: i64) -> String {
+pub(crate) fn iso(at_ms: i64) -> String {
     time::OffsetDateTime::from_unix_timestamp_nanos(at_ms as i128 * 1_000_000)
         .ok()
         .and_then(|at| {
@@ -240,7 +248,7 @@ fn iso(at_ms: i64) -> String {
 /// into JSON. `'` and `"` are escaped as well as the three that must be, because
 /// the same function renders attribute values — a `content="…"` in the OG card —
 /// and one escape used two ways cannot be the wrong one in either.
-fn escape(raw: &str) -> String {
+pub(crate) fn escape(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
         match ch {
@@ -256,7 +264,7 @@ fn escape(raw: &str) -> String {
 }
 
 /// One `<meta property=…>`, or nothing when there is nothing to say.
-fn meta(property: &str, content: Option<&str>) -> String {
+pub(crate) fn meta(property: &str, content: Option<&str>) -> String {
     match content {
         Some(content) => format!(
             "<meta property=\"{property}\" content=\"{}\">\n",
@@ -331,11 +339,21 @@ pub fn render(preview: &Preview) -> String {
 /// The **Marks** a Call carries, as badges — the same closed vocabulary the app
 /// shows (CONTEXT.md), never a free-form tag.
 fn marks(preview: &Preview) -> String {
+    mark_badges(preview.emergency, preview.encrypted, preview.tone)
+}
+
+/// ...over the three bits themselves, so an **Event**'s page renders a member's
+/// marks identically without building a [`Preview`] it has no expiry for (#67).
+///
+/// #92's rule one page along: two surfaces, one vocabulary. A badge that said
+/// "Tone-out" on one page and "Tone" on the other would be this Instance
+/// disagreeing with itself about a **Mark**.
+pub(crate) fn mark_badges(emergency: bool, encrypted: bool, tone: bool) -> String {
     let mut out = String::new();
     for (on, label) in [
-        (preview.emergency, "Emergency"),
-        (preview.encrypted, "Encrypted"),
-        (preview.tone, "Tone-out"),
+        (emergency, "Emergency"),
+        (encrypted, "Encrypted"),
+        (tone, "Tone-out"),
     ] {
         if on {
             let _ = write!(out, "<span class=\"mark\">{label}</span>");
@@ -375,12 +393,12 @@ pub fn render_gone(gone: Gone) -> String {
 /// Deliberately the product's name rather than the Operator's: **branding is
 /// #71**, and inventing a second place for an instance title here would be a
 /// setting to migrate the moment that lands.
-const SITE_NAME: &str = "Radio-Scout";
+pub(crate) const SITE_NAME: &str = "Radio-Scout";
 
 /// The icon a card shows — the PWA's own, which the binary already embeds, so
 /// there is no image to generate and none to store (`client/public/`, rasterized
 /// by `client/scripts/build-icons.sh`).
-const ICON_PATH: &str = "/icon-512.png";
+pub(crate) const ICON_PATH: &str = "/icon-512.png";
 
 /// The shell every page here shares.
 ///
@@ -399,7 +417,7 @@ const ICON_PATH: &str = "/icon-512.png";
 /// own — a share link is something you *send to a person*, not something you
 /// publish. An Operator who wants a Call on a public timeline has the Call's
 /// own page in the app for that.
-fn document(title: &str, head: &str, body: &str) -> String {
+pub(crate) fn document(title: &str, head: &str, body: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">

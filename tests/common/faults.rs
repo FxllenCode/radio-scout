@@ -246,6 +246,7 @@ impl Transaction for Refusing<Txn> {
 #[derive(Default)]
 struct Script {
     fail_puts: AtomicBool,
+    fail_deletes: AtomicBool,
     fail_presigning: AtomicBool,
     /// What a read of an object's bytes does. One value rather than a flag
     /// each, because "broken" and "gone" are alternatives: a store cannot both
@@ -277,6 +278,17 @@ impl Faults {
     /// refusing writes.
     pub fn fail_puts(&self) {
         self.0.fail_puts.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuse every delete from now on — a bucket whose credentials lost their
+    /// write permission, or a node that has gone away.
+    ///
+    /// The arm this reaches is the one every row-then-object delete has and no
+    /// real store can be talked into: a failed delete must be **counted, never
+    /// fatal**, because the row is already gone and one unhappy object must not
+    /// wedge a sweep — or an **Event**'s release (#67) — forever.
+    pub fn fail_deletes(&self) {
+        self.0.fail_deletes.store(true, Ordering::SeqCst);
     }
 
     /// Refuse to sign a URL from now on — a clock too far out for SigV4, or
@@ -332,6 +344,13 @@ impl Faults {
     fn check_puts(&self) -> Result<(), ObjectError> {
         match self.0.fail_puts.load(Ordering::SeqCst) {
             true => Err(refused("put")),
+            false => Ok(()),
+        }
+    }
+
+    fn check_deletes(&self) -> Result<(), ObjectError> {
+        match self.0.fail_deletes.load(Ordering::SeqCst) {
+            true => Err(refused("delete")),
             false => Ok(()),
         }
     }
@@ -396,6 +415,7 @@ impl AudioStore for FaultyStore {
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectError> {
+        self.faults.check_deletes()?;
         self.inner.delete(key).await
     }
 

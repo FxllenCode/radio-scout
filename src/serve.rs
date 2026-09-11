@@ -313,10 +313,47 @@ pub async fn serve_call(
         .map_err(Stage::LookUpCall.failed())?
         .ok_or(Reason::CallNotFound)?;
 
+    serve_object(
+        state,
+        &call.object_key,
+        call.mime.as_deref(),
+        &call.enhancement,
+        dedup_window_of(
+            call.created_at_ms,
+            state.clock.now_ms(),
+            state.ingest.dedup_replace,
+        ),
+        headers,
+    )
+    .await
+}
+
+/// One stored object, served — everything [`serve_call`] does once it has stopped
+/// being about a **Call**.
+///
+/// **The seam an Event's frozen copy comes through** (#67). An `event_calls` row
+/// is not a Call and may outlive the one it was made from, so there is no row for
+/// `serve_call` to read; what there *is* is a key, a MIME type, and the same
+/// question about presigning, ranges and cache headers. A parameter rather than a
+/// copy, for the reason #64 got one: a second implementation would be right on one
+/// door and wrong on the other the first time either moved.
+///
+/// A frozen copy passes [`EnhancementState::DONE`] and [`DedupWindow::Closed`]
+/// and means them — nothing ever rewrites one, which is what *frozen* is — so it
+/// is the one thing this Instance serves that is `immutable` from the moment it
+/// exists.
+pub async fn serve_object(
+    state: &AppState,
+    object_key: &str,
+    mime: Option<&str>,
+    enhancement: &str,
+    window: DedupWindow,
+    headers: &HeaderMap,
+) -> Result<Audio, Failure> {
     // Nothing is asked of the store about an object that isn't there — an
     // Encrypted Call's key is the empty string, and `plan` is what turns that
     // into an answer.
-    let stored = (!call.object_key.is_empty()).then_some(call.object_key.as_str());
+    let stored = (!object_key.is_empty()).then_some(object_key);
     let signed = match stored.filter(|_| state.audio.is_presigning()) {
         Some(key) => state
             .audio
@@ -336,14 +373,10 @@ pub async fn serve_call(
     };
 
     let serve = plan(Facts {
-        object_key: &call.object_key,
-        enhancement: &call.enhancement,
-        window: dedup_window_of(
-            call.created_at_ms,
-            state.clock.now_ms(),
-            state.ingest.dedup_replace,
-        ),
-        mime: call.mime.as_deref(),
+        object_key,
+        enhancement,
+        window,
+        mime,
         signed,
         size,
         range: headers.get(header::RANGE),
@@ -354,17 +387,35 @@ pub async fn serve_call(
         Serve::Redirect { .. } => bytes::Bytes::new(),
         Serve::Whole { .. } => state
             .audio
-            .get(&call.object_key)
+            .get(object_key)
             .await
             .map_err(Stage::ReadAudio.failed())?
             .ok_or(Reason::AudioNotFound)?,
         Serve::Range { start, end, .. } => state
             .audio
-            .get_range(&call.object_key, *start, *end + 1)
+            .get_range(object_key, *start, *end + 1)
             .await
             .map_err(Stage::ReadAudioRange.failed())?,
     };
     Ok(Audio { serve, bytes })
+}
+
+/// A **frozen** copy, served: final bytes, and they always will be (#67).
+pub async fn serve_frozen(
+    state: &AppState,
+    object_key: &str,
+    mime: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Audio, Failure> {
+    serve_object(
+        state,
+        object_key,
+        mime,
+        crate::db::entities::call::EnhancementState::DONE,
+        DedupWindow::Closed,
+        headers,
+    )
+    .await
 }
 
 /// The parsed outcome of a `Range` request header.

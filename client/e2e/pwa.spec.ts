@@ -103,7 +103,8 @@ test.describe('PWA', () => {
   })
 
   /**
-   * **A share link is the server's page, not the app's** (#64, spec US 32).
+   * **A share link is the server's page, not the app's** (#64 for one Call,
+   * #67 for an **Event**).
    *
    * The whole promise is that it plays without the app — so the one browser it
    * must not break in is the one that has this instance installed, where a
@@ -119,21 +120,25 @@ test.describe('PWA', () => {
     await controlled(page)
     await context.setOffline(true)
 
-    // First the three client-side routes that begin with an `s` — they still
+    // First the client-side paths that begin with a denied letter — they still
     // *do* get the shell, which is what the anchoring in `sw.ts` protects.
-    for (const path of ['/search', '/session', '/settings']) {
+    // `/events` is not a route today and is here on purpose: it is the shape of
+    // the thing the anchor exists for, and a regex written `^\/e` instead of
+    // `^\/e(\/|\?|$)` would deny it outright.
+    for (const path of ['/search', '/session', '/settings', '/events']) {
       await page.goto(path)
       await expect(
         page.getByRole('navigation', { name: 'Primary' }),
       ).toBeVisible()
     }
 
-    // Then the share link. A **navigation**, not a `fetch`: `NavigationRoute`
-    // matches on `request.mode === 'navigate'`, so a `fetch()` would prove
-    // nothing about it either way. Offline and denylisted, this reaches for the
-    // network and fails — where a worker answering it with the shell would
-    // succeed, which is the bug. Last, because a failed navigation leaves the
-    // page on an error document.
+    // Then the two share links. A **navigation**, not a `fetch`:
+    // `NavigationRoute` matches on `request.mode === 'navigate'`, so a `fetch()`
+    // would prove nothing about it either way. Offline and denylisted, these
+    // reach for the network and fail — where a worker answering them with the
+    // shell would succeed, which is the bug. Last, because a failed navigation
+    // leaves the page on an error document.
     await expect(page.goto('/s?t=nope')).rejects.toThrow()
+    await expect(page.goto('/e?t=nope')).rejects.toThrow()
   })
 })

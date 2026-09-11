@@ -112,6 +112,7 @@ describe('the admin gate', () => {
       '/settings/admin/downstreams',
       '/settings/admin/webhooks',
       '/settings/admin/shares',
+      '/settings/admin/events',
       '/settings/admin/listeners',
       '/settings/logs',
     ])

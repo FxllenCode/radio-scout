@@ -13,6 +13,7 @@ import { AdminScreen } from '@/routes/admin/AdminScreen'
 import { AdminTalkgroupsScreen } from '@/routes/admin/AdminTalkgroupsScreen'
 import { ApiKeysScreen } from '@/routes/admin/ApiKeysScreen'
 import { DownstreamsScreen } from '@/routes/admin/DownstreamsScreen'
+import { EventsScreen } from '@/routes/admin/EventsScreen'
 import { ListenersScreen } from '@/routes/admin/ListenersScreen'
 import { SharesScreen } from '@/routes/admin/SharesScreen'
 import { WebhooksScreen } from '@/routes/admin/WebhooksScreen'
@@ -67,6 +68,10 @@ export default function App() {
         />
         <Route path="settings/admin/webhooks" element={<WebhooksScreen />} />
         <Route path="settings/admin/shares" element={<SharesScreen />} />
+        {/* Incidents frozen against Retention (#67, spec US 38). Behind the
+            same gate: freezing copies audio no policy can reclaim, which is
+            why it is the Operator's and not a Listener's. */}
+        <Route path="settings/admin/events" element={<EventsScreen />} />
         {/* How many people have been listening (#62, spec US 41). Behind the
             same gate as the rest: counts are the Operator's business. */}
         <Route path="settings/admin/listeners" element={<ListenersScreen />} />

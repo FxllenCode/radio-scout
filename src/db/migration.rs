@@ -8,8 +8,8 @@ use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
     api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
-    downstream_delivery, group, listener_sample, log_event, share_link, site, system, tag,
-    talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
+    downstream_delivery, event, event_call, group, listener_sample, log_event, share_link, site,
+    system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
     webhook_delivery,
 };
 
@@ -40,6 +40,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0019_patched_channel_index::Migration),
             Box::new(m0020_share_links::Migration),
             Box::new(m0021_starred_calls::Migration),
+            Box::new(m0022_events::Migration),
         ]
     }
 }
@@ -1994,6 +1995,80 @@ mod m0021_starred_calls {
                         .drop_column(call::Column::StarredAtMs)
                         .to_owned(),
                 )
+                .await
+        }
+    }
+}
+
+/// **Events** — a curated collection of Calls that outlives the Archive (#67,
+/// spec US 38).
+///
+/// Two tables, and one absence worth naming: `event_calls.call_id` carries **no
+/// foreign key**. A member is a frozen snapshot, and its whole purpose is to
+/// still be there after **Retention** has pruned the Call it was made from — a
+/// constraint here would make every Event a row the sweep cannot get past,
+/// which is the failure #55 taught this project to look for, seen from the
+/// other side.
+///
+/// Two indexes. `(event_id, call_id)` is unique, so adding a Call to an Event it
+/// is already in is one member rather than two copies of one transmission —
+/// enforced here rather than by a read-then-write, which two open tabs would
+/// race. `(event_id, call_at_ms)` is the order the members are listed, played
+/// and exported in: an incident has one useful order, and without the index that
+/// order is a sort of the whole table per read.
+mod m0022_events {
+    use super::*;
+
+    const MEMBER_UNIQUE: &str = "idx_event_calls_event_call";
+    const MEMBER_ORDER: &str = "idx_event_calls_event_time";
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0022_events"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(event::Entity))
+                .await?;
+            manager
+                .create_table(schema.create_table_from_entity(event_call::Entity))
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name(MEMBER_UNIQUE)
+                        .table(event_call::Entity)
+                        .col(event_call::Column::EventId)
+                        .col(event_call::Column::CallId)
+                        .unique()
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name(MEMBER_ORDER)
+                        .table(event_call::Entity)
+                        .col(event_call::Column::EventId)
+                        .col(event_call::Column::CallAtMs)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(event_call::Entity).to_owned())
+                .await?;
+            manager
+                .drop_table(Table::drop().table(event::Entity).to_owned())
                 .await
         }
     }

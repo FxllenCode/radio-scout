@@ -171,6 +171,16 @@ stages! {
     // -- Stars (`crate::star`, #66) -----------------------------------------
     /// Marking, or un-marking, one Call as **Starred**.
     SetStar => "set-star",
+    // -- Events (`crate::event`, #67) ---------------------------------------
+    /// Assembling an **Event** — writing the row, freezing a Call into it, or
+    /// letting one go. Its own stage rather than [`Stage::Curate`] because it is
+    /// the only curation path besides a force-delete that touches the **object
+    /// store**, and "the database refused" and "the bucket refused" send an
+    /// Operator to different places.
+    CurateEvent => "curate-event",
+    /// Reading the Event a share token names — the page, one member's audio, and
+    /// the download alike.
+    OpenEvent => "open-event",
 }
 
 impl Stage {

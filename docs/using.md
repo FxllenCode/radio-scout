@@ -466,6 +466,26 @@ handing you a download that was never going to arrive. Narrow the range and try 
 One export runs at a time on an instance. If somebody else is mid-download you are asked to come
 back in a moment, rather than both of you getting a slow one.
 
+### Someone sent you an event
+
+An **Event** is an incident your operator kept: a named collection of calls — the tone-out, the
+dispatch, the fireground traffic, the all-clear — assembled by hand and **frozen**, so it is still
+there long after retention has taken everything around it.
+
+You cannot make one; only the operator can, because keeping an incident costs their disk for good.
+What you can be sent is a link to one, and that link works the way a shared call's does: a plain
+page in any browser, on any phone, for somebody who has never heard of this instance. It lists every
+call in the incident with a play button on each, and offers the same two downloads a search does —
+a zip, or one stitched file.
+
+Two differences from a shared call are worth knowing:
+
+- **It does not expire.** An event is the durable thing by definition, so there is no week on it.
+  What there is instead is an operator who can stop sharing it, and if they do the link is dead for
+  good rather than paused — re-sharing gives out a different one.
+- **A long incident shows the first two hundred calls.** The page says so when it does, and the
+  download has all of them.
+
 ---
 
 ## On your phone

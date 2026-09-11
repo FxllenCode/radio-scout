@@ -791,3 +791,99 @@ export interface NewToneProfile {
   gapMaxMs?: number
   disabled?: boolean
 }
+
+/**
+ * One **Event** (#67, spec US 38), as the curation listing shows it.
+ *
+ * **There is no token**, the [`AdminShareLink`] rule and for its reason: the
+ * whole link is the credential, so a listing that carried one would put it into
+ * every page of every screen that renders Events. What is here is whether it is
+ * shared *at all*; the link itself is fetched once, when an Operator asks to
+ * copy it.
+ */
+export interface AdminEvent {
+  id: number
+  name: string
+  notes?: string
+  /** How many Calls are frozen into it, and how many bytes those copies come to
+   *  — the number an Operator is spending, since **Retention** can never
+   *  reclaim it. */
+  calls: number
+  bytes: number
+  shared: boolean
+  createdAtMs: number
+  updatedAtMs: number
+}
+
+/** One Event with its frozen members — what opening it shows. */
+export interface AdminEventDetail extends AdminEvent {
+  members: EventMember[]
+}
+
+/**
+ * ...and the same document answered by a write, which **always** carries the
+ * report.
+ *
+ * Its own type rather than an optional field, because the two are different
+ * facts: a *read* has no request to report on, and a create or an add always
+ * has one. Folding them into `added?: FreezeReport` would put a branch in every
+ * caller for a shape the server never sends — untestable by construction, which
+ * is the kind of code that quietly stops being exercised.
+ */
+export interface FrozenEvent extends AdminEventDetail {
+  added: FreezeReport
+}
+
+/**
+ * One **Call** frozen into an Event.
+ *
+ * It *is* a [`Call`] — the same wire shape a search page answers with, so every
+ * component that can draw a search row can draw one of these (#65's manifest
+ * rule). What it adds is the **member's own id**, which is what a remove
+ * addresses: the Call's id may name a row that no longer exists, which is the
+ * whole point of the feature.
+ */
+export interface EventMember extends Call {
+  /** What a remove and the audio route address.
+   *
+   *  **`memberId`, not `id`** — `id` is the *Call's*, exactly as it is on a
+   *  search row, because this document is flattened from one. A field called
+   *  `id` here would serialize to the same key on the wire and the last one
+   *  written would win, which is how the client came to read the Call's id and
+   *  use it to address a delete. */
+  memberId: number
+  addedAtMs: number
+}
+
+/**
+ * What freezing a batch of Calls came to.
+ *
+ * Four endings rather than a count, because an Operator does different things
+ * about them: narrow the selection, wait for the object store to come back, or
+ * nothing at all.
+ */
+export interface FreezeReport {
+  frozen: number
+  alreadyHeld: number
+  /** No such Call — it aged out while they were reading the page. */
+  missing: number
+  /** The Call is there and its audio would not read. **No member was written**,
+   *  so adding it again once the store is back really does freeze it. */
+  unreadable: number
+}
+
+/** An Event's share link, fetched only when an Operator asks to copy it. */
+export interface EventShare {
+  /** `/e?t=…`, absent when the Event is not shared. */
+  url?: string
+  shared: boolean
+}
+
+/** What a new Event needs. `callIds` is how the screen is really used: an Event
+ *  is made *from* a multi-selection rather than made and then filled. */
+export interface NewEvent {
+  name: string
+  notes?: string | null
+  callIds?: number[]
+}
+

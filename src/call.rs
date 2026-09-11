@@ -167,8 +167,29 @@ pub type Emission = i64;
 /// A stored Call as delivered over the live feed and referenced by the audio
 /// endpoint. Serializes with the compact camelCase keys the live-feed protocol
 /// uses (ADR-0004). `object_key` is internal and never sent to clients.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// # It reads back, and that is what an **Event** is made of
+///
+/// `Deserialize` + a container-level `default` exist for one caller: an Event
+/// member is a *snapshot* of this document, frozen when an Operator curated it
+/// and read back years later after the Call itself has been pruned (#67). Two
+/// properties follow, and both are the reason the snapshot is this shape rather
+/// than a second one.
+///
+/// A field added to the Archive's wire reaches a frozen Call with **no
+/// migration** — the manifest's rule (#65), one table along. And a snapshot
+/// written by *this* release and read by a later one gets the new field's
+/// default rather than a parse error, which is what makes a document safe to
+/// keep for as long as an Event is meant to last. The container default is what
+/// buys the second: nearly every field here is `skip_serializing_if`, so a
+/// frozen document is mostly *absent keys* by design.
+///
+/// `Default` is therefore reachable, which [`crate::db::repo::NewCall`]
+/// deliberately is not — and the asymmetry is the point. That type is what a
+/// **Recorder** said, where a default would be an invented fact; this one is a
+/// *view*, and a view of nothing is an empty view.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct StoredCall {
     pub id: CallId,
     pub system_ref: i64,

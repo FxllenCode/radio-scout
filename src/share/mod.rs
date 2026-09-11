@@ -280,7 +280,11 @@ pub fn audio_link_to(token: &str) -> String {
 /// unguessable at any rate an instance could be asked to answer, and this string
 /// is one a human reads in a chat client, where twice the length buys nothing
 /// and costs a line wrap.
-fn new_token() -> String {
+///
+/// `pub` because an **Event**'s share token is the same kind of secret minted the
+/// same way (#67), and two generators would be two chances for one of them to be
+/// narrower than it claims.
+pub fn new_token() -> String {
     use argon2::password_hash::rand_core::{OsRng, RngCore};
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
@@ -288,6 +292,10 @@ fn new_token() -> String {
 }
 
 /// The token in `?t=…`.
+///
+/// Shared with [`crate::event`], which spells its links the same way for the
+/// same reason (#67): the whole URL is the credential, and it rides the query
+/// string because that is the one part of a request nothing writes down.
 #[derive(Debug, Deserialize)]
 pub struct TokenQuery {
     /// Optional so a bare `/s` is an ordinary "no such link" rather than
@@ -295,6 +303,13 @@ pub struct TokenQuery {
     /// Operator could grep.
     #[serde(default, rename = "t")]
     token: Option<String>,
+}
+
+impl TokenQuery {
+    /// The token, if one was sent.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
 }
 
 /// `POST /api/call/{id}/share` — mint (or re-mint) this Call's public link.
@@ -406,7 +421,7 @@ pub async fn open(
     State(state): State<AppState>,
     Query(query): Query<TokenQuery>,
 ) -> Result<page::Rendered, Failure> {
-    let opened = match resolve(&state, query.token.as_deref()).await? {
+    let opened = match resolve(&state, query.token()).await? {
         Resolved::Live(opened) => opened,
         Resolved::Gone(gone) => return Ok(page::Rendered::gone(gone)),
     };
@@ -438,7 +453,7 @@ pub async fn audio(
     Query(query): Query<TokenQuery>,
     headers: HeaderMap,
 ) -> Result<crate::serve::Audio, Failure> {
-    match resolve(&state, query.token.as_deref()).await? {
+    match resolve(&state, query.token()).await? {
         Resolved::Live(opened) => crate::serve::serve_call(&state, opened.call.id, &headers).await,
         Resolved::Gone(gone) => Err(gone.reason().into()),
     }

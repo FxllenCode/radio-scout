@@ -752,6 +752,55 @@ placed on one. Both are still in the zip's manifest. A call whose audio object h
 since the export began becomes silence of exactly its declared length, so the file stays valid and
 everything after it still plays where it should.
 
+## Events: keeping an incident for good
+
+Retention eventually takes everything. An **Event** is the exception: a named collection of calls
+whose audio is **copied** when you curate it, so the sweep never touches it and the incident is
+still there in a year.
+
+You build one from the search screen. Find the calls, tick them, name the incident — it is the one
+control on that screen only *you* see, because you are signed in and a listener is not. Settings →
+Admin → **Events** is where you rename one afterwards, drop a call that should not be in it, share
+it, download it, or let it go.
+
+There is no `[events]` section: an Event borrows `[share] enabled` for its page and `[export]` for
+its downloads, because those are the two questions you have already been asked — is this instance's
+audio reachable from outside, and how much of it may leave at once.
+
+Five things to know before you make one.
+
+**It costs disk, for good.** Freezing copies the audio rather than pointing at it, which is what
+keeps the retention sweep one pass over one archive — but it means the bytes are spent until you
+delete the Event. Each row says how many it is holding, and deleting one is the only thing that
+gives them back. A call that is still in the archive is therefore stored twice for as long as both
+survive; that is the price of the incident outliving the window.
+
+**`max_size_gb` counts them and never takes them.** They are audio on the same disk, so a cap that
+could not see them would stop being true the moment you kept something. If your Events alone come
+to more than the cap, the sweep empties the archive around them and then stops with a line in the
+log saying so — which is the honest answer, and your cue to delete an Event or raise the number.
+Nothing silently goes over.
+
+**Curating one takes the admin password.** Starring and share links do not, because each is bounded
+by something: a star by the window you set, a link by the number of calls in the archive. This is
+bounded by nothing at all, so it is not something a stranger gets to do to your SD card.
+
+**Only you can make one; anybody you send it to can play it.** Sharing an Event gives you a public
+link — a plain page listing every call in the incident with a play button on each, and both
+downloads. It does not expire, because an Event is the durable thing by definition; instead
+*turning sharing off is a revoke*, and it really is one. The URL dies, and sharing again hands out a
+different link.
+
+**A call with no audio is still in it.** An encrypted call freezes as a row, because that the
+channel was busy is part of the incident. It has no player on the page and is not in a stitched
+file, exactly as it is not in a range export's.
+
+**Five hundred calls at a time.** Each one is an object read and an object written, one after
+another, inside the request you are making — so a bigger batch would be a request that outlives its
+own timeout while the copying carried on behind it. Above that you are told the count and add in
+batches. It is a fixed number rather than a setting: what it bounds is a Pi, not a stranger, since
+this surface already needs your password.
+
 ## Listener counts
 
 Settings → Admin → **Listeners** charts how many people have been connected, and when. It answers

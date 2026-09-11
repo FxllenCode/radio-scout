@@ -428,8 +428,22 @@ pub async fn sweep(
     // somebody holding no credential at all. The age pass above is where a Star
     // is honoured; the cap is the disk, and the disk is finite whatever anybody
     // meant to keep.
+    //
+    // **An Event's frozen copies are counted and never taken** (#67). They are
+    // stored audio on the same disk as everything else, so a cap blind to them
+    // would stop being true the moment an Operator curated an incident — and
+    // this setting exists to stop an SD card filling. They cannot be *pruned*,
+    // because being outside every policy is the whole of what freezing bought;
+    // so the cap eats the Archive around them and, if that is not enough, stops
+    // and says so below. That is the visible failure rather than the quiet one.
+    //
+    // Read **once**, outside the loop: pruning Calls cannot change it, and an
+    // Operator curating an Event mid-sweep is a difference the next sweep picks
+    // up — where re-reading would be a statement per batch, forever, to track a
+    // number that almost never moves.
     if let Some(cap) = config.max_size_bytes {
-        let mut total = repo::total_audio_bytes(db).await?;
+        let frozen = repo::frozen_audio_bytes(db).await?;
+        let mut total = repo::total_audio_bytes(db).await?.saturating_add(frozen);
         while total > cap {
             let page = repo::oldest_calls(db, config.batch_size).await?;
             if page.is_empty() {
@@ -451,7 +465,20 @@ pub async fn sweep(
             // authority, and one aggregate per batch is cheap next to the
             // deletes. It also guarantees progress — every round deletes at
             // least one row, so the loop terminates even if sizes are missing.
-            total = repo::total_audio_bytes(db).await?;
+            total = repo::total_audio_bytes(db).await?.saturating_add(frozen);
+        }
+        if total > cap {
+            // The Archive is empty (or unsized) and the disk is still over the
+            // line, which on an Instance with Events means the Events are the
+            // reason. **WARN and once per sweep** — an Operator must act, and
+            // the only actions are deleting an Event or raising the cap, so the
+            // line carries the number that decides which (ADR-0011 rules 7, 8).
+            warn!(
+                cap_bytes = cap,
+                total_bytes = total,
+                frozen_bytes = frozen,
+                "archive is over its size cap and nothing more can be pruned"
+            );
         }
     }
 
