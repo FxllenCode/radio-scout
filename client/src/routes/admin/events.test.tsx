@@ -22,10 +22,24 @@ function signedIn() {
   return renderWithProviders(<EventsScreen />)
 }
 
-/** Open the one Event on screen and hand back its editor. */
+/**
+ * Open the one Event on screen and hand back its row.
+ *
+ * **The row, not whatever listitem happens to be on screen.** Opening one
+ * renders its frozen Calls *inside* it as a nested list, so from the moment that
+ * request lands there are three listitems and a bare `getByRole('listitem')` is
+ * ambiguous — which is a race a developer's machine wins and a CI runner loses.
+ * It is why these tests passed locally and had never once passed in CI.
+ *
+ * Walking up from the toggle is timing-independent: the button is in the row's
+ * actions whatever else has rendered, and finding it as **Close** is also what
+ * proves the row really opened.
+ */
 async function opened() {
   await userEvent.click(await screen.findByRole('button', { name: 'Open' }))
-  return screen.getByRole('listitem')
+  const row = (await screen.findByRole('button', { name: 'Close' })).closest('li')
+  expect(row, 'the Close button should sit inside its Event row').not.toBeNull()
+  return row as HTMLElement
 }
 
 describe('the Events screen', () => {
@@ -75,6 +89,11 @@ describe('the Events screen', () => {
     })
     expect(within(calls).getAllByRole('listitem')).toHaveLength(2)
     expect(within(calls).getByText(/Fireground 2/)).toBeInTheDocument()
+
+    // **The hazard [`opened`] exists for, stated once.** An open Event nests its
+    // Calls inside its own row, so there is never exactly one listitem on this
+    // screen — any helper that assumed there was would be a race, and was.
+    expect(screen.getAllByRole('listitem').length).toBeGreaterThan(1)
   })
 
   it('renames one, and says what it sent', async () => {
