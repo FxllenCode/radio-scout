@@ -10,6 +10,7 @@ import { renderWithProviders } from '@/test/utils'
 
 import { AdminScreen } from './AdminScreen'
 import { AdminTalkgroupsScreen } from './AdminTalkgroupsScreen'
+import { AccessCodesScreen } from './AccessCodesScreen'
 import { ApiKeysScreen } from './ApiKeysScreen'
 import { DownstreamsScreen } from './DownstreamsScreen'
 import { GroupsScreen, TagsScreen } from './LabelsScreen'
@@ -109,6 +110,7 @@ describe('the admin gate', () => {
       '/settings/admin/groups',
       '/settings/admin/tags',
       '/settings/admin/api-keys',
+      '/settings/admin/codes',
       '/settings/admin/downstreams',
       '/settings/admin/webhooks',
       '/settings/admin/shares',
@@ -359,6 +361,10 @@ describe('systems', () => {
         label: 'Fulton',
         autoPopulate: true,
         enhancement: false,
+        // Sent unchanged, and sent at all: a System is the top of the access
+        // inheritance (#68), so its form has a plain checkbox and the wire
+        // always carries what it reads.
+        restricted: false,
         blacklist: [],
       },
     })
@@ -762,6 +768,9 @@ describe('talkgroups', () => {
       tag: null,
       groups: ['Fire', 'Dispatch'],
       led: 'red',
+      // Untouched, and `null` because it is three-state: *follow the System*
+      // is what a channel nobody has decided about carries (#68).
+      restricted: null,
       blacklisted: false,
     })
   })
@@ -1040,6 +1049,128 @@ describe('units', () => {
 // ---------------------------------------------------------------------------
 // API keys
 // ---------------------------------------------------------------------------
+
+describe('access codes', () => {
+  /** **Two secrets, and the listing carries neither.** The code is Argon2id at
+   *  rest and cannot be read back by anybody, including this page; the grant —
+   *  what a browser actually carries — is shown exactly once. */
+  it('issues a code, shows the grant once, and lists neither', async () => {
+    signedIn(<AccessCodesScreen />)
+    await screen.findByLabelText('What is it for')
+
+    await userEvent.type(screen.getByLabelText('What is it for'), 'Fire Ops')
+    await userEvent.type(screen.getByLabelText('Code'), 'FIRE-2026-OPS')
+    await userEvent.click(screen.getByRole('button', { name: 'Issue' }))
+
+    const shown = await screen.findByRole('status')
+    expect(shown).toHaveTextContent('rsg_issued0001')
+    expect(shown).toHaveTextContent('shown once')
+    expect(wrote()[0].body).toEqual({ label: 'Fire Ops', code: 'FIRE-2026-OPS' })
+
+    const list = await screen.findByRole('list', { name: 'Access codes' })
+    expect(within(list).queryByText(/rsg_issued/)).toBeNull()
+    expect(within(list).queryByText(/FIRE-2026-OPS/)).toBeNull()
+  })
+
+  /** The refusal quotes the **rule** and never what was sent — which here is a
+   *  credential an Operator is about to hand out. */
+  it('refuses a code too short to be worth hashing, without quoting it', async () => {
+    signedIn(<AccessCodesScreen />)
+    await screen.findByLabelText('Code')
+
+    await userEvent.type(screen.getByLabelText('Code'), '1234')
+    await userEvent.click(screen.getByRole('button', { name: 'Issue' }))
+
+    const refused = await screen.findByRole('alert')
+    expect(refused).toHaveTextContent(/at least 8 characters/i)
+    expect(refused).not.toHaveTextContent('1234')
+  })
+
+  /** What an Operator is actually asking of this listing: is this code being
+   *  used, and until when. */
+  it('says how many are listening and when it runs out', async () => {
+    instance.code({
+      label: 'Fire Ops',
+      connections: 3,
+      maxConnections: 5,
+      expiresAtMs: Date.parse('2026-12-31T00:00:00Z'),
+    })
+    signedIn(<AccessCodesScreen />)
+
+    const list = await screen.findByRole('list', { name: 'Access codes' })
+    expect(within(list).getByText(/3 listening/)).toBeInTheDocument()
+    expect(within(list).getByText(/limit 5/)).toBeInTheDocument()
+  })
+
+  /** Disable is the durable off — the row stays, and the grant with it, which
+   *  is what makes re-enabling mean something. */
+  it('disables and revokes a code', async () => {
+    const code = instance.code({ label: 'Fire Ops' })
+    signedIn(<AccessCodesScreen />)
+    await screen.findByRole('list', { name: 'Access codes' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Disable' }))
+
+    expect(await screen.findByText(/disabled/)).toBeInTheDocument()
+    expect(wrote()[0]).toEqual({
+      method: 'PATCH',
+      path: `/api/admin/codes/${code.id}`,
+      body: { disabled: true },
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(2))
+    expect(wrote()[1].method).toBe('DELETE')
+  })
+
+  /** **A blank code field means "leave it alone"**, because there is nothing to
+   *  pre-fill it with — the code is hashed — and an Operator editing a scope
+   *  must not have to re-choose a secret thirty people already know. */
+  it('leaves the code alone when the field is left blank', async () => {
+    const code = instance.code({ label: 'Fire Ops' })
+    signedIn(<AccessCodesScreen />)
+    await screen.findByRole('list', { name: 'Access codes' })
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    const editor = within(screen.getByRole('form', { name: 'Edit Fire Ops' }))
+    await userEvent.clear(editor.getByLabelText('What is it for'))
+    await userEvent.type(editor.getByLabelText('What is it for'), 'Fire Ops 2027')
+    await userEvent.type(editor.getByLabelText('Connection limit'), '4')
+    await userEvent.click(editor.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0]).toEqual({
+      method: 'PATCH',
+      path: `/api/admin/codes/${code.id}`,
+      body: {
+        label: 'Fire Ops 2027',
+        expiresAtMs: null,
+        maxConnections: 4,
+        scope: { all: false, sel: {} },
+      },
+    })
+  })
+
+  /** ...and typing one **rotates** it, which is what kills every grant already
+   *  out there. */
+  it('rotates the code when one is typed', async () => {
+    instance.code({ label: 'Fire Ops' })
+    signedIn(<AccessCodesScreen />)
+    await screen.findByRole('list', { name: 'Access codes' })
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    const editor = within(screen.getByRole('form', { name: 'Edit Fire Ops' }))
+    await userEvent.type(
+      editor.getByLabelText('New code (rotates it)'),
+      'FIRE-2027-OPS',
+    )
+    await userEvent.click(editor.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].body).toMatchObject({ code: 'FIRE-2027-OPS' })
+  })
+})
 
 describe('api keys', () => {
   /** **Shown once.** The key is stored hashed, so the moment it is issued is the
@@ -1444,7 +1575,14 @@ describe('creating and paging', () => {
     expect(wrote()[0]).toEqual({
       method: 'PATCH',
       path: `/api/admin/systems/${system.id}`,
-      body: { ref: 42, label: 'Fulton', autoPopulate: false, enhancement: null, blacklist: [] },
+      body: {
+        ref: 42,
+        label: 'Fulton',
+        autoPopulate: false,
+        enhancement: null,
+        restricted: false,
+        blacklist: [],
+      },
     })
   })
 

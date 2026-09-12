@@ -60,6 +60,7 @@ import {
   useLazySearchCallsQuery,
   useSearchCallsQuery,
 } from '@/store/api'
+import { useGrant } from '@/hooks/useGrant'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   enterLiveFeed,
@@ -879,6 +880,9 @@ function ResultRow({
   selected?: boolean
   onSelect: () => void
 }) {
+  // The **grant** goes on the link, never through the base query: a download
+  // is a navigation (#68).
+  const grant = useGrant()
   const name = talkgroupName(call)
   const system = systemName(call)
   const description = `${name} on ${system} at ${formatCallTime(call.timestamp)}`
@@ -994,7 +998,7 @@ function ResultRow({
             </Button>
           )}
           <a
-            href={downloadUrl(call.id)}
+            href={downloadUrl(call.id, grant)}
             download
             aria-label={`Download ${description}`}
             className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"

@@ -20,6 +20,13 @@ RadioReference and Trunk Recorder export at.
 
 **Your habits.** Hold, avoid, talkgroup selection, archive search and download are all here.
 
+**Access codes — improved rather than copied.** rdio's PIN closes the *whole* instance the
+moment one code exists. Here the gate is on the **channel**: mark the few that need it, hand
+out a code for those, and everything else stays open. Codes are stored hashed (rdio keeps them
+in plaintext, returns them from its admin API, and writes a guessed one into its log), a code
+that has expired says so instead of being served anyway, and the connection limit is counted
+per code rather than by comparing pointers that reset whenever you edit a setting.
+
 ## What does not migrate
 
 **The call archive.** rdio-scanner stores audio as BLOBs inside its database; Radio-Scout
@@ -29,10 +36,6 @@ new instance starts with an empty Archive and fills as Calls arrive.
 If your history matters, the realistic options are to keep the old instance running read-only
 for as long as you need it, or to accept the gap. Running both in parallel (below) means the
 gap is only ever "everything before the day you switched".
-
-**Access codes.** rdio-scanner's per-listener PINs with scoped access and expiry are not built.
-Listening is open to whoever can reach the instance — put it behind a VPN or an authenticating
-reverse proxy if that matters to you.
 
 **The admin web UI.** Configuration is a TOML file, environment variables and flags rather than
 a settings interface. The admin surface today is login and talkgroup CSV import.

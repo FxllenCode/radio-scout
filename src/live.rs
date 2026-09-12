@@ -8,8 +8,11 @@
 //!   to, not just its own (rdio's `IsEnabled`, plus we carry `patches[]` on the
 //!   wire so the client can display cross-patched traffic).
 //! - **Access scope** — every delivery is gated by both the Selection and an
-//!   access scope (ADR-0008). v1 listening is open ([`AccessScope::All`]); the
-//!   restricted variant is the v2 access-code seam.
+//!   access scope (ADR-0008, [`crate::access`]). An Instance that restricts no
+//!   channel hands every connection [`AccessScope::All`] and is exactly what it
+//!   was before #68; one that restricts a channel gates it live and in a
+//!   **Backfill** alike, because a restriction holding on only one of the two
+//!   paths would hand the Archive to anyone who reconnected with a cursor.
 //! - **Heartbeat + dead-connection reaping** — rdio has no heartbeat of its own.
 //!   The server pings on an interval and reaps half-open connections, keeping
 //!   proxies warm and freeing resources promptly.
@@ -37,7 +40,7 @@
 //! its own, and the only way to watch a connection be reaped was to shorten the
 //! shipped heartbeat from outside and then sleep through it.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -51,6 +54,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{Instrument, Span, debug, info, warn};
 
 use crate::AppState;
+use crate::access::AccessScope;
 use crate::call::{Emission, StoredCall};
 use crate::selection::Selection;
 
@@ -158,53 +162,6 @@ impl Default for LiveFeed {
 }
 
 // ---------------------------------------------------------------------------
-// Access scope (ADR-0008)
-// ---------------------------------------------------------------------------
-
-/// A Listener's Talkgroup access within one System (the v2 access-code shape).
-#[derive(Debug, Clone)]
-pub enum TalkgroupScope {
-    /// Every Talkgroup in the System.
-    All,
-    /// Only these Talkgroup Refs.
-    Only(HashSet<i64>),
-}
-
-/// A connection's access scope (ADR-0008). A Call is delivered only when
-/// **both** the Selection and the access scope admit it — live and in a
-/// **Backfill** alike, because a restriction that held on only one of the two
-/// paths would hand the archive to anyone who reconnected with a cursor.
-///
-/// **An input to the connection, not a constant** (#94): [`Connection::new`]
-/// takes one, so a test can open a restricted connection and assert what it does
-/// and does not receive. Production hands it [`AccessScope::All`], because
-/// nothing grants a scope until #68 resolves an access code to one — so "an
-/// instance with no codes behaves exactly as today" holds by construction rather
-/// than by inspection.
-#[derive(Debug, Clone)]
-pub enum AccessScope {
-    /// Full access (v1 default; scope `"*"`).
-    All,
-    /// Restricted to specific Systems, each optionally down to specific
-    /// Talkgroups (v2; scope `[{id, talkgroups}]`).
-    Systems(HashMap<i64, TalkgroupScope>),
-}
-
-impl AccessScope {
-    /// May this scope hear `(system_ref, talkgroup_ref)`?
-    fn permits(&self, system_ref: i64, talkgroup_ref: i64) -> bool {
-        match self {
-            AccessScope::All => true,
-            AccessScope::Systems(systems) => match systems.get(&system_ref) {
-                None => false,
-                Some(TalkgroupScope::All) => true,
-                Some(TalkgroupScope::Only(talkgroups)) => talkgroups.contains(&talkgroup_ref),
-            },
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The connection: a table of state and event to actions (#94)
 // ---------------------------------------------------------------------------
 
@@ -223,8 +180,13 @@ pub(crate) enum Event<'a> {
     Quiet,
     /// A Call went out on the fanout — or this connection fell behind it.
     Broadcast(Result<Emitted, broadcast::error::RecvError>),
-    /// The heartbeat period elapsed.
-    Tick,
+    /// The heartbeat period elapsed, and what time it was.
+    ///
+    /// The instant rides along because an **Access code** can expire *while a
+    /// socket is open* (#68), and re-reading that is the one decision here that
+    /// needs a clock. rdio never re-checks at all, so a code that runs out
+    /// tonight keeps working until the listener closes the tab.
+    Tick(i64),
     /// The **Backfill** this connection asked for, read and handed back.
     Backfilled(Backfill),
     /// The peer is gone: a close frame, a socket error, a stream that ended.
@@ -285,6 +247,10 @@ impl Backfill {
 pub(crate) struct Connection {
     sub: Selection,
     scope: AccessScope,
+    /// When the **Access code** this connection opened with runs out, if it has
+    /// one — re-read on every heartbeat, so a code that expires tonight takes
+    /// its sockets with it rather than serving until somebody closes a tab.
+    until: Option<i64>,
     heartbeat: Heartbeat,
 }
 
@@ -299,8 +265,19 @@ impl Connection {
         Connection {
             sub: Selection::default(),
             scope,
+            until: None,
             heartbeat: Heartbeat::default(),
         }
+    }
+
+    /// The same connection, opened with an **Access code** that runs out.
+    ///
+    /// A builder rather than a second parameter on [`Connection::new`], because
+    /// almost every connection there will ever be has no code at all and the
+    /// table reads better for saying so.
+    pub(crate) fn until(mut self, expires_at_ms: Option<i64>) -> Self {
+        self.until = expires_at_ms;
+        self
     }
 
     /// The table: what this connection does about one event.
@@ -317,7 +294,7 @@ impl Connection {
                 Vec::new()
             }
             Event::Broadcast(result) => self.on_broadcast(result),
-            Event::Tick => self.on_tick(),
+            Event::Tick(now_ms) => self.on_tick(now_ms),
             Event::Backfilled(backfill) => self.on_backfilled(backfill),
             Event::Gone => vec![Action::Close],
         }
@@ -328,7 +305,13 @@ impl Connection {
     /// so a Talkgroup the Listener selected but may not hear delivers nothing.
     fn wants(&self, call: &StoredCall) -> bool {
         self.sub.reaches(call, |system_ref, talkgroup_ref| {
-            self.scope.permits(system_ref, talkgroup_ref)
+            // The restriction is the Call's own channel's (#68), whichever
+            // channel of the Call's the Selection matched on — a transmission
+            // addressed to a gated channel stays gated however it was patched.
+            // It rides on the view for nothing, which is what lets a live frame
+            // be gated on the same fact the Archive's SQL filters on.
+            self.scope
+                .permits(system_ref, talkgroup_ref, call.restricted)
         })
     }
 
@@ -385,7 +368,24 @@ impl Connection {
 
     /// A heartbeat period elapsed: ping, or reap what never answered the last
     /// one.
-    fn on_tick(&mut self) -> Vec<Action> {
+    fn on_tick(&mut self, now_ms: i64) -> Vec<Action> {
+        // Checked before the heartbeat, because a connection that may no longer
+        // be here is not one to ping. rdio assigns the scope *before* it looks
+        // at expiry and never looks again, so an expired code there keeps
+        // delivering for as long as the socket lasts.
+        if self
+            .until
+            .is_some_and(|expires_at_ms| now_ms >= expires_at_ms)
+        {
+            warn!(
+                reason = %"access-code-expired",
+                "live-feed listener dropped: the access code it opened with has expired"
+            );
+            return vec![
+                Action::Send(refused_frame("access-code-expired")),
+                Action::Close,
+            ];
+        }
         match self.heartbeat.on_tick() {
             Beat::Ping => vec![Action::Ping],
             // A half-open connection is a Listener who stopped hearing anything
@@ -537,6 +537,21 @@ fn lagged_frame(skipped: u64) -> String {
     serde_json::json!({ "t": "lagged", "skipped": skipped }).to_string()
 }
 
+/// A notice that this connection is being ended, and the slug saying why (#68).
+///
+/// The socket's answer to [`crate::failure::Reason`], and it exists because an
+/// upgraded WebSocket has no status line left: by the time an **Access code** is
+/// found expired or over its connection limit, `101` has already gone out. The
+/// slug is the one a refusal would have carried over HTTP, so an Operator greps
+/// one vocabulary — and the client can tell "your code ran out" from "too many
+/// of you are connected", which are two different things to go and do.
+///
+/// rdio sends its client a `pin` or `max` command and then **goes on serving
+/// it**, because the scope was assigned before the check.
+fn refused_frame(reason: &str) -> String {
+    serde_json::json!({ "t": "refused", "reason": reason }).to_string()
+}
+
 /// A notice that a **Backfill** could not reach back as far as the Listener
 /// asked: there are Calls after `since` this page could not carry, and only
 /// archive search (#13) can fill them in.
@@ -622,17 +637,17 @@ impl Socket for WebSocket {
 }
 
 /// `GET /api/live` — upgrade to a WebSocket and run the per-connection loop.
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    // v1 listening is open (ADR-0008), so every connection is unrestricted. This
-    // is the one line #68 replaces: resolve an access code to a scope here, and
-    // everything below already honours it, live and in a Backfill alike.
-    let scope = AccessScope::All;
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    viewer: crate::access::Viewer,
+) -> Response {
     // `on_upgrade` runs the connection in a task of its own, which would
     // otherwise lose the request span the upgrade was logged under (#28).
     // Carrying it means everything this socket says stays attributable to the
     // request that opened it.
     let span = Span::current();
-    ws.on_upgrade(move |socket| handle_socket(socket, state, scope).instrument(span))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, viewer).instrument(span))
 }
 
 /// A connection's lifetime, bracketed by the two lines that are the socket's
@@ -642,14 +657,41 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 /// No address on either line: a Listener's IP never appears above DEBUG (rule
 /// 5), and rdio-scanner's habit of logging every listener's IP and access-code
 /// ident at info (`client.go:152`) is the thing we are deliberately not doing.
-async fn handle_socket(socket: impl Socket, state: AppState, scope: AccessScope) {
+async fn handle_socket(mut socket: impl Socket, state: AppState, viewer: crate::access::Viewer) {
+    // **The connection limit, before anything else** (#68). Held as a guard, so
+    // the slot comes back however this ends — a close frame, a socket error, a
+    // task cancelled out from under it — rather than on whichever arm remembered
+    // to give it back. rdio counts by comparing `Access` *pointers* and rebuilds
+    // its roster on every configuration write, so editing an unrelated setting
+    // silently resets every code's count to zero.
+    let held = match viewer.code() {
+        Some(code) => match state.access.hold(code) {
+            Some(held) => Some(held),
+            None => {
+                crate::failure::Reason::AccessConnectionLimit {
+                    code_id: code.id,
+                    limit: code.max_connections.unwrap_or_default(),
+                }
+                .record();
+                // Said out loud and then closed. rdio tells its client `max` and
+                // carries on serving it, because by then it has already assigned
+                // the scope.
+                let _ = socket
+                    .send(Outbound::Text(refused_frame("access-connection-limit")))
+                    .await;
+                return;
+            }
+        },
+        None => None,
+    };
     info!("live-feed listener connected");
     let connected_at = Instant::now();
     // Counted here rather than inside the loop, and as a guard rather than a
     // pair of calls (#62): a connection is a Listener for exactly as long as
     // this function runs, however it ends.
     let _present = state.listeners.arrive();
-    run_connection(socket, state, scope).await;
+    run_connection(socket, state, viewer).await;
+    drop(held);
     // `connected_ms`, not `duration_ms`: a Call already has a `duration_ms` (its
     // audio length) and the request line has a `duration_us`. One grep, one
     // meaning.
@@ -676,9 +718,10 @@ enum Flow {
 ///
 /// The whole of the loop: everything that decides anything is in
 /// [`Connection::on`], and everything here either waits or does as it is told.
-async fn run_connection(mut socket: impl Socket, state: AppState, scope: AccessScope) {
+async fn run_connection(mut socket: impl Socket, state: AppState, viewer: crate::access::Viewer) {
     let mut receiver = state.live.subscribe();
-    let mut conn = Connection::new(scope);
+    let mut conn = Connection::new(viewer.scope.clone())
+        .until(viewer.code().and_then(|code| code.expires_at_ms));
 
     let opening = conn.on(Event::Opened);
     if !carried_on(perform(&mut socket, &state, &mut conn, opening).await) {
@@ -700,7 +743,7 @@ async fn run_connection(mut socket: impl Socket, state: AppState, scope: AccessS
             Wake::Inbound(Some(Inbound::Quiet)) => conn.on(Event::Quiet),
             Wake::Inbound(None) => conn.on(Event::Gone),
             Wake::Broadcast(result) => conn.on(Event::Broadcast(result)),
-            Wake::Tick => conn.on(Event::Tick),
+            Wake::Tick => conn.on(Event::Tick(state.clock.now_ms())),
         };
         if !carried_on(perform(&mut socket, &state, &mut conn, actions).await) {
             break;
@@ -809,8 +852,19 @@ mod tests {
         call_with_patches(system_ref, talkgroup_ref, vec![])
     }
 
+    /// The same Call on a **restricted** channel (#68) — which is the only kind
+    /// an access scope has anything to say about, since an open channel is open
+    /// to every scope there is.
+    fn gated(call: StoredCall) -> StoredCall {
+        StoredCall {
+            restricted: true,
+            ..call
+        }
+    }
+
     fn call_with_patches(system_ref: i64, talkgroup_ref: i64, patches: Vec<i64>) -> StoredCall {
         StoredCall {
+            restricted: false,
             id: 1,
             system_ref,
             system_label: None,
@@ -881,12 +935,22 @@ mod tests {
         connection
     }
 
-    /// A scope permitting exactly these Talkgroups of System 11.
+    /// A scope opening exactly these restricted Talkgroups of System 11.
+    ///
+    /// An **Access code**'s scope is a [`Selection`] — the same matrix a Listener
+    /// subscribes with and a **Downstream** is scoped by — so this is the shape a
+    /// code really carries rather than a test-only one.
     fn only(talkgroups: [i64; 1]) -> AccessScope {
-        AccessScope::Systems(HashMap::from([(
-            11,
-            TalkgroupScope::Only(HashSet::from(talkgroups)),
-        )]))
+        AccessScope::granting(selection(
+            &talkgroups
+                .iter()
+                .map(|talkgroup| ("11", talkgroup.to_string()))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|(system, talkgroup)| (*system, talkgroup.as_str()))
+                .collect::<Vec<_>>(),
+            false,
+        ))
     }
 
     /// Every frame a round of actions sends, parsed.
@@ -1050,55 +1114,78 @@ mod tests {
         assert!(!c.wants(&patched));
     }
 
-    // --- Access scope (AccessScope::permits) ---------------------------------
-
-    #[test]
-    fn scope_all_permits_anything() {
-        assert!(AccessScope::All.permits(1, 2));
-        assert!(AccessScope::All.permits(999, 888));
-    }
-
-    #[test]
-    fn scope_systems_all_permits_the_whole_system_only() {
-        let scope = AccessScope::Systems(HashMap::from([(11, TalkgroupScope::All)]));
-        assert!(scope.permits(11, 54241), "any tg in the permitted system");
-        assert!(!scope.permits(22, 54241), "other system denied");
-    }
-
-    #[test]
-    fn scope_systems_only_permits_listed_talkgroups() {
-        let scope = AccessScope::Systems(HashMap::from([(
-            11,
-            TalkgroupScope::Only(HashSet::from([100, 200])),
-        )]));
-        assert!(scope.permits(11, 100));
-        assert!(!scope.permits(11, 300), "tg not in the allow-list");
-        assert!(!scope.permits(22, 100), "other system denied");
-    }
+    // --- Access scope (#68) --------------------------------------------------
+    //
+    // What a scope *permits* is `crate::access`'s own table. What is asserted
+    // here is the half that belongs to the connection: that the gate applies on
+    // top of the Selection, on both delivery paths.
 
     /// The scope gate applies on top of the Selection: subscribing to a
     /// Talkgroup you're not permitted to hear delivers nothing.
     #[test]
     fn scope_denies_even_a_subscribed_talkgroup() {
-        let c = conn_scoped(&[("11", "300")], only([100])); // subscribed to 300, only allowed 100
-        assert!(!c.wants(&call(11, 300)));
+        let c = conn_scoped(&[("11", "300")], only([100])); // subscribed to 300, only opened 100
+        assert!(!c.wants(&gated(call(11, 300))));
+        assert!(
+            c.wants(&call(11, 300)),
+            "...and an unrestricted channel is still open to it"
+        );
     }
 
     /// Scope gates patch matching too: a patched Talkgroup outside the scope
     /// doesn't leak the Call.
     #[test]
     fn scope_gates_patched_talkgroup() {
-        // Subscribed to both, but only 300 is in scope; call on 100 patched to 300.
+        // Subscribed to both, but only 300 is opened; call on 100 patched to 300.
         let c = conn_scoped(&[("11", "100"), ("11", "300")], only([300]));
-        let patched = call_with_patches(11, 100, vec![300]);
-        assert!(c.wants(&patched), "matches on the in-scope patch 300");
+        let patched = gated(call_with_patches(11, 100, vec![300]));
+        assert!(c.wants(&patched), "matches on the opened patch 300");
 
-        // Now only 100 is in scope, but the Listener didn't subscribe to 100.
+        // Now only 100 is opened, but the Listener didn't subscribe to 100.
         let c2 = conn_scoped(&[("11", "300")], only([100]));
         assert!(
             !c2.wants(&patched),
-            "subscribed to 300 (out of scope) and not to 100"
+            "subscribed to 300 (not opened) and not to 100"
         );
+    }
+
+    /// **An Access code that runs out takes its sockets with it** (#68).
+    ///
+    /// rdio never re-checks: it assigns the scope at PIN time and looks at
+    /// expiry afterwards, so a code that runs out tonight keeps delivering
+    /// until somebody closes the tab. Here the heartbeat carries the clock, so
+    /// the whole of it is one row of the table.
+    #[test]
+    fn a_connection_whose_code_expires_is_told_and_closed() {
+        let mut open = Connection::new(AccessScope::All).until(Some(1_000));
+
+        assert_eq!(
+            open.on(Event::Tick(999)),
+            vec![Action::Ping],
+            "inside the window it is an ordinary heartbeat"
+        );
+
+        let refused = open.on(Event::Tick(1_000));
+
+        assert_eq!(
+            frames(&refused),
+            vec![serde_json::json!({"t": "refused", "reason": "access-code-expired"})],
+            "told why, in the vocabulary an HTTP refusal would have used"
+        );
+        assert_eq!(
+            refused.last(),
+            Some(&Action::Close),
+            "and then the socket goes"
+        );
+    }
+
+    /// A connection holding no code never expires, whatever the clock says —
+    /// which is every connection on every Instance that gates nothing.
+    #[test]
+    fn a_connection_with_no_code_is_never_expired() {
+        let mut open = Connection::new(AccessScope::All);
+
+        assert_eq!(open.on(Event::Tick(i64::MAX)), vec![Action::Ping]);
     }
 
     /// A **restricted connection**, driven the way a real one is: opened with a
@@ -1114,27 +1201,33 @@ mod tests {
         restricted.on(Event::Text(r#"{"t":"sub","all":true}"#));
 
         assert_eq!(
-            restricted.on(Event::Broadcast(Ok(emitted(call(11, 100))))),
-            vec![Action::Send(call_frame(&emitted(call(11, 100))))],
-            "in scope, and selected"
+            restricted.on(Event::Broadcast(Ok(emitted(gated(call(11, 100)))))),
+            vec![Action::Send(call_frame(&emitted(gated(call(11, 100)))))],
+            "gated, and opened by this code"
+        );
+        assert_eq!(
+            restricted.on(Event::Broadcast(Ok(emitted(gated(call(11, 300)))))),
+            vec![],
+            "selected by `all`, gated, and not opened by this code"
+        );
+        assert_eq!(
+            restricted.on(Event::Broadcast(Ok(emitted(gated(call(22, 100)))))),
+            vec![],
+            "the same Ref on a System the code says nothing about"
         );
         assert_eq!(
             restricted.on(Event::Broadcast(Ok(emitted(call(11, 300))))),
-            vec![],
-            "selected by `all`, but outside the scope"
-        );
-        assert_eq!(
-            restricted.on(Event::Broadcast(Ok(emitted(call(22, 100))))),
-            vec![],
-            "a System the scope says nothing about"
+            vec![Action::Send(call_frame(&emitted(call(11, 300))))],
+            "and the open channels are exactly as open as they were before #68"
         );
 
         let backfilled = restricted.on(Event::Backfilled(Backfill {
             since: 0,
             calls: vec![
-                emitted_at(1, call(11, 100)),
-                emitted_at(2, call(11, 300)),
-                emitted_at(3, call(22, 100)),
+                emitted_at(1, gated(call(11, 100))),
+                emitted_at(2, gated(call(11, 300))),
+                emitted_at(3, gated(call(22, 100))),
+                emitted_at(4, call(11, 300)),
             ],
             truncated: false,
         }));
@@ -1143,7 +1236,7 @@ mod tests {
                 .iter()
                 .map(|frame| frame["seq"].clone())
                 .collect::<Vec<_>>(),
-            vec![serde_json::json!(1)],
+            vec![serde_json::json!(1), serde_json::json!(4)],
             "a Backfill is gated by the same scope the live path is"
         );
     }
@@ -1318,9 +1411,9 @@ mod tests {
         let capture = LogCapture::start();
         let mut c = conn_all();
 
-        assert_eq!(c.on(Event::Tick), vec![Action::Ping], "first tick pings");
+        assert_eq!(c.on(Event::Tick(0)), vec![Action::Ping], "first tick pings");
         assert_eq!(
-            c.on(Event::Tick),
+            c.on(Event::Tick(0)),
             vec![Action::Close],
             "unanswered -> reaped"
         );
@@ -1337,12 +1430,12 @@ mod tests {
     #[case::a_subscribe(Event::Text(r#"{"t":"sub","all":true}"#))]
     fn an_answered_ping_pings_again(#[case] answer: Event<'_>) {
         let mut c = conn_all();
-        assert_eq!(c.on(Event::Tick), vec![Action::Ping]);
+        assert_eq!(c.on(Event::Tick(0)), vec![Action::Ping]);
 
         c.on(answer);
 
         assert_eq!(
-            c.on(Event::Tick),
+            c.on(Event::Tick(0)),
             vec![Action::Ping],
             "answered -> ping again, not reaped"
         );
@@ -1682,7 +1775,7 @@ mod tests {
         let (socket, mut peer) = FakeSocket::pair();
         peer.hangs_up();
 
-        run_connection(socket, state, AccessScope::All).await;
+        run_connection(socket, state, crate::access::Viewer::unrestricted()).await;
 
         let frames = peer.every_frame().await;
         assert_eq!(frames.len(), 1, "{frames:?}");
@@ -1704,7 +1797,7 @@ mod tests {
         let (socket, mut peer) = FakeSocket::pair();
 
         // Returns *because* it was reaped: nothing else here ever ends it.
-        run_connection(socket, state, AccessScope::All).await;
+        run_connection(socket, state, crate::access::Viewer::unrestricted()).await;
 
         let sent = peer.everything().await;
         assert_eq!(
@@ -1727,7 +1820,11 @@ mod tests {
         let (state, _tmp) = a_state().await;
         tokio::time::pause();
         let (socket, mut peer) = FakeSocket::pair();
-        let running = tokio::spawn(run_connection(socket, state, AccessScope::All));
+        let running = tokio::spawn(run_connection(
+            socket,
+            state,
+            crate::access::Viewer::unrestricted(),
+        ));
         peer.next().await.expect("the greeting");
 
         // Nothing else is runnable, so waiting for the ping is what advances the
@@ -1753,7 +1850,11 @@ mod tests {
         let (state, _tmp) = a_state().await;
         tokio::time::pause();
         let (socket, mut peer) = FakeSocket::pair();
-        let running = tokio::spawn(run_connection(socket, state, AccessScope::All));
+        let running = tokio::spawn(run_connection(
+            socket,
+            state,
+            crate::access::Viewer::unrestricted(),
+        ));
 
         let mut pings = 0;
         // Answer the first three pings, then stop — which is what ends the test.
@@ -1778,7 +1879,11 @@ mod tests {
     async fn a_subscribed_peer_is_sent_the_calls_it_selected() {
         let (state, _tmp) = a_state().await;
         let (socket, mut peer) = FakeSocket::pair();
-        let running = tokio::spawn(run_connection(socket, state.clone(), AccessScope::All));
+        let running = tokio::spawn(run_connection(
+            socket,
+            state.clone(),
+            crate::access::Viewer::unrestricted(),
+        ));
 
         assert!(
             peer.next().await.expect("the greeting").contains("hello"),
@@ -1811,7 +1916,7 @@ mod tests {
         let (state, _tmp) = a_state().await;
         let (socket, mut peer) = FakeSocket::broken();
 
-        run_connection(socket, state, AccessScope::All).await;
+        run_connection(socket, state, crate::access::Viewer::unrestricted()).await;
 
         assert!(
             peer.everything().await.is_empty(),
@@ -1828,7 +1933,11 @@ mod tests {
         store_and_emit(&state, 200, 2).await;
 
         let (socket, mut peer) = FakeSocket::pair();
-        let running = tokio::spawn(run_connection(socket, state, AccessScope::All));
+        let running = tokio::spawn(run_connection(
+            socket,
+            state,
+            crate::access::Viewer::unrestricted(),
+        ));
         peer.says(r#"{"t":"sub","all":true,"since":1}"#);
         // Greeting, ack, then the page.
         peer.next().await;

@@ -35,6 +35,7 @@
 //! never the port, the database URL or the storage backend. The admin password
 //! stays in the environment, for the reason ADR-0008 gives.
 
+pub mod codes;
 pub mod document;
 pub mod downstreams;
 pub mod events;
@@ -171,6 +172,15 @@ pub fn routes() -> Router<AppState> {
             "/api/admin/webhooks/{id}",
             patch(webhooks::update).delete(webhooks::remove),
         )
+        // **Access codes** (#68, spec US 52) — the Listener-facing credentials
+        // that open a restricted channel. Beside the API keys because they are
+        // the same kind of thing from the other direction: one lets a Recorder
+        // write, the other lets a Listener hear.
+        .route("/api/admin/codes", get(codes::list).post(codes::create))
+        .route(
+            "/api/admin/codes/{id}",
+            patch(codes::update).delete(codes::remove),
+        )
         .route("/api/admin/api-keys", get(keys::list).post(keys::create))
         .route(
             "/api/admin/api-keys/{id}",
@@ -195,6 +205,7 @@ pub enum What {
     Downstream,
     Webhook,
     ToneProfile,
+    AccessCode,
     ShareLink,
     Event,
     /// One **Call** frozen into an Event — addressed by the member's own id,
@@ -215,6 +226,7 @@ impl What {
             What::Downstream => "downstream",
             What::Webhook => "webhook",
             What::ToneProfile => "tone profile",
+            What::AccessCode => "access code",
             What::ShareLink => "share link",
             What::Event => "event",
             What::EventCall => "call in this event",
@@ -235,6 +247,7 @@ impl What {
             What::Downstream => "downstream-not-found",
             What::Webhook => "webhook-not-found",
             What::ToneProfile => "tone-profile-not-found",
+            What::AccessCode => "access-code-not-found",
             What::ShareLink => "share-link-not-found",
             What::Event => "event-not-found",
             What::EventCall => "event-call-not-found",
@@ -255,6 +268,7 @@ impl What {
             | What::Downstream
             | What::Webhook
             | What::ToneProfile
+            | What::AccessCode
             | What::ShareLink
             | What::Event
             | What::EventCall => "ref-taken",
@@ -271,6 +285,7 @@ impl What {
             | What::Unit
             | What::ApiKey
             | What::ToneProfile
+            | What::AccessCode
             | What::Downstream
             | What::Webhook
             | What::ShareLink
@@ -356,6 +371,20 @@ pub enum Rejected {
     /// a pager that is not being watched looks exactly like a pager that has not
     /// gone off.
     UnusableToneProfile { detail: String },
+    /// An **Access code** too short to be worth the Argon2id it would be stored
+    /// under (#68).
+    ///
+    /// Carries the rule and **never what was sent** — [`Rejected::UnusableWebhookUrl`]'s
+    /// rule, and here it is the same secret one notch further: what is being
+    /// refused is a code an Operator is about to hand out, and a refusal is
+    /// rendered into a form *and* answered as a 400.
+    ///
+    /// A floor rather than a complexity rule, because a complexity rule on a
+    /// credential people say out loud pushes them toward writing it down. Four
+    /// characters is a PIN anybody can brute-force through the lockout given a
+    /// week; the floor plus the lockout plus Argon2id is what makes a memorable
+    /// code defensible at all.
+    ShortAccessCode { least: usize },
     /// A **mark** this release does not know (#54).
     ///
     /// Refused rather than dropped, which is the opposite of what a *stored*
@@ -397,6 +426,7 @@ impl Rejected {
             Rejected::UnusableWebhookUrl => "unusable-webhook-url",
             Rejected::UnknownFormat { .. } => "unknown-format",
             Rejected::UnknownMark { .. } => "unknown-mark",
+            Rejected::ShortAccessCode { .. } => "short-access-code",
             Rejected::UnusableToneProfile { .. } => "unusable-tone-profile",
             Rejected::TooManyCalls { .. } => "too-many-calls",
             Rejected::HasCalls { what, .. } => what.has_calls(),
@@ -414,7 +444,8 @@ impl Rejected {
             | Rejected::UnusableWebhookUrl
             | Rejected::UnknownFormat { .. }
             | Rejected::UnknownMark { .. }
-            | Rejected::UnusableToneProfile { .. } => StatusCode::BAD_REQUEST,
+            | Rejected::UnusableToneProfile { .. }
+            | Rejected::ShortAccessCode { .. } => StatusCode::BAD_REQUEST,
             Rejected::NotFound(_) => StatusCode::NOT_FOUND,
             Rejected::TooManyCalls { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Rejected::NameTaken { .. }
@@ -486,6 +517,11 @@ impl std::fmt::Display for Rejected {
                     .join(", ")
             ),
             Rejected::UnusableToneProfile { detail } => write!(f, "{detail}"),
+            // Deliberately says nothing about what was sent — see the arm.
+            Rejected::ShortAccessCode { least } => write!(
+                f,
+                "an access code has to be at least {least} characters"
+            ),
             Rejected::UnknownMark { mark } => write!(
                 f,
                 "{mark:?} is not a mark a Call can carry: choose one of {}",

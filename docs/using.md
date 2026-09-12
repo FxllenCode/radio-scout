@@ -259,6 +259,24 @@ A big system is hundreds of Talkgroups, and the panel is built for that:
 Your selection, your pins, your priorities, your sort and which Systems you folded away are
 saved in this browser and survive a reload.
 
+### Locked channels
+
+Most instances are open to anybody who can reach them, and on those you will never see this.
+
+Some operators gate a handful of channels. A gated one is still listed — with a **lock** instead
+of a switch, and no activity beside it — and the bar above the list says how many there are.
+Tap either to enter the **access code** you were given.
+
+Once you have, the lock goes, the channel behaves like any other, and this browser remembers it:
+you will not be asked again tomorrow. What it remembers is not the code itself, so clearing your
+site data is how you take it back.
+
+If the code later expires or the operator changes it, you are told once and quietly put back to
+the open channels — nothing breaks, and nothing goes silently missing without a reason.
+
+> A code is per *channel*, not per person: there are no accounts here, and nothing records who
+> listened or when.
+
 ### Two independent setups in one browser
 
 Add `?id=` and a name to the URL:

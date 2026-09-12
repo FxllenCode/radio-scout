@@ -63,6 +63,7 @@ use subtle::ConstantTimeEq;
 use crate::AppState;
 use crate::config::TrustedProxies;
 use crate::failure::{Failure, Reason};
+use crate::lockout::{Budget, Lockout};
 use crate::startup::AdminPassword;
 
 /// The header a reverse proxy names the original client in — the same one the
@@ -220,7 +221,7 @@ impl AdminAuth {
             .lockout
             .lock()
             .expect("lockout")
-            .locked_for(addr, now, &self.0.config)
+            .locked_for(addr, now, self.budget())
     }
 
     /// Charge `addr` for a wrong password, returning its running failure count.
@@ -229,7 +230,16 @@ impl AdminAuth {
             .lockout
             .lock()
             .expect("lockout")
-            .record_failure(addr, now, &self.0.config)
+            .record_failure(addr, now, self.budget())
+    }
+
+    /// What this surface allows before it stops answering — the one thing that
+    /// differs between the two holders of a [`Lockout`] (#68).
+    fn budget(&self) -> Budget {
+        Budget {
+            attempts: self.0.config.lockout_attempts,
+            cooldown: self.0.config.lockout,
+        }
     }
 
     /// Forget `addr`'s failures, because it just proved it knows the password.
@@ -255,113 +265,6 @@ struct Entry {
     opened_at: Instant,
     last_seen: Instant,
 }
-
-/// Failed logins, per address.
-///
-/// rdio-scanner has one of these and it does not work. Its cooldown is
-/// `time.Duration(time.Duration.Minutes(10))` (`admin.go:64`) — a method
-/// expression that evaluates to **zero**, not ten minutes — so failures never
-/// decay and three wrong passwords lock an address until the process restarts;
-/// and the only thing that ever clears the ledger is a successful login, which
-/// clears it for *everybody*. Both are fixed here, and the decay is the fix
-/// that matters: a lockout an operator cannot wait out is a lockout they have
-/// to restart the scanner to escape.
-#[derive(Default)]
-struct Lockout {
-    failures: HashMap<IpAddr, Failures>,
-}
-
-/// One address's record: how many failures, and when the last one was.
-struct Failures {
-    count: u32,
-    last: Instant,
-}
-
-impl Lockout {
-    /// How long `addr` must wait before it may try again, or `None` if it may
-    /// try now.
-    ///
-    /// Checked *before* the password is verified, so a locked-out address costs
-    /// no Argon2 work — the memory-hard hash that makes each guess expensive
-    /// would otherwise make a lockout a way to exhaust a Pi's memory.
-    fn locked_for(&self, addr: IpAddr, now: Instant, config: &AdminConfig) -> Option<Duration> {
-        let record = self.failures.get(&addr)?;
-        if record.count < config.lockout_attempts {
-            return None;
-        }
-        match config.lockout.checked_sub(now.duration_since(record.last)) {
-            // Rounded up, so a caller told to wait never gets 0 — and never
-            // retries a fraction of a second too early.
-            Some(left) if !left.is_zero() => Some(Duration::from_secs(left.as_secs() + 1)),
-            _ => None,
-        }
-    }
-
-    /// Charge `addr` for a wrong password. Returns the running count, so the
-    /// line that reports the lockout can be written exactly once.
-    fn record_failure(&mut self, addr: IpAddr, now: Instant, config: &AdminConfig) -> u32 {
-        // This is also what makes failures *decay*: an address that walked away
-        // for the full cooldown has its record dropped here, so the `or_insert`
-        // below starts it over at zero rather than resuming. One mechanism, not
-        // a sweep plus a reset that would each have to be right on their own.
-        self.forget_spent(now, config);
-        let record = self.failures.entry(addr).or_insert(Failures {
-            count: 0,
-            last: now,
-        });
-        record.count += 1;
-        record.last = now;
-        record.count
-    }
-
-    /// Forget `addr`'s failures — and only `addr`'s.
-    fn clear(&mut self, addr: IpAddr) {
-        self.failures.remove(&addr);
-    }
-
-    /// Drop what the ledger no longer needs, so guessing from a fresh address
-    /// each time cannot grow it without bound — free for anyone holding an IPv6
-    /// /64, and a Pi is the machine that would notice.
-    ///
-    /// A record whose cooldown has fully elapsed carries no information:
-    /// [`Lockout::record_failure`] would reset its count anyway, so remembering
-    /// it and forgetting it are the same behaviour. Only if that leaves the
-    /// ledger still at its cap does a *live* record go, and then the least
-    /// recently seen — which at worst hands the most idle attacker its budget
-    /// back. Run on failure rather than on a timer: an attempt is already
-    /// paying for an Argon2 hash, so a walk of a small map is free beside it,
-    /// and nothing grows while nobody is guessing.
-    fn forget_spent(&mut self, now: Instant, config: &AdminConfig) {
-        self.failures
-            .retain(|_, record| now.duration_since(record.last) < config.lockout);
-        if self.failures.len() < MAX_TRACKED_ADDRESSES {
-            return;
-        }
-        while self.failures.len() >= MAX_TRACKED_ADDRESSES {
-            let stalest = self
-                .failures
-                .iter()
-                .min_by_key(|(_, record)| record.last)
-                .map(|(addr, _)| *addr)
-                // The loop runs only while the map is at a non-zero cap.
-                .expect("a full ledger has a least recently seen address");
-            self.failures.remove(&stalest);
-        }
-        tracing::warn!(
-            limit = MAX_TRACKED_ADDRESSES,
-            "admin lockout ledger is full; the least recently seen addresses were forgotten"
-        );
-    }
-}
-
-/// How many addresses the lockout ledger tracks at once.
-///
-/// Far above what a real instance sees — an operator mistyping their password
-/// is one address — and small enough that the whole map is a rounding error on
-/// a Pi. It exists so that the ledger is bounded by *something* even inside a
-/// single cooldown window, when [`Lockout::forget_spent`]'s expiry sweep has
-/// nothing to reclaim.
-const MAX_TRACKED_ADDRESSES: usize = 1_024;
 
 /// How many sessions may be live at once.
 ///
@@ -842,16 +745,6 @@ mod tests {
         }
     }
 
-    fn addr(last: u8) -> IpAddr {
-        IpAddr::from([10, 0, 0, last])
-    }
-
-    /// A distinct address per `n`, past the 256 a single octet can spell — the
-    /// ledger's cap is larger than that.
-    fn addr_n(n: u64) -> IpAddr {
-        IpAddr::from([10, 1, (n >> 8) as u8, n as u8])
-    }
-
     // -- Sessions -----------------------------------------------------------
 
     /// The idle window is what an unused session dies of.
@@ -1045,183 +938,6 @@ mod tests {
         sessions.open(now, &config);
 
         assert!(sessions.touch(id, now, &config).is_none(), "id={id:?}");
-    }
-
-    // -- Lockout ------------------------------------------------------------
-
-    /// The budget, then the wall.
-    #[test]
-    fn an_address_is_locked_out_only_once_its_budget_is_spent() {
-        let (config, now) = (config(), Instant::now());
-        let mut lockout = Lockout::default();
-
-        for attempt in 1..=2 {
-            lockout.record_failure(addr(1), now, &config);
-            assert_eq!(
-                lockout.locked_for(addr(1), now, &config),
-                None,
-                "attempt {attempt} is still inside the budget"
-            );
-        }
-        lockout.record_failure(addr(1), now, &config);
-
-        assert!(lockout.locked_for(addr(1), now, &config).is_some());
-    }
-
-    /// The fix for rdio's zero-length cooldown: an operator who locks themselves
-    /// out can wait it out instead of restarting the scanner.
-    #[test]
-    fn a_lockout_expires_on_its_own() {
-        let (config, start) = (config(), Instant::now());
-        let mut lockout = Lockout::default();
-        for _ in 0..3 {
-            lockout.record_failure(addr(1), start, &config);
-        }
-
-        assert!(
-            lockout
-                .locked_for(addr(1), start + Duration::from_secs(59), &config)
-                .is_some(),
-            "still inside the cooldown"
-        );
-        assert_eq!(
-            lockout.locked_for(addr(1), start + Duration::from_secs(60), &config),
-            None,
-            "the cooldown is over"
-        );
-    }
-
-    /// ...and waiting it out returns the whole budget, not one more try.
-    #[test]
-    fn waiting_out_a_lockout_restores_the_whole_budget() {
-        let (config, start) = (config(), Instant::now());
-        let mut lockout = Lockout::default();
-        for _ in 0..3 {
-            lockout.record_failure(addr(1), start, &config);
-        }
-        let later = start + Duration::from_secs(60);
-
-        assert_eq!(lockout.record_failure(addr(1), later, &config), 1);
-        assert_eq!(lockout.locked_for(addr(1), later, &config), None);
-    }
-
-    /// Hammering a locked address keeps it locked: the cooldown runs from the
-    /// last attempt, not the one that spent the budget.
-    #[test]
-    fn attempts_during_a_lockout_extend_it() {
-        let (config, start) = (config(), Instant::now());
-        let mut lockout = Lockout::default();
-        for _ in 0..3 {
-            lockout.record_failure(addr(1), start, &config);
-        }
-
-        lockout.record_failure(addr(1), start + Duration::from_secs(59), &config);
-
-        assert!(
-            lockout
-                .locked_for(addr(1), start + Duration::from_secs(90), &config)
-                .is_some(),
-            "the cooldown restarted from the last attempt"
-        );
-    }
-
-    /// One address's failures are its own. rdio keys the ledger on a spoofable
-    /// header *and* clears the whole thing on any success; both of those let one
-    /// client spend or restore another's budget.
-    #[test]
-    fn addresses_do_not_share_a_budget() {
-        let (config, now) = (config(), Instant::now());
-        let mut lockout = Lockout::default();
-        for _ in 0..3 {
-            lockout.record_failure(addr(1), now, &config);
-        }
-
-        assert!(lockout.locked_for(addr(1), now, &config).is_some());
-        assert_eq!(
-            lockout.locked_for(addr(2), now, &config),
-            None,
-            "a second address starts with a full budget"
-        );
-
-        lockout.clear(addr(2));
-
-        assert!(
-            lockout.locked_for(addr(1), now, &config).is_some(),
-            "clearing one address must not free another"
-        );
-    }
-
-    /// The ledger is bounded, or it is a way to exhaust a Pi's memory by
-    /// guessing from a fresh address each time — which an IPv6 /64 makes free.
-    /// A record whose cooldown has fully elapsed carries no information (its
-    /// budget is already whole again), so it is dropped rather than kept.
-    #[test]
-    fn a_ledger_forgets_addresses_whose_cooldown_has_passed() {
-        let (config, start) = (config(), Instant::now());
-        let mut lockout = Lockout::default();
-        for host in 0..50 {
-            lockout.record_failure(addr(host), start, &config);
-        }
-        assert_eq!(lockout.failures.len(), 50);
-
-        // One more, a full cooldown later: the other 50 are spent history.
-        lockout.record_failure(addr(200), start + Duration::from_secs(60), &config);
-
-        assert_eq!(
-            lockout.failures.len(),
-            1,
-            "only the address still inside its window should be remembered"
-        );
-    }
-
-    /// ...and even inside one window the ledger cannot grow without limit: past
-    /// the cap the least recently seen address is forgotten, which at worst
-    /// hands a long-idle attacker its budget back.
-    #[test]
-    fn a_ledger_is_capped_even_when_nothing_has_expired() {
-        // A cooldown long enough that nothing expires over the run, so this is
-        // about the cap alone and not the sweep the test above covers.
-        let config = AdminConfig {
-            lockout: Duration::from_secs(24 * 60 * 60),
-            ..config()
-        };
-        let start = Instant::now();
-        let mut lockout = Lockout::default();
-
-        // Every attempt a second apart, so "least recently seen" is unambiguous.
-        for host in 0..=(MAX_TRACKED_ADDRESSES as u64) {
-            lockout.record_failure(addr_n(host), start + Duration::from_secs(host), &config);
-        }
-
-        assert_eq!(lockout.failures.len(), MAX_TRACKED_ADDRESSES);
-        assert!(
-            !lockout.failures.contains_key(&addr_n(0)),
-            "the least recently seen address should have been dropped"
-        );
-        assert!(
-            lockout
-                .failures
-                .contains_key(&addr_n(MAX_TRACKED_ADDRESSES as u64)),
-            "the newest attempt must be recorded"
-        );
-    }
-
-    /// A `Retry-After` of 0 tells a client to try again immediately, which is
-    /// the one thing a lockout must never say.
-    #[test]
-    fn a_lockout_never_reports_zero_seconds_left() {
-        let (config, start) = (config(), Instant::now());
-        let mut lockout = Lockout::default();
-        for _ in 0..3 {
-            lockout.record_failure(addr(1), start, &config);
-        }
-
-        for elapsed_ms in [0, 1, 999, 59_001, 59_999] {
-            let left = lockout
-                .locked_for(addr(1), start + Duration::from_millis(elapsed_ms), &config)
-                .expect("locked");
-            assert!(!left.is_zero(), "elapsed_ms={elapsed_ms} left={left:?}");
-        }
     }
 
     // -- Cookies and tokens -------------------------------------------------
@@ -1451,22 +1167,6 @@ mod tests {
                 prop_assert!(!id.is_empty());
                 prop_assert!(!id.contains(';'));
             }
-        }
-
-        /// However the attempts fall, an address inside its budget is never
-        /// locked out and an address that has spent it always is.
-        #[test]
-        fn the_budget_alone_decides_whether_an_address_is_locked(attempts in 0u32..10) {
-            let (config, now) = (config(), Instant::now());
-            let mut lockout = Lockout::default();
-            for _ in 0..attempts {
-                lockout.record_failure(addr(7), now, &config);
-            }
-            prop_assert_eq!(
-                lockout.locked_for(addr(7), now, &config).is_some(),
-                attempts >= config.lockout_attempts,
-                "after {} attempts", attempts
-            );
         }
     }
 }

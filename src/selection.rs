@@ -55,6 +55,24 @@ impl Selection {
         self.all
     }
 
+    /// Everything is selected: the global default is on and no entry turns
+    /// anything off.
+    ///
+    /// The mirror of [`Selection::is_all_off`], and the condition
+    /// [`crate::archive`]'s `within` returns *no filter at all* for — written
+    /// here so that the SQL and an **Access code**'s scope normalization
+    /// (#68's [`crate::access::AccessScope::granting`]) cannot come to disagree
+    /// about which matrices are unfiltered. A scope that reaches everything is
+    /// [`crate::access::AccessScope::All`], which is what keeps a master code
+    /// costing a search no joins.
+    pub fn reaches_everything(&self) -> bool {
+        self.all
+            && self
+                .sel
+                .values()
+                .all(|talkgroups| talkgroups.values().all(|&on| on))
+    }
+
     /// Nothing is selected at all (rdio's `IsAllOff`): no global-all and no
     /// enabled entry — exclusions alone select nothing. Lets [`Selection::reaches`]
     /// skip patch resolution for an idle listener.
@@ -173,6 +191,21 @@ fn canonical_ref(value: &str) -> Option<String> {
         return None;
     }
     Some(value.parse::<i64>().ok()?.to_string())
+}
+
+/// **What a stored Selection means, written once.**
+///
+/// A scope that will not parse selects **nothing** — the safe direction, since
+/// the alternatives are forwarding an Operator's whole County to a **Downstream**
+/// peer that was scoped to one channel (#52), posting it to a **Webhook** (#54),
+/// or handing it to whoever is holding an **Access code** (#68). Five places read
+/// one — the sender routing a Call, the curation listings rendering one, the
+/// configuration document exporting one, and an unlock resolving one — and the
+/// *screen* has to show the same empty scope that routing is applying rather than
+/// a shape it invented, so the fallback is one function rather than five
+/// `unwrap_or_default()`s that can drift apart.
+pub fn stored(json: &str) -> Selection {
+    serde_json::from_str(json).unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ import { useRunPageAhead } from '@/hooks/useRunPageAhead'
 import { downloadUrl, formatCallTime, formatDuration } from '@/lib/archive'
 import { talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
+import { useGrant } from '@/hooks/useGrant'
 import { useGetUnitHistoryQuery, useSearchCallsQuery } from '@/store/api'
 import { useAppDispatch } from '@/store/hooks'
 import { startRun } from '@/store/playback'
@@ -169,6 +170,9 @@ function Calls({
   search: { system: number; unit: number }
   page: SearchPage | undefined
 }) {
+  // The **grant** goes on the link, never through the base query: a download
+  // is a navigation (#68).
+  const grant = useGrant()
   const dispatch = useAppDispatch()
   if (calls.length === 0 || !page) return null
 
@@ -217,7 +221,7 @@ function Calls({
                   <Play className="size-4" aria-hidden />
                 </Button>
                 <a
-                  href={downloadUrl(call.id)}
+                  href={downloadUrl(call.id, grant)}
                   download
                   aria-label={`Download ${talkgroupName(call)} at ${formatCallTime(call.timestamp)}`}
                   className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"

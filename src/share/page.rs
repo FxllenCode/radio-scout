@@ -477,6 +477,7 @@ mod tests {
 
     fn a_call() -> StoredCall {
         StoredCall {
+            restricted: false,
             id: 42,
             system_ref: 11,
             system_label: Some(String::from("Fulton County")),

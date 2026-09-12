@@ -31,3 +31,17 @@ export function parseRefs(raw: string): number[] | undefined {
   const refs = splitList(raw).map(Number)
   return refs.some((ref) => !Number.isInteger(ref)) ? undefined : refs
 }
+
+/**
+ * A nullable boolean as a three-state `<select>` value (#20, #68).
+ *
+ * `''` is **inherit** — follow whatever is above this row — and it is the state
+ * a plain checkbox cannot spell, which is why both settings that have it are
+ * selects. Two forms use it now (a System's enhancement, a Talkgroup's access),
+ * so it is written once rather than twice with the same three lines.
+ */
+export function inherit(value: boolean | null | undefined): string {
+  if (value === true) return 'on'
+  if (value === false) return 'off'
+  return ''
+}

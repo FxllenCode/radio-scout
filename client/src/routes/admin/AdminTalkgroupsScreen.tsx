@@ -20,7 +20,7 @@ import { useAdminSession } from '@/hooks/useAdminSession'
 import { useMerge } from '@/hooks/useMerge'
 import { Button } from '@/components/ui/button'
 import { pageSummary } from '@/lib/archive'
-import { splitList } from '@/lib/curate'
+import { inherit, splitList } from '@/lib/curate'
 import { LED_ORDER } from '@/lib/led'
 import {
   useAssignTalkgroupsMutation,
@@ -612,6 +612,11 @@ function TalkgroupForm({
   const [groups, setGroups] = useState(row.groups.join(', '))
   const [led, setLed] = useState(row.led ?? '')
   const [blacklisted, setBlacklisted] = useState(row.blacklisted)
+  // Three states, not two: `null` is *follow the System*, which is what an
+  // auto-populated channel carries and what makes a gated System gate the Refs
+  // a recorder finds on it (#68). `inherit` is the System form's own spelling
+  // of the enhancement select, one entity down.
+  const [restricted, setRestricted] = useState(inherit(row.restricted))
 
   return (
     <form
@@ -628,6 +633,7 @@ function TalkgroupForm({
               tag: tag.trim() === '' ? null : tag.trim(),
               groups: splitList(groups),
               led: led === '' ? null : led,
+              restricted: restricted === '' ? null : restricted === 'on',
               blacklisted,
             },
           }).unwrap()
@@ -687,6 +693,22 @@ function TalkgroupForm({
               {colour}
             </option>
           ))}
+        </select>
+      </Field>
+      {/* **Access codes** (#68, spec US 52). Who may hear it is a separate
+          screen — Settings → Admin → Access codes — because *what is sensitive*
+          and *who may hear it* are different questions, and keeping them apart
+          is what lets a channel be marked before any code exists for it. */}
+      <Field label="Access" htmlFor={`tg-restricted-${row.id}`}>
+        <select
+          id={`tg-restricted-${row.id}`}
+          className={controlClass}
+          value={restricted}
+          onChange={(event) => setRestricted(event.target.value)}
+        >
+          <option value="">Follow the system</option>
+          <option value="on">Restricted — needs an access code</option>
+          <option value="off">Open to anybody</option>
         </select>
       </Field>
       <label className="flex items-center gap-2 font-mono text-xs">

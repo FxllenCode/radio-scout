@@ -26,6 +26,11 @@ pub struct Model {
     /// "follow the instance", which is why `auto_populate` above is awkward to
     /// turn off for one System.
     pub enhancement: Option<bool>,
+    /// Whether Calls on this System are **restricted** (#68, spec US 52) —
+    /// reachable only by a **Listener** holding an **Access code** scoped to it.
+    /// `false`, which is what ships and what every row already written has, is
+    /// open listening (ADR-0008).
+    pub restricted: bool,
     pub created_at_ms: i64,
 }
 

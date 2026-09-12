@@ -16,6 +16,7 @@ import {
   selectFeedStatus,
   selectSince,
 } from '@/store/live'
+import { selectGrant } from '@/store/access'
 import { selectSubscription } from '@/store/transport'
 
 const STATUS_ACTION: Record<LiveStatus, () => { type: string }> = {
@@ -42,6 +43,12 @@ export function LiveFeedLink() {
   // on every dispatch that would have rebuilt an equal one.
   const matrix = useAppSelector(selectSubscription)
   const feedOff = useAppSelector(selectFeedStatus) === 'off'
+  // **A dependency, so unlocking re-opens the socket** (#68). The server
+  // resolves a connection's scope once, at connect — an expiry is re-read on the
+  // heartbeat and a *new* grant is not — so a Listener who unlocks a channel
+  // while connected has to be given a new socket, or they would hear nothing
+  // from it until the next network blip.
+  const grant = useAppSelector(selectGrant)
 
   useEffect(() => {
     // Feed off is a **hard** off (#80): no socket at all, so bandwidth and
@@ -62,16 +69,19 @@ export function LiveFeedLink() {
       dispatch(disconnected())
       return
     }
-    const handle = connectLiveFeed({
-      onStatus: (status) => dispatch(STATUS_ACTION[status]()),
-      onCall: (call, seq) => dispatch(received(call, seq)),
-      onLagged: (skipped) => dispatch(lagged(skipped)),
-      onGap: () => dispatch(gapped()),
-      // Read at send time, not subscribe time: the cursor moves with every Call
-      // and only matters when the socket comes back (ADR-0004). Turning the feed
-      // off clears it, so coming back subscribes from now.
-      since: () => selectSince(store.getState()),
-    })
+    const handle = connectLiveFeed(
+      {
+        onStatus: (status) => dispatch(STATUS_ACTION[status]()),
+        onCall: (call, seq) => dispatch(received(call, seq)),
+        onLagged: (skipped) => dispatch(lagged(skipped)),
+        onGap: () => dispatch(gapped()),
+        // Read at send time, not subscribe time: the cursor moves with every
+        // Call and only matters when the socket comes back (ADR-0004). Turning
+        // the feed off clears it, so coming back subscribes from now.
+        since: () => selectSince(store.getState()),
+      },
+      { grant },
+    )
     feed.current = handle
     // Tell it what to send *here*, not only from the matrix effect below.
     //
@@ -88,7 +98,7 @@ export function LiveFeedLink() {
       feed.current = null
       handle.close()
     }
-  }, [dispatch, store, feedOff])
+  }, [dispatch, store, feedOff, grant])
 
   // Re-sent when the listener changes what they hear.
   useEffect(() => {

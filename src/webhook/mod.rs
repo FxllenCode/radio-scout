@@ -215,7 +215,7 @@ impl Serialize for Marks {
 
 /// **What a stored mark set means, written once.**
 ///
-/// A set that will not parse selects **nothing**, the [`crate::downstream::scope_of`]
+/// A set that will not parse selects **nothing**, the [`crate::selection::stored`]
 /// direction and for its reason: the alternative is a webhook whose stored
 /// configuration is unreadable posting an Operator's whole Archive into a
 /// channel.
@@ -401,7 +401,7 @@ impl WebhookConfig {
 ///
 /// The scope, the marks and the format arrive **parsed**, because what an
 /// unreadable one means is decided once ([`marks_of`], [`format_of`],
-/// [`crate::downstream::scope_of`]) where it can be said out loud — and because
+/// [`crate::selection::stored`]) where it can be said out loud — and because
 /// the curation listing has to show the same policy the sender is applying
 /// rather than a shape it invented.
 #[derive(Debug, Clone, PartialEq)]
@@ -428,7 +428,7 @@ impl Webhook {
             url: row.url.clone(),
             format: format_of(&row.format),
             marks: marks_of(&row.marks),
-            scope: crate::downstream::scope_of(&row.scope),
+            scope: crate::selection::stored(&row.scope),
         }
     }
 
@@ -730,7 +730,7 @@ mod tests {
         };
         let elsewhere = Webhook {
             id: 3,
-            scope: crate::downstream::scope_of(r#"{"sel":{"22":{"*":true}}}"#),
+            scope: crate::selection::stored(r#"{"sel":{"22":{"*":true}}}"#),
             ..emergency_hook()
         };
         let hooks = vec![wants_emergency, wants_nothing, elsewhere];

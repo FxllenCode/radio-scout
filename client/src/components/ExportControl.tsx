@@ -1,4 +1,5 @@
 /**
+import { useGrant } from '@/hooks/useGrant'
  * Taking these results away (#65, spec US 33).
  *
  * One control on two screens — the Search screen's toolbar and the DVR's —
@@ -21,6 +22,7 @@ import { useState } from 'react'
 
 import { Sheet } from '@/components/Sheet'
 import { Button } from '@/components/ui/button'
+import { useGrant } from '@/hooks/useGrant'
 import { EXPORT_FORMATS, exportUrl, offerExport } from '@/lib/export'
 import type { Catalog, SearchQuery } from '@/types'
 
@@ -36,6 +38,9 @@ export function ExportControl({
   /** What this instance offers, or `undefined` until it has said. */
   catalog: Catalog | undefined
 }) {
+  // The **grant** goes on the link, never through the base query: a download
+  // is a navigation (#68).
+  const grant = useGrant()
   const [open, setOpen] = useState(false)
   const offer = offerExport(catalog, count)
 
@@ -68,7 +73,7 @@ export function ExportControl({
                 {EXPORT_FORMATS.map((format) => (
                   <li key={format.id}>
                     <a
-                      href={exportUrl(search, format.id)}
+                      href={exportUrl(search, format.id, grant)}
                       className="flex flex-col gap-0.5 rounded-md border border-border bg-card px-3 py-2 hover:bg-accent"
                       onClick={() => setOpen(false)}
                     >

@@ -298,7 +298,7 @@ fn row_of(row: webhook::Model, queued: i64) -> WebhookRow {
         // policy delivery is not using.
         format: crate::webhook::format_of(&row.format).slug(),
         marks: crate::webhook::marks_of(&row.marks),
-        scope: crate::downstream::scope_of(&row.scope),
+        scope: crate::selection::stored(&row.scope),
         disabled: row.disabled,
         queued,
         last_success_ms: row.last_success_ms,

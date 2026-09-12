@@ -447,7 +447,9 @@ async fn dialect_sensitive_queries_on_postgres_when_available() {
 ///
 /// Reads the dataset [`run_search_suite`] seeded, before retention adds its own.
 async fn run_catalog_suite(db: &Db) {
-    let catalog = radio_scout::catalog::read(db, 0).await.unwrap();
+    let catalog = radio_scout::catalog::read(db, 0, &radio_scout::access::AccessScope::All)
+        .await
+        .unwrap();
 
     let systems: Vec<_> = catalog
         .systems
@@ -909,6 +911,7 @@ async fn seed_system(
         label: Set(Some(label.into())),
         auto_populate: Set(auto_populate),
         blacklist: Set(blacklist.map(str::to_string)),
+        restricted: Set(false),
         created_at_ms: Set(NOW),
         ..Default::default()
     }
@@ -2335,6 +2338,12 @@ async fn recorder_truth_migration_converges_on_databases_that_predate_the_column
         ("call_units", "emergency"),
         ("call_units", "signal_system"),
         ("call_units", "at_ms"),
+        // ...and #68's two, which are the sharper case: `systems.restricted` is
+        // `NOT NULL`, so a migration that added it without a default would
+        // refuse to run over the rows an operator already has — and the first
+        // symptom would be an instance that will not start.
+        ("systems", "restricted"),
+        ("talkgroups", "restricted"),
     ] {
         db.execute_unprepared(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
             .await

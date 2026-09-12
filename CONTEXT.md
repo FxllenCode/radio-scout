@@ -263,9 +263,27 @@ _Avoid_: file ingest, folder watch, hot folder.
 Per-System/Talkgroup policy that publishes a **Call** to **Listeners** only after a configured interval — stored on arrival, emitted late, flagged as delayed, surviving restarts. Officer-safety policy, not a buffer.
 _Avoid_: delayer (rdio's noun for the mechanism), embargo, hold-back.
 
+**Restricted**:
+A **Talkgroup** or **System** only a **Listener** holding an **Access code** scoped to it may hear. The property of the *channel*, and deliberately not derived from the code roster: a channel can be marked sensitive before any code exists for it, which is the state an **Operator** is in halfway through setting this up and must be silent rather than open. `NULL` on a Talkgroup **inherits its System**, so a Ref auto-populated onto a gated System arrives gated.
+
+**An Instance that restricts nothing is unchanged in every respect** — the same answers, the same catalog document, and not one extra statement. That is what "open listening is the default posture" (ADR-0008) means operationally, and it is why the gate is a column rather than a switch.
+_Avoid_: private, locked (what the *client* draws a restricted channel as, which is a different thing: a channel is restricted whether or not the person looking can hear it), secret, hidden.
+
 **Access code**:
-A listener-facing PIN that grants scoped viewing access to specific systems/talkgroups (with optional expiry and concurrent-connection limits). Distinct from an **API key**.
-_Avoid_: password, passcode.
+A **Listener**-facing secret that opens the **Restricted** channels it is scoped to — with an optional expiry and an optional limit on how many live-feed connections may hold it at once. Chosen by the **Operator** and said out loud, so it is stored **Argon2id** (the **admin password**'s hash, not an **API key**'s SHA-256) and is never readable again by anybody, including the admin surface.
+
+It says *who may hear a gated channel* and never *which channels are gated*. Distinct from an **API key**, which is a **Recorder**'s, and from the **admin password**, of which there is exactly one.
+_Avoid_: password, passcode, PIN (what it was called before #68, and misleading now the floor is eight characters and the store is Argon2id).
+
+**Grant**:
+What an **unlock** hands a browser, and what every gated read then carries: 128 minted bits belonging to the **Access code**'s row, presented on the **query string** — the one part of a URL an `<audio>` element, a `WebSocket` and a `fetch` can all carry, and the one part `http_log` never writes down.
+
+Durable rather than per-unlock, because it belongs to the row: there is no session table to sweep, a restart logs nobody out, and revoking the code revokes every browser holding it in one delete. Changing the code re-mints it, because rotating a secret that leaked must not leave the browsers holding the old one connected. It is remembered per browser; the **Access code** itself never is.
+_Avoid_: token (spent on a **Share link**'s), session (the **Operator**'s), ticket, key.
+
+**Unlock**:
+A **Listener** proving they know an **Access code** and being handed its **Grant**. The one Argon2id verification in the listening path, bounded by the **Lockout** the admin login already keeps — and the only place a code is ever sent, in a request *body*.
+_Avoid_: sign in, log in, authenticate (all of which mean the admin **Session**).
 
 **API key**:
 A recorder-facing secret that authorizes ingesting calls into specific systems. Distinct from an **access code**.
@@ -283,7 +301,9 @@ The secret bound to a **session** that a state-changing admin request must echo 
 _Avoid_: nonce, anti-forgery token.
 
 **Lockout**:
-The refusal to check any password from an address that has spent its budget of failed logins, until a cooldown measured from its last attempt has passed. Per address, and never shared: one address's failures neither spend nor restore another's.
+The refusal to check any secret from an address that has spent its budget of failed attempts, until a cooldown measured from its last attempt has passed. Per address, and never shared: one address's failures neither spend nor restore another's.
+
+Two surfaces keep one — the **admin password** and an **Access code**'s **unlock** — and they keep the *same* one, because both verify with Argon2id and an unbounded guesser is therefore also a way to exhaust a Pi. What differs between them is only the budget.
 _Avoid_: ban, throttle, rate limit.
 
 ### Audio quality

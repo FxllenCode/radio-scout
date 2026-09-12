@@ -1,6 +1,8 @@
 /** Helpers the archive screen shares with the RTK Query layer: turning filters
  *  into a request, and turning a Call into something a listener can read.
  *  Mirrors the backend's `src/archive.rs`. */
+import { withGrant } from './access'
+
 import type {
   ActivityQuery,
   AdminTalkgroupQuery,
@@ -37,9 +39,13 @@ export function searchParams(
 }
 
 /** Where a Call's audio downloads from, named after the Call rather than its
- *  object key (spec US 27). */
-export function downloadUrl(callId: number): string {
-  return `/api/call/${callId}/download`
+ *  object key (spec US 27).
+ *
+ *  Carries the **grant** when this browser holds one (#68), because a download
+ *  is an ordinary navigation and the gate is on the route: without it a Listener
+ *  who unlocked a channel would be able to play its Calls and not to save one. */
+export function downloadUrl(callId: number, grant?: string): string {
+  return withGrant(`/api/call/${callId}/download`, grant)
 }
 
 /** Read an `<input type="datetime-local">` value as unix milliseconds. The

@@ -1,12 +1,14 @@
-import { ChevronDown, ChevronRight, Link2, Pin, Search, Zap } from 'lucide-react'
+import { ChevronDown, ChevronRight, Link2, Lock, Pin, Search, Zap } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
+import { UnlockSheet } from '@/components/UnlockSheet'
 import { Button } from '@/components/ui/button'
 import { useShareLink } from '@/hooks/useShareLink'
 import { useWindowedRows } from '@/hooks/useWindowedRows'
+import { accessOf, lockedCount } from '@/lib/access'
 import { avoidMinutesLeft } from '@/lib/avoiding'
 import {
   lastHeard,
@@ -170,6 +172,14 @@ export function TalkgroupsScreen() {
   const chosen = useAppSelector(selectSelection)
   const link = useShareLink()
   useLinkedSelection()
+  // **Access codes** (#68, spec US 52). Both readings come off the catalog the
+  // panel is already drawn from — whether this Instance gates anything at all,
+  // and how many of *these* rows this browser cannot hear — so the control
+  // costs no request of its own and is absent entirely on an Instance that
+  // gates nothing.
+  const access = accessOf(data)
+  const locked = lockedCount(data)
+  const [unlocking, setUnlocking] = useState(false)
 
   const catalog = data ?? EMPTY_CATALOG
   const panel = useMemo(
@@ -194,6 +204,10 @@ export function TalkgroupsScreen() {
     onChoose: choose,
     onPin: (key: string) => dispatch(togglePin(key)),
     onPriority: (key: string) => dispatch(togglePriority(key)),
+    // A locked row's tap is the unlock, not a selection: selecting a channel
+    // this browser cannot hear would be a switch that turns on and then does
+    // nothing, which is the one thing a panel must never offer.
+    onUnlock: () => setUnlocking(true),
   }
 
   return (
@@ -223,6 +237,20 @@ export function TalkgroupsScreen() {
               >
                 {on} of {total} on
               </span>
+              {/* Only where there is something to unlock. An Instance that
+                  gates nothing has no control here at all, which is what keeps
+                  this screen the screen it was before #68. */}
+              {access.gating && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+                  onClick={() => setUnlocking(true)}
+                >
+                  <Lock className="size-3 shrink-0" aria-hidden />
+                  {locked > 0 ? `${locked} locked` : 'Unlocked'}
+                </Button>
+              )}
               <SortToggle
                 sort={sort}
                 windowMs={catalog.activityWindowMs}
@@ -314,6 +342,12 @@ export function TalkgroupsScreen() {
 
           {panel.empty && <Notice>No talkgroups match “{filter}”.</Notice>}
         </>
+      )}
+      {/* Outside the loading/error branch, so a Listener who has a code can
+          still enter it while the panel is failing to load — which is exactly
+          when they most want to. */}
+      {unlocking && (
+        <UnlockSheet locked={locked} onClose={() => setUnlocking(false)} />
       )}
     </Screen>
   )
@@ -438,6 +472,8 @@ interface RowControls {
   onChoose: (choice: Choice) => void
   onPin: (key: string) => void
   onPriority: (key: string) => void
+  /** What a **locked** row's tap does instead of selecting it (#68). */
+  onUnlock: () => void
 }
 
 function SystemSection({
@@ -516,8 +552,51 @@ function TalkgroupRow({
   onChoose,
   onPin,
   onPriority,
+  onUnlock,
 }: { row: PanelRow; named?: boolean } & RowControls) {
-  const { selected, avoidedUntil, pinned, priority } = row
+  const { selected, avoidedUntil, pinned, priority, locked } = row
+
+  // **A locked row is drawn and cannot be switched on** (#68, spec US 52). The
+  // row stays — the Operator gated the channel, not the fact that it exists,
+  // and a Listener holding a code has to be able to see what the code is *for*
+  // — so what changes is the control: a plain button that offers the unlock,
+  // rather than a switch that would turn on and then deliver nothing.
+  if (locked) {
+    return (
+      <li className="flex items-center" style={{ height: ROW_HEIGHT }}>
+        <button
+          type="button"
+          onClick={onUnlock}
+          aria-label={`${row.label} is locked — enter an access code`}
+          className="flex h-full min-w-0 flex-1 items-center gap-3 pl-3 pr-2.5 text-left transition-colors hover:bg-muted/40"
+        >
+          <Lock
+            className="size-[18px] shrink-0 text-muted-foreground/50"
+            aria-hidden
+          />
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="truncate font-mono text-sm leading-tight text-muted-foreground">
+              {row.label}
+            </span>
+            {named && (
+              <span className="truncate font-mono text-[9px] uppercase tracking-wider text-muted-foreground/60">
+                {row.systemLabel}
+              </span>
+            )}
+          </span>
+          {/* No activity cell: the server sends none for a locked row, because
+              how busy a gated channel has been is traffic analysis of exactly
+              what was gated. */}
+          <span
+            aria-hidden
+            className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/60"
+          >
+            {row.talkgroupRef}
+          </span>
+        </button>
+      </li>
+    )
+  }
 
   return (
     <li className="flex items-center" style={{ height: ROW_HEIGHT }}>

@@ -12,9 +12,11 @@ import {
   setPlaybackState,
   setPositionState,
 } from '@/lib/mediaSession'
+import { withGrant } from '@/lib/access'
 import { prefetchAudio } from '@/lib/prefetch'
 import { keepAliveLoopUrl } from '@/lib/silence'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
+import { selectGrant } from '@/store/access'
 import { selectPlayId } from '@/store/live'
 import {
   KEEP_ALIVE_LIMIT_MS,
@@ -72,6 +74,7 @@ export function CallPlayer() {
   const rate = hurrying ? CATCHUP_RATE : NORMAL_RATE
   /** A seek the Listener asked for and the element has not made yet (#63). */
   const seek = useAppSelector(selectSeek)
+  const grant = useAppSelector(selectGrant)
   const element = useRef<HTMLAudioElement>(null)
   /** Bumped on every return to the foreground — what re-binds the lock screen. */
   const [foregrounded, setForegrounded] = useState(0)
@@ -256,9 +259,9 @@ export function CallPlayer() {
   useEffect(() => {
     if (!upcoming) return
     const controller = new AbortController()
-    void prefetchAudio(upcoming.audioUrl, controller.signal)
+    void prefetchAudio(withGrant(upcoming.audioUrl ?? '', grant), controller.signal)
     return () => controller.abort()
-  }, [upcoming])
+  }, [upcoming, grant])
 
   return (
     <audio
@@ -268,7 +271,12 @@ export function CallPlayer() {
       // In a gap the element holds the keep-alive loop rather than nothing at
       // all — never `paused`, never `ended`, which are the two states iOS
       // reads as permission to suspend the page (spec US 31).
-      src={bridging ? keepAliveLoopUrl() : current?.audioUrl}
+      // **The grant goes on the `src`** (#68): an `<audio>` element carries no
+      // header, and on a gated channel the difference between attaching it and
+      // not is a Call that plays and one that 404s. `withGrant` leaves the URL
+      // alone when there is nothing to attach, which is every Listener on every
+      // Instance that gates nothing.
+      src={bridging ? keepAliveLoopUrl() : withGrant(current?.audioUrl ?? '', grant) || undefined}
       loop={bridging}
       onEnded={() => dispatch(nextCall())}
       onLoadedMetadata={(event) => {

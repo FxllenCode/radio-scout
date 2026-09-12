@@ -27,7 +27,7 @@ use sea_orm::{
 use crate::blob::StoredAudio;
 use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
+    access_code, api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
     downstream_delivery, event, event_call, group, listener_sample, log_event, share_link, site,
     system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
     webhook_delivery,
@@ -61,6 +61,10 @@ pub async fn resolve_or_create_system<C: ConnectionTrait>(
         // governs unless an operator flips this on later (#8). `blacklist` is left
         // unset (NULL — nothing blacklisted).
         auto_populate: Set(false),
+        // A System a **Recorder** discovered is **open** (#68): gating is
+        // curation, and a channel nobody has looked at yet is not sensitive
+        // because a stranger's upload said so.
+        restricted: Set(false),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
@@ -3829,6 +3833,117 @@ pub async fn clear_webhook_deliveries<C: ConnectionTrait>(
     Ok(())
 }
 
+// -- Access codes (#68) -------------------------------------------------------
+
+/// Which channel a Call is on, and whether that channel is **restricted** (#68).
+///
+/// One statement, and the only thing an [`crate::access::AccessScope`] needs to
+/// decide about a Call it has nothing else in hand for — the audio route, the
+/// download, a Share link being minted, a **Star** being left. It is asked *only*
+/// when this Instance gates something, which is what keeps every one of those
+/// paths at exactly the statement count it had before.
+///
+/// `COALESCE` because `talkgroups.restricted` is nullable and `NULL` inherits
+/// its System, the same reading [`crate::archive`]'s `unrestricted` predicate
+/// makes and the same one the denormalizer puts on the wire.
+pub async fn call_channel<C: ConnectionTrait>(
+    db: &C,
+    id: crate::call::CallId,
+) -> Result<Option<ChannelOf>, DbErr> {
+    use sea_orm::sea_query::{Expr, Func};
+
+    call::Entity::find_by_id(id)
+        .select_only()
+        .join(sea_orm::JoinType::InnerJoin, call::Relation::System.def())
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            call::Relation::Talkgroup.def(),
+        )
+        .column_as(system::Column::Ref, "system_ref")
+        .column_as(talkgroup::Column::Ref, "talkgroup_ref")
+        .column_as(
+            Expr::expr(Func::coalesce([
+                Expr::col((talkgroup::Entity, talkgroup::Column::Restricted)).into(),
+                Expr::col((system::Entity, system::Column::Restricted)).into(),
+            ])),
+            "restricted",
+        )
+        .into_model::<ChannelOf>()
+        .one(db)
+        .await
+}
+
+/// Where one Call sits, for the access gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct ChannelOf {
+    pub system_ref: i64,
+    pub talkgroup_ref: i64,
+    pub restricted: bool,
+}
+
+/// Is **any** channel on this Instance restricted?
+///
+/// [`crate::access::Access::rearm`]'s question, and the one bit that decides
+/// whether this feature costs an Instance anything at all. Two statements rather
+/// than one join, each bounded to a single row: a System that gates everything
+/// under it, or a Talkgroup that gates itself on an open System.
+///
+/// `talkgroups.restricted` is nullable and `NULL` inherits, so only an explicit
+/// `true` counts here — a `NULL` under a restricted System is already covered by
+/// the System's own row.
+pub async fn anything_restricted<C: ConnectionTrait>(db: &C) -> Result<bool, DbErr> {
+    let gated_system = system::Entity::find()
+        .filter(system::Column::Restricted.eq(true))
+        .limit(1)
+        .one(db)
+        .await?
+        .is_some();
+    if gated_system {
+        return Ok(true);
+    }
+    Ok(talkgroup::Entity::find()
+        .filter(talkgroup::Column::Restricted.eq(true))
+        .limit(1)
+        .one(db)
+        .await?
+        .is_some())
+}
+
+/// The **Access code** a presented grant names, live or not.
+///
+/// One indexed lookup — `access_codes.grant` is unique — and it deliberately
+/// returns a **disabled** row as `None`, so the durable off is one predicate here
+/// rather than a thing every caller has to remember. Expiry is *not* filtered
+/// out, because "this expired" is a different sentence from "nobody answers to
+/// this" and [`crate::access::Access::viewer`] is where that is decided.
+pub async fn code_by_grant<C: ConnectionTrait>(
+    db: &C,
+    grant: &str,
+) -> Result<Option<access_code::Model>, DbErr> {
+    access_code::Entity::find()
+        .filter(access_code::Column::Grant.eq(grant))
+        .filter(access_code::Column::Disabled.eq(false))
+        .one(db)
+        .await
+}
+
+/// Every code an unlock has to verify against.
+///
+/// A salted hash cannot be looked up, so this is the whole enabled roster and
+/// [`crate::access::Access::unlock`] walks it. Expired rows are **in** it: a
+/// Listener who types the right code deserves to be told it expired rather than
+/// that it was wrong, and telling them apart means proving the code first.
+/// Ordered by id so the walk is stable across dialects.
+pub async fn unlockable_codes<C: ConnectionTrait>(
+    db: &C,
+) -> Result<Vec<access_code::Model>, DbErr> {
+    access_code::Entity::find()
+        .filter(access_code::Column::Disabled.eq(false))
+        .order_by_asc(access_code::Column::Id)
+        .all(db)
+        .await
+}
+
 // -- Tone-out detection (#55) -------------------------------------------------
 
 /// Does this Instance have any enabled **Tone profile** at all?
@@ -4019,13 +4134,28 @@ pub async fn settle_quiet<C: ConnectionTrait>(
 pub async fn quiet_spans_for<C: ConnectionTrait>(
     db: &C,
     ids: &[CallId],
+    scope: &crate::access::AccessScope,
 ) -> Result<Vec<(CallId, Vec<crate::quiet::Span>)>, DbErr> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(call::Entity::find()
+    // Gated for the reason every other id-shaped read is (#68): a Listener who
+    // typed an id they were never given must not learn from the answer that the
+    // Call is there. The joins are made only when something is gated, so the
+    // statement a Catch-up window costs is the one it always cost.
+    let mut found = call::Entity::find()
         .filter(call::Column::Id.is_in(ids.iter().copied()))
-        .filter(call::Column::Quiet.is_not_null())
+        .filter(call::Column::Quiet.is_not_null());
+    if let Some(permitted) = crate::archive::gate(scope) {
+        found = found
+            .join(sea_orm::JoinType::InnerJoin, call::Relation::System.def())
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                call::Relation::Talkgroup.def(),
+            )
+            .filter(permitted);
+    }
+    Ok(found
         .order_by_asc(call::Column::Id)
         .all(db)
         .await?
@@ -4595,6 +4725,7 @@ mod tests {
         let system = system::ActiveModel {
             r#ref: Set(11),
             auto_populate: Set(true),
+            restricted: Set(false),
             created_at_ms: Set(0),
             ..Default::default()
         }
@@ -4913,6 +5044,7 @@ mod tests {
 
     fn a_system(auto_populate: bool, blacklist: Option<&str>) -> system::Model {
         system::Model {
+            restricted: false,
             id: 1,
             r#ref: 11,
             label: None,
@@ -4925,6 +5057,7 @@ mod tests {
 
     fn a_talkgroup(primary_ref: i64) -> talkgroup::Model {
         talkgroup::Model {
+            restricted: None,
             id: 7,
             system_id: 1,
             r#ref: primary_ref,

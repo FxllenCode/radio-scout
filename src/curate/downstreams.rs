@@ -232,8 +232,8 @@ fn row_of(row: downstream::Model, queued: i64) -> DownstreamRow {
         label: row.label,
         url: row.url,
         // The same reading the sender applies, so the screen cannot show a
-        // scope routing is not using (`downstream::scope_of`).
-        scope: crate::downstream::scope_of(&row.scope),
+        // scope routing is not using (`selection::stored`).
+        scope: crate::selection::stored(&row.scope),
         disabled: row.disabled,
         has_key: !row.api_key.is_empty(),
         queued,

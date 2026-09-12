@@ -291,7 +291,20 @@ pub async fn audio(
     State(state): State<AppState>,
     Path(id): Path<CallId>,
     headers: HeaderMap,
+    viewer: crate::access::Viewer,
 ) -> Result<Audio, Failure> {
+    // **The gate is on the route, not inside [`serve_call`]** (#68). A **Share
+    // link** and an **Event** page reach the same bytes through their own token,
+    // and ADR-0008 already says what that is worth: a link hands over exactly one
+    // Call, which is strictly less than the Archive route it deliberately does
+    // not inherit. Putting the check here is what keeps that true — a code-holder
+    // who shares a gated Call gives away that Call and not the channel.
+    if !crate::access::reaches_call(&state.db, &viewer.scope, id)
+        .await
+        .map_err(Stage::Access.failed())?
+    {
+        return Err(Reason::CallNotFound.into());
+    }
     serve_call(&state, id, &headers).await
 }
 

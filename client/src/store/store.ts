@@ -17,6 +17,9 @@ import {
   saveSelection,
 } from '@/lib/persist'
 
+import { clearGrant, loadGrant, saveGrant } from '@/lib/access'
+
+import { accessReducer, initialAccessState } from './access'
 import { api } from './api'
 import { createAvoidClock } from './avoids'
 import { expireAvoids, initialLiveState, liveReducer } from './live'
@@ -66,6 +69,11 @@ export function makeStore(options: StoreOptions = {}) {
   // Field by field, so an arrangement we can only half read costs the Listener
   // only the half we could not (`lib/persist`).
   const rememberedPanel = storage ? loadPanel(storage, namespace) : {}
+  // **Not namespaced**, unlike everything above it: two scanners in one browser
+  // are two arrangements of the same Listener's access, and making somebody
+  // unlock twice because they opened a second tab would be a lock in the wrong
+  // place (#68).
+  const rememberedGrant = storage && loadGrant(storage)
   const hydrated = {
     ...(remembered ? { selection: remembered } : {}),
     ...(rememberedFeedOff === undefined ? {} : { feedOff: rememberedFeedOff }),
@@ -84,6 +92,10 @@ export function makeStore(options: StoreOptions = {}) {
       // is the Instance's, so a reload is how this is meant to empty.
       stars: starsReducer,
       transport: transportReducer,
+      // The **grant** this browser holds (#68) — persisted, unlike `stars`,
+      // because a Listener who unlocked a channel this morning should not be
+      // asked again this afternoon.
+      access: accessReducer,
     },
     middleware: (getDefaultMiddleware) =>
       // Prepended, as RTK requires of a listener middleware, so an effect sees
@@ -97,6 +109,10 @@ export function makeStore(options: StoreOptions = {}) {
     preloadedState: {
       live: { ...initialLiveState, ...hydrated },
       panel: { ...initialPanelState, ...rememberedPanel },
+      access: {
+        ...initialAccessState,
+        ...(rememberedGrant ? { grant: rememberedGrant } : {}),
+      },
     },
   })
   // Enables refetchOnFocus / refetchOnReconnect behavior.
@@ -129,6 +145,13 @@ export function makeStore(options: StoreOptions = {}) {
     remember((it) => it.live.feedOff, (it) => saveFeedOff(storage, namespace, it))
     remember((it) => it.live.priority, (it) => savePriority(storage, namespace, it))
     remember((it) => it.panel, (it) => savePanel(storage, namespace, it))
+    // Written out as it changes, and **removed** when it goes: a grant the
+    // server has stopped honouring must not be sitting in storage to be sent
+    // again on the next reload.
+    remember(
+      (it) => it.access.grant,
+      (grant) => (grant ? saveGrant(storage, grant) : clearGrant(storage)),
+    )
   }
 
   // A store hydrated holding an Avoid has had no action to wake its clock with

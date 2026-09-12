@@ -873,6 +873,11 @@ impl TestApp {
             label: Set(Some(format!("sys{system_ref}"))),
             auto_populate: Set(auto_populate),
             blacklist: Set(blacklist.map(str::to_string)),
+            // Explicit, like `auto_populate` and unlike a column with a database
+            // default: a `restricted` an insert forgot would be a channel
+            // silently *open*, and a loud refusal is the safer way to find that
+            // out (#68).
+            restricted: Set(false),
             created_at_ms: Set(0),
             ..Default::default()
         }
@@ -1299,6 +1304,107 @@ impl TestApp {
         body["id"].as_i64().expect("the new webhook's id")
     }
 
+    // -- Access codes (#68) -------------------------------------------------
+
+    /// Mark a System **restricted**, through the admin surface a real Operator
+    /// uses.
+    ///
+    /// Through the API rather than by writing the column, deliberately: whether
+    /// this Instance gates anything is a **cached bit**, and the thing worth
+    /// proving is that a channel restricted *now* is gated on the very next
+    /// request — which is a property of the write path, not of the column. The
+    /// `tests/tone.rs` re-arm has the same shape and the same reason.
+    pub async fn restrict_system(&self, system_ref: i64, restricted: bool) {
+        let id = self.system_id(system_ref).await;
+        let (status, body) = self
+            .admin_patch(
+                &format!("/api/admin/systems/{id}"),
+                serde_json::json!({ "restricted": restricted }),
+            )
+            .await;
+        assert_eq!(status, 200, "restricting system {system_ref}: {body}");
+    }
+
+    /// Mark one channel restricted, or open it back up (`Some(false)`), or hand
+    /// it back to its System (`None`).
+    pub async fn restrict_talkgroup(
+        &self,
+        system_ref: i64,
+        talkgroup_ref: i64,
+        restricted: Option<bool>,
+    ) {
+        let id = self
+            .talkgroup_by_ref(system_ref, talkgroup_ref)
+            .await
+            .expect("a talkgroup to restrict")
+            .id;
+        let (status, body) = self
+            .admin_patch(
+                &format!("/api/admin/talkgroups/{id}"),
+                serde_json::json!({ "restricted": restricted }),
+            )
+            .await;
+        assert_eq!(status, 200, "restricting talkgroup {talkgroup_ref}: {body}");
+    }
+
+    /// Issue an **Access code** and hand back the **grant** a browser carries.
+    ///
+    /// The scope is a **Selection** — the live feed's own matrix, which is what
+    /// a code really stores.
+    pub async fn create_access_code(&self, code: &str, scope: serde_json::Value) -> String {
+        self.create_access_code_as(serde_json::json!({ "code": code, "scope": scope }))
+            .await
+    }
+
+    /// The same, with the whole body the caller's — an expiry, a connection
+    /// limit, a label.
+    pub async fn create_access_code_as(&self, body: serde_json::Value) -> String {
+        let (status, answered) = self.admin_post("/api/admin/codes", body).await;
+        assert_eq!(status, 201, "issuing an access code: {answered}");
+        answered["grant"]
+            .as_str()
+            .expect("the one and only sight of the grant")
+            .to_owned()
+    }
+
+    /// `POST /api/unlock` — what a Listener's browser does with a code.
+    pub async fn unlock(&self, code: &str) -> (u16, serde_json::Value) {
+        let response = self
+            .post_json("/api/unlock", serde_json::json!({ "code": code }))
+            .await;
+        let status = response.status().as_u16();
+        let text = response.text().await.expect("an unlock body");
+        let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        (status, body)
+    }
+
+    /// One System's internal Id, which is what the curation routes are keyed on.
+    pub async fn system_id(&self, system_ref: i64) -> i64 {
+        use radio_scout::db::entities::system;
+        system::Entity::find()
+            .filter(system::Column::Ref.eq(system_ref))
+            .one(&self.db)
+            .await
+            .expect("read systems")
+            .unwrap_or_else(|| panic!("no system {system_ref}"))
+            .id
+    }
+
+    /// `GET` a path with a **grant** attached, the way a browser that has
+    /// unlocked something does.
+    ///
+    /// The credential rides the **query string** (ADR-0008, `crate::access`), so
+    /// this is string concatenation rather than a header — which is the whole
+    /// point of it: `http_log` writes a path and never a query.
+    pub async fn get_with_grant(&self, path: &str, grant: &str) -> reqwest::Response {
+        self.get(&with_grant(path, grant)).await
+    }
+
+    /// ...and its JSON, which is what nearly every assertion here wants.
+    pub async fn get_json_with_grant(&self, path: &str, grant: &str) -> serde_json::Value {
+        self.get_json(&with_grant(path, grant)).await
+    }
+
     /// How many Calls are queued for `webhook_id` — the **durable** depth, read
     /// from the table rather than from the sender's meter.
     pub async fn queued_for_webhook(&self, webhook_id: i64) -> i64 {
@@ -1422,6 +1528,28 @@ impl TestApp {
         let mut ws = self.connect_ws_raw().await;
         let hello = serde_json::from_str(&next_text(&mut ws).await).expect("hello json");
         (ws, hello)
+    }
+
+    /// Open a live-feed WebSocket carrying a **grant** (#68), the way a browser
+    /// that has unlocked a channel does — on the query string, because that is
+    /// the one part of a URL an `<audio>` element and a `WebSocket` can both
+    /// take and `http_log` never writes down.
+    pub async fn connect_ws_as(&self, grant: &str) -> Ws {
+        let (mut ws, greeting) = self.try_connect_ws_as(grant).await;
+        assert_eq!(greeting["t"], "hello", "the socket was refused: {greeting}");
+        let _ = &mut ws;
+        ws
+    }
+
+    /// The same, keeping whatever the server said first — which for a socket
+    /// over its **Access code**'s connection limit is a `refused` frame rather
+    /// than a `hello` (#68).
+    pub async fn try_connect_ws_as(&self, grant: &str) -> (Ws, serde_json::Value) {
+        let (mut ws, _) = tokio_tungstenite::connect_async(with_grant(&self.ws_url(), grant))
+            .await
+            .expect("ws connect");
+        let first = serde_json::from_str(&next_text(&mut ws).await).expect("a first frame");
+        (ws, first)
     }
 
     /// Open a live-feed WebSocket and read nothing — the raw socket, `hello`
@@ -1804,4 +1932,14 @@ pub struct SharedLink {
     pub audio: String,
     pub token: String,
     pub expires_at_ms: i64,
+}
+
+/// A path with a **grant** on its query string, whether or not it already has
+/// one of its own.
+pub fn with_grant(path: &str, grant: &str) -> String {
+    let joiner = match path.contains('?') {
+        true => '&',
+        false => '?',
+    };
+    format!("{path}{joiner}grant={grant}")
 }

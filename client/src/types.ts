@@ -215,6 +215,14 @@ export interface CatalogTalkgroup {
    *  Never older than the window: it is the window's answer, not the
    *  Archive's. */
   lastCallAtMs?: number
+  /** This channel is **restricted** and this browser cannot hear it (#68, spec
+   *  US 52), so the panel draws a lock rather than a switch.
+   *
+   *  The row is still here and its activity is not: the Operator gated the
+   *  channel, not the fact that it exists — and how busy a gated channel has
+   *  been is traffic analysis of exactly what was gated, so the server strips
+   *  the counts rather than trusting the client not to draw them. */
+  locked?: boolean
 }
 
 export interface CatalogSystem {
@@ -247,6 +255,19 @@ export interface Catalog {
    *  quietly means less than a Listener thinks it does is the same lie told
    *  more slowly, and only the server knows `[retention] starred_days`. */
   starred: { kept: boolean; keptDays: number }
+  /** Where this browser stands with **Access codes** (#68, spec US 52).
+   *
+   *  Absent entirely on an Instance that gates nothing — which is every
+   *  Instance until an Operator marks a channel — so the document a fresh
+   *  install serves is the one it served before this feature existed. When a
+   *  grant was sent and is not being honoured, `stale` says why, which is what
+   *  tells this browser to stop sending it. */
+  access?: {
+    gating: boolean
+    label?: string
+    expiresAtMs?: number
+    stale?: 'unknown' | 'expired'
+  }
 }
 
 export interface SystemOption {
@@ -392,6 +413,10 @@ export interface AdminSystem {
   /** `null` inherits the instance's `[enhancement] mode` (#20); a plain boolean
    *  has no way to say "follow the instance". */
   enhancement?: boolean | null
+  /** Whether every channel here is **restricted** (#68, spec US 52) — reachable
+   *  only by a listener holding an **Access code** scoped to it. `false`, which
+   *  is what every System starts as, is open listening. */
+  restricted: boolean
   talkgroups: number
   units: number
   /** Calls in the Archive under it — what a delete would take. */
@@ -413,6 +438,10 @@ export interface AdminTalkgroup {
   groups: string[]
   led?: string | null
   enhancement?: boolean | null
+  /** Whether this channel is **restricted** (#68, spec US 52). `null` inherits
+   *  the System — which is what an auto-populated channel carries, so a Ref a
+   *  recorder discovers on a gated System arrives gated. */
+  restricted?: boolean | null
   blacklisted: boolean
   calls: number
   createdAtMs: number
@@ -887,3 +916,51 @@ export interface NewEvent {
   callIds?: number[]
 }
 
+
+// -- Access codes (#68, spec US 52) ------------------------------------------
+
+/** One **Access code**, as the admin listing shows it — **never the code and
+ *  never the grant**. The code is Argon2id at rest and cannot be read back at
+ *  all; the grant is shown exactly once, by a create or a rotation. */
+export interface AdminAccessCode {
+  id: number
+  label?: string
+  /** Which restricted channels it opens, as the live feed's own **Selection** —
+   *  the same shape a Downstream's and a Webhook's scope take, so one editor
+   *  serves all three. */
+  scope: SelectionMatrix
+  expiresAtMs?: number
+  maxConnections?: number
+  /** How many live-feed connections are holding it right now. */
+  connections: number
+  disabled: boolean
+  createdAtMs: number
+}
+
+/** What a create carries. */
+export interface NewAccessCode {
+  label?: string | null
+  /** What a Listener types. On a `PATCH` this **rotates** the code, and every
+   *  grant already out there goes with it. */
+  code?: string
+  scope?: SelectionMatrix
+  expiresAtMs?: number | null
+  maxConnections?: number | null
+  disabled?: boolean
+}
+
+/** A code that has just been issued or rotated: the row, plus the one and only
+ *  sight of its grant. */
+export interface IssuedAccessCode extends AdminAccessCode {
+  grant: string
+}
+
+/** What `POST /api/unlock` hands back. */
+export interface Unlocked {
+  /** What this browser carries from now on. */
+  grant: string
+  label?: string
+  /** Which restricted channels it opens. */
+  scope: SelectionMatrix
+  expiresAtMs?: number
+}

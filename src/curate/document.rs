@@ -130,6 +130,16 @@ pub struct SystemEntry {
     /// `null`/absent inherits the instance's `[enhancement] mode` (#20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enhancement: Option<bool>,
+    /// Whether every channel here is **restricted** (#68).
+    ///
+    /// Carried even though an **Access code** itself never is: the code is a
+    /// secret and #51's rule keeps every secret out of this file, but *which
+    /// channels are sensitive* is ordinary curation — and a restore that
+    /// dropped it would silently open every gated channel on the Instance it
+    /// was restored onto, which is the one direction this feature must never
+    /// fail in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restricted: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub talkgroups: Vec<TalkgroupEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -152,6 +162,10 @@ pub struct TalkgroupEntry {
     pub led: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enhancement: Option<bool>,
+    /// `null`/absent inherits the System (#68) — which is what an
+    /// auto-populated channel carries, so a gated System's new Refs stay gated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restricted: Option<bool>,
     /// The other Refs this channel answers to (#45) — a merge is configuration,
     /// so a restore that dropped it would re-flood the panel with the churn the
     /// Operator folded away.
@@ -334,6 +348,11 @@ pub async fn import(
     // After the commit, and skipped on a dry run, because nothing was written.
     if !dry_run {
         state.tones.rearm(&state.db).await;
+        // ...and its first **restricted** channel (#68), which is the same
+        // cached-bit problem with the opposite failure: a document that gates a
+        // channel and is not re-read leaves that channel open to everybody
+        // until the next restart.
+        state.access.rearm(&state.db).await;
     }
 
     // Built before the macro rather than inside it, for the reason
@@ -510,6 +529,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
                         groups,
                         led: channel.led.clone(),
                         enhancement: channel.enhancement,
+                        restricted: channel.restricted,
                         member_refs: members.into_iter().map(|(_, r#ref)| r#ref).collect(),
                         tones,
                     }
@@ -543,6 +563,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
                 auto_populate: row.auto_populate,
                 blacklist: blacklist_of(row.blacklist.as_deref()),
                 enhancement: row.enhancement,
+                restricted: row.restricted,
                 talkgroups: channels,
                 units: apparatus,
             }
@@ -575,7 +596,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
         .map(|row| DownstreamEntry {
             url: row.url,
             label: row.label,
-            scope: crate::downstream::scope_of(&row.scope),
+            scope: crate::selection::stored(&row.scope),
         })
         .collect();
     // By value like the keys above, and for the same reason: two Instances
@@ -720,6 +741,7 @@ async fn apply_system<C: ConnectionTrait>(
                 auto_populate: Set(entry.auto_populate),
                 blacklist: Set(blacklist),
                 enhancement: Set(entry.enhancement),
+                restricted: Set(entry.restricted),
                 created_at_ms: Set(now_ms),
                 ..Default::default()
             }
@@ -730,7 +752,8 @@ async fn apply_system<C: ConnectionTrait>(
             let same = found.label == label
                 && found.auto_populate == entry.auto_populate
                 && found.blacklist == blacklist
-                && found.enhancement == entry.enhancement;
+                && found.enhancement == entry.enhancement
+                && found.restricted == entry.restricted;
             match same {
                 true => {
                     report.systems.unchanged += 1;
@@ -743,6 +766,7 @@ async fn apply_system<C: ConnectionTrait>(
                     row.auto_populate = Set(entry.auto_populate);
                     row.blacklist = Set(blacklist);
                     row.enhancement = Set(entry.enhancement);
+                    row.restricted = Set(entry.restricted);
                     row.update(db).await?
                 }
             }
@@ -830,6 +854,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                 tag_id: Set(tag_id),
                 led: Set(led),
                 enhancement: Set(entry.enhancement),
+                restricted: Set(entry.restricted),
                 created_at_ms: Set(now_ms),
                 ..Default::default()
             }
@@ -842,6 +867,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                 && found.tag_id == tag_id
                 && found.led == led
                 && found.enhancement == entry.enhancement
+                && found.restricted == entry.restricted
                 && stored_groups(db, found.id).await? == sorted(&groups);
             match same {
                 true => {
@@ -856,6 +882,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                     row.tag_id = Set(tag_id);
                     row.led = Set(led);
                     row.enhancement = Set(entry.enhancement);
+                    row.restricted = Set(entry.restricted);
                     row.update(db).await?
                 }
             }
@@ -1173,12 +1200,14 @@ mod tests {
         let document = Document {
             version: VERSION,
             systems: vec![SystemEntry {
+                restricted: false,
                 r#ref: 11,
                 label: Some(String::from("Fulton")),
                 auto_populate: true,
                 blacklist: vec![9999],
                 enhancement: Some(false),
                 talkgroups: vec![TalkgroupEntry {
+                    restricted: None,
                     r#ref: 100,
                     label: Some(String::from("Fire Dispatch")),
                     name: None,

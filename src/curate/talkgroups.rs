@@ -80,6 +80,10 @@ pub struct TalkgroupRow {
     pub led: Option<String>,
     /// `null` inherits the System, which inherits the instance (#20).
     pub enhancement: Option<bool>,
+    /// Whether this channel is **restricted** (#68). `null` inherits the
+    /// System — which is what an auto-populated channel carries, so a Ref a
+    /// recorder discovers on a gated System arrives gated.
+    pub restricted: Option<bool>,
     /// Whether this Ref is on its System's blacklist — a derived fact, not a
     /// column.
     pub blacklisted: bool,
@@ -105,6 +109,7 @@ pub struct NewTalkgroup {
     pub groups: Vec<String>,
     pub led: Option<String>,
     pub enhancement: Option<bool>,
+    pub restricted: Option<bool>,
     #[serde(default)]
     pub blacklisted: bool,
 }
@@ -127,6 +132,8 @@ pub struct TalkgroupPatch {
     pub led: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
     pub enhancement: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub restricted: Option<Option<bool>>,
     pub blacklisted: Option<bool>,
 }
 
@@ -207,6 +214,7 @@ pub async fn create(
         tag_id: Set(tag_id),
         led: Set(led),
         enhancement: Set(body.enhancement),
+        restricted: Set(body.restricted),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
@@ -220,6 +228,9 @@ pub async fn create(
         .await
         .map_err(Stage::Curate.failed())?;
     txn.commit().await.map_err(Stage::Curate.failed())?;
+    // Re-read whether anything is gated, on the request that could have changed
+    // it (#68) — see `curate::systems::create`.
+    state.access.rearm(&state.db).await;
 
     Ok(Created(
         one(db, row.id).await.map_err(Stage::Curate.failed())?,
@@ -285,6 +296,9 @@ pub async fn update(
     if let Some(enhancement) = body.enhancement {
         row.enhancement = Set(enhancement);
     }
+    if let Some(restricted) = body.restricted {
+        row.restricted = Set(restricted);
+    }
     let stored = row.update(&txn).await.map_err(Stage::Curate.failed())?;
     if let Some(groups) = &body.groups {
         set_groups(&txn, id, groups, now_ms)
@@ -312,6 +326,9 @@ pub async fn update(
             .map_err(Stage::Curate.failed())?;
     }
     txn.commit().await.map_err(Stage::Curate.failed())?;
+    // Re-read whether anything is gated, on the request that could have changed
+    // it (#68) — see `curate::systems::create`.
+    state.access.rearm(&state.db).await;
 
     one(db, id).await.map_err(Stage::Curate.failed())
 }
@@ -457,6 +474,9 @@ pub async fn remove(
         .await
         .map_err(Stage::Curate.failed())?;
     txn.commit().await.map_err(Stage::Curate.failed())?;
+    // Re-read whether anything is gated, on the request that could have changed
+    // it (#68) — see `curate::systems::create`.
+    state.access.rearm(&state.db).await;
 
     Ok(Removed)
 }
@@ -718,6 +738,7 @@ async fn denormalize<C: ConnectionTrait>(
                 name: row.name,
                 led: row.led,
                 enhancement: row.enhancement,
+                restricted: row.restricted,
                 created_at_ms: row.created_at_ms,
             }
         })
@@ -979,6 +1000,7 @@ mod tests {
         systems.insert(
             1,
             system::Model {
+                restricted: false,
                 id: 1,
                 r#ref: 11,
                 label: None,
@@ -994,6 +1016,7 @@ mod tests {
         systems.insert(
             2,
             system::Model {
+                restricted: false,
                 id: 2,
                 r#ref: 12,
                 label: None,

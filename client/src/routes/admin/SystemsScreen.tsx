@@ -13,7 +13,7 @@ import {
 import { Screen } from '@/components/layout/Screen'
 import { useAdminSession } from '@/hooks/useAdminSession'
 import { Button } from '@/components/ui/button'
-import { parseRefs } from '@/lib/curate'
+import { inherit, parseRefs } from '@/lib/curate'
 import {
   useCreateSystemMutation,
   useDeleteSystemMutation,
@@ -166,6 +166,7 @@ function SystemForm({
   const [label, setLabel] = useState(row.label ?? '')
   const [autoPopulate, setAutoPopulate] = useState(row.autoPopulate)
   const [enhancement, setEnhancement] = useState(inherit(row.enhancement))
+  const [restricted, setRestricted] = useState(row.restricted)
   const [blacklist, setBlacklist] = useState(row.blacklist.join(', '))
   const [ref, setRef] = useState(String(row.ref))
   const refs = parseRefs(blacklist)
@@ -190,6 +191,7 @@ function SystemForm({
               label: label.trim() === '' ? null : label.trim(),
               autoPopulate,
               enhancement: enhancement === '' ? null : enhancement === 'on',
+              restricted,
               blacklist: refs ?? [],
             },
           }).unwrap()
@@ -226,6 +228,18 @@ function SystemForm({
           onChange={(event) => setAutoPopulate(event.target.checked)}
         />
         Discover new talkgroups and units on this system
+      </label>
+      {/* **Access codes** (#68, spec US 52). A plain checkbox rather than the
+          three-state select beside it: a System is the top of the inheritance,
+          so there is nothing above it to follow — the third state belongs to a
+          Talkgroup, which can say "whatever my System says". */}
+      <label className="flex items-center gap-2 font-mono text-xs">
+        <input
+          type="checkbox"
+          checked={restricted}
+          onChange={(event) => setRestricted(event.target.checked)}
+        />
+        Restricted — only listeners with an access code may hear this system
       </label>
       <Field label="Enhancement" htmlFor={`system-enhance-${row.id}`}>
         <select
@@ -276,8 +290,3 @@ function SystemForm({
 
 /** The select's value for a nullable flag: `''` is "inherit", which is the state
  *  a checkbox has no way to hold. */
-function inherit(value: boolean | null | undefined): string {
-  if (value === true) return 'on'
-  if (value === false) return 'off'
-  return ''
-}

@@ -11,6 +11,7 @@ import { SettingsScreen } from '@/routes/SettingsScreen'
 import { UnitScreen } from '@/routes/UnitScreen'
 import { AdminScreen } from '@/routes/admin/AdminScreen'
 import { AdminTalkgroupsScreen } from '@/routes/admin/AdminTalkgroupsScreen'
+import { AccessCodesScreen } from '@/routes/admin/AccessCodesScreen'
 import { ApiKeysScreen } from '@/routes/admin/ApiKeysScreen'
 import { DownstreamsScreen } from '@/routes/admin/DownstreamsScreen'
 import { EventsScreen } from '@/routes/admin/EventsScreen'
@@ -62,6 +63,7 @@ export default function App() {
         <Route path="settings/admin/tags" element={<TagsScreen />} />
         <Route path="settings/admin/units" element={<UnitsScreen />} />
         <Route path="settings/admin/api-keys" element={<ApiKeysScreen />} />
+        <Route path="settings/admin/codes" element={<AccessCodesScreen />} />
         <Route
           path="settings/admin/downstreams"
           element={<DownstreamsScreen />}

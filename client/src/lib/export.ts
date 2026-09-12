@@ -14,6 +14,8 @@
  * told "that range holds 4,312 calls" before they wait for a download that was
  * never going to arrive, not after.
  */
+import { withGrant } from './access'
+
 import type { Catalog, SearchQuery } from '@/types'
 
 import { searchParams } from './archive'
@@ -43,9 +45,19 @@ export const EXPORT_FORMATS: { id: ExportFormat; label: string; detail: string }
  *  **Run** keeps (`lib/run`), for the same reason. Nor does `sort`: the server
  *  overrides it (an incident has one useful order), so sending one would make
  *  two links to the same export look like different exports. */
-export function exportUrl(search: SearchQuery, format: ExportFormat): string {
+export function exportUrl(
+  search: SearchQuery,
+  format: ExportFormat,
+  grant?: string,
+): string {
   const { sort: _sort, limit: _limit, offset: _offset, ...filters } = search
-  return `/api/calls/export?${searchParams({ ...filters, format } as SearchQuery)}`
+  // The grant rides along for `downloadUrl`'s reason (#68): an export is a
+  // navigation, and one that silently left out the channels a Listener unlocked
+  // would hand them a file that is quietly short.
+  return withGrant(
+    `/api/calls/export?${searchParams({ ...filters, format } as SearchQuery)}`,
+    grant,
+  )
 }
 
 /** Whether this range can go, and what to say when it cannot. */

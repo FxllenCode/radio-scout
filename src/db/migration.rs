@@ -7,7 +7,7 @@ use sea_orm::Schema;
 use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
-    api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
+    access_code, api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
     downstream_delivery, event, event_call, group, listener_sample, log_event, share_link, site,
     system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
     webhook_delivery,
@@ -41,6 +41,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0020_share_links::Migration),
             Box::new(m0021_starred_calls::Migration),
             Box::new(m0022_events::Migration),
+            Box::new(m0023_access_codes::Migration),
         ]
     }
 }
@@ -2069,6 +2070,104 @@ mod m0022_events {
                 .await?;
             manager
                 .drop_table(Table::drop().table(event::Entity).to_owned())
+                .await
+        }
+    }
+}
+
+/// **Access codes**, and the channels they open (#68, spec US 52).
+///
+/// Two halves, and the separation is the feature. `systems.restricted` /
+/// `talkgroups.restricted` say *what is sensitive*; `access_codes` says *who may
+/// hear it*. Deriving either from the other — a channel being gated because some
+/// code happens to name it — would make it impossible to express the state an
+/// Operator is in halfway through setting this up: **sensitive, and no code
+/// written yet**, which must be silent rather than open.
+///
+/// `talkgroups.restricted` is **nullable and inherits its System**, the
+/// [`m0006_enhancement`] shape and for a sharper reason than that one had: a
+/// Talkgroup auto-populated by ingest (#8) carries no curation at all, so a new
+/// Ref appearing on a restricted System must arrive **gated**. A plain boolean
+/// defaulting to `false` would open every channel a recorder discovered, one at
+/// a time, silently, forever.
+///
+/// `systems.restricted` is not null and defaults to `false`, which is what makes
+/// "an instance with no codes behaves exactly as today" true of every row that
+/// already exists rather than of a migration that had to guess.
+mod m0023_access_codes {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0023_access_codes"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let schema = Schema::new(manager.get_database_backend());
+            if !manager.has_table("access_codes").await? {
+                manager
+                    .create_table(schema.create_table_from_entity(access_code::Entity))
+                    .await?;
+            }
+            // The standing tax m0003 named: `m0001_init` generates its DDL from
+            // the *live* entities, so a database created after this release
+            // already has both columns by the time this runs.
+            if !manager.has_column("systems", "restricted").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(system::Entity)
+                            .add_column(
+                                ColumnDef::new(system::Column::Restricted)
+                                    .boolean()
+                                    .not_null()
+                                    .default(false),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_column("talkgroups", "restricted").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(talkgroup::Entity)
+                            .add_column(
+                                ColumnDef::new(talkgroup::Column::Restricted)
+                                    .boolean()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(talkgroup::Entity)
+                        .drop_column(talkgroup::Column::Restricted)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(system::Entity)
+                        .drop_column(system::Column::Restricted)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .drop_table(Table::drop().table(access_code::Entity).to_owned())
                 .await
         }
     }

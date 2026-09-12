@@ -20,6 +20,12 @@ pub struct Model {
     /// System, which in turn inherits the instance. The most specific row wins,
     /// so a Talkgroup may opt back into a System that opted out.
     pub enhancement: Option<bool>,
+    /// Whether this channel is **restricted** (#68). `NULL` inherits the System,
+    /// which is what a Talkgroup auto-populated by ingest carries — so a Ref a
+    /// recorder discovers on a gated System arrives gated rather than opening a
+    /// hole nobody asked for. `false` opens one channel on an otherwise gated
+    /// System, the `enhancement` shape read in the other direction.
+    pub restricted: Option<bool>,
     pub created_at_ms: i64,
 }
 

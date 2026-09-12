@@ -273,6 +273,21 @@ pub struct StoredCall {
     /// the way a player can act on.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub encrypted: bool,
+    /// This Call's channel is **restricted** (#68, spec US 52), so reaching it
+    /// took an **Access code**.
+    ///
+    /// `COALESCE(talkgroup.restricted, system.restricted)`, read for no extra
+    /// statement by the denormalizer that joins both tables anyway — which is
+    /// what lets a live frame be gated on the same fact the SQL filters on.
+    /// Omitted when it isn't, [`StoredCall::emergency`]'s rule: almost no Call
+    /// carries it, and every live frame pays for a key that is present.
+    ///
+    /// It is on the wire because it is *true of a Call somebody is allowed to
+    /// see* — a Listener who unlocked a channel is shown which of their Calls
+    /// came from it. Nobody who may not see the Call receives it at all, so this
+    /// publishes nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restricted: bool,
     /// A **Tone profile** on this channel was paged in this Call's audio (#55,
     /// spec US 20) — omitted when it wasn't, [`StoredCall::emergency`]'s rule
     /// and for its reason: a page is rare and every live frame pays for a key
@@ -731,6 +746,7 @@ mod tests {
 
     fn full() -> StoredCall {
         StoredCall {
+            restricted: false,
             id: 42,
             system_ref: 11,
             system_label: Some("butco".into()),
@@ -792,6 +808,7 @@ mod tests {
     #[test]
     fn none_fields_are_omitted() {
         let minimal = StoredCall {
+            restricted: false,
             id: 1,
             system_ref: 11,
             system_label: None,

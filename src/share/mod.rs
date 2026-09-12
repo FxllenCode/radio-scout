@@ -316,9 +316,23 @@ impl TokenQuery {
 pub async fn create(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<CallId>,
+    viewer: crate::access::Viewer,
 ) -> Result<Minted, Failure> {
     if !state.shares.enabled() {
         return Err(Gone::Disabled.reason().into());
+    }
+    // **Minting needs the scope, and then the link works for anybody** (#68).
+    // The two halves are one decision: a stranger must not be able to mint a
+    // public URL onto a channel an Operator gated, and a Listener who holds the
+    // code is a trusted Listener deliberately sending one Call — which is
+    // ADR-0008's own argument for why this write may be unauthenticated at all.
+    // The Operator keeps both levers they already had: `[share] enabled`, and
+    // revoking the individual link.
+    if !crate::access::reaches_call(&state.db, &viewer.scope, id)
+        .await
+        .map_err(Stage::MintShare.failed())?
+    {
+        return Err(Reason::CallNotFound.into());
     }
     // The Call has to exist before a link to it does — otherwise a typo'd id
     // mints a working URL onto a page that can never render.

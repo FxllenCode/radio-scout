@@ -43,6 +43,7 @@ use sea_orm::{
 };
 
 use crate::AppState;
+use crate::access::{AccessScope, Viewer};
 use crate::activity::{Axis, Grain, Series};
 use crate::call::{CallDetail, CallId, Emission, StoredCall};
 use crate::db::entities::{
@@ -87,7 +88,7 @@ pub enum CallSort {
 
 /// Cascading archive-search filters. All are optional and combine with AND;
 /// `limit == 0` means unlimited.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CallSearch {
     pub after_ms: Option<i64>,
     pub before_ms: Option<i64>,
@@ -171,9 +172,57 @@ pub struct CallSearch {
     /// not a query-string filter — nobody types this — which is why it is set by
     /// the one caller that needs it rather than read by [`parse_search`].
     pub with_audio: bool,
+    /// What the **Listener** asking may hear (#68, spec US 52) — every
+    /// unrestricted channel, plus whatever **Access code** they presented opens.
+    ///
+    /// [`CallSearch::with_audio`]'s shape and for a sharper reason: nobody types
+    /// this, and a query string that *could* would be a way to ask for somebody
+    /// else's channels. [`crate::query::Params`] never reads it; every handler
+    /// sets it from the [`crate::access::Viewer`] it was extracted with, which is
+    /// what makes forgetting one a compile-time-visible omission rather than a
+    /// search that quietly answers with the whole Archive.
+    ///
+    /// The default is [`AccessScope::All`] rather than open listening, because
+    /// this type is also how the **Downstream** sender, the **Mining** sweep and
+    /// every worker read the Archive — none of which is a Listener, and all of
+    /// which must see every Call there is.
+    pub scope: AccessScope,
     pub sort: CallSort,
     pub limit: u64,
     pub offset: u64,
+}
+
+impl Default for CallSearch {
+    /// An unfiltered search that reaches **every** Call there is.
+    ///
+    /// Hand-written rather than derived so that [`CallSearch::scope`] can be
+    /// [`AccessScope::All`] while [`AccessScope`]'s own default is open
+    /// listening. The two are opposite on purpose: a scope assembled by mistake
+    /// must grant the least, and a `CallSearch` assembled by hand belongs to a
+    /// **Worker** rather than to a Listener — the **Downstream** sender, an
+    /// export walking a range it has already been allowed, a sweep. Every
+    /// Listener-facing search comes through [`parse_search`], which cannot be
+    /// called without a [`Viewer`].
+    fn default() -> Self {
+        CallSearch {
+            after_ms: None,
+            before_ms: None,
+            system_ref: None,
+            talkgroup_ref: None,
+            group_name: None,
+            tag_name: None,
+            min_duration_ms: None,
+            unit_ref: None,
+            mark: None,
+            selection: None,
+            starred: false,
+            with_audio: false,
+            scope: AccessScope::All,
+            sort: CallSort::Newest,
+            limit: 0,
+            offset: 0,
+        }
+    }
 }
 
 /// A [`CallSearch`] with everything the database had to be asked **before** its
@@ -376,6 +425,13 @@ impl CallQuery {
         if let Some(reached) = search.selection.as_ref().and_then(within) {
             self = self.join_system().join_talkgroup().and_where(reached);
         }
+        // Last, and structurally last: every filter above narrows what a
+        // Listener asked for, and this narrows what they are allowed to have
+        // asked. `None` is the whole cost of this feature on an Instance that
+        // gates nothing — no clause, and no joins made for one.
+        if let Some(permitted) = gate(&search.scope) {
+            self = self.join_system().join_talkgroup().and_where(permitted);
+        }
         self
     }
 
@@ -490,12 +546,11 @@ fn within(selection: &crate::selection::Selection) -> Option<sea_orm::Condition>
 
     // A System whose default is on with nothing excepted admits every Call on
     // it, which is what `all` already says — so a scanner made only of those is
-    // an unfiltered search.
-    if selection.all
-        && scopes
-            .iter()
-            .all(|scope| scope.default_on && scope.exceptions.is_empty())
-    {
+    // an unfiltered search. Asked of the Selection rather than of the reduction,
+    // so that this and [`crate::access::AccessScope::granting`] — which
+    // normalizes a scope reaching everything to "no gate at all" — cannot come
+    // to disagree about which matrices are unfiltered.
+    if selection.reaches_everything() {
         return None;
     }
 
@@ -549,6 +604,52 @@ fn within(selection: &crate::selection::Selection) -> Option<sea_orm::Condition>
         arms.into_iter()
             .fold(sea_orm::Condition::any(), sea_orm::Condition::add),
     )
+}
+
+/// Which Calls an [`AccessScope`] may see — `None` when it may see every Call
+/// there is, so an Instance that gates nothing pays no clause and no joins.
+///
+/// Two arms, `OR`ed, and the order they are written in is the feature's own
+/// sentence: **an unrestricted channel is open to everybody**, and a restricted
+/// one is reachable only where the grant reaches it. The second half is
+/// [`within`] — the Selection SQL a **DVR** already filters on — so an Access
+/// code scoped to a channel reaches a **Patch** onto that channel, which is the
+/// half rdio-scanner's own scope check gets wrong one feature along
+/// (`downstream.go:99`).
+///
+/// The restriction is read off the Call's **own** channel, which is the same
+/// fact [`crate::call::StoredCall::restricted`] carries and therefore the same
+/// answer [`AccessScope::permits`] gives a live frame. A Call addressed to a
+/// gated channel stays gated however it was patched; one addressed to an open
+/// channel stays open, which hides nothing — that audio is reachable under the
+/// open channel's own name by anybody.
+pub(crate) fn gate(scope: &AccessScope) -> Option<sea_orm::Condition> {
+    match scope {
+        AccessScope::All => None,
+        AccessScope::Granted(granted) => Some(
+            sea_orm::Condition::any()
+                .add(unrestricted())
+                .add(within(granted).unwrap_or_else(never)),
+        ),
+    }
+}
+
+/// A Call whose own channel is open to everybody.
+///
+/// `COALESCE` because `talkgroups.restricted` is nullable and `NULL` **inherits
+/// its System** (#68) — which is what an auto-populated channel carries, so a
+/// Ref a recorder discovers on a gated System is gated by this expression
+/// without anybody having curated it. `systems.restricted` is not null, so the
+/// coalesce always resolves and there is no third state for the comparison to
+/// fall through.
+fn unrestricted() -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::sea_query::{Expr, Func};
+
+    Expr::expr(Func::coalesce([
+        Expr::col((talkgroup::Entity, talkgroup::Column::Restricted)).into(),
+        Expr::col((system::Entity, system::Column::Restricted)).into(),
+    ]))
+    .eq(false)
 }
 
 /// One System of a Selection, reduced to a default and the Refs that differ
@@ -1541,6 +1642,16 @@ pub async fn stored_calls<C: ConnectionTrait>(
                 system_ref: system.map_or(0, |s| s.r#ref),
                 system_label: system.and_then(|s| s.label.clone()),
                 talkgroup_ref: talkgroup.map_or(0, |t| t.r#ref),
+                // `NULL` on the channel inherits the System, which is what an
+                // auto-populated Ref carries (#68) — the same coalesce the
+                // Archive's own `unrestricted` predicate makes in SQL, so a
+                // live frame and a search page cannot disagree about which
+                // Calls are gated. A Call with neither row is the belt-and-
+                // braces case below and reads as open, which is what an
+                // Instance that gates nothing wants.
+                restricted: talkgroup
+                    .and_then(|t| t.restricted)
+                    .unwrap_or_else(|| system.is_some_and(|s| s.restricted)),
                 talkgroup_label: talkgroup.and_then(|t| t.label.clone()),
                 talkgroup_group: group_of.get(&call.talkgroup_id).cloned(),
                 talkgroup_tag: talkgroup
@@ -1776,6 +1887,7 @@ pub async fn unit_history<C: ConnectionTrait>(
     db: &C,
     system_ref: i64,
     unit_ref: i64,
+    scope: &AccessScope,
 ) -> Result<Option<crate::call::UnitHistory>, DbErr> {
     use crate::call::{RefSpan, UnitHistory, UnitTalkgroup};
 
@@ -1787,12 +1899,20 @@ pub async fn unit_history<C: ConnectionTrait>(
         return Ok(None);
     };
     let unit = crate::db::repo::resolve_unit(db, system.id, unit_ref).await?;
-    let scope = crate::db::repo::unit_scope(db, unit_ref).await?;
+    let heard = crate::db::repo::unit_scope(db, unit_ref).await?;
 
-    let mut rows = CallQuery::new()
+    let mut query = CallQuery::new()
         .join_talkgroup()
         .and_where(call::Column::SystemId.eq(system.id))
-        .and_where(heard_by(&scope))
+        .and_where(heard_by(&heard));
+    // The summary counts what this Listener may hear and nothing else (#68).
+    // Without it a gated channel is absent from `?unit=`'s Calls and present in
+    // the tally above them — a number that says a radio was somewhere its
+    // Calls do not appear, which is worse than either answer alone.
+    if let Some(permitted) = gate(scope) {
+        query = query.join_system().and_where(permitted);
+    }
+    let mut rows = query
         .grouped()
         .column_as(talkgroup::Column::Ref, "talkgroup_ref")
         .column_as(talkgroup::Column::Label, "talkgroup_label")
@@ -1872,7 +1992,17 @@ where
 /// Read the archive-search filters out of a query string, or say which
 /// parameter was wrong. Blank is absent and bad input is named — see
 /// [`crate::query`], which both read surfaces share.
-pub(crate) fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSearch> {
+///
+/// **The [`Viewer`] is a parameter rather than something a handler remembers to
+/// set afterwards** (#68). A `CallSearch` built from a query string is by
+/// definition one somebody asked for over HTTP, and what such a search may
+/// *reach* is not theirs to say — so there is no way to parse one without
+/// saying whose it is. The worker-facing searches keep [`CallSearch::default`],
+/// which reaches every Call there is, because none of them is a Listener.
+pub(crate) fn parse_search(
+    params: &HashMap<String, String>,
+    viewer: &Viewer,
+) -> Filtered<CallSearch> {
     let params = Params::new(params);
 
     let sort = match params.raw("sort") {
@@ -1938,6 +2068,9 @@ pub(crate) fn parse_search(params: &HashMap<String, String>) -> Filtered<CallSea
         // touched the control and one who has cleared it are asking the same
         // question, and a checkbox spells the second.
         starred: params.flag("starred")?.unwrap_or(false),
+        // ...nor this one, and it is not even the caller's to choose: it is
+        // whatever the grant this request arrived with opens (#68).
+        scope: viewer.scope.clone(),
         // Nobody types this one: it is the **stitched export**'s (#65), set by
         // the one caller that needs it.
         with_audio: false,
@@ -1966,8 +2099,9 @@ fn seconds_to_ms(seconds: i64) -> Filtered<i64> {
 pub async fn search(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
+    viewer: Viewer,
 ) -> Result<SearchPage, Failure> {
-    let search = parse_search(&params)?;
+    let search = parse_search(&params, &viewer)?;
 
     page(&state.db, &search)
         .await
@@ -1980,8 +2114,9 @@ pub async fn search(
 pub async fn filters(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
+    viewer: Viewer,
 ) -> Result<FilterOptions, Failure> {
-    let search = parse_search(&params)?;
+    let search = parse_search(&params, &viewer)?;
 
     options(&state.db, &search)
         .await
@@ -2003,10 +2138,11 @@ pub async fn filters(
 pub async fn quiet(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
+    viewer: Viewer,
 ) -> Result<crate::quiet::QuietWindow, Failure> {
     let ids = parse_ids(params.get("ids").map(String::as_str))?;
 
-    crate::db::repo::quiet_spans_for(&state.db, &ids)
+    crate::db::repo::quiet_spans_for(&state.db, &ids, &viewer.scope)
         .await
         .map(crate::quiet::QuietWindow::of)
         .map_err(Stage::LoadQuietSpans.failed())
@@ -2057,8 +2193,9 @@ fn parse_ids(raw: Option<&str>) -> Result<Vec<CallId>, Reason> {
 pub async fn activity(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
+    viewer: Viewer,
 ) -> Result<Series, Failure> {
-    let search = parse_search(&params)?;
+    let search = parse_search(&params, &viewer)?;
     let grain = crate::activity::parse_grain(&params)?;
 
     call_activity(&state.db, &search, grain, state.clock.now_ms())
@@ -2075,11 +2212,25 @@ pub async fn activity(
 pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<CallId>,
+    viewer: Viewer,
 ) -> Result<CallDetail, Failure> {
     call_detail(&state.db, id)
         .await
         .map_err(Stage::LoadCallDetail.failed())?
+        .filter(|detail| reachable(&viewer.scope, &detail.call))
         .ok_or(Reason::CallNotFound.into())
+}
+
+/// Whether a viewer may have this Call at all (#68).
+///
+/// **The single-Call form of [`gate`]**, and the answer is deliberately the same
+/// one a Call that is not there gets: [`Reason::CallNotFound`]. An Instance that
+/// told a stranger "that Call exists and you may not have it" would publish, one
+/// id at a time, exactly what an Operator gated the channel to keep quiet — and
+/// a `403` on a hand-typed id is a working oracle. The log tells the two apart,
+/// which is where the Operator looks.
+pub(crate) fn reachable(scope: &AccessScope, call: &StoredCall) -> bool {
+    scope.permits(call.system_ref, call.talkgroup_ref, call.restricted)
 }
 
 /// `GET /api/unit/{system}/{ref}` — one radio's history (#47, spec US 44).
@@ -2091,8 +2242,9 @@ pub async fn detail(
 pub async fn unit(
     State(state): State<AppState>,
     Path((system_ref, unit_ref)): Path<(i64, i64)>,
+    viewer: Viewer,
 ) -> Result<crate::call::UnitHistory, Failure> {
-    unit_history(&state.db, system_ref, unit_ref)
+    unit_history(&state.db, system_ref, unit_ref, &viewer.scope)
         .await
         .map_err(Stage::LoadUnitHistory.failed())?
         .ok_or(Reason::UnitNotFound.into())
@@ -2109,7 +2261,14 @@ pub async fn unit(
 pub async fn download(
     State(state): State<AppState>,
     Path(id): Path<CallId>,
+    viewer: Viewer,
 ) -> Result<Attachment, Failure> {
+    if !crate::access::reaches_call(&state.db, &viewer.scope, id)
+        .await
+        .map_err(Stage::Access.failed())?
+    {
+        return Err(Reason::CallNotFound.into());
+    }
     let call = call_download(&state.db, id)
         .await
         .map_err(Stage::LookUpCall.failed())?
@@ -2437,7 +2596,7 @@ mod tests {
 
     #[test]
     fn an_empty_query_is_the_default_page_newest_first() {
-        let search = parse_search(&query(&[])).unwrap();
+        let search = parse_search(&query(&[]), &Viewer::unrestricted()).unwrap();
         assert_eq!(search.sort, CallSort::Newest);
         assert_eq!(search.limit, DEFAULT_LIMIT);
         assert_eq!(search.offset, 0);
@@ -2452,18 +2611,21 @@ mod tests {
 
     #[test]
     fn every_filter_is_read_and_whitespace_trimmed() {
-        let search = parse_search(&query(&[
-            ("after", " 1000 "),
-            ("before", "2000"),
-            ("system", "11"),
-            ("talkgroup", "54241"),
-            ("group", " Fire "),
-            ("tag", "Fire Dispatch"),
-            ("minDuration", " 5 "),
-            ("sort", "oldest"),
-            ("limit", "25"),
-            ("offset", "50"),
-        ]))
+        let search = parse_search(
+            &query(&[
+                ("after", " 1000 "),
+                ("before", "2000"),
+                ("system", "11"),
+                ("talkgroup", "54241"),
+                ("group", " Fire "),
+                ("tag", "Fire Dispatch"),
+                ("minDuration", " 5 "),
+                ("sort", "oldest"),
+                ("limit", "25"),
+                ("offset", "50"),
+            ]),
+            &Viewer::unrestricted(),
+        )
         .unwrap();
 
         assert_eq!(search.after_ms, Some(1000));
@@ -2486,18 +2648,21 @@ mod tests {
     #[case("")]
     #[case("   ")]
     fn blank_values_are_absent(#[case] blank: &str) {
-        let search = parse_search(&query(&[
-            ("system", blank),
-            ("talkgroup", blank),
-            ("group", blank),
-            ("tag", blank),
-            ("after", blank),
-            ("before", blank),
-            ("minDuration", blank),
-            ("sort", blank),
-            ("limit", blank),
-            ("offset", blank),
-        ]))
+        let search = parse_search(
+            &query(&[
+                ("system", blank),
+                ("talkgroup", blank),
+                ("group", blank),
+                ("tag", blank),
+                ("after", blank),
+                ("before", blank),
+                ("minDuration", blank),
+                ("sort", blank),
+                ("limit", blank),
+                ("offset", blank),
+            ]),
+            &Viewer::unrestricted(),
+        )
         .unwrap();
 
         assert_eq!(search.system_ref, None);
@@ -2519,7 +2684,9 @@ mod tests {
     #[case("asc", CallSort::Oldest)]
     fn sort_spellings(#[case] raw: &str, #[case] expected: CallSort) {
         assert_eq!(
-            parse_search(&query(&[("sort", raw)])).unwrap().sort,
+            parse_search(&query(&[("sort", raw)]), &Viewer::unrestricted())
+                .unwrap()
+                .sort,
             expected
         );
     }
@@ -2532,7 +2699,9 @@ mod tests {
     #[case("99999", MAX_LIMIT)]
     fn limit_defaults_and_clamps(#[case] raw: &str, #[case] expected: u64) {
         assert_eq!(
-            parse_search(&query(&[("limit", raw)])).unwrap().limit,
+            parse_search(&query(&[("limit", raw)]), &Viewer::unrestricted())
+                .unwrap()
+                .limit,
             expected
         );
     }
@@ -2557,7 +2726,7 @@ mod tests {
     #[case("offset", "-1")]
     #[case("offset", "1e3")]
     fn malformed_values_are_named_in_the_error(#[case] key: &str, #[case] value: &str) {
-        let result = parse_search(&query(&[(key, value)]));
+        let result = parse_search(&query(&[(key, value)]), &Viewer::unrestricted());
         if value.is_empty() {
             assert!(result.is_ok(), "blank {key} is absent, not malformed");
             return;
@@ -2571,6 +2740,7 @@ mod tests {
 
     fn call() -> StoredCall {
         StoredCall {
+            restricted: false,
             id: 42,
             system_ref: 11,
             system_label: Some("Butler County".into()),

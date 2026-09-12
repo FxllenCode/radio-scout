@@ -1,6 +1,8 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
+
+import { renderWithProviders } from '@/test/utils'
 
 import { ExportControl } from './ExportControl'
 import type { Catalog } from '@/types'
@@ -13,8 +15,12 @@ const catalog = (over: Partial<Catalog['export']> = {}): Catalog => ({
   starred: { kept: false, keptDays: 0 },
 })
 
+/** Rendered inside a store because the download link carries this browser's
+ *  **Access code** grant (#68) — a navigation cannot go through the base query,
+ *  so the component reads it rather than each of its two callers remembering
+ *  to hand it over. */
 function draw(props: Partial<Parameters<typeof ExportControl>[0]> = {}) {
-  return render(
+  return renderWithProviders(
     <ExportControl
       search={{ talkgroup: 7 }}
       count={12}

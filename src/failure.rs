@@ -163,6 +163,12 @@ stages! {
     /// **object store**, and "the database refused" and "the bucket refused"
     /// send an Operator to different places.
     PurgeCalls => "purge-calls",
+    // -- Access codes (`crate::access`, #68) --------------------------------
+    /// Resolving a presented **grant**, re-reading whether anything is gated, or
+    /// reading the roster an unlock has to verify against. One stage for the
+    /// surface, [`Stage::Curate`]'s reasoning: the request line beside it
+    /// already says whether this was a listen or an unlock.
+    Access => "access",
     // -- Share links (`crate::share`, #64) ----------------------------------
     /// Minting the expiring public link for one Call.
     MintShare => "mint-share",
@@ -340,6 +346,35 @@ pub enum Reason {
     /// decodes an hour of audio, and a queue on a Pi that is also recording
     /// would only make it late for two people instead of one.
     ExportBusy,
+    // -- Access codes (#68, spec US 52) -------------------------------------
+    /// A code nobody answers to. Carries the address, rule 5's authentication
+    /// exemption, and the running failure count — and **never the code**, which
+    /// is the single thing rdio-scanner writes into its log on this exact path
+    /// (`controller.go:462`).
+    InvalidAccessCode { client_addr: IpAddr, failures: u32 },
+    /// The right code, past its window. Its own arm rather than a flavour of the
+    /// one above, because "you typed it wrong" and "this stopped working last
+    /// night" send a Listener to different people — and because an Operator
+    /// watching their firefighters fail to get in wants the second sentence.
+    ///
+    /// Named by **Id**, never by the code: a label is the most that may be said
+    /// out loud about one, and the span the refusal happens in carries it.
+    AccessCodeExpired { code_id: i64 },
+    /// An address that has spent its budget of failed unlocks. Refused *before*
+    /// any Argon2 work, [`Reason::AdminLockedOut`]'s rule and for its reason: the
+    /// hash is memory-hard on purpose, so an unbounded guesser is also a way to
+    /// exhaust a Pi.
+    UnlockLockedOut {
+        client_addr: IpAddr,
+        retry_after_secs: u64,
+    },
+    /// A live-feed connection beyond what its **Access code** allows at once.
+    ///
+    /// Recorded rather than rendered: a WebSocket that has already been upgraded
+    /// has no status line left to answer with, so the socket is told in a frame
+    /// and closed. rdio tells its client `max` and then goes on serving it,
+    /// because the scope was assigned before the check.
+    AccessConnectionLimit { code_id: i64, limit: i64 },
     // -- Curation (#49) -----------------------------------------------------
     /// A curation write the admin surface refused — a blank field, a name or a
     /// Ref already taken, a row that is not there, or a delete that would have
@@ -416,6 +451,13 @@ struct Refusal {
     retry_after_secs: Option<u64>,
     /// The stored Call a duplicate was of.
     duplicate_of: Option<crate::call::CallId>,
+    /// Which **Access code** a refusal is about (#68).
+    ///
+    /// The Id, never the code and never the grant — a label is the most that may
+    /// ever be said out loud about one, and this line is written where the
+    /// label is not in hand. An Operator whose firefighters cannot get in reads
+    /// it against the admin listing.
+    code_id: Option<i64>,
 }
 
 /// What the caller is handed: text for everything a recorder or a listener
@@ -438,7 +480,14 @@ impl Refusal {
             failures: None,
             retry_after_secs: None,
             duplicate_of: None,
+            code_id: None,
         }
+    }
+
+    /// The **Access code** this refusal is about (#68).
+    fn about_code(mut self, code_id: i64) -> Self {
+        self.code_id = Some(code_id);
+        self
     }
 
     /// The Call this one turned out to be a copy of.
@@ -711,6 +760,52 @@ impl Reason {
                 text("another export is running; try again in a moment\n"),
             )
             .retry_after(EXPORT_RETRY_AFTER_SECS),
+            Reason::InvalidAccessCode {
+                client_addr,
+                failures,
+            } => Refusal::new(
+                "invalid-access-code",
+                Level::WARN,
+                StatusCode::UNAUTHORIZED,
+                text("invalid access code\n"),
+            )
+            .attempted_from(*client_addr)
+            .failures(*failures),
+            // **WARN, and deliberately not DEBUG.** Every other dead-credential
+            // refusal here is somebody clicking a stale link; this one is a
+            // Listener who holds the right code and has been shut out, which is
+            // a thing an Operator does something about (rule 7).
+            Reason::AccessCodeExpired { code_id } => Refusal::new(
+                "access-code-expired",
+                Level::WARN,
+                StatusCode::GONE,
+                text("access code expired\n"),
+            )
+            .about_code(*code_id),
+            Reason::UnlockLockedOut {
+                client_addr,
+                retry_after_secs,
+            } => Refusal::new(
+                "unlock-locked-out",
+                Level::WARN,
+                StatusCode::TOO_MANY_REQUESTS,
+                text("too many failed unlocks; try again later\n"),
+            )
+            .attempted_from(*client_addr)
+            .retry_after(*retry_after_secs),
+            Reason::AccessConnectionLimit { code_id, limit } => Refusal::new(
+                "access-connection-limit",
+                Level::WARN,
+                StatusCode::TOO_MANY_REQUESTS,
+                // The status is for the vocabulary rather than for a caller:
+                // this one is *recorded* and never rendered, because a socket
+                // that has already been upgraded has no status line left to
+                // answer with — it is told in a frame (`crate::live`).
+                text(format!(
+                    "too many connections for that access code (limit {limit})\n"
+                )),
+            )
+            .about_code(*code_id),
             Reason::BadImport(error) => Refusal::new(
                 error.reason(),
                 Level::DEBUG,
@@ -773,6 +868,7 @@ impl Reason {
                     failures = refusal.failures,
                     retry_after_secs = refusal.retry_after_secs,
                     duplicate_of = refusal.duplicate_of,
+                    code_id = refusal.code_id,
                     "request refused"
                 )
             };

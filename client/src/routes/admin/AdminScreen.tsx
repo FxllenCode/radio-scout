@@ -34,6 +34,11 @@ const SECTIONS = [
     hint: 'what recorders authenticate with',
   },
   {
+    to: '/settings/admin/codes',
+    label: 'Access codes',
+    hint: 'what listeners unlock restricted channels with',
+  },
+  {
     to: '/settings/admin/downstreams',
     label: 'Downstreams',
     hint: 'instances you forward calls to',

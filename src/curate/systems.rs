@@ -58,6 +58,11 @@ pub struct SystemRow {
     /// `[enhancement] mode` — a plain boolean has no way to say "follow the
     /// instance", which is exactly what makes this column nullable.
     pub enhancement: Option<bool>,
+    /// Whether every channel here is **restricted** (#68, spec US 52) —
+    /// reachable only by a Listener holding an **Access code** scoped to it. A
+    /// Talkgroup may still open itself back up, the `enhancement` shape read the
+    /// other way round.
+    pub restricted: bool,
     pub talkgroups: u64,
     pub units: u64,
     /// Calls in the Archive under this System — what a delete would take.
@@ -81,6 +86,8 @@ pub struct NewSystem {
     #[serde(default)]
     pub blacklist: Vec<i64>,
     pub enhancement: Option<bool>,
+    #[serde(default)]
+    pub restricted: bool,
 }
 
 /// What an edit carries. Absent means **leave alone**; `null` on a nullable
@@ -95,6 +102,7 @@ pub struct SystemPatch {
     pub blacklist: Option<Vec<i64>>,
     #[serde(default, deserialize_with = "nullable")]
     pub enhancement: Option<Option<bool>>,
+    pub restricted: Option<bool>,
 }
 
 /// `GET /api/admin/systems` — every System, with what hangs off it.
@@ -136,12 +144,19 @@ pub async fn create(
         auto_populate: Set(body.auto_populate),
         blacklist: Set(blacklist_text(&body.blacklist)),
         enhancement: Set(body.enhancement),
+        restricted: Set(body.restricted),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
     .insert(db)
     .await
     .map_err(Stage::Curate.failed())?;
+
+    // Re-read whether anything is gated, on the request that could have changed
+    // it (#68) — [`crate::tone::Tones::rearm`]'s rule, with a sharper
+    // consequence: a stale `true` buys a join on every search, and a stale
+    // `false` leaves a restricted channel open to everybody.
+    state.access.rearm(&state.db).await;
 
     Ok(Created(SystemRow {
         id: row.id,
@@ -150,6 +165,7 @@ pub async fn create(
         auto_populate: row.auto_populate,
         blacklist: blacklist_of(row.blacklist.as_deref()),
         enhancement: row.enhancement,
+        restricted: row.restricted,
         talkgroups: 0,
         units: 0,
         calls: 0,
@@ -203,7 +219,15 @@ pub async fn update(
     if let Some(enhancement) = body.enhancement {
         row.enhancement = Set(enhancement);
     }
+    if let Some(restricted) = body.restricted {
+        row.restricted = Set(restricted);
+    }
     row.update(db).await.map_err(Stage::Curate.failed())?;
+    // Re-read whether anything is gated, on the request that could have changed
+    // it (#68) — [`crate::tone::Tones::rearm`]'s rule, with a sharper
+    // consequence: a stale `true` buys a join on every search, and a stale
+    // `false` leaves a restricted channel open to everybody.
+    state.access.rearm(&state.db).await;
 
     one(db, id).await.map_err(Stage::Curate.failed())
 }
@@ -286,6 +310,9 @@ pub async fn remove(
         result.map_err(Stage::Curate.failed())?;
     }
     txn.commit().await.map_err(Stage::Curate.failed())?;
+    // Re-read whether anything is gated, on the request that could have changed
+    // it (#68) — see `curate::systems::create`.
+    state.access.rearm(&state.db).await;
 
     Ok(Removed)
 }
@@ -314,6 +341,7 @@ pub async fn read_all<C: ConnectionTrait>(db: &C) -> Result<Vec<SystemRow>, DbEr
             auto_populate: row.auto_populate,
             blacklist: blacklist_of(row.blacklist.as_deref()),
             enhancement: row.enhancement,
+            restricted: row.restricted,
             created_at_ms: row.created_at_ms,
         })
         .collect();

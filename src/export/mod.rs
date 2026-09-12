@@ -277,12 +277,15 @@ struct Asked {
 
 impl Asked {
     /// A range of the Archive, from the query string a search page built.
-    fn read(params: &HashMap<String, String>) -> Result<Asked, Reason> {
+    fn read(
+        params: &HashMap<String, String>,
+        viewer: &crate::access::Viewer,
+    ) -> Result<Asked, Reason> {
         let format = Format::parse(crate::query::Params::new(params).raw("format"))?;
         Ok(Asked {
             format,
             source: Source::Range {
-                search: Box::new(exported_search(params, format)?),
+                search: Box::new(exported_search(params, viewer, format)?),
                 filters: describe(params),
             },
         })
@@ -414,8 +417,12 @@ fn projected(extent: &Extent, format: Format) -> u64 {
 ///   kerchunk filter at zero, because "a Call whose length was never measured
 ///   never matches" is already that filter's own documented rule, and a second
 ///   way of saying it would be a second thing to keep true.
-fn exported_search(params: &HashMap<String, String>, format: Format) -> Result<CallSearch, Reason> {
-    let mut search = crate::archive::parse_search(params)?;
+fn exported_search(
+    params: &HashMap<String, String>,
+    viewer: &crate::access::Viewer,
+    format: Format,
+) -> Result<CallSearch, Reason> {
+    let mut search = crate::archive::parse_search(params, viewer)?;
     search.sort = CallSort::Oldest;
     search.limit = 0;
     search.offset = 0;
@@ -504,8 +511,9 @@ fn describe(params: &HashMap<String, String>) -> String {
 pub async fn export(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
+    viewer: crate::access::Viewer,
 ) -> Result<Response, Failure> {
-    stream_export(state, Asked::read(&params)?).await
+    stream_export(state, Asked::read(&params, &viewer)?).await
 }
 
 /// `GET /api/admin/events/{id}/export` — one **Event** as a file (#67, spec
@@ -935,7 +943,10 @@ mod tests {
         Asked {
             format,
             source: Source::Range {
-                search: Box::new(exported_search(&params(&[]), format).expect("a search")),
+                search: Box::new(
+                    exported_search(&params(&[]), &crate::access::Viewer::unrestricted(), format)
+                        .expect("a search"),
+                ),
                 filters: String::new(),
             },
         }
@@ -986,7 +997,8 @@ mod tests {
     fn an_export_walks_the_whole_of_what_matched_oldest_first() {
         let asked = params(&[("talkgroup", "7"), ("sort", "newest"), ("offset", "300")]);
 
-        let search = exported_search(&asked, Format::Zip).expect("a search");
+        let search = exported_search(&asked, &crate::access::Viewer::unrestricted(), Format::Zip)
+            .expect("a search");
 
         assert_eq!(search.talkgroup_ref, Some(7));
         assert_eq!(search.sort, CallSort::Oldest);
@@ -997,7 +1009,12 @@ mod tests {
 
     #[test]
     fn a_stitch_takes_only_what_it_can_place_on_a_timeline() {
-        let search = exported_search(&params(&[]), Format::Stitched).expect("a search");
+        let search = exported_search(
+            &params(&[]),
+            &crate::access::Viewer::unrestricted(),
+            Format::Stitched,
+        )
+        .expect("a search");
 
         assert!(search.with_audio);
         assert_eq!(
@@ -1013,7 +1030,12 @@ mod tests {
     fn a_stitch_never_widens_a_duration_filter_the_listener_set() {
         let asked = params(&[("minDuration", "5")]);
 
-        let search = exported_search(&asked, Format::Stitched).expect("a search");
+        let search = exported_search(
+            &asked,
+            &crate::access::Viewer::unrestricted(),
+            Format::Stitched,
+        )
+        .expect("a search");
 
         assert_eq!(search.min_duration_ms, Some(5_000));
     }
@@ -1106,10 +1128,15 @@ mod tests {
             selection,
             starred,
             with_audio: _,
+            // Never a filter, and deliberately never recorded in a manifest:
+            // what a Listener was *allowed* to reach is not a description of
+            // the range they asked for (#68).
+            scope: _,
             sort: _,
             limit: _,
             offset: _,
-        } = crate::archive::parse_search(&asked).expect("every listed key is a real filter");
+        } = crate::archive::parse_search(&asked, &crate::access::Viewer::unrestricted())
+            .expect("every listed key is a real filter");
 
         // Every dimension the manifest can record, really recorded — so a
         // filter the list has never been told about is a field left at its

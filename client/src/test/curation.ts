@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
 
 import type {
+  AdminAccessCode,
   AdminApiKey,
   AdminEvent,
   EventMember,
@@ -42,6 +43,10 @@ export class FakeInstance {
   tags: AdminLabel[] = []
   units: AdminUnit[] = []
   keys: AdminApiKey[] = []
+  /** The **Access codes** roster (#68). Modelled faithfully in the one way that
+   *  matters: the listing carries neither the code nor the grant, so a screen
+   *  that read one back would read `undefined` here too. */
+  codes: AdminAccessCode[] = []
   downstreams: AdminDownstream[] = []
   webhooks: AdminWebhook[] = []
   shares: AdminShareLink[] = []
@@ -80,6 +85,7 @@ export class FakeInstance {
       autoPopulate: false,
       blacklist: [],
       enhancement: null,
+      restricted: false,
       talkgroups: 0,
       units: 0,
       calls: 0,
@@ -240,6 +246,20 @@ export class FakeInstance {
       ...row,
     }
     this.events.push(created)
+    return created
+  }
+
+  code(row: Partial<AdminAccessCode> = {}): AdminAccessCode {
+    const created: AdminAccessCode = {
+      id: this.id(),
+      label: 'Fire Ops',
+      scope: { all: false, sel: {} },
+      connections: 0,
+      disabled: false,
+      createdAtMs: 1_700_000_000_000,
+      ...row,
+    }
+    this.codes.push(created)
     return created
   }
 
@@ -679,6 +699,44 @@ export function curationHandlers(instance: FakeInstance) {
         downstreamsToKey: 0,
         rejected: [],
       })
+    }),
+
+    // **Access codes** (#68, spec US 52). The create answers with the grant
+    // once, exactly as the server does; nothing else here ever carries one.
+    http.get(`${ORIGIN}/api/admin/codes`, () =>
+      HttpResponse.json({ results: instance.codes }),
+    ),
+    http.post(`${ORIGIN}/api/admin/codes`, async ({ request }) => {
+      const body = await record('POST', request, '/api/admin/codes')
+      const code = String(body.code ?? '').trim()
+      if (code.length < 8) {
+        return refusal(
+          400,
+          'short-access-code',
+          'an access code has to be at least 8 characters',
+        )
+      }
+      const row = instance.code({ label: (body.label as string) ?? null })
+      return HttpResponse.json({ ...row, grant: 'rsg_issued0001' }, { status: 201 })
+    }),
+    http.patch(`${ORIGIN}/api/admin/codes/:id`, async ({ request, params }) => {
+      const body = await record('PATCH', request, `/api/admin/codes/${params.id}`)
+      const row = instance.codes.find((it) => String(it.id) === params.id)
+      if (!row) return refusal(404, 'access-code-not-found', 'no such access code')
+      // The code itself is never stored on the row and never read back — it is
+      // Argon2id at rest, so there is nothing for a listing to show.
+      const { code: _code, ...rest } = body
+      Object.assign(row, rest)
+      return HttpResponse.json(row)
+    }),
+    http.delete(`${ORIGIN}/api/admin/codes/:id`, ({ params }) => {
+      instance.wrote.push({
+        method: 'DELETE',
+        path: `/api/admin/codes/${params.id}`,
+        body: undefined,
+      })
+      instance.codes = instance.codes.filter((it) => String(it.id) !== params.id)
+      return new HttpResponse(null, { status: 204 })
     }),
 
     http.get(`${ORIGIN}/api/admin/api-keys`, () =>

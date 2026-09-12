@@ -211,10 +211,11 @@ needs SSH:
 | Screen | What it owns |
 | --- | --- |
 | **Talkgroups** | labels, names, tags, groups, LED colours, blacklists — filtered and paged, with **multi-select bulk assignment** so categorising a county is one action rather than an afternoon, and **Merges** for folding duplicates together |
-| **Systems** | label, ref, the per-system auto-populate toggle, the enhancement scope, and the raw blacklist |
+| **Systems** | label, ref, the per-system auto-populate toggle, the enhancement scope, whether the whole system is [restricted](#gating-sensitive-channels), and the raw blacklist |
 | **Units** | naming the radios, filtered to *the ones nobody has named yet*, and the **Ranges** a fleet's block occupies |
 | **Groups** / **Tags** | the two category vocabularies, with a count of what is behind each |
 | **API keys** | issue (shown once), label, scope to a System, disable, revoke |
+| **Access codes** | what a listener types to hear a restricted channel — see [below](#gating-sensitive-channels) |
 | **Downstreams** | the other instances you forward calls to — see [below](#forwarding-to-other-instances) |
 | **Webhooks** | addresses that receive your flagged calls — see [below](#webhooks) |
 
@@ -235,6 +236,88 @@ Four things are worth knowing before you start:
   owns the entities Calls are addressed to, not the machine.
 
 Bulk CSV import is still there and still the fastest way to name a county at once — see below.
+
+## Gating sensitive channels
+
+Listening is **open by default**, and stays open: an instance where you have marked nothing is
+byte-for-byte the instance it was before this feature existed — the same answers, the same
+catalog, and not one extra query per request. What you can do is gate the handful of channels
+that need it, and hand out a code for them.
+
+It is two separate things, deliberately:
+
+- **What is sensitive** is a toggle on the channel. *Settings → Admin → Talkgroups → Edit →
+  Access*, or on the **System** form to gate everything under it at once.
+- **Who may hear it** is an **access code**. *Settings → Admin → Access codes.*
+
+Keeping them apart is what lets you mark a channel sensitive *before* you have written a code
+for it — which is the state you are in halfway through setting this up, and which should be
+silent rather than open.
+
+A talkgroup's access has **three** settings, not two:
+
+| | |
+| --- | --- |
+| **Follow the system** | the default, and what a channel a recorder discovered carries — so a new TGID appearing on a gated system arrives **gated**, rather than opening a hole nobody asked for |
+| **Restricted** | needs a code, whatever the system says |
+| **Open to anybody** | lets one channel back out of an otherwise gated system |
+
+### Issuing a code
+
+On *Settings → Admin → Access codes*, give it a name you will recognise ("Fire Ops") and a code
+of at least eight characters. Then open it and set:
+
+- **which channels it opens** — the same scope editor a downstream or a webhook uses. A code
+  scoped to a channel also reaches calls **patched onto** that channel, which is what you want
+  and what most scanners get wrong.
+- **an expiry**, if it should stop working on its own. A code that has run out says *so* to
+  whoever types it, rather than reading as wrong — and it takes any open connections with it on
+  the next heartbeat rather than serving until somebody closes a tab.
+- **a connection limit**, if a code handed to a station should not turn into a public link. The
+  listing shows how many people are on each code right now.
+
+**Disable** is the reversible off; **Revoke** deletes the row and every browser holding it stops
+working. Editing the **code** rotates it — which is the point of rotating one — so everyone who
+had it has to be told the new one.
+
+### What a listener sees
+
+A gated channel is still *listed* in their Talkgroups panel, with a lock instead of a switch and
+no activity counts beside it. Tapping it asks for the code. The panel also says how many are
+locked, so there is something to tap.
+
+Once they unlock, the browser remembers it — so they are not asked again tomorrow. What it
+remembers is not the code you gave them: unlocking exchanges it for a long random credential
+belonging to that code's row, and only that is stored. If you later revoke or change the code,
+their browser is told, lets go of it, and quietly goes back to the open channels.
+
+### What it does not do
+
+- **It is not a login.** There are no listener accounts, no history of who listened, and nothing
+  recorded about an address that unlocks successfully — see [Logging](#logging).
+- **It does not hide that a channel exists.** The row is listed; its traffic is not.
+- **It is not a substitute for a firewall.** Everything unrestricted is still open to anybody
+  who can reach the instance. If the whole thing should be private, put it behind a reverse
+  proxy, a VPN, or Cloudflare Access — see [Behind a reverse proxy](#behind-a-reverse-proxy).
+
+### Two settings
+
+Only how hard somebody may guess:
+
+```toml
+[access]
+lockout_attempts = 10   # failed unlocks one address may spend
+lockout_secs = 300      # before it may try again, measured from its last attempt
+```
+
+A code is stored hashed with **Argon2id** — the same way the admin password is, and unlike an
+API key, because you pick a code you can say out loud — so every guess costs real work. That is
+also why an unbounded guesser has to be stopped: it would be spending *your* Pi's work, not
+theirs. The address counted is the TCP peer's unless you named that peer in
+`[server] trusted_proxies`.
+
+There is no on/off switch for the feature, because a code is a row and a gate is a column: with
+nothing marked restricted, none of this runs.
 
 ## Forwarding to other instances
 

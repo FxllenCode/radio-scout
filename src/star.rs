@@ -84,16 +84,18 @@ crate::answers_json!(Starred);
 pub async fn star(
     State(state): State<AppState>,
     Path(id): Path<CallId>,
+    viewer: crate::access::Viewer,
 ) -> Result<Starred, Failure> {
-    set(&state, id, Some(state.clock.now_ms())).await
+    set(&state, &viewer, id, Some(state.clock.now_ms())).await
 }
 
 /// `DELETE /api/call/{id}/star` — take the mark off again.
 pub async fn unstar(
     State(state): State<AppState>,
     Path(id): Path<CallId>,
+    viewer: crate::access::Viewer,
 ) -> Result<Starred, Failure> {
-    set(&state, id, None).await
+    set(&state, &viewer, id, None).await
 }
 
 /// Both verbs, which differ only in the instant they write.
@@ -101,7 +103,22 @@ pub async fn unstar(
 /// One statement: the update's own row count is what says whether the Call was
 /// there, so a typo'd id costs a read that a `find_call` first would have made
 /// anyway — and there is no window in which a Call is pruned between the two.
-async fn set(state: &AppState, id: CallId, at_ms: Option<i64>) -> Result<Starred, Failure> {
+async fn set(
+    state: &AppState,
+    viewer: &crate::access::Viewer,
+    id: CallId,
+    at_ms: Option<i64>,
+) -> Result<Starred, Failure> {
+    // A **Star** is the Instance's mark and anybody may leave one — but only on
+    // a Call they could have heard (#68). Without this, a gated Call is
+    // unreachable and still starrable, and "Starred" would be a list holding
+    // rows that answer nothing when opened.
+    if !crate::access::reaches_call(&state.db, &viewer.scope, id)
+        .await
+        .map_err(Stage::SetStar.failed())?
+    {
+        return Err(Reason::CallNotFound.into());
+    }
     let found = crate::db::repo::set_star(&state.db, id, at_ms)
         .await
         .map_err(Stage::SetStar.failed())?;

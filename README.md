@@ -158,6 +158,13 @@ expiring public link to that Call alone, which plays in any browser, comes up as
 in a messaging app, and reaches nothing else on your instance. Revocable per link, and it can be
 switched off entirely.
 
+**Access codes** *(nothing is gated until you gate it)*. Mark the handful of channels that need
+it **restricted**, and hand out a code for them; everything else stays open to anyone who can
+reach the instance. A code carries the channels it opens, an optional expiry and an optional
+limit on how many people may be on it at once, and a listener's browser remembers it. An
+instance where you have marked nothing is byte-for-byte the instance it was before the feature
+existed — not one extra query per request.
+
 **On your phone.** Installable to the home screen, and works offline for the app shell.
 Radio-Scout does not send notifications — it never asks for the permission and never wakes
 your device ([ADR-0014](docs/adr/0014-no-notifications.md)).
@@ -188,9 +195,6 @@ after switching:
   database; Radio-Scout keeps objects and metadata. There is no importer, so you start the
   Archive from empty. Run both side by side during cutover — recorders happily upload to two
   servers at once.
-- **No access codes yet.** Listening is open to anyone who can reach the instance; scoped,
-  per-listener PINs are not built. Put it behind a VPN or a reverse proxy with auth if that
-  matters.
 - **The machine is still configured in a file.** Ports, storage, retention and the database
   live in `radio-scout.toml`, environment variables and flags. Everything *else* — systems,
   talkgroups, groups, tags, units, API keys, downstream peers, tone profiles and webhooks — is

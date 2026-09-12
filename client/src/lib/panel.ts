@@ -165,6 +165,17 @@ export interface PanelRow {
    *  otherwise", absent when it is not avoided. The deadline itself, because
    *  the countdown beside it is a subtraction from the clock. */
   avoidedUntil?: number
+  /** **Restricted**, and this browser holds no code that opens it (#68, spec
+   *  US 52) — so the row draws a lock instead of a switch and its tap offers the
+   *  unlock.
+   *
+   *  The server's answer, carried through rather than derived: a client that
+   *  decided for itself which channels are gated would be a second
+   *  implementation of the gate, and the wrong one. The row is still *here*,
+   *  because the Operator gated the channel and not the fact that it exists —
+   *  and it carries no activity, because the server strips that from a locked
+   *  row rather than trusting this not to draw it. */
+  locked?: boolean
   choice: Choice
 }
 
@@ -352,6 +363,7 @@ function rowOf(
       ? {}
       : { lastCallAtMs: talkgroup.lastCallAtMs }),
     ...(key in avoided ? { avoidedUntil: avoided[key] } : {}),
+    ...(talkgroup.locked ? { locked: true } : {}),
     choice: { keys: [{ systemRef, talkgroupRef }], on: !selected },
   }
 }

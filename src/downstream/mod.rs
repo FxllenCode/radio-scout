@@ -126,23 +126,10 @@ impl DownstreamConfig {
     }
 }
 
-/// **What a stored scope means, written once.**
-///
-/// A scope that will not parse selects **nothing** — the safe direction, since
-/// the alternative is forwarding an Operator's whole County to a peer that was
-/// scoped to one channel. Three places read one (the sender routing a Call, the
-/// curation listing rendering it, the configuration document exporting it), and
-/// the *screen* has to show the same empty scope that routing is applying rather
-/// than a shape it invented — so the fallback is one function rather than three
-/// `unwrap_or_default()`s that can drift apart.
-pub fn scope_of(stored: &str) -> Selection {
-    serde_json::from_str(stored).unwrap_or_default()
-}
-
 /// A configured Downstream, as the sender uses one.
 ///
 /// The scope arrives parsed rather than as the JSON the row stores, because
-/// [`scope_of`] decides what an unreadable one means once, where it can be said
+/// [`crate::selection::stored`] decides what an unreadable one means once, where it can be said
 /// out loud.
 ///
 /// **`Downstream` is CONTEXT.md's word, and this is the type for it.** The
@@ -169,7 +156,7 @@ impl Downstream {
             id: row.id,
             url: row.url.clone(),
             api_key: row.api_key.clone(),
-            scope: scope_of(&row.scope),
+            scope: crate::selection::stored(&row.scope),
         }
     }
 

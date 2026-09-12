@@ -5,6 +5,7 @@
 //! router the binary serves and the integration harness drives in-process over
 //! its real HTTP + WS boundary (ADR-0009).
 
+pub mod access;
 pub mod activity;
 pub mod admin;
 pub mod archive;
@@ -27,6 +28,7 @@ pub mod ingest;
 pub mod instance;
 pub mod listeners;
 pub mod live;
+pub mod lockout;
 pub mod logsink;
 pub mod logview;
 pub mod merge;
@@ -123,6 +125,12 @@ pub struct AppState {
     /// connection joins, and the one a status page (#70) reads. Counts only:
     /// there is nothing in it that could name anybody.
     pub listeners: crate::listeners::Listeners,
+    /// Who may hear what (#68, spec US 52) — whether this Instance gates any
+    /// channel at all, and what a presented **grant** resolves to. Like a
+    /// Webhook and unlike enhancement there is no disabled form: an **Access
+    /// code** is a row and a gate is a column, so an Instance with neither has
+    /// nothing switched off and pays nothing.
+    pub access: crate::access::Access,
     /// What time it is, for everything a handler stamps or expires (#90).
     pub clock: Clock,
     /// What every background Worker owes right now (#93) — the reading half, so
@@ -153,6 +161,7 @@ impl AppState {
             stars: crate::star::Stars::default(),
             exports: crate::export::Exports::default(),
             listeners: crate::listeners::Listeners::default(),
+            access: crate::access::Access::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
         }
@@ -235,6 +244,11 @@ pub fn build_app(state: AppState) -> Router {
         // holds none, and the mark they leave is the Instance's (#66).
         .route("/api/call/{id}/star", post(star::star).delete(star::unstar))
         .route("/api/call/{id}/download", get(archive::download))
+        // Proving you know an **Access code** (#68, spec US 52). Listener-facing
+        // and unauthenticated for the reason minting a share link is: a Listener
+        // holds no credential. What bounds it is a per-address **Lockout**, the
+        // admin login's own.
+        .route("/api/unlock", post(access::unlock))
         // The way in to the admin surface, and the only route under
         // `/api/admin/` outside the session guard — there is no session yet.
         .route("/api/admin/login", post(admin::login))

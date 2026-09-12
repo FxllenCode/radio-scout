@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 
+import { AccessNoticeBar } from '@/components/AccessNotice'
 import { AvoidUndoBar } from '@/components/AvoidUndo'
 import { CallPlayer } from '@/components/CallPlayer'
 import { InstallBanner } from '@/components/InstallBanner'
@@ -10,6 +11,7 @@ import { SelectionUndoBar } from '@/components/SelectionUndo'
 import { UpdateBanner } from '@/components/UpdateBanner'
 import { useAppUpdate } from '@/hooks/useAppUpdate'
 import { useCatchupQuiet } from '@/hooks/useCatchupQuiet'
+import { useStaleGrantWatch } from '@/hooks/useStaleGrantWatch'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { selectStrip } from '@/store/transport'
@@ -46,6 +48,11 @@ export function AppShell() {
   // wherever the Listener happens to be looking — the same reason the audio
   // element and the socket are here (#59).
   useCatchupQuiet()
+  // Watch for the server saying this browser's **Access code** has stopped
+  // working (#68). Here rather than on the Talkgroups screen because what
+  // changed is *what can be heard*, which is not a fact about the screen
+  // anybody happens to be on.
+  useStaleGrantWatch()
   const { pathname, search } = useLocation()
   /**
    * Where the Search tab goes back to (#61, spec US 30).
@@ -93,6 +100,7 @@ export function AppShell() {
           thing with a running clock is the closest to the thumb. */}
       <div className="pointer-events-none fixed inset-x-0 bottom-16 z-40 mx-auto flex max-w-2xl flex-col gap-2 px-3">
         {update.ready ? <UpdateBanner apply={update.apply} /> : <InstallBanner />}
+        <AccessNoticeBar />
         <AvoidUndoBar />
         <SelectionUndoBar />
         {docked && <MiniPlayer strip={docked} />}

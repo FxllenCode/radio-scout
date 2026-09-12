@@ -1,12 +1,15 @@
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
 
+import { withGrant } from '@/lib/access'
 import { loginFailure, statusOf } from '@/lib/adminError'
 import { searchParams } from '@/lib/archive'
 
+import { grantHeld, selectGrant } from './access'
 import { forgetStar, markStarred } from './stars'
 import type { QuietSpan } from '@/lib/catchup'
 import type {
   ActivityQuery,
+  AdminAccessCode,
   AdminApiKey,
   AdminAssignment,
   AdminDownstream,
@@ -29,6 +32,7 @@ import type {
   EventShare,
   FrozenEvent,
   FilterOptions,
+  IssuedAccessCode,
   IssuedApiKey,
   ListenerQuery,
   Listing,
@@ -37,6 +41,7 @@ import type {
   MemberDelta,
   MemberRef,
   MergeReport,
+  NewAccessCode,
   NewDownstream,
   NewEvent,
   NewToneProfile,
@@ -49,16 +54,14 @@ import type {
   ShareLink,
   Span,
   UnitHistory,
+  Unlocked,
 } from '@/types'
 
 /** The single RTK Query API slice. Everything is same-origin: in dev the Vite
  *  proxy forwards to the Rust backend, and in production the SPA is served by
  *  the binary itself, so relative URLs Just Work. */
-export const api = createApi({
-  reducerPath: 'api',
-  // `fetchFn` calls the current global `fetch` at request time rather than
-  // capturing it at creation — resilient to polyfills and cleanly mockable.
-  baseQuery: fetchBaseQuery({
+/** The plain same-origin fetch, before the **grant** is put on it. */
+const sameOrigin = fetchBaseQuery({
     baseUrl: '/',
     fetchFn: (...args) => fetch(...args),
     /** **The CSRF token, attached once.**
@@ -77,7 +80,36 @@ export const api = createApi({
       if (session.data) headers.set('x-csrf-token', session.data.csrf_token)
       return headers
     },
-  }),
+})
+
+/**
+ * **The grant, attached once** (#68, spec US 52).
+ *
+ * `prepareHeaders` cannot do this: a grant rides the **query string**, which is
+ * the one part of a URL an `<audio src>`, a `WebSocket` and a `fetch` can all
+ * carry and the one part `http_log` never writes down (ADR-0008). So the base
+ * query is wrapped rather than configured, and the rewrite happens for every
+ * endpoint there is — which is the same property the CSRF token gets from
+ * `prepareHeaders` and for the same reason: an endpoint added later inherits it
+ * instead of remembering it.
+ *
+ * A request with no grant is byte-for-byte the request this app sent before
+ * this feature existed, which is what keeps "an instance with no codes behaves
+ * exactly as today" true on this side of the wire too.
+ */
+const baseQuery: typeof sameOrigin = (args, apiArgs, extra) => {
+  const grant = selectGrant(apiArgs.getState() as never)
+  if (!grant) return sameOrigin(args, apiArgs, extra)
+  const granted =
+    typeof args === 'string'
+      ? withGrant(args, grant)
+      : { ...args, url: withGrant(args.url, grant) }
+  return sameOrigin(granted, apiArgs, extra)
+}
+
+export const api = createApi({
+  reducerPath: 'api',
+  baseQuery,
   tagTypes: [
     'Call',
     'AdminSession',
@@ -94,6 +126,7 @@ export const api = createApi({
     'ShareLink',
     'Star',
     'Event',
+    'AccessCode',
   ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
@@ -503,6 +536,70 @@ export const api = createApi({
       invalidatesTags: ['ApiKey'],
     }),
 
+    /** **Access codes** (#68, spec US 52) — the Listener-facing credentials that
+     *  open a restricted channel. The listing carries neither secret: the code
+     *  is Argon2id at rest and cannot be read back at all, and the grant is
+     *  shown exactly once, by [`createAccessCode`]. */
+    getAccessCodes: builder.query<Listing<AdminAccessCode>, void>({
+      query: () => ({ url: 'api/admin/codes' }),
+      providesTags: ['AccessCode'],
+    }),
+    createAccessCode: builder.mutation<IssuedAccessCode, NewAccessCode>({
+      query: (body) => ({ url: 'api/admin/codes', method: 'POST', body }),
+      invalidatesTags: ['AccessCode'],
+    }),
+    /** Edit one. A `code` in the patch **rotates it**, and the grant every
+     *  browser is holding goes with it — which is why the answer to a rotation
+     *  is worth showing, and why one without a `code` is not. */
+    updateAccessCode: builder.mutation<
+      AdminAccessCode,
+      { id: number; patch: Partial<NewAccessCode> }
+    >({
+      query: ({ id, patch }) => ({
+        url: `api/admin/codes/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['AccessCode'],
+    }),
+    deleteAccessCode: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/codes/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['AccessCode'],
+    }),
+
+    /**
+     * Prove knowledge of an **Access code** and be handed its grant (#68).
+     *
+     * The code goes up in a **body**, never a query string: it is the secret an
+     * Operator chose and the one thing here that must not end up in a URL a
+     * browser remembers. What comes back rides in local storage from then on,
+     * and is 128 minted bits rather than a word thirty people were told.
+     *
+     * **The grant is held here, and the refetch is dispatched by hand** — not
+     * through `invalidatesTags`, which is the one place the order matters.
+     * Unlocking changes *what every read answers with* (the catalog's locked
+     * rows, the search page, the filter options), so everything has to come
+     * back; but `invalidatesTags` fires on the fulfilled action, before any
+     * caller could have stored what came back, so the refetch would go out
+     * **without the grant** and answer with exactly the channels the Listener
+     * just unlocked being absent. Storing it first and invalidating second is
+     * the whole fix, and doing both here is what keeps a second caller from
+     * having to know.
+     */
+    unlock: builder.mutation<Unlocked, string>({
+      query: (code) => ({ url: 'api/unlock', method: 'POST', body: { code } }),
+      async onQueryStarted(_code, { dispatch, queryFulfilled }) {
+        // Caught, because a refused unlock is an ordinary outcome — a mistyped
+        // code, an expired one — and `queryFulfilled` rejects on every one of
+        // them. The sheet is what tells the Listener; there is nothing to do
+        // here but not crash the tab.
+        const unlocked = await queryFulfilled.catch(() => undefined)
+        if (!unlocked) return
+        dispatch(grantHeld(unlocked.data.grant))
+        dispatch(api.util.invalidateTags(['Call', 'Talkgroup', 'AccessCode']))
+      },
+    }),
+
     /** **Downstream** peers (#52), with their health beside them — queue depth,
      *  last success, consecutive failures. The listing is the operator-facing
      *  status surface until #70 exists. */
@@ -704,6 +801,7 @@ export const {
   useAdminLogoutMutation,
   useAddEventCallsMutation,
   useAssignTalkgroupsMutation,
+  useCreateAccessCodeMutation,
   useCreateApiKeyMutation,
   useCreateDownstreamMutation,
   useCreateEventMutation,
@@ -714,6 +812,7 @@ export const {
   useCreateTagMutation,
   useCreateTalkgroupMutation,
   useCreateUnitMutation,
+  useDeleteAccessCodeMutation,
   useDeleteApiKeyMutation,
   useDeleteDownstreamMutation,
   useDeleteEventMutation,
@@ -730,6 +829,7 @@ export const {
   useGetAdminSessionQuery,
   useGetAdminTalkgroupsQuery,
   useGetAdminUnitsQuery,
+  useGetAccessCodesQuery,
   useGetApiKeysQuery,
   useGetCallQuery,
   useGetCatalogQuery,
@@ -760,6 +860,8 @@ export const {
   useSearchCallsQuery,
   useShareCallMutation,
   useSetRangesMutation,
+  useUnlockMutation,
+  useUpdateAccessCodeMutation,
   useUpdateApiKeyMutation,
   useUpdateDownstreamMutation,
   useUpdateEventMutation,

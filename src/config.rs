@@ -57,6 +57,7 @@ use clap::{Parser, Subcommand};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
+use crate::access::AccessConfig;
 use crate::admin::AdminConfig;
 use crate::blob::{Backend, Storage, StorageConfig};
 use crate::downstream::DownstreamConfig;
@@ -412,6 +413,7 @@ pub struct Config {
     pub webhook: WebhookConfig,
     pub tone: ToneConfig,
     pub quiet: QuietConfig,
+    pub access: AccessConfig,
     pub share: ShareConfig,
     pub export: ExportConfig,
     pub listeners: ListenerConfig,
@@ -554,6 +556,28 @@ impl Config {
                 "quiet.queue_depth",
                 "0",
                 "a positive number of Calls — use enabled = false to stop scanning",
+            ));
+        }
+        // Zero attempts locks every address out before its first try, so no
+        // **Access code** could ever be unlocked and a gated channel would be
+        // gated against everybody — the `[admin]` windows' failure exactly, and
+        // there is no second reading to guess at: deleting the codes is how you
+        // stop people unlocking.
+        if self.access.lockout_attempts == 0 {
+            return Err(ConfigError::invalid_key(
+                "access.lockout_attempts",
+                "0",
+                "a positive number of attempts — delete the access codes to stop unlocking",
+            ));
+        }
+        // ...and a zero cooldown is rdio's own bug (`admin.go:64`, a method
+        // expression that evaluates to zero): a lockout nobody ever waits out
+        // is not one.
+        if self.access.lockout.is_zero() {
+            return Err(ConfigError::invalid_key(
+                "access.lockout_secs",
+                "0",
+                "a positive number of seconds",
             ));
         }
         // LUFS is referenced to full scale, so a usable target is negative and
@@ -1144,6 +1168,26 @@ pub const SETTINGS: &[Setting] = &[
         example: "600",
         set: |setting, config, value| {
             config.downstream.retry_max = Duration::from_secs(setting.parse(value)?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "access.lockout_attempts",
+        var: "RADIO_SCOUT_ACCESS_LOCKOUT_ATTEMPTS",
+        expected: "a number of attempts",
+        example: "20",
+        set: |setting, config, value| {
+            config.access.lockout_attempts = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "access.lockout_secs",
+        var: "RADIO_SCOUT_ACCESS_LOCKOUT_SECS",
+        expected: "a number of seconds",
+        example: "600",
+        set: |setting, config, value| {
+            config.access.lockout = Duration::from_secs(setting.parse(value)?);
             Ok(())
         },
     },
@@ -1757,6 +1801,29 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # that peer in [server] trusted_proxies.
 # lockout_attempts = 5
 # lockout_secs = 900
+
+[access]
+# Access codes (#68): gating sensitive channels while listening stays open.
+#
+# The codes themselves are not configured here — you write them in
+# Settings -> Access codes, and you mark which channels are sensitive on the
+# System and Talkgroup forms. With nothing marked restricted, this instance is
+# exactly what it was before the feature existed: every channel open to anyone
+# who can reach it, and not one extra query per request.
+#
+# What is here is only how hard somebody may guess. A code is stored hashed with
+# Argon2id (like the admin password, and unlike an API key, because an operator
+# picks a code they can say out loud), so each guess costs real work — which is
+# also why an unbounded guesser has to be stopped before it costs *you* real
+# work.
+
+# Failed unlock attempts one address may spend before it is refused outright,
+# and for how long. The cooldown runs from the last attempt, so hammering keeps
+# it locked and walking away clears it. More generous than [admin]
+# lockout_attempts on purpose: this is a listener typing a code somebody read
+# out to them, not an operator typing a password they chose.
+# lockout_attempts = 10
+# lockout_secs = 300
 
 [enhancement]
 # Audio enhancement (#20): reprocess each Call's audio after it is stored, to

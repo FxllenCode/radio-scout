@@ -13,6 +13,8 @@
  * no client-side watchdog here: a dead connection reaches us as a `close`, and
  * `close` is what we retry.
  */
+import { withGrant } from './access'
+
 import type { Call, SelectionMatrix } from '@/types'
 
 export type LiveStatus = 'offline' | 'connecting' | 'connected'
@@ -50,6 +52,13 @@ export interface LiveFeedHandlers {
 export interface LiveFeedOptions {
   /** First reconnect delay, doubling up to [`MAX_RETRY_MS`]. */
   retryMs?: number
+  /** The **Access code**'s grant this browser holds (#68), or nothing — which
+   *  is every Listener on an Instance that gates nothing.
+   *
+   *  Read at **connect**, and therefore afresh on every reconnect: a Listener
+   *  who unlocks a channel is given a new socket by the caller, and one whose
+   *  code is revoked comes back on the next retry without it. */
+  grant?: string
 }
 
 export interface LiveFeedHandle {
@@ -70,15 +79,20 @@ const MAX_RETRY_MS = 30_000
  *  page served over TLS must use `wss:`, or the browser blocks the socket. */
 export function liveFeedUrl(
   at: { protocol: string; host: string } = location,
+  grant?: string,
 ): string {
   const protocol = at.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${at.host}/api/live`
+  // A socket cannot carry a header, so the **grant** rides the query string
+  // (#68) — which is where it rides everywhere else for a different reason
+  // (`http_log` writes a path and never a query), and is why one spelling
+  // serves a `fetch`, an `<audio src>` and this.
+  return withGrant(`${protocol}//${at.host}/api/live`, grant)
 }
 
 /** Connect, and keep reconnecting until closed. */
 export function connectLiveFeed(
   handlers: LiveFeedHandlers,
-  { retryMs = FIRST_RETRY_MS }: LiveFeedOptions = {},
+  { retryMs = FIRST_RETRY_MS, grant }: LiveFeedOptions = {},
 ): LiveFeedHandle {
   let socket: WebSocket | undefined
   let subscription: Subscription | undefined
@@ -97,7 +111,7 @@ export function connectLiveFeed(
 
   function open() {
     handlers.onStatus('connecting')
-    socket = new WebSocket(liveFeedUrl())
+    socket = new WebSocket(liveFeedUrl(location, grant))
 
     socket.onopen = () => {
       retry = retryMs

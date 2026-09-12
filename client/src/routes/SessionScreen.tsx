@@ -44,6 +44,7 @@ import { systemName, talkgroupName } from '@/lib/call'
 import { feedPlays } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
 import { cn } from '@/lib/utils'
+import { useGrant } from '@/hooks/useGrant'
 import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
@@ -57,6 +58,9 @@ import {
 import type { Call } from '@/types'
 
 export function SessionScreen() {
+  // The **grant** goes on the link, never through the base query: a download
+  // is a navigation (#68).
+  const grant = useGrant()
   const dispatch = useAppDispatch()
   const calls = useAppSelector(selectSessionLog)
   const hold = useAppSelector(selectHold)
@@ -238,7 +242,7 @@ export function SessionScreen() {
                 encrypted Call has no audio to offer (#42). */}
             {acting.audioUrl && (
               <a
-                href={downloadUrl(acting.id)}
+                href={downloadUrl(acting.id, grant)}
                 download
                 onClick={() => setActing(null)}
                 className="flex items-center gap-3 rounded-lg border border-border px-3 py-2.5 font-mono text-xs transition-colors hover:bg-muted/40"

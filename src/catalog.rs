@@ -80,6 +80,23 @@ pub struct CatalogTalkgroup {
     /// window: it is the window's answer, not the Archive's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_call_at_ms: Option<i64>,
+    /// This channel is **restricted** and this Listener cannot hear it (#68,
+    /// spec US 52) — so the panel draws the row with a lock rather than a
+    /// switch, and offers the unlock.
+    ///
+    /// **The row is still here, and its activity is not.** Two decisions, and
+    /// they pull in opposite directions on purpose: the Operator gated the
+    /// channel, not the fact that it exists, and a Listener holding a code has
+    /// to be able to see what the code is *for* — but "PD Tac took 94 Calls in
+    /// the last hour" is traffic analysis of exactly the channel that was
+    /// gated, so [`CatalogTalkgroup::recent_calls`] and `last_call_at_ms` are
+    /// absent on a locked row however busy it was.
+    ///
+    /// Omitted when it isn't, the [`crate::call::StoredCall::emergency`] rule:
+    /// an Instance that gates nothing serves the document it served before this
+    /// field existed, byte for byte.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// One System and the Talkgroups under it.
@@ -127,6 +144,80 @@ pub struct Catalog {
     /// means less than a Listener thinks it does is the same lie told more
     /// slowly. Only the server knows `[retention] starred_days`.
     pub starred: StarOffer,
+    /// Where this browser stands with **Access codes** (#68, spec US 52).
+    ///
+    /// `sharing`'s reason a third time, plus one this feature owes on its own:
+    /// a browser remembers its grant, and a grant can stop working while the
+    /// browser is not looking — the Operator revoked the code, or it reached
+    /// its expiry overnight. Every HTTP read **degrades** rather than refusing
+    /// in that case, so without this the app would quietly go back to open
+    /// listening and never say why. This is where it is said, and it is what
+    /// tells the client to clear what it is holding.
+    ///
+    /// **Absent entirely on an Instance that gates nothing**, which is every
+    /// Instance until an Operator marks a channel — so the document a fresh
+    /// install serves is byte-for-byte the one it served before this feature
+    /// existed, and `tests/catalog.rs` can assert that rather than describe it.
+    /// It is the [`crate::call::StoredCall::emergency`] rule applied to a whole
+    /// object instead of a field.
+    #[serde(skip_serializing_if = "AccessOffer::is_quiet")]
+    pub access: AccessOffer,
+}
+
+/// Where the browser reading this catalog stands with **Access codes** (#68).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessOffer {
+    /// Whether this Instance restricts any channel at all. `false` — which is
+    /// what ships and what every Instance is until an Operator marks something
+    /// — means there is nothing to unlock and no control to draw.
+    pub gating: bool,
+    /// The **label** of the code this request arrived with, if it arrived with a
+    /// live one. Never the code and never the grant (ADR-0011 rule 2): a label
+    /// is the most that may be said out loud about one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// When that code runs out, if it does — so a browser can say "your access
+    /// ends at 18:00" rather than discovering it mid-transmission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
+    /// Why the grant this request presented is not being honoured, when it
+    /// presented one that is not. Absent for a browser holding nothing and for
+    /// one holding a live code — the two ordinary states.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<crate::access::Stale>,
+}
+
+impl AccessOffer {
+    /// Whether there is nothing here worth a key on the wire: an Instance that
+    /// gates nothing, read by a browser holding nothing.
+    ///
+    /// Every field, not just `gating`, because the three that follow it are the
+    /// answer to *"what happened to the grant I sent?"* — and a browser that
+    /// sent one is owed that answer whatever the rest of the Instance looks like.
+    fn is_quiet(&self) -> bool {
+        !self.gating && self.label.is_none() && self.expires_at_ms.is_none() && self.stale.is_none()
+    }
+}
+
+impl From<&crate::access::Viewer> for AccessOffer {
+    fn from(viewer: &crate::access::Viewer) -> Self {
+        match &viewer.held {
+            crate::access::Held::Nothing => AccessOffer::default(),
+            crate::access::Held::Code(code) => AccessOffer {
+                gating: false,
+                label: code.label.clone(),
+                expires_at_ms: code.expires_at_ms,
+                stale: None,
+            },
+            crate::access::Held::Stale(why) => AccessOffer {
+                gating: false,
+                label: None,
+                expires_at_ms: None,
+                stale: Some(*why),
+            },
+        }
+    }
 }
 
 /// What starring a Call does here, beyond marking it (#66).
@@ -172,10 +263,17 @@ pub struct ExportOffer {
 crate::answers_json!(Catalog);
 
 /// `GET /api/catalog` — the Systems and Talkgroups a listener can select.
-pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> {
-    let catalog = read(&state.db, state.clock.now_ms() - ACTIVITY_WINDOW_MS)
-        .await
-        .map_err(Stage::LoadCatalog.failed())?;
+pub async fn catalog(
+    State(state): State<AppState>,
+    viewer: crate::access::Viewer,
+) -> Result<Catalog, Failure> {
+    let catalog = read(
+        &state.db,
+        state.clock.now_ms() - ACTIVITY_WINDOW_MS,
+        &viewer.scope,
+    )
+    .await
+    .map_err(Stage::LoadCatalog.failed())?;
     Ok(Catalog {
         sharing: state.shares.enabled(),
         export: ExportOffer {
@@ -183,6 +281,12 @@ pub async fn catalog(State(state): State<AppState>) -> Result<Catalog, Failure> 
             max_calls: state.exports.max_calls(),
         },
         starred: state.stars.kept_days().into(),
+        access: AccessOffer {
+            // The bit is the Instance's and the rest is this request's, which is
+            // why they are assembled from two places and not one.
+            gating: state.access.is_gating(),
+            ..AccessOffer::from(&viewer)
+        },
         ..catalog
     })
 }
@@ -203,7 +307,11 @@ struct Activity {
 /// affordable on a Pi with a few hundred Talkgroups, and it keeps the
 /// dialect-divergent list aggregation out of SQL (ADR-0003), like the archive
 /// search.
-pub async fn read<C: ConnectionTrait>(db: &C, since_ms: i64) -> Result<Catalog, DbErr> {
+pub async fn read<C: ConnectionTrait>(
+    db: &C,
+    since_ms: i64,
+    scope: &crate::access::AccessScope,
+) -> Result<Catalog, DbErr> {
     // One grouped query for the whole panel, not one per row (#86): a county
     // catalog is 400+ Talkgroups, and an N+1 here would be invisible from
     // outside because every answer it gave would be correct.
@@ -221,6 +329,8 @@ pub async fn read<C: ConnectionTrait>(db: &C, since_ms: i64) -> Result<Catalog, 
         .map(|row| (row.talkgroup_id, row))
         .collect();
 
+    let systems: Vec<system::Model> = system::Entity::find().all(db).await?;
+
     let mut groups_by_talkgroup: std::collections::HashMap<i64, Vec<String>> =
         std::collections::HashMap::new();
     for (link, group) in talkgroup_group::Entity::find()
@@ -236,6 +346,14 @@ pub async fn read<C: ConnectionTrait>(db: &C, since_ms: i64) -> Result<Catalog, 
         }
     }
 
+    // Read **before** the Talkgroups, because whether a channel is gated is its
+    // System's answer whenever its own column is `NULL` (#68) — and read once,
+    // because this is also what the listing below is built from.
+    let systems_by_id: std::collections::HashMap<i64, (i64, bool)> = systems
+        .iter()
+        .map(|system| (system.id, (system.r#ref, system.restricted)))
+        .collect();
+
     let mut talkgroups_by_system: std::collections::HashMap<i64, Vec<CatalogTalkgroup>> =
         std::collections::HashMap::new();
     for (talkgroup, tag) in talkgroup::Entity::find()
@@ -248,6 +366,14 @@ pub async fn read<C: ConnectionTrait>(db: &C, since_ms: i64) -> Result<Catalog, 
             .unwrap_or_default();
         groups.sort();
         let heard = activity.remove(&talkgroup.id);
+        // `NULL` on the channel inherits its System, which is the reading the
+        // Archive's SQL and the live feed's wire both take (#68).
+        let (system_ref, system_restricted) = systems_by_id
+            .get(&talkgroup.system_id)
+            .copied()
+            .unwrap_or_default();
+        let restricted = talkgroup.restricted.unwrap_or(system_restricted);
+        let locked = !scope.permits(system_ref, talkgroup.r#ref, restricted);
         talkgroups_by_system
             .entry(talkgroup.system_id)
             .or_default()
@@ -258,14 +384,19 @@ pub async fn read<C: ConnectionTrait>(db: &C, since_ms: i64) -> Result<Catalog, 
                 tag: tag.map(|tag| tag.name),
                 groups,
                 led: talkgroup.led,
-                recent_calls: heard.as_ref().map(|heard| heard.recent_calls),
-                last_call_at_ms: heard.map(|heard| heard.last_call_at_ms),
+                // Stripped on a locked row rather than merely not drawn: how busy
+                // a gated channel has been is traffic analysis of exactly what
+                // was gated, and the client is not where that is decided.
+                recent_calls: heard
+                    .as_ref()
+                    .filter(|_| !locked)
+                    .map(|heard| heard.recent_calls),
+                last_call_at_ms: heard.filter(|_| !locked).map(|heard| heard.last_call_at_ms),
+                locked,
             });
     }
 
-    let mut systems: Vec<CatalogSystem> = system::Entity::find()
-        .all(db)
-        .await?
+    let mut systems: Vec<CatalogSystem> = systems
         .into_iter()
         .map(|system| {
             let mut talkgroups = talkgroups_by_system.remove(&system.id).unwrap_or_default();

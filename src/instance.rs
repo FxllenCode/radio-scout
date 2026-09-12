@@ -599,6 +599,13 @@ async fn assemble(
     // Operator writes one — spends nothing per upload rediscovering it. Every
     // surface that writes a profile re-reads it on the same request.
     state.tones.rearm(&db).await;
+    state.access = crate::access::Access::new(config.access.clone());
+    // ...and read once at boot whether any channel is **restricted** (#68), for
+    // the same reason one line up and with a sharper consequence: the bit being
+    // wrong in the `true` direction buys a join, and in the `false` direction
+    // leaves a gate open. Every surface that writes the column re-reads it on
+    // the same request.
+    state.access.rearm(&db).await;
     state.clock = parts.clock;
     // Enhancement (#20) runs off its own queue, behind ingest rather than in
     // it. With `[enhancement] mode = "off"` — what ships — this spawns nothing,

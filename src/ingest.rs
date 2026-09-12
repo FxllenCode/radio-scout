@@ -2600,6 +2600,7 @@ mod tests {
         blacklist: Option<&str>,
     ) -> crate::db::entities::system::Model {
         crate::db::entities::system::Model {
+            restricted: false,
             id: 1,
             r#ref: 11,
             label: None,
@@ -2612,6 +2613,7 @@ mod tests {
 
     fn a_talkgroup() -> crate::db::entities::talkgroup::Model {
         crate::db::entities::talkgroup::Model {
+            restricted: None,
             id: 7,
             system_id: 1,
             r#ref: 54241,
