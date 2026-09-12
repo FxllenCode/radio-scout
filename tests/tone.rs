@@ -294,14 +294,43 @@ async fn deleting_the_last_profile_stops_the_looking() {
 // Off the ingest path
 // ---------------------------------------------------------------------------
 
-/// **A 200 never waits on it** — the ticket's own criterion.
+/// **The upload queues the Call rather than looking at it** — the readable half
+/// of the ticket's "a 200 never waits on it".
 ///
-/// The upload is answered while the Call is still `pending`, which is a *state*
-/// a test can read rather than a duration it has to guess at: a timing assertion
-/// here would be a flake on a loaded runner, and would prove nothing on a fast
-/// one. `settle()` afterwards is what proves the work really did happen.
+/// # What this used to assert, and why it could not
+///
+/// It read the row straight after the `200` and asserted `PENDING` — on the
+/// reasoning that a *state* is something a test can read where a duration is
+/// something it would have to guess at. The reasoning is right and the
+/// assertion was still a race: `pending` is a state the detector **leaves
+/// whenever it likes**, and the reader wins that race on an idle laptop and
+/// loses it on a loaded runner. So it passed locally and failed *every* CI run
+/// from the day #55 landed until #68's push made somebody read the log.
+/// Reproducing it is one line — sleep 400 ms before the read and it fails here
+/// too, with the same `left: "matched"`.
+///
+/// # What is readable
+///
+/// That the Call was **queued by the upload**, which is monotone and therefore
+/// safe to read whenever: `NONE` is the state a Call carries when nothing ever
+/// offered it for detection, and [`ToneState::NONE`] is *deliberately never
+/// re-entered* — adding a profile marks the Calls that follow it and never goes
+/// back over the Archive. So a row that is not `NONE` was queued by the
+/// transaction that stored it, and no later moment can take that back.
+///
+/// # What is not, and where it is proved instead
+///
+/// That the response did not *wait* for the decode. Nothing here can observe
+/// that: stopping the worker to make `pending` stable would need a parked read,
+/// and the two seams that exist are the wrong shape — `refuse_updates_to("calls")`
+/// blocks the queueing update too (the row reads `none`), and a store that fails
+/// reads makes the detector settle as unreadable rather than not settle at all.
+/// What does prove it is structural and is tested elsewhere: the detector is a
+/// separate Worker fed by a channel, and
+/// [`an_instance_with_no_profile_spends_nothing_per_call`] holds the ingest path
+/// to spending nothing per Call when there is nothing to look for.
 #[tokio::test]
-async fn the_upload_is_answered_before_anything_is_decoded() {
+async fn the_upload_queues_the_call_rather_than_decoding_it() {
     let app = an_instance().await;
     write_profile(&app, "Station 12", quick_call()).await;
 
@@ -317,10 +346,11 @@ async fn the_upload_is_answered_before_anything_is_decoded() {
         .await;
 
     assert_eq!(status, 200, "{body}");
-    assert_eq!(
+    assert_ne!(
         newest(&app).await.tone,
-        ToneState::PENDING,
-        "answered with the audio unread — the whole point of an off-path worker"
+        ToneState::NONE,
+        "the upload itself queued it — `none` is what a Call carries when \
+         nothing ever offered it, and nothing re-enters that state"
     );
 
     app.settle().await;
