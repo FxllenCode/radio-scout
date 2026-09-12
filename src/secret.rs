@@ -1,22 +1,56 @@
-//! **Lockout** (CONTEXT.md): the refusal to check any secret from an address
-//! that has spent its budget of failed attempts, until a cooldown measured from
-//! its last attempt has passed.
+//! **What it takes to guard a secret somebody chose.**
 //!
-//! Two surfaces guard a secret with one — the **admin password** (#19) and an
-//! **Access code**'s unlock (#68) — and they do it for the same reason and with
-//! the same failure mode: both verify with Argon2id, which is memory-hard on
-//! purpose, so an unbounded guesser is *also* a way to exhaust a Pi. What
-//! differs is only the budget, which is why that is the parameter and everything
-//! else is here once.
+//! Two of them: the **admin password** (#19) and an **Access code** (#68). They
+//! are the same kind of thing — a human picked it, said it out loud, and can
+//! type it wrong — so they are guarded the same way, and that way is two pieces
+//! which only make sense together:
 //!
-//! It is deliberately **not** a rate limiter over requests, and it is not a
-//! record of who listened (ADR-0011 rule 5): the only addresses in it are ones
-//! that presented a wrong secret, they are forgotten as soon as their cooldown
-//! elapses, and nothing is ever written down about an address that got it right.
+//! - [`hash`] / [`verify`], **Argon2id** at the crate's defaults, which are
+//!   OWASP's (19 MiB, t=2, p=1). A low-entropy secret needs a hash that costs
+//!   real work per guess, which is exactly what an unsalted SHA-256 does not —
+//!   `api_keys.key_hash` is that, and #51 records why it is only defensible for
+//!   128 *minted* bits.
+//! - [`Lockout`], because memory-hard cuts both ways: an unbounded guesser
+//!   spending 19 MiB a try is also a way to exhaust a Pi. What differs between
+//!   the two surfaces is only the [`Budget`], which is why that is the parameter
+//!   and everything else is here once.
+//!
+//! **Lockout** is CONTEXT.md's word and keeps it: the refusal to check any
+//! secret from an address that has spent its budget of failed attempts, until a
+//! cooldown measured from its last attempt has passed. It is deliberately not a
+//! rate limiter over requests, and not a record of who listened (ADR-0011 rule
+//! 5): the only addresses in it are ones that presented a *wrong* secret, they
+//! are forgotten as soon as their cooldown elapses, and nothing is ever written
+//! down about an address that got it right.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
+
+use argon2::password_hash::rand_core::OsRng;
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+
+/// Store a secret somebody chose: Argon2id, salted, in PHC format.
+pub(crate) fn hash(secret: &str) -> String {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(secret.as_bytes(), &salt)
+        .expect("argon2 accepts any byte string")
+        .to_string()
+}
+
+/// Whether `candidate` is the secret behind `stored`.
+///
+/// One expression rather than a chain of guards, because a stored hash we cannot
+/// *read* means the same thing as one that does not match: it is not something
+/// we wrote, so nothing verifies against it.
+pub(crate) fn verify(stored: &str, candidate: &str) -> bool {
+    PasswordHash::new(stored).is_ok_and(|hash| {
+        Argon2::default()
+            .verify_password(candidate.as_bytes(), &hash)
+            .is_ok()
+    })
+}
 
 /// What one surface allows before it stops answering.
 ///
@@ -383,5 +417,32 @@ mod tests {
                 "after {} attempts", attempts
             );
         }
+    }
+
+    // -- Hashing a chosen secret --------------------------------------------
+
+    /// Salted, so two Instances holding the same password hold different bytes
+    /// and a stolen database is not a stolen credential.
+    #[test]
+    fn the_same_secret_hashes_differently_every_time_and_still_verifies() {
+        let (first, second) = (hash("hunter2"), hash("hunter2"));
+
+        assert_ne!(first, second, "salted");
+        assert!(first.starts_with("$argon2id$"), "{first}");
+        assert!(verify(&first, "hunter2"));
+        assert!(verify(&second, "hunter2"));
+        assert!(!verify(&first, "Hunter2"), "and it is case-sensitive");
+    }
+
+    /// A stored hash we cannot *read* verifies nothing, rather than verifying
+    /// everything — which is what a naive string compare against a corrupt row
+    /// would do, and which would turn a truncated backup into an open door.
+    #[rstest::rstest]
+    #[case::empty("")]
+    #[case::the_secret_itself("hunter2")]
+    #[case::truncated("$argon2id$v=19$m=19456,t=2,p=1$")]
+    fn a_hash_we_did_not_write_verifies_nothing(#[case] stored: &str) {
+        assert!(!verify(stored, "hunter2"), "stored={stored:?}");
+        assert!(!verify(stored, ""), "stored={stored:?}");
     }
 }

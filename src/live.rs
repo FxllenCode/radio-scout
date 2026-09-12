@@ -247,10 +247,13 @@ impl Backfill {
 pub(crate) struct Connection {
     sub: Selection,
     scope: AccessScope,
-    /// When the **Access code** this connection opened with runs out, if it has
-    /// one — re-read on every heartbeat, so a code that expires tonight takes
-    /// its sockets with it rather than serving until somebody closes a tab.
-    until: Option<i64>,
+    /// The **Access code** this connection opened with, if it opened with one.
+    ///
+    /// Its expiry is re-read on every heartbeat, so a code that runs out tonight
+    /// takes its sockets with it rather than serving until somebody closes a
+    /// tab — and its **Id** is what the refusal names, because a label is the
+    /// most that may ever be said out loud about a code.
+    held: Option<crate::access::CodeHeld>,
     heartbeat: Heartbeat,
 }
 
@@ -265,18 +268,18 @@ impl Connection {
         Connection {
             sub: Selection::default(),
             scope,
-            until: None,
+            held: None,
             heartbeat: Heartbeat::default(),
         }
     }
 
-    /// The same connection, opened with an **Access code** that runs out.
+    /// The same connection, opened with an **Access code**.
     ///
     /// A builder rather than a second parameter on [`Connection::new`], because
     /// almost every connection there will ever be has no code at all and the
     /// table reads better for saying so.
-    pub(crate) fn until(mut self, expires_at_ms: Option<i64>) -> Self {
-        self.until = expires_at_ms;
+    pub(crate) fn holding(mut self, held: Option<crate::access::CodeHeld>) -> Self {
+        self.held = held;
         self
     }
 
@@ -373,18 +376,12 @@ impl Connection {
         // be here is not one to ping. rdio assigns the scope *before* it looks
         // at expiry and never looks again, so an expired code there keeps
         // delivering for as long as the socket lasts.
-        if self
-            .until
-            .is_some_and(|expires_at_ms| now_ms >= expires_at_ms)
-        {
-            warn!(
-                reason = %"access-code-expired",
-                "live-feed listener dropped: the access code it opened with has expired"
-            );
-            return vec![
-                Action::Send(refused_frame("access-code-expired")),
-                Action::Close,
-            ];
+        if let Some(expired) = self.ran_out(now_ms) {
+            // **Through the one vocabulary**, not a hand-written `warn!` beside
+            // it: the slug an Operator greps and the slug the client is told are
+            // the same string because they are the same `Reason` (#92).
+            expired.record();
+            return vec![Action::Send(refused_frame(&expired)), Action::Close];
         }
         match self.heartbeat.on_tick() {
             Beat::Ping => vec![Action::Ping],
@@ -400,6 +397,17 @@ impl Connection {
                 vec![Action::Close]
             }
         }
+    }
+
+    /// Has the **Access code** this connection opened with run out?
+    ///
+    /// `None` for the connection that has no code, which is every connection on
+    /// every Instance that gates nothing.
+    fn ran_out(&self, now_ms: i64) -> Option<crate::failure::Reason> {
+        let held = self.held.as_ref()?;
+        held.expires_at_ms
+            .filter(|expires_at_ms| now_ms >= *expires_at_ms)
+            .map(|_| crate::failure::Reason::AccessCodeExpired { code_id: held.id })
     }
 
     /// Deliver a **Backfill**: the Calls this Listener missed and may hear,
@@ -548,8 +556,8 @@ fn lagged_frame(skipped: u64) -> String {
 ///
 /// rdio sends its client a `pin` or `max` command and then **goes on serving
 /// it**, because the scope was assigned before the check.
-fn refused_frame(reason: &str) -> String {
-    serde_json::json!({ "t": "refused", "reason": reason }).to_string()
+fn refused_frame(reason: &crate::failure::Reason) -> String {
+    serde_json::json!({ "t": "refused", "reason": reason.slug() }).to_string()
 }
 
 /// A notice that a **Backfill** could not reach back as far as the Listener
@@ -668,17 +676,15 @@ async fn handle_socket(mut socket: impl Socket, state: AppState, viewer: crate::
         Some(code) => match state.access.hold(code) {
             Some(held) => Some(held),
             None => {
-                crate::failure::Reason::AccessConnectionLimit {
+                let refused = crate::failure::Reason::AccessConnectionLimit {
                     code_id: code.id,
                     limit: code.max_connections.unwrap_or_default(),
-                }
-                .record();
+                };
+                refused.record();
                 // Said out loud and then closed. rdio tells its client `max` and
                 // carries on serving it, because by then it has already assigned
                 // the scope.
-                let _ = socket
-                    .send(Outbound::Text(refused_frame("access-connection-limit")))
-                    .await;
+                let _ = socket.send(Outbound::Text(refused_frame(&refused))).await;
                 return;
             }
         },
@@ -720,8 +726,7 @@ enum Flow {
 /// [`Connection::on`], and everything here either waits or does as it is told.
 async fn run_connection(mut socket: impl Socket, state: AppState, viewer: crate::access::Viewer) {
     let mut receiver = state.live.subscribe();
-    let mut conn = Connection::new(viewer.scope.clone())
-        .until(viewer.code().and_then(|code| code.expires_at_ms));
+    let mut conn = Connection::new(viewer.scope.clone()).holding(viewer.code().cloned());
 
     let opening = conn.on(Event::Opened);
     if !carried_on(perform(&mut socket, &state, &mut conn, opening).await) {
@@ -1157,7 +1162,12 @@ mod tests {
     /// the whole of it is one row of the table.
     #[test]
     fn a_connection_whose_code_expires_is_told_and_closed() {
-        let mut open = Connection::new(AccessScope::All).until(Some(1_000));
+        let mut open = Connection::new(AccessScope::All).holding(Some(crate::access::CodeHeld {
+            id: 7,
+            label: Some(String::from("Fire Ops")),
+            expires_at_ms: Some(1_000),
+            max_connections: None,
+        }));
 
         assert_eq!(
             open.on(Event::Tick(999)),
@@ -1169,7 +1179,13 @@ mod tests {
 
         assert_eq!(
             frames(&refused),
-            vec![serde_json::json!({"t": "refused", "reason": "access-code-expired"})],
+            vec![serde_json::json!({
+                "t": "refused",
+                // The slug is the `Reason`'s own, never a second copy of it:
+                // what an Operator greps and what the client is told are one
+                // string (#92).
+                "reason": crate::failure::Reason::AccessCodeExpired { code_id: 7 }.slug(),
+            })],
             "told why, in the vocabulary an HTTP refusal would have used"
         );
         assert_eq!(

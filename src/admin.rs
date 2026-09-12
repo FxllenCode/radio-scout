@@ -51,7 +51,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::Json;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
@@ -63,7 +62,7 @@ use subtle::ConstantTimeEq;
 use crate::AppState;
 use crate::config::TrustedProxies;
 use crate::failure::{Failure, Reason};
-use crate::lockout::{Budget, Lockout};
+use crate::secret::{Budget, Lockout};
 use crate::startup::AdminPassword;
 
 /// The header a reverse proxy names the original client in — the same one the
@@ -136,7 +135,7 @@ impl AdminAuth {
     /// An admin surface gated by `password`.
     pub fn new(password: &str, config: AdminConfig) -> Self {
         AdminAuth(Arc::new(Inner {
-            password: Some(hash_password(password)),
+            password: Some(crate::secret::hash(password)),
             config,
             sessions: Mutex::new(Sessions::default()),
             lockout: Mutex::new(Lockout::default()),
@@ -181,12 +180,7 @@ impl AdminAuth {
         self.0
             .password
             .as_deref()
-            .and_then(|stored| PasswordHash::new(stored).ok())
-            .is_some_and(|hash| {
-                Argon2::default()
-                    .verify_password(candidate.as_bytes(), &hash)
-                    .is_ok()
-            })
+            .is_some_and(|stored| crate::secret::verify(stored, candidate))
     }
 
     /// Open a session, returning the id for its cookie and what the client is
@@ -659,16 +653,6 @@ fn cleared_session_cookie() -> String {
     format!("{SESSION_COOKIE}=; HttpOnly; {COOKIE_ATTRIBUTES}; Max-Age=0")
 }
 
-/// Hash a password for storage, Argon2id at the crate's defaults (OWASP's
-/// recommended 19 MiB / t=2 / p=1) with a fresh random salt.
-fn hash_password(password: &str) -> String {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .expect("argon2 accepts any byte string")
-        .to_string()
-}
-
 /// A 256-bit random token, hex-encoded — a session id or a CSRF token.
 fn random_token() -> String {
     let mut bytes = [0u8; 32];
@@ -1130,16 +1114,17 @@ mod tests {
         assert!(!auth.verify(""), "{provisioned:?}");
     }
 
-    /// A stored hash is never the password, and two hashes of the same password
-    /// differ — a shared salt would let one leaked hash be tested against every
-    /// instance at once.
+    /// A stored hash is never the password — the half of [`crate::secret`]'s
+    /// bargain this surface depends on, asserted where the password lives
+    /// rather than only where the hashing does.
     #[test]
-    fn hashing_is_salted_and_never_stores_the_password() {
-        let (first, second) = (hash_password("hunter2"), hash_password("hunter2"));
+    fn a_provisioned_surface_never_holds_the_password() {
+        let auth = AdminAuth::new("hunter2", config());
 
-        assert_ne!(first, second, "each hash gets its own salt");
-        assert!(!first.contains("hunter2"), "{first}");
-        assert!(first.starts_with("$argon2id$"), "{first}");
+        let held = auth.0.password.as_deref().expect("a provisioned surface");
+
+        assert!(!held.contains("hunter2"), "{held}");
+        assert!(held.starts_with("$argon2id$"), "{held}");
     }
 
     proptest! {

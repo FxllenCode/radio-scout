@@ -67,8 +67,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use argon2::password_hash::rand_core::{OsRng, RngCore};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::extract::{FromRequestParts, Query};
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
@@ -77,7 +75,7 @@ use crate::AppState;
 use crate::db::Db;
 use crate::db::entities::access_code;
 use crate::failure::{Failure, Reason, Stage};
-use crate::lockout::{Budget, Lockout};
+use crate::secret::{Budget, Lockout};
 use crate::selection::Selection;
 
 /// The query parameter every gated read carries the **grant** in.
@@ -89,11 +87,6 @@ use crate::selection::Selection;
 /// pass that can be wrong. It is also the only thing an `<audio src>` and a
 /// `WebSocket` URL can both carry.
 pub const GRANT_PARAM: &str = "grant";
-
-/// How many bytes of randomness a minted grant carries. 128 bits, the
-/// **Share link** token's own size and for its reason: it is a bearer credential
-/// that reaches a URL, so it has to be unguessable rather than memorable.
-const GRANT_BYTES: usize = 16;
 
 /// The prefix a grant is minted with, so one found in a paste is recognisable as
 /// this Instance's and not as an API key or a share token.
@@ -196,11 +189,17 @@ pub enum Held {
     Code(CodeHeld),
     /// A grant that named no code, or named one that is disabled or expired.
     ///
-    /// **Degraded rather than refused**, on every HTTP read: a browser whose
-    /// stored grant has gone stale must fall back to open listening and be told
-    /// so, not find the whole app answering `401`. Where it *is* refused is the
-    /// two places a Listener is asking for something specific — the unlock
-    /// itself, and the live feed, which says so in a frame.
+    /// **Degraded, never refused** — on every read, and on the live feed too: a
+    /// browser whose stored grant has gone stale falls back to open listening
+    /// and is told so on the catalog, rather than finding the whole app
+    /// answering `401` or its socket closed. Taking the *open* channels away as
+    /// well would be a strictly worse answer than the one it already has.
+    ///
+    /// The two refusals this feature does write are both about something a
+    /// Listener asked for **now**: the unlock itself, and a live connection that
+    /// is over its code's limit or whose code runs out *while it is open*
+    /// ([`crate::live`]). A grant that was already stale when the socket opened
+    /// is not one of them — it is not a code at all.
     Stale(Stale),
 }
 
@@ -514,7 +513,7 @@ impl Access {
         let matched = tokio::task::spawn_blocking(move || {
             candidates
                 .into_iter()
-                .find(|row| verify(&row.code_hash, &candidate))
+                .find(|row| crate::secret::verify(&row.code_hash, &candidate))
         })
         .await
         .map_err(Stage::Access.failed())?;
@@ -696,8 +695,8 @@ pub async fn unlock(
     // Built before the macro rather than inside it, for the reason
     // `MergeChange::record` gives: a `tracing` field expression runs only when
     // a subscriber is interested, which makes it look unreachable to coverage.
-    let code = unlocked.label.as_deref().unwrap_or("(unlabelled)");
-    tracing::info!(code, "access code unlocked");
+    let label = unlocked.label.as_deref().unwrap_or("(unlabelled)");
+    tracing::info!(label, "access code unlocked");
     Ok(unlocked)
 }
 
@@ -759,37 +758,23 @@ pub async fn reaches_call<C: sea_orm::ConnectionTrait>(
 // ---------------------------------------------------------------------------
 
 /// A fresh grant: [`GRANT_PREFIX`] and 128 random bits, hex.
-pub fn mint_grant() -> String {
-    let mut bytes = [0u8; GRANT_BYTES];
-    OsRng.fill_bytes(&mut bytes);
-    let mut grant = String::from(GRANT_PREFIX);
-    for byte in bytes {
-        grant.push_str(&format!("{byte:02x}"));
-    }
-    grant
-}
-
-/// Store an Operator-chosen code: Argon2id at the crate's defaults, which are
-/// OWASP's (19 MiB, t=2, p=1) — the admin password's own.
-pub fn hash_code(code: &str) -> String {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(code.as_bytes(), &salt)
-        .expect("argon2 accepts any byte string")
-        .to_string()
-}
-
-/// Whether `candidate` is the code behind `stored`.
 ///
-/// A stored hash we cannot read verifies nothing — the same reading
-/// [`crate::admin::AdminAuth::verify`] takes, and for its reason: a hash we
-/// cannot parse is one we did not write.
-fn verify(stored: &str, candidate: &str) -> bool {
-    PasswordHash::new(stored).is_ok_and(|hash| {
-        Argon2::default()
-            .verify_password(candidate.as_bytes(), &hash)
-            .is_ok()
-    })
+/// The bits are [`crate::share::new_token`]'s — the same mint a **Share link**
+/// uses, because they are the same thing (an unguessable bearer credential in a
+/// URL) and two implementations of "128 random bits, hex" is two chances for one
+/// of them to be 64. What the prefix adds is recognisability: one found in a
+/// paste is this Instance's grant rather than an API key or a share token.
+pub fn mint_grant() -> String {
+    format!("{GRANT_PREFIX}{}", crate::share::new_token())
+}
+
+/// Store an Operator-chosen code.
+///
+/// [`crate::secret::hash`] — Argon2id, the **admin password**'s own, because a
+/// code somebody chose and says out loud is the same kind of secret and needs
+/// the same kind of hash (see that module).
+pub fn hash_code(code: &str) -> String {
+    crate::secret::hash(code)
 }
 
 #[cfg(test)]
@@ -1027,7 +1012,9 @@ mod tests {
 
         assert_ne!(first, second);
         assert!(first.starts_with(GRANT_PREFIX), "{first}");
-        assert_eq!(first.len(), GRANT_PREFIX.len() + GRANT_BYTES * 2, "{first}");
+        // 128 bits, hex — [`crate::share::new_token`]'s, which is where the
+        // randomness comes from and where its size is decided.
+        assert_eq!(first.len(), GRANT_PREFIX.len() + 32, "{first}");
         assert!(
             first[GRANT_PREFIX.len()..]
                 .chars()
@@ -1049,27 +1036,18 @@ mod tests {
         assert!(access.is_gating(), "kept, rather than quietly opened");
     }
 
-    /// A code is stored Argon2id and salted, so two Instances with the same code
-    /// hold different bytes and a stolen database is not a stolen roster. This is
-    /// the whole difference from `api_keys.key_hash`, which is unsalted SHA-256
-    /// and defensible only for 128 minted bits (#51).
+    /// A code goes through [`crate::secret`], which is where a chosen secret is
+    /// stored Argon2id and salted — and which has the rest of the table. What is
+    /// asserted here is only that a code takes that road and not `api_keys`'
+    /// unsalted SHA-256, which #51 records as defensible for 128 *minted* bits
+    /// and nothing else.
     #[test]
-    fn a_code_is_salted_argon2id_and_verifies() {
+    fn a_code_is_stored_the_way_a_chosen_secret_has_to_be() {
         let (first, second) = (hash_code("FIRE2024"), hash_code("FIRE2024"));
 
         assert_ne!(first, second, "salted");
         assert!(first.starts_with("$argon2id$"), "{first}");
-        assert!(verify(&first, "FIRE2024"));
-        assert!(verify(&second, "FIRE2024"));
-        assert!(!verify(&first, "fire2024"), "and it is case-sensitive");
-    }
-
-    /// A stored hash we cannot read verifies nothing, rather than verifying
-    /// everything — which is what a naive string compare against a corrupt row
-    /// would do.
-    #[test]
-    fn a_hash_we_did_not_write_verifies_nothing() {
-        assert!(!verify("", ""));
-        assert!(!verify("FIRE2024", "FIRE2024"));
+        assert!(crate::secret::verify(&first, "FIRE2024"));
+        assert!(crate::secret::verify(&second, "FIRE2024"));
     }
 }

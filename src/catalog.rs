@@ -189,6 +189,30 @@ pub struct AccessOffer {
 }
 
 impl AccessOffer {
+    /// What this request is told about access: one fact about the **Instance**
+    /// and the rest about the **request**.
+    ///
+    /// Both halves are parameters rather than a `From` over the Viewer alone,
+    /// because the Instance's bit is not the Viewer's to know — and a partial
+    /// constructor that filled it in with `false` would fail **open** the first
+    /// time somebody built one without overwriting it: a client told nothing is
+    /// gated draws no lock and offers no unlock.
+    fn of(gating: bool, viewer: &crate::access::Viewer) -> Self {
+        let held = match &viewer.held {
+            crate::access::Held::Nothing => AccessOffer::default(),
+            crate::access::Held::Code(code) => AccessOffer {
+                label: code.label.clone(),
+                expires_at_ms: code.expires_at_ms,
+                ..AccessOffer::default()
+            },
+            crate::access::Held::Stale(why) => AccessOffer {
+                stale: Some(*why),
+                ..AccessOffer::default()
+            },
+        };
+        AccessOffer { gating, ..held }
+    }
+
     /// Whether there is nothing here worth a key on the wire: an Instance that
     /// gates nothing, read by a browser holding nothing.
     ///
@@ -197,26 +221,6 @@ impl AccessOffer {
     /// sent one is owed that answer whatever the rest of the Instance looks like.
     fn is_quiet(&self) -> bool {
         !self.gating && self.label.is_none() && self.expires_at_ms.is_none() && self.stale.is_none()
-    }
-}
-
-impl From<&crate::access::Viewer> for AccessOffer {
-    fn from(viewer: &crate::access::Viewer) -> Self {
-        match &viewer.held {
-            crate::access::Held::Nothing => AccessOffer::default(),
-            crate::access::Held::Code(code) => AccessOffer {
-                gating: false,
-                label: code.label.clone(),
-                expires_at_ms: code.expires_at_ms,
-                stale: None,
-            },
-            crate::access::Held::Stale(why) => AccessOffer {
-                gating: false,
-                label: None,
-                expires_at_ms: None,
-                stale: Some(*why),
-            },
-        }
     }
 }
 
@@ -281,12 +285,9 @@ pub async fn catalog(
             max_calls: state.exports.max_calls(),
         },
         starred: state.stars.kept_days().into(),
-        access: AccessOffer {
-            // The bit is the Instance's and the rest is this request's, which is
-            // why they are assembled from two places and not one.
-            gating: state.access.is_gating(),
-            ..AccessOffer::from(&viewer)
-        },
+        // The bit is the Instance's and the rest is this request's, which is why
+        // both are named here and neither is a default something else filled in.
+        access: AccessOffer::of(state.access.is_gating(), &viewer),
         ..catalog
     })
 }

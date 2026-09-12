@@ -14,7 +14,7 @@ mod common;
 
 use common::{
     CallUpload, FILTER_BUDGET, TestApp, audio_at, frame_within, next_json, no_frame_within,
-    subscribe,
+    subscribe, two_keyups,
 };
 use radio_scout::db::repo::NewCall;
 use serde_json::json;
@@ -203,6 +203,112 @@ async fn every_single_call_surface_answers_as_if_a_gated_call_were_not_there() {
 
     let starred = app.post(&format!("/api/call/{gated}/star")).await;
     assert_eq!(starred.status().as_u16(), 404, "nor leave a Star on one");
+}
+
+/// **Catch-up's quiet spans are an id-shaped read, and it is gated too.**
+///
+/// A Listener who typed an id they were never given must not learn from the
+/// answer that the Call is there — the same oracle a `403` on `/api/call/{id}`
+/// would be, one endpoint along.
+#[tokio::test]
+async fn the_quiet_spans_of_a_gated_call_are_not_answered_for() {
+    let app = TestApp::with_key("k").await;
+    // Audio that genuinely holds gaps, so "this Call is absent" is a fact about
+    // the gate rather than about there having been nothing to say.
+    for talkgroup in [OPEN, GATED] {
+        app.upload_ok(
+            CallUpload::new()
+                .talkgroup(talkgroup)
+                .at(recent(20_000 - talkgroup))
+                .audio(&two_keyups()),
+        )
+        .await;
+    }
+    app.settle().await;
+    let open = the_call_on(&app, OPEN).await;
+    let gated = the_call_on(&app, GATED).await;
+    app.login().await;
+    app.restrict_talkgroup(SYSTEM, GATED, Some(true)).await;
+    let grant = app
+        .create_access_code(
+            "FIRE-2026-OPS",
+            json!({ "sel": { "11": { "54999": true } } }),
+        )
+        .await;
+
+    let window = format!("/api/calls/quiet?ids={open},{gated}");
+    // The window is the map itself — a Call with nothing to trim is absent
+    // rather than empty, which is what makes "absent" the assertion here.
+    let answered = |page: &serde_json::Value| -> Vec<String> {
+        let mut ids: Vec<String> = page
+            .as_object()
+            .expect("the window")
+            .keys()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    let mine = answered(&app.get_json(&window).await);
+    assert_eq!(
+        mine,
+        vec![open.to_string()],
+        "a Listener holding nothing is told nothing about the gated Call"
+    );
+
+    let mut both = vec![open.to_string(), gated.to_string()];
+    both.sort();
+    assert_eq!(
+        answered(&app.get_json_with_grant(&window, &grant).await),
+        both,
+        "...and with the code, both"
+    );
+}
+
+/// **An export measures itself over what its asker may hear.**
+///
+/// Decision 4's other half, asserted through the **cap** rather than by reading
+/// the zip: `archive::extent` is one statement and every refusal is taken from
+/// it, so a range that is two Calls to a code-holder and one to a stranger is
+/// exactly the difference the cap sees. That is also what makes the stranger's
+/// export *short* rather than refused — from where they stand those Calls are
+/// not there.
+#[tokio::test]
+async fn an_export_measures_itself_over_what_its_asker_may_hear() {
+    let app = TestApp::builder()
+        .config(|config| config.export.max_calls = 1)
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+    app.upload_ok(CallUpload::new().talkgroup(OPEN).at(recent(20_000)))
+        .await;
+    app.upload_ok(CallUpload::new().talkgroup(GATED).at(recent(10_000)))
+        .await;
+    app.login().await;
+    app.restrict_talkgroup(SYSTEM, GATED, Some(true)).await;
+    let grant = app
+        .create_access_code(
+            "FIRE-2026-OPS",
+            json!({ "sel": { "11": { "54999": true } } }),
+        )
+        .await;
+
+    let open = app.get("/api/calls/export?format=zip").await;
+    assert_eq!(
+        open.status().as_u16(),
+        200,
+        "one Call is inside the cap, because the gated one is not this asker's"
+    );
+
+    let held = app
+        .get_with_grant("/api/calls/export?format=zip", &grant)
+        .await;
+    assert_eq!(
+        held.status().as_u16(),
+        413,
+        "and with the code the same range holds two, which is over it"
+    );
 }
 
 /// The live feed and its **Backfill** are gated by the same rule, which is the

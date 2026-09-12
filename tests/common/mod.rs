@@ -1535,9 +1535,8 @@ impl TestApp {
     /// the one part of a URL an `<audio>` element and a `WebSocket` can both
     /// take and `http_log` never writes down.
     pub async fn connect_ws_as(&self, grant: &str) -> Ws {
-        let (mut ws, greeting) = self.try_connect_ws_as(grant).await;
+        let (ws, greeting) = self.try_connect_ws_as(grant).await;
         assert_eq!(greeting["t"], "hello", "the socket was refused: {greeting}");
-        let _ = &mut ws;
         ws
     }
 

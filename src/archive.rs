@@ -629,6 +629,15 @@ pub(crate) fn gate(scope: &AccessScope) -> Option<sea_orm::Condition> {
         AccessScope::Granted(granted) => Some(
             sea_orm::Condition::any()
                 .add(unrestricted())
+                // **`within`'s `None` cannot reach here, and would mean the
+                // opposite if it did.** It means *this Selection reaches every
+                // Call*, which for a grant is [`AccessScope::All`] — the arm
+                // above — because [`AccessScope::granting`] is the only way a
+                // `Granted` holding such a Selection could be built and it sends
+                // one there. So the fallback is not that reading: it is what an
+                // unreachable `None` must be *taken* as on a gate, which is
+                // nothing extra ([`crate::selection::stored`]'s rule, one layer
+                // up).
                 .add(within(granted).unwrap_or_else(never)),
         ),
     }

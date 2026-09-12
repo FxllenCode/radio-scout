@@ -98,7 +98,7 @@ const sameOrigin = fetchBaseQuery({
  * exactly as today" true on this side of the wire too.
  */
 const baseQuery: typeof sameOrigin = (args, apiArgs, extra) => {
-  const grant = selectGrant(apiArgs.getState() as never)
+  const grant = selectGrant(apiArgs.getState() as Parameters<typeof selectGrant>[0])
   if (!grant) return sameOrigin(args, apiArgs, extra)
   const granted =
     typeof args === 'string'
