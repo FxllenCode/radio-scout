@@ -417,6 +417,10 @@ export interface AdminSystem {
    *  only by a listener holding an **Access code** scoped to it. `false`, which
    *  is what every System starts as, is open listening. */
   restricted: boolean
+  /** How many days Calls here are kept (#69, spec US 53). `null` inherits
+   *  `[retention] days`; `0` keeps them for good, the reading every window in
+   *  that section has. */
+  retentionDays?: number | null
   talkgroups: number
   units: number
   /** Calls in the Archive under it — what a delete would take. */
@@ -442,6 +446,9 @@ export interface AdminTalkgroup {
    *  the System — which is what an auto-populated channel carries, so a Ref a
    *  recorder discovers on a gated System arrives gated. */
   restricted?: boolean | null
+  /** How many days Calls here are kept (#69). `null` inherits the System, which
+   *  inherits `[retention] days`; `0` keeps them for good. */
+  retentionDays?: number | null
   blacklisted: boolean
   calls: number
   createdAtMs: number

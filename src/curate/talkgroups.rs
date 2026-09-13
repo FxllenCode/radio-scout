@@ -84,6 +84,11 @@ pub struct TalkgroupRow {
     /// System — which is what an auto-populated channel carries, so a Ref a
     /// recorder discovers on a gated System arrives gated.
     pub restricted: Option<bool>,
+    /// How many days Calls here are kept (#69). `null` inherits the System, which
+    /// inherits `[retention] days`; `0` keeps them for good. Read as an `i64`
+    /// where a form may only **write** a `u32`, [`super::systems::SystemRow`]'s
+    /// asymmetry and for its reason.
+    pub retention_days: Option<i64>,
     /// Whether this Ref is on its System's blacklist — a derived fact, not a
     /// column.
     pub blacklisted: bool,
@@ -110,6 +115,8 @@ pub struct NewTalkgroup {
     pub led: Option<String>,
     pub enhancement: Option<bool>,
     pub restricted: Option<bool>,
+    /// Days to keep Calls here, or absent to inherit the System (#69).
+    pub retention_days: Option<u32>,
     #[serde(default)]
     pub blacklisted: bool,
 }
@@ -134,6 +141,8 @@ pub struct TalkgroupPatch {
     pub enhancement: Option<Option<bool>>,
     #[serde(default, deserialize_with = "nullable")]
     pub restricted: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub retention_days: Option<Option<u32>>,
     pub blacklisted: Option<bool>,
 }
 
@@ -215,6 +224,7 @@ pub async fn create(
         led: Set(led),
         enhancement: Set(body.enhancement),
         restricted: Set(body.restricted),
+        retention_days: Set(body.retention_days.map(i64::from)),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
@@ -298,6 +308,9 @@ pub async fn update(
     }
     if let Some(restricted) = body.restricted {
         row.restricted = Set(restricted);
+    }
+    if let Some(retention_days) = body.retention_days {
+        row.retention_days = Set(retention_days.map(i64::from));
     }
     let stored = row.update(&txn).await.map_err(Stage::Curate.failed())?;
     if let Some(groups) = &body.groups {
@@ -739,6 +752,7 @@ async fn denormalize<C: ConnectionTrait>(
                 led: row.led,
                 enhancement: row.enhancement,
                 restricted: row.restricted,
+                retention_days: row.retention_days,
                 created_at_ms: row.created_at_ms,
             }
         })
@@ -1001,6 +1015,7 @@ mod tests {
             1,
             system::Model {
                 restricted: false,
+                retention_days: None,
                 id: 1,
                 r#ref: 11,
                 label: None,
@@ -1017,6 +1032,7 @@ mod tests {
             2,
             system::Model {
                 restricted: false,
+                retention_days: None,
                 id: 2,
                 r#ref: 12,
                 label: None,

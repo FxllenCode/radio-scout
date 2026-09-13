@@ -45,3 +45,45 @@ export function inherit(value: boolean | null | undefined): string {
   if (value === false) return 'off'
   return ''
 }
+
+/** Which of the three things a retention window is currently saying (#69). */
+export type KeepMode = 'inherit' | 'days' | 'forever'
+
+/** The largest window the server will take — `[retention] days` and both
+ *  overrides are `u32`, so a bigger number is a `422` with nothing an Operator
+ *  can read. Refusing it here is `is_postable_url`'s rule (#54): a form must not
+ *  accept what the server refuses, or the value goes up and comes straight back
+ *  after the box has cleared. */
+const MAX_DAYS = 0xffffffff
+
+/** What a stored window means, as the mode a form shows it in.
+ *
+ *  Three options rather than one number box, because `0` means **forever** on
+ *  the wire and a number box makes that a trap: an Operator typing `0` into
+ *  "days to keep" means *delete these*, which is the exact opposite. The magic
+ *  value stays in the protocol, where `[retention] days` already spends it, and
+ *  the screen says what it means. */
+export function keepMode(days: number | null | undefined): KeepMode {
+  if (days === null || days === undefined) return 'inherit'
+  return days === 0 ? 'forever' : 'days'
+}
+
+/** What a form sends for a retention window, or `undefined` when the box does
+ *  not hold one.
+ *
+ *  `undefined` is *refuse to submit*, [`parseRefs`]' rule — not "leave it
+ *  alone", which is a thing only an absent key can say and a thing this control
+ *  never means: it is rendered from the row it is editing, so it always has an
+ *  answer. A blank box under **days** has not given one, and `0` there is not
+ *  one either: that is what the *forever* option is for, and reading it as one
+ *  would make two options mean the same thing while looking like they do not. */
+export function keepWindow(
+  mode: KeepMode,
+  raw: string,
+): number | null | undefined {
+  if (mode === 'inherit') return null
+  if (mode === 'forever') return 0
+  const days = Number(raw.trim())
+  const given = raw.trim() !== '' && Number.isInteger(days)
+  return given && days > 0 && days <= MAX_DAYS ? days : undefined
+}

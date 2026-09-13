@@ -42,6 +42,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0021_starred_calls::Migration),
             Box::new(m0022_events::Migration),
             Box::new(m0023_access_codes::Migration),
+            Box::new(m0024_retention_overrides::Migration),
         ]
     }
 }
@@ -2168,6 +2169,86 @@ mod m0023_access_codes {
                 .await?;
             manager
                 .drop_table(Table::drop().table(access_code::Entity).to_owned())
+                .await
+        }
+    }
+}
+
+/// Per-entity **Retention** windows (#69, spec US 53).
+///
+/// `systems.retention_days` and `talkgroups.retention_days`, both nullable, both
+/// the [`m0006_enhancement`] shape: `NULL` inherits the level above and the most
+/// specific row wins. Nullable is what makes "follow the instance" sayable — the
+/// third state a plain number has no room for — and it is also what every row
+/// already written carries, so an upgraded Instance prunes exactly as it did.
+///
+/// `0` is *keep for good*, the reading `[retention] days` already has, which is
+/// why there is no separate flag: a boolean beside a number would allow the
+/// fourth combination (kept for good *and* for fourteen days) that means nothing.
+mod m0024_retention_overrides {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0024_retention_overrides"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // The standing tax m0003 named: `m0001_init` generates its DDL from
+            // the *live* entities, so a database created after this release
+            // already has both columns by the time this runs.
+            if !manager.has_column("systems", "retention_days").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(system::Entity)
+                            .add_column(
+                                ColumnDef::new(system::Column::RetentionDays)
+                                    .big_integer()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_column("talkgroups", "retention_days").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(talkgroup::Entity)
+                            .add_column(
+                                ColumnDef::new(talkgroup::Column::RetentionDays)
+                                    .big_integer()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(talkgroup::Entity)
+                        .drop_column(talkgroup::Column::RetentionDays)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(system::Entity)
+                        .drop_column(system::Column::RetentionDays)
+                        .to_owned(),
+                )
                 .await
         }
     }

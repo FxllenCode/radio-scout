@@ -44,7 +44,7 @@ use crate::db::repo::{self, PrunableCall};
 use crate::worker::{Meter, Worker};
 
 /// Milliseconds in a day.
-const MS_PER_DAY: i64 = 86_400_000;
+pub(crate) const MS_PER_DAY: i64 = 86_400_000;
 
 /// Bytes in a binary gigabyte (GiB, 2^30) — how `retention.max_size_gb` is read.
 const BYTES_PER_GB: f64 = 1_073_741_824.0;
@@ -170,41 +170,203 @@ pub enum StarKeep {
     Forever,
 }
 
-/// What one age pass may take: everything older than `cutoff_ms`, except what
-/// a **Star** is still holding back.
+/// How long one Call is kept, once the per-entity overrides (#69, spec US 53)
+/// have had their say.
 ///
-/// A value rather than two arguments, so the sweep and the query that serves it
-/// cannot be given one and not the other — the [`crate::ingest::dedup_window`]
-/// move, one policy along.
+/// **The Rust half of an expression that also has to run in SQL.** A Call's
+/// window depends on its own Talkgroup and System, so the age pass cannot
+/// compare against one instant the way it did before #69 — the comparison is
+/// per row, which means the arithmetic is the database's. That is `src/activity`'s
+/// situation exactly, and it gets `src/activity`'s answer: the two live next to
+/// each other ([`due_expr`](crate::db::repo::due_expr)) and `tests/db.rs` runs
+/// the SQL against this type on **both dialects**, because either alone answers
+/// confidently and wrongly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    /// Taken once it is older than this many days.
+    ///
+    /// `i64`, matching the column, rather than the `u32` the setting is written
+    /// in: the SQL has to read whatever is in the row, so a type that could not
+    /// hold it would mean this half and that half disagreeing about a value
+    /// neither of them chose. Every surface that *writes* one takes a `u32`.
+    Days(i64),
+    /// Never taken by an age pass at all — `0`, at whichever level said it.
+    Forever,
+}
+
+impl Window {
+    /// The window a Call on this Talkgroup, in this System, under an Instance
+    /// keeping things `instance_days` days is kept for.
+    ///
+    /// **The most specific row wins**, which is [`crate::enhance`]'s scope rule
+    /// (#20) and `restricted`'s (#68) — so a Talkgroup may keep more *or* less
+    /// than its System, and a System more or less than the Instance. `0` means
+    /// forever wherever it is written, the reading every window in
+    /// [`RetentionConfig`] already has; it is therefore **not** a floor a more
+    /// specific row cannot undercut, or an Operator keeping one System for good
+    /// could never then bound one chatty channel inside it.
+    pub fn of(talkgroup: Option<i64>, system: Option<i64>, instance_days: u32) -> Window {
+        match talkgroup.or(system).unwrap_or(i64::from(instance_days)) {
+            0 => Window::Forever,
+            days => Window::Days(days),
+        }
+    }
+
+    /// The instant a Call transmitted at `call_at_ms` is due to be taken.
+    ///
+    /// *When*, rather than *whether* — so one expression serves both policies
+    /// that ask: the age pass takes what is due (`due < now`), and the size cap
+    /// takes whatever is due **soonest**. [`Window::Forever`] answers the instant
+    /// that never arrives, which makes it fall out of the first comparison and
+    /// sort last in the second without either caller carrying an arm for it.
+    ///
+    /// Saturating in both operations, because the column is an `i64` and nothing
+    /// but a surface we own bounds it to a `u32`: the widest window anybody can
+    /// *write* is ~3.7e17 ms and overflows nothing, and a row edited by hand can
+    /// hold anything at all. Landing on `i64::MAX` there reads as "not due",
+    /// which is the safe direction — and is the one place the SQL cannot follow,
+    /// since `call_at_ms + days * 86400000` overflows in the database and the two
+    /// dialects do not agree on what that means.
+    pub fn due_at_ms(self, call_at_ms: i64) -> i64 {
+        match self {
+            Window::Forever => i64::MAX,
+            Window::Days(days) => call_at_ms.saturating_add(days.saturating_mul(MS_PER_DAY)),
+        }
+    }
+}
+
+/// Whether anything on this Instance keeps its Calls for a different length of
+/// time than the Instance does (#69).
+///
+/// **A shape, not a policy**, and it exists for one reason: the per-entity
+/// expression cannot use the `call_at_ms` index. An Instance that has overridden
+/// nothing — which is nearly all of them — therefore keeps the statements it had
+/// before #69, an index walk bounded by the batch size, while one that has
+/// overridden something pays a scan. The two shapes answering identically is
+/// what `tests/db.rs` holds, on both dialects, because that is the drift a
+/// second implementation buys.
+///
+/// Read **once per sweep** rather than cached: a sweep is hourly, so the
+/// statement is free, and a cached bit would buy the invalidation problem every
+/// curation surface that can write one of these columns would then have to
+/// remember ([`crate::access::Access::is_gating`] is cached because it is asked
+/// per *request*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Windows {
+    /// One window for every Call in the Archive: `[retention] days`.
+    Uniform(u32),
+    /// At least one System or Talkgroup carries a window of its own, so every
+    /// Call's has to be resolved from its own channel. Carries the Instance-wide
+    /// window still, because that is what a row overriding nothing inherits.
+    PerEntity(u32),
+}
+
+impl Windows {
+    /// Which shape an Instance keeping things `instance_days` days is in, given
+    /// whether anything under it carries a window of its own
+    /// ([`crate::db::repo::has_retention_overrides`] is the fact).
+    ///
+    /// Here rather than in the data layer for the reason `downstream::routed_to`
+    /// decides and `repo::queue_deliveries` is handed the answer: the database
+    /// reports what is stored, and what that *means* belongs beside the type
+    /// that means it.
+    pub fn of(instance_days: u32, overridden: bool) -> Windows {
+        match overridden {
+            true => Windows::PerEntity(instance_days),
+            false => Windows::Uniform(instance_days),
+        }
+    }
+
+    /// The Instance-wide window, whichever shape this is.
+    pub fn instance_days(self) -> u32 {
+        match self {
+            Windows::Uniform(days) | Windows::PerEntity(days) => days,
+        }
+    }
+
+    /// What a uniform age pass compares `call_at_ms` against, or `None` when the
+    /// Instance keeps everything for good and the pass may take nothing at all.
+    ///
+    /// [`Window::due_at_ms`] rearranged — `at + days*DAY < now` is
+    /// `at < now - days*DAY` — which is only sound because *every* Call shares the
+    /// window. That rearrangement is the whole reason the uniform shape can use
+    /// the `call_at_ms` index.
+    ///
+    /// **Through [`cutoff_for`] rather than off the number**, so `0` means
+    /// *forever* here exactly as it does for the log and listener windows above
+    /// — one reading, in one place. The first version of this subtracted the
+    /// number directly, which made `Uniform(0)` a cutoff of *now*: "prune the
+    /// entire Archive" where the joined shape said "keep all of it". Nothing in
+    /// production could reach it ([`Windows::prunes_anything`] answers no first),
+    /// and it was still the worst answer in the file; `tests/db.rs` asserting
+    /// the two shapes agree **for every window, reachable or not** is what
+    /// found it.
+    ///
+    /// Meaningless under [`Windows::PerEntity`], where each Call has a cutoff of
+    /// its own: the query that asks matches on the shape first.
+    pub fn uniform_cutoff_ms(self, now_ms: i64) -> Option<i64> {
+        cutoff_for(self.instance_days(), now_ms)
+    }
+
+    /// Whether an age pass could take anything at all.
+    ///
+    /// Only one shape can answer no: an Instance keeping everything forever that
+    /// nobody has overridden. `PerEntity` is read as "could" rather than "will" —
+    /// the override it was told about may itself be `0` — because the alternative
+    /// is asking the database *which* overrides exist, and a pass that scans once
+    /// and finds nothing is cheaper than that for every Instance that has one.
+    pub fn prunes_anything(self) -> bool {
+        !matches!(self, Windows::Uniform(0))
+    }
+}
+
+/// What one age pass may take: every Call past the window *its own channel* is
+/// kept for, except what a **Star** is still holding back.
+///
+/// A value rather than three arguments, so the sweep and the query that serves it
+/// cannot be given one and not the others — the [`crate::ingest::dedup_window`]
+/// move, one policy along. It carries `now_ms` rather than a precomputed cutoff
+/// because since #69 there is no single cutoff: each Call has one of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgePass {
-    /// A Call older than this instant has aged out.
-    pub cutoff_ms: i64,
-    /// What a **Star** does about that.
+    /// The instant this pass is being made at. A Call is taken when its
+    /// [`Window::due_at_ms`] is before it.
+    pub now_ms: i64,
+    /// Which windows are in play, and what an unoverridden Call inherits.
+    pub windows: Windows,
+    /// What a **Star** does about all of that.
     pub stars: StarKeep,
 }
 
 impl RetentionConfig {
-    /// The `call_at_ms` below which a Call has aged out, or `None` when
-    /// age-based pruning is disabled (`days == 0`).
-    pub fn cutoff_ms(&self, now_ms: i64) -> Option<i64> {
-        cutoff_for(self.days, now_ms)
-    }
-
     /// What this sweep's age pass may take at `now_ms`, or `None` when there is
-    /// no age pass at all (`days == 0`, rdio's "keep forever").
+    /// no age pass at all.
+    ///
+    /// `None` is **narrower than it was before #69**: `days == 0` used to be the
+    /// whole answer, and now it is only the answer while nothing carries a window
+    /// of its own — because "keep everything forever except this one chatty
+    /// channel" has to be expressible, and skipping the pass would make it
+    /// silently not be.
     ///
     /// The Star window is read only when there is a pass to be spared from,
     /// which is what keeps an Operator who keeps everything forever from being
-    /// able to configure a Star that *shortens* a Call's life.
-    pub fn age_pass(&self, now_ms: i64) -> Option<AgePass> {
-        let cutoff_ms = self.cutoff_ms(now_ms)?;
+    /// able to configure a Star that *shortens* a Call's life. It cannot shorten
+    /// one under an override either: being taken needs the Call past **both** its
+    /// own window and the Star's, so a Star only ever lengthens.
+    pub fn age_pass(&self, now_ms: i64, windows: Windows) -> Option<AgePass> {
+        if !windows.prunes_anything() {
+            return None;
+        }
         let stars = match self.starred_days {
             None => StarKeep::None,
             Some(0) => StarKeep::Forever,
             Some(days) => StarKeep::Until(days_before(days, now_ms)),
         };
-        Some(AgePass { cutoff_ms, stars })
+        Some(AgePass {
+            now_ms,
+            windows,
+            stars,
+        })
     }
 
     /// The same, for stored log events and [`RetentionConfig::log_days`] (#30).
@@ -411,7 +573,12 @@ pub async fn sweep(
 ) -> Result<SweepReport, SweepError> {
     let mut report = SweepReport::default();
 
-    if let Some(pass) = config.age_pass(now_ms) {
+    // Which shape the two prune queries take, read once (#69). A sweep is
+    // hourly, so this is cheaper than the invalidation a cached bit would owe
+    // every curation surface that can write one of these columns.
+    let windows = Windows::of(config.days, repo::has_retention_overrides(db).await?);
+
+    if let Some(pass) = config.age_pass(now_ms, windows) {
         loop {
             let batch = repo::calls_older_than(db, &pass, config.batch_size).await?;
             if batch.is_empty() {
@@ -445,7 +612,7 @@ pub async fn sweep(
         let frozen = repo::frozen_audio_bytes(db).await?;
         let mut total = repo::total_audio_bytes(db).await?.saturating_add(frozen);
         while total > cap {
-            let page = repo::oldest_calls(db, config.batch_size).await?;
+            let page = repo::calls_due_soonest(db, windows, config.batch_size).await?;
             if page.is_empty() {
                 break;
             }
@@ -788,27 +955,12 @@ mod tests {
             ..Default::default()
         };
 
-        let pass = config.age_pass(NOW).expect("an age pass");
+        let pass = config
+            .age_pass(NOW, Windows::Uniform(7))
+            .expect("an age pass");
 
-        assert_eq!(pass.cutoff_ms, NOW - 7 * MS_PER_DAY);
+        assert_eq!(pass.now_ms, NOW);
         assert_eq!(pass.stars, expected);
-    }
-
-    /// `days = 0` is rdio's "keep forever", and it outranks the Star window
-    /// rather than combining with it: there is no age pass to be spared from.
-    /// Which is also what stops a `starred_days` shorter than an unset `days`
-    /// from *shortening* a starred Call's life.
-    #[rstest]
-    #[case::stars_unset(None)]
-    #[case::stars_kept_a_week(Some(7))]
-    fn keeping_everything_forever_leaves_no_age_pass_to_spare(#[case] starred_days: Option<u32>) {
-        let config = RetentionConfig {
-            days: 0,
-            starred_days,
-            ..Default::default()
-        };
-
-        assert_eq!(config.age_pass(NOW), None);
     }
 
     /// rdio-scanner's prune ticker first fires an *hour* after start, so an
@@ -1273,11 +1425,7 @@ mod tests {
     #[case(7, Some(999_395_200_000))]
     #[case(30, Some(997_408_000_000))]
     fn cutoff_for_days(#[case] days: u32, #[case] expected: Option<i64>) {
-        let config = RetentionConfig {
-            days,
-            ..Default::default()
-        };
-        assert_eq!(config.cutoff_ms(NOW), expected);
+        assert_eq!(Windows::Uniform(days).uniform_cutoff_ms(NOW), expected);
     }
 
     /// The operator's gigabytes, in the bytes the sweep counts.
@@ -1306,9 +1454,91 @@ mod tests {
         /// lands in the future — pruning can't eat Calls that haven't aged out.
         #[test]
         fn cutoff_never_exceeds_now(days in 0u32..u32::MAX, now_ms in i64::MIN..i64::MAX) {
-            if let Some(cutoff) = (RetentionConfig { days, ..Default::default() }).cutoff_ms(now_ms) {
+            if let Some(cutoff) = Windows::Uniform(days).uniform_cutoff_ms(now_ms) {
                 prop_assert!(cutoff <= now_ms, "cutoff {cutoff} > now {now_ms}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use rstest::rstest;
+
+    const NOW: i64 = 1_000_000_000_000;
+
+    /// The most specific row wins, and `0` means forever at every level — the
+    /// `enhancement` precedence (#20) over `[retention] days`' own reading of
+    /// zero.
+    #[rstest]
+    #[case::nothing_overridden(None, None, 7, Window::Days(7))]
+    #[case::the_system_said_a_quarter(None, Some(90), 7, Window::Days(90))]
+    #[case::the_channel_outranks_its_system(Some(14), Some(90), 7, Window::Days(14))]
+    #[case::the_channel_outranks_the_instance(Some(14), None, 7, Window::Days(14))]
+    #[case::a_channel_kept_for_good(Some(0), Some(90), 7, Window::Forever)]
+    #[case::a_system_kept_for_good(None, Some(0), 7, Window::Forever)]
+    #[case::a_channel_opting_out_of_a_forever_system(Some(14), Some(0), 7, Window::Days(14))]
+    #[case::the_instance_keeps_everything(None, None, 0, Window::Forever)]
+    #[case::one_channel_inside_a_forever_instance(Some(14), None, 0, Window::Days(14))]
+    fn which_window_keeps_a_call(
+        #[case] talkgroup: Option<i64>,
+        #[case] system: Option<i64>,
+        #[case] instance_days: u32,
+        #[case] expected: Window,
+    ) {
+        assert_eq!(Window::of(talkgroup, system, instance_days), expected);
+    }
+
+    /// A window answers *when* a Call goes, not *whether* it has — so one
+    /// expression serves the age pass (is it due yet) and the size cap (which is
+    /// due first), and `Forever` is the instant that never arrives.
+    #[rstest]
+    #[case::due_a_week_after_the_transmission(Window::Days(7), NOW + 7 * MS_PER_DAY)]
+    #[case::due_a_quarter_after_it(Window::Days(90), NOW + 90 * MS_PER_DAY)]
+    #[case::never_due(Window::Forever, i64::MAX)]
+    // A window written backwards into the column by hand. The SQL reads whatever
+    // is there, so both halves have to mean the same thing by it — and they do:
+    // `tests/db.rs` puts one in a real row on both dialects.
+    #[case::a_window_somebody_typed_backwards(Window::Days(-5), NOW - 5 * MS_PER_DAY)]
+    // And one no column could hold through any surface (a window is a `u32`
+    // everywhere one is written). This pins the *saturation* and claims nothing
+    // about SQL: `call_at_ms + days * 86400000` overflows there, and the two
+    // dialects do not even agree on what overflow is.
+    #[case::a_window_past_the_end_of_time(Window::Days(i64::MAX), i64::MAX)]
+    fn when_a_call_is_due_to_go(#[case] window: Window, #[case] expected: i64) {
+        assert_eq!(window.due_at_ms(NOW), expected);
+    }
+
+    /// An Instance nobody has overridden keeps `days = 0`'s whole meaning: there
+    /// is no age pass, so nothing is scanned and nothing is spared from.
+    #[rstest]
+    #[case::stars_unset(None)]
+    #[case::stars_kept_a_week(Some(7))]
+    fn keeping_everything_forever_leaves_no_age_pass(#[case] starred_days: Option<u32>) {
+        let config = RetentionConfig {
+            days: 0,
+            starred_days,
+            ..Default::default()
+        };
+
+        assert_eq!(config.age_pass(NOW, Windows::Uniform(0)), None);
+    }
+
+    /// …but one channel inside that Instance having said `14` is a pass, because
+    /// that channel's Calls are prunable and nothing else would take them.
+    #[test]
+    fn one_override_gives_a_forever_instance_an_age_pass() {
+        let config = RetentionConfig {
+            days: 0,
+            ..Default::default()
+        };
+
+        let pass = config
+            .age_pass(NOW, Windows::PerEntity(0))
+            .expect("an age pass");
+
+        assert_eq!(pass.now_ms, NOW);
+        assert_eq!(pass.windows, Windows::PerEntity(0));
     }
 }

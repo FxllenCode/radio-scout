@@ -140,6 +140,16 @@ pub struct SystemEntry {
     /// fail in.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restricted: bool,
+    /// How many days Calls here are kept (#69, spec US 53) — `null`/absent
+    /// inherits `[retention] days`.
+    ///
+    /// Carried because it is ordinary curation: an Operator who decided Fire is
+    /// kept a quarter decided that, and a restore that dropped it would quietly
+    /// start deleting at the Instance's own window — which is the retention
+    /// direction this must never fail in, `restricted`'s argument one column
+    /// along.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub talkgroups: Vec<TalkgroupEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -166,6 +176,9 @@ pub struct TalkgroupEntry {
     /// auto-populated channel carries, so a gated System's new Refs stay gated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restricted: Option<bool>,
+    /// `null`/absent inherits the System, which inherits `[retention] days` (#69).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
     /// The other Refs this channel answers to (#45) — a merge is configuration,
     /// so a restore that dropped it would re-flood the panel with the churn the
     /// Operator folded away.
@@ -180,6 +193,17 @@ pub struct TalkgroupEntry {
     /// [`crate::webhook`], so it belongs in a file an Operator can email.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tones: Vec<ToneEntry>,
+}
+
+/// A stored retention window as a document carries it (#69).
+///
+/// The column is an `i64` so the SQL arithmetic cannot be ambiguous; a document
+/// is a file an Operator edits, and every surface that writes one of these takes
+/// a `u32`. A value outside that — which only hand-editing the database can
+/// produce — is **not carried**, which under #51's "absence never deletes" leaves
+/// the odd row exactly as it is rather than replacing it with a guess.
+fn window_of(days: Option<i64>) -> Option<u32> {
+    days.and_then(|days| u32::try_from(days).ok())
 }
 
 /// One **Tone profile**, as a backup carries it (#55).
@@ -530,6 +554,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
                         led: channel.led.clone(),
                         enhancement: channel.enhancement,
                         restricted: channel.restricted,
+                        retention_days: window_of(channel.retention_days),
                         member_refs: members.into_iter().map(|(_, r#ref)| r#ref).collect(),
                         tones,
                     }
@@ -564,6 +589,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
                 blacklist: blacklist_of(row.blacklist.as_deref()),
                 enhancement: row.enhancement,
                 restricted: row.restricted,
+                retention_days: window_of(row.retention_days),
                 talkgroups: channels,
                 units: apparatus,
             }
@@ -731,6 +757,7 @@ async fn apply_system<C: ConnectionTrait>(
         .await?;
     let blacklist = blacklist_text(&entry.blacklist);
     let label = optional_text(entry.label.clone());
+    let retention_days = entry.retention_days.map(i64::from);
 
     let system = match existing {
         None => {
@@ -742,6 +769,7 @@ async fn apply_system<C: ConnectionTrait>(
                 blacklist: Set(blacklist),
                 enhancement: Set(entry.enhancement),
                 restricted: Set(entry.restricted),
+                retention_days: Set(retention_days),
                 created_at_ms: Set(now_ms),
                 ..Default::default()
             }
@@ -753,7 +781,8 @@ async fn apply_system<C: ConnectionTrait>(
                 && found.auto_populate == entry.auto_populate
                 && found.blacklist == blacklist
                 && found.enhancement == entry.enhancement
-                && found.restricted == entry.restricted;
+                && found.restricted == entry.restricted
+                && found.retention_days == retention_days;
             match same {
                 true => {
                     report.systems.unchanged += 1;
@@ -767,6 +796,7 @@ async fn apply_system<C: ConnectionTrait>(
                     row.blacklist = Set(blacklist);
                     row.enhancement = Set(entry.enhancement);
                     row.restricted = Set(entry.restricted);
+                    row.retention_days = Set(retention_days);
                     row.update(db).await?
                 }
             }
@@ -824,6 +854,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
     };
     let label = optional_text(entry.label.clone());
     let name = optional_text(entry.name.clone());
+    let retention_days = entry.retention_days.map(i64::from);
     let groups: Vec<String> = entry
         .groups
         .iter()
@@ -855,6 +886,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                 led: Set(led),
                 enhancement: Set(entry.enhancement),
                 restricted: Set(entry.restricted),
+                retention_days: Set(retention_days),
                 created_at_ms: Set(now_ms),
                 ..Default::default()
             }
@@ -868,6 +900,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                 && found.led == led
                 && found.enhancement == entry.enhancement
                 && found.restricted == entry.restricted
+                && found.retention_days == retention_days
                 && stored_groups(db, found.id).await? == sorted(&groups);
             match same {
                 true => {
@@ -883,6 +916,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                     row.led = Set(led);
                     row.enhancement = Set(entry.enhancement);
                     row.restricted = Set(entry.restricted);
+                    row.retention_days = Set(retention_days);
                     row.update(db).await?
                 }
             }
@@ -1201,6 +1235,7 @@ mod tests {
             version: VERSION,
             systems: vec![SystemEntry {
                 restricted: false,
+                retention_days: Some(90),
                 r#ref: 11,
                 label: Some(String::from("Fulton")),
                 auto_populate: true,
@@ -1208,6 +1243,7 @@ mod tests {
                 enhancement: Some(false),
                 talkgroups: vec![TalkgroupEntry {
                     restricted: None,
+                    retention_days: Some(14),
                     r#ref: 100,
                     label: Some(String::from("Fire Dispatch")),
                     name: None,

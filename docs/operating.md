@@ -109,7 +109,7 @@ log_days = 30       # stored log events, on their own window
 listener_days = 90  # listener counts, on theirs
 ```
 
-A **sweep** runs at startup and on an interval: age Calls out, then prune oldest-first until
+A **sweep** runs at startup and on an interval: age Calls out, then prune until
 the size cap is met, then prune stored log events past `log_days`, then listener counts past
 `listener_days`, then reclaim audio no Call points at.
 
@@ -142,6 +142,49 @@ Four things to know before you set it:
 
 What you have configured rides on the wire, so the star control in the app says which of the three
 it is: kept for so many days, kept indefinitely, or not kept at all.
+
+### Keeping one system (or one channel) longer than the rest
+
+`days` is the instance-wide window. Systems and talkgroups can each have one of their own, set in
+**Settings → Admin → Systems** and **→ Talkgroups**, so the answer to "keep fire for three months
+and everything else a fortnight" is two fields rather than a compromise:
+
+| Set on | What it means |
+| --- | --- |
+| Nothing | Follow the level above — a talkgroup follows its system, a system follows `days`. |
+| A number of days | Keep calls here that long, whether that is longer *or shorter* than the level above. |
+| For good | Never delete calls here by age. |
+
+The most specific setting wins, in both directions. A talkgroup kept for good inside a system kept
+a fortnight works, and so does one chatty talkgroup bounded to a week inside a system you keep for
+a quarter. There is no floor: a channel is free to keep less than its system.
+
+Five things to know:
+
+- **The size cap still outranks all of it.** When `max_size_gb` has to delete something, it takes
+  whatever is **closest to its own expiry** — so if fire is kept 90 days and the rest 14, the cap
+  eats the 14-day traffic first, which is what you asked for. With no overrides anywhere that is
+  exactly "oldest first", which is what it has always done. But a cap that could not reach a call
+  would not be a cap, so with a tight cap and a long window, the long window loses eventually.
+- **`days = 0` no longer means "nothing is ever deleted"** if you have set an override. It means
+  *the instance-wide window is off*; a system or talkgroup with a window of its own is still swept.
+  That is the point — "keep everything except this one noisy channel" has to be sayable.
+- **Stars can only lengthen.** A call is deleted when it is past its channel's window *and* past
+  `starred_days`, so a starred call in a channel kept 90 days is kept 90 days even if
+  `starred_days` is 30.
+- **Events are already safe and need nothing here.** Freezing a call into an event copies its
+  audio, so an event survives whatever window takes the original — see
+  [Events](#events-keeping-an-incident-for-good).
+- **They are not free, and the cost is worth knowing before a big archive.** Once anything is
+  overridden, each call's window has to be worked out from its own channel, so the sweep can no
+  longer use the index it walks otherwise. An instance that overrides nothing pays exactly what it
+  paid before. One that does pays a scan per prune batch — nothing you would notice on a normal
+  archive, and worth pausing over if you set a `max_size_gb` for the first time on a large one,
+  where the catch-up sweep does that work repeatedly until it is under the cap.
+
+These also travel in the exported configuration document, so a restore puts them back — a backup
+that dropped them would quietly start deleting at the instance's window on the machine you
+restored onto.
 
 Two details that matter in practice:
 
@@ -232,8 +275,10 @@ Four things are worth knowing before you start:
   both stick, including across a restart with `RADIO_SCOUT_API_KEY` still set.
 - **Nothing is silently ignored.** A name already taken, a Ref another channel answers to, an
   LED outside the palette, a blank required field — each is refused, named, and shown beside the
-  input that caused it. Ports, storage and retention are still `radio-scout.toml`'s: this screen
-  owns the entities Calls are addressed to, not the machine.
+  input that caused it. Ports, storage and the retention *policy* are still `radio-scout.toml`'s:
+  this screen owns the entities Calls are addressed to, not the machine. The one crossover is
+  [how long one system or channel keeps its calls](#keeping-one-system-or-one-channel-longer-than-the-rest),
+  which is a property of the entity and so lives here.
 
 Bulk CSV import is still there and still the fastest way to name a county at once — see below.
 
@@ -1049,7 +1094,9 @@ would hate to retype.
 - **Only units you curated** are in it — the ones with a name or a range. An instance rosters a
   unit for every radio it has ever heard, and those come back on their own from the next call.
 
-Ports, storage, the database URL and retention are **not** in it: those are `radio-scout.toml`,
-and an entity document that carried them between machines would be a way to point a second
-instance at the first one's bucket. (The *systems you receive* are in it — it is the machine's
-own configuration that is not.)
+Ports, storage, the database URL and the retention *policy* are **not** in it: those are
+`radio-scout.toml`, and an entity document that carried them between machines would be a way to
+point a second instance at the first one's bucket. (The *systems you receive* are in it — it is the
+machine's own configuration that is not. A per-system or per-talkgroup **retention window** is the
+entity's own curation, so that part does travel: a restore that dropped it would quietly start
+deleting at the new machine's window.)

@@ -68,10 +68,24 @@ async fn a_curated_instance() -> TestApp {
                 "tag": "Fire",
                 "groups": ["Fire", "Dispatch"],
                 "led": "red",
+                "retentionDays": 14,
             }),
         )
         .await;
     assert_eq!(status, 201, "{created}");
+
+    // A retention window on the System too (#69), so export → import has to
+    // reproduce both levels of the scope rather than only the one a form happened
+    // to set: a restore that dropped either would start deleting at the
+    // Instance's own window, quietly, on somebody else's archive.
+    let id = system_id(&app, 11).await;
+    let (status, patched) = app
+        .admin_patch(
+            &format!("/api/admin/systems/{id}"),
+            json!({"retentionDays": 90}),
+        )
+        .await;
+    assert_eq!(status, 200, "{patched}");
 
     app.seed_talkgroup(11, 8123).await;
     let owner = created["id"].as_i64().expect("an id");
@@ -123,6 +137,7 @@ async fn the_document_carries_every_curated_entity_under_its_system() {
     assert_eq!(system["ref"], 11);
     assert_eq!(system["autoPopulate"], true);
     assert_eq!(system["blacklist"], json!([9999]));
+    assert_eq!(system["retentionDays"], 90, "the System's own window (#69)");
 
     let talkgroup = &system["talkgroups"][0];
     assert_eq!(talkgroup["ref"], 100);
@@ -131,6 +146,10 @@ async fn the_document_carries_every_curated_entity_under_its_system() {
     assert_eq!(talkgroup["tag"], "Fire");
     assert_eq!(talkgroup["groups"], json!(["Dispatch", "Fire"]));
     assert_eq!(talkgroup["led"], "red");
+    assert_eq!(
+        talkgroup["retentionDays"], 14,
+        "a channel bounded inside a System kept longer (#69)"
+    );
     assert_eq!(
         talkgroup["memberRefs"],
         json!([8123]),
@@ -808,6 +827,7 @@ fn a_full_document() -> Value {
             "autoPopulate": true,
             "blacklist": [9999],
             "enhancement": true,
+            "retentionDays": 90,
             "talkgroups": [{
                 "ref": 100,
                 "label": "Fire Dispatch",
@@ -816,6 +836,7 @@ fn a_full_document() -> Value {
                 "groups": ["Dispatch", "Fire"],
                 "led": "red",
                 "enhancement": false,
+                "retentionDays": 14,
             }],
             "units": [{
                 "ref": 1200,
@@ -847,12 +868,14 @@ fn changed(at: &str, field: &str, value: Value) -> Value {
 #[case::system_auto_populate("system", "autoPopulate", json!(false), "systems")]
 #[case::system_blacklist("system", "blacklist", json!([1234]), "systems")]
 #[case::system_enhancement("system", "enhancement", json!(false), "systems")]
+#[case::system_retention_days("system", "retentionDays", json!(30), "systems")]
 #[case::talkgroup_label("talkgroup", "label", json!("Renamed"), "talkgroups")]
 #[case::talkgroup_name("talkgroup", "name", json!("Renamed"), "talkgroups")]
 #[case::talkgroup_tag("talkgroup", "tag", json!("Law"), "talkgroups")]
 #[case::talkgroup_groups("talkgroup", "groups", json!(["Fire"]), "talkgroups")]
 #[case::talkgroup_led("talkgroup", "led", json!("blue"), "talkgroups")]
 #[case::talkgroup_enhancement("talkgroup", "enhancement", json!(true), "talkgroups")]
+#[case::talkgroup_retention_days("talkgroup", "retentionDays", json!(7), "talkgroups")]
 #[case::unit_label("unit", "label", json!("Renamed"), "units")]
 #[case::unit_ranges("unit", "ranges", json!([{"from": 1201, "to": 1250}]), "units")]
 #[tokio::test]

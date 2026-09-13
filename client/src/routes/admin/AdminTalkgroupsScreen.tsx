@@ -5,6 +5,7 @@ import {
   FailureNote,
   Field,
   Placeholder,
+  RetentionField,
   RowCard,
   RowList,
   SignOutButton,
@@ -21,6 +22,7 @@ import { useMerge } from '@/hooks/useMerge'
 import { Button } from '@/components/ui/button'
 import { pageSummary } from '@/lib/archive'
 import { inherit, splitList } from '@/lib/curate'
+import { useRetentionWindow } from '@/hooks/useRetentionWindow'
 import { LED_ORDER } from '@/lib/led'
 import {
   useAssignTalkgroupsMutation,
@@ -617,6 +619,9 @@ function TalkgroupForm({
   // a recorder finds on it (#68). `inherit` is the System form's own spelling
   // of the enhancement select, one entity down.
   const [restricted, setRestricted] = useState(inherit(row.restricted))
+  // The System form's own control (#69), one entity down — where *inherit*
+  // follows the System rather than the Instance.
+  const retention = useRetentionWindow(row.retentionDays)
 
   return (
     <form
@@ -634,6 +639,7 @@ function TalkgroupForm({
               groups: splitList(groups),
               led: led === '' ? null : led,
               restricted: restricted === '' ? null : restricted === 'on',
+              retentionDays: retention.value,
               blacklisted,
             },
           }).unwrap()
@@ -711,6 +717,15 @@ function TalkgroupForm({
           <option value="off">Open to anybody</option>
         </select>
       </Field>
+      {/* **Retention** (#69, spec US 41) — the most specific row wins, so this
+          may keep more *or* less than its System: one chatty channel bounded
+          inside a System kept for a quarter, or one channel kept for good inside
+          a System that is not. */}
+      <RetentionField
+        id={`tg-${row.id}`}
+        {...retention.field}
+        inheritsFrom="Follow the system"
+      />
       <label className="flex items-center gap-2 font-mono text-xs">
         <input
           type="checkbox"
@@ -720,7 +735,7 @@ function TalkgroupForm({
         Never ingest calls on this talkgroup
       </label>
       {updating.error != null && <FailureNote error={updating.error} />}
-      <Button type="submit" size="sm">
+      <Button type="submit" size="sm" disabled={retention.value === undefined}>
         Save
       </Button>
     </form>

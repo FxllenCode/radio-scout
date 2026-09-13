@@ -31,6 +31,11 @@ pub struct Model {
     /// `false`, which is what ships and what every row already written has, is
     /// open listening (ADR-0008).
     pub restricted: bool,
+    /// How many days Calls on this System are kept (#69, spec US 53). `NULL`
+    /// inherits `[retention] days`; `0` keeps them for good, the reading every
+    /// window in that section has. Nullable for [`Model::enhancement`]'s reason —
+    /// a plain number has no way to say "follow the instance".
+    pub retention_days: Option<i64>,
     pub created_at_ms: i64,
 }
 

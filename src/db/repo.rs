@@ -2794,6 +2794,103 @@ fn spared_from(stars: crate::retention::StarKeep) -> sea_orm::Condition {
     }
 }
 
+/// Whether any System or Talkgroup carries a retention window of its own (#69).
+///
+/// A **fact**, not a policy: what to do about it is
+/// [`crate::retention::Windows::of`]'s, the way `downstream::routed_to` decides
+/// and [`queue_deliveries`] is merely handed the ids. It is the one question a
+/// sweep asks to learn which shape its two prune queries should take.
+///
+/// **Any override at all, not merely a non-zero one.** An override of `0` means
+/// *keep this System for good*, which changes what an Instance with a non-zero
+/// `[retention] days` prunes just as much as a longer window does; reading only
+/// non-zero ones would quietly prune the System an Operator had asked to keep.
+///
+/// Two statements rather than one union, because a sweep is hourly and two
+/// `EXISTS` probes against tables with hundreds of rows is not a cost worth a
+/// hand-rolled query for. The Talkgroup probe is skipped when a System has
+/// already answered.
+pub async fn has_retention_overrides<C: ConnectionTrait>(db: &C) -> Result<bool, DbErr> {
+    let system = system::Entity::find()
+        .filter(system::Column::RetentionDays.is_not_null())
+        .select_only()
+        .column(system::Column::Id)
+        .into_tuple::<i64>()
+        .one(db)
+        .await?;
+    if system.is_some() {
+        return Ok(true);
+    }
+    Ok(talkgroup::Entity::find()
+        .filter(talkgroup::Column::RetentionDays.is_not_null())
+        .select_only()
+        .column(talkgroup::Column::Id)
+        .into_tuple::<i64>()
+        .one(db)
+        .await?
+        .is_some())
+}
+
+/// When a Call is due to be taken, in SQL — the other half of
+/// [`crate::retention::Window::due_at_ms`] (#69).
+///
+/// `COALESCE(talkgroup, system, instance)` is the precedence, and `NULLIF(…, 0)`
+/// is how *forever* is spelled without a `CASE`: a zero window becomes `NULL`,
+/// the sum it is added to becomes `NULL`, and the outer `COALESCE` answers the
+/// instant that never arrives. Two functions both dialects have, where a `CASE`
+/// would be a third thing to keep identical across them.
+///
+/// **Only [`crate::retention::Windows::PerEntity`] uses it.** Under a uniform
+/// window every Call's due instant is `call_at_ms` plus the same constant, so
+/// ordering and filtering by `call_at_ms` answers identically *and* can use its
+/// index — which is why the two callers below each have two shapes rather than
+/// one that is always right and sometimes slow.
+fn due_expr(instance_days: u32) -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::IntoSimpleExpr;
+    use sea_orm::sea_query::{Expr, Func};
+
+    let window = Func::cust(NullIf).args([
+        Func::coalesce([
+            Expr::col((talkgroup::Entity, talkgroup::Column::RetentionDays)).into(),
+            Expr::col((system::Entity, system::Column::RetentionDays)).into(),
+            Expr::val(i64::from(instance_days)).into(),
+        ])
+        .into(),
+        Expr::val(0_i64).into(),
+    ]);
+    Func::coalesce([
+        call::Column::CallAtMs
+            .into_simple_expr()
+            .add(Expr::expr(window).mul(crate::retention::MS_PER_DAY)),
+        Expr::val(i64::MAX).into(),
+    ])
+    .into()
+}
+
+/// `NULLIF`, which sea-query has no builder for. Both dialects spell it this way.
+#[derive(Debug, Clone, Copy)]
+struct NullIf;
+
+impl sea_orm::sea_query::Iden for NullIf {
+    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
+        write!(s, "NULLIF").expect("write to a formatter");
+    }
+}
+
+/// Join a Call to the two rows that decide its retention window.
+///
+/// Inner joins, and they cannot drop a row: `calls.system_id` and
+/// `calls.talkgroup_id` are both `NOT NULL` and both point at rows ingest
+/// resolved or created before it wrote the Call.
+fn joined_to_channel(query: sea_orm::Select<call::Entity>) -> sea_orm::Select<call::Entity> {
+    query
+        .join(sea_orm::JoinType::InnerJoin, call::Relation::System.def())
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            call::Relation::Talkgroup.def(),
+        )
+}
+
 /// Up to `limit` Calls the age pass may take, oldest first — one page of it.
 /// Paging (rather than one unbounded `DELETE`, as rdio does) keeps each SQLite
 /// write-lock window short so a sweep over a large archive never stalls ingest
@@ -2802,13 +2899,39 @@ fn spared_from(stars: crate::retention::StarKeep) -> sea_orm::Condition {
 /// A **Star** narrows what a page may hold (#66), and by how much is
 /// [`crate::retention::StarKeep`]'s to say — including *not at all*, which is
 /// what ships and which costs no clause at all.
+///
+/// **Two shapes since #69.** A uniform window is one instant for the whole
+/// Archive, so the filter is a comparison against the `call_at_ms` index — the
+/// statement this was before per-entity overrides existed, which is what nearly
+/// every Instance still issues. A per-entity window has to be resolved from each
+/// Call's own channel, so the filter is [`due_expr`] over two joins and cannot
+/// use that index. The page is still bounded, and what it costs to fill is a
+/// scan of the Archive's oldest Calls up to `limit` matches — so an Instance
+/// holding a large, old, *kept-for-good* System walks past it on every sweep.
+/// Hourly, and only where somebody asked for it. `tests/db.rs` holds the two
+/// shapes to answering identically, on both dialects, because a second
+/// implementation is exactly where a policy drifts.
 pub async fn calls_older_than<C: ConnectionTrait>(
     db: &C,
     pass: &crate::retention::AgePass,
     limit: u64,
 ) -> Result<Vec<PrunableCall>, DbErr> {
-    Ok(call::Entity::find()
-        .filter(call::Column::CallAtMs.lt(pass.cutoff_ms))
+    use crate::retention::Windows;
+
+    let query = call::Entity::find();
+    let query = match pass.windows {
+        Windows::Uniform(_) => match pass.windows.uniform_cutoff_ms(pass.now_ms) {
+            Some(cutoff_ms) => query.filter(call::Column::CallAtMs.lt(cutoff_ms)),
+            // Nothing can ever be due. Spelled explicitly, because an *empty*
+            // condition renders as no condition at all and therefore as every
+            // Call — `archive::never`'s trap, one module along, and the inversion
+            // this arm exists to make impossible.
+            None => query.filter(sea_orm::sea_query::Expr::val(1).eq(0)),
+        },
+        Windows::PerEntity(instance_days) => joined_to_channel(query)
+            .filter(sea_orm::sea_query::Expr::expr(due_expr(instance_days)).lt(pass.now_ms)),
+    };
+    Ok(query
         .filter(spared_from(pass.stars))
         .order_by_asc(call::Column::CallAtMs)
         .order_by_asc(call::Column::Id)
@@ -2820,13 +2943,45 @@ pub async fn calls_older_than<C: ConnectionTrait>(
         .collect())
 }
 
-/// Up to `limit` Calls, oldest first, regardless of age — one page of the
-/// size-cap prune, which drops the oldest until the archive fits.
-pub async fn oldest_calls<C: ConnectionTrait>(
+/// Up to `limit` Calls, the ones closest to being due first — one page of the
+/// size-cap prune, which drops them until the archive fits.
+///
+/// **Due-first rather than oldest-first (#69), and with no overrides anywhere the
+/// two are the same order**: a uniform window adds the same constant to every
+/// Call's `call_at_ms`, which cannot reorder anything — so this keeps its old
+/// statement, and its old index, for every Instance that has overridden nothing.
+///
+/// Where something *is* overridden, due-first is what makes an override worth
+/// having when the two policies collide: an Operator who keeps Fire for 90 days
+/// and everything else for 14 must not lose Fire's history first merely because
+/// it is the oldest thing on the disk. A **Star** is still not consulted (#66) —
+/// the cap is the disk, and a cap a Listener can defeat is not a cap — and a
+/// window of *forever* sorts last but is still takeable, for the same reason.
+///
+/// **What the per-entity shape costs is worth stating, because it is the larger
+/// of the two.** There is no filter to narrow it, and no index can serve an
+/// ordering by an expression, so each page under `PerEntity` is a top-`limit`
+/// scan of the whole `calls` table — where the uniform shape walks `limit` rows
+/// of an index. It is paid once per *batch deleted*, so the steady state (a cap
+/// trimming an hour of traffic) is one scan an hour, and the expensive case is
+/// the catch-up after a cap is first set on a large Archive. Both halves are
+/// opt-in: it costs nothing until an Operator sets both a `max_size_gb` and a
+/// per-entity window.
+pub async fn calls_due_soonest<C: ConnectionTrait>(
     db: &C,
+    windows: crate::retention::Windows,
     limit: u64,
 ) -> Result<Vec<PrunableCall>, DbErr> {
-    Ok(call::Entity::find()
+    use crate::retention::Windows;
+
+    let query = call::Entity::find();
+    let query = match windows {
+        Windows::Uniform(_) => query,
+        Windows::PerEntity(instance_days) => {
+            joined_to_channel(query).order_by_asc(due_expr(instance_days))
+        }
+    };
+    Ok(query
         .order_by_asc(call::Column::CallAtMs)
         .order_by_asc(call::Column::Id)
         .limit(limit)
@@ -5045,6 +5200,7 @@ mod tests {
     fn a_system(auto_populate: bool, blacklist: Option<&str>) -> system::Model {
         system::Model {
             restricted: false,
+            retention_days: None,
             id: 1,
             r#ref: 11,
             label: None,
@@ -5058,6 +5214,7 @@ mod tests {
     fn a_talkgroup(primary_ref: i64) -> talkgroup::Model {
         talkgroup::Model {
             restricted: None,
+            retention_days: None,
             id: 7,
             system_id: 1,
             r#ref: primary_ref,

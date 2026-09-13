@@ -512,9 +512,11 @@ async fn run_retention_suite(db: &Db) {
         seeded_without_sizes + 2
     );
 
-    // Oldest-first paging, both by age and unconditionally.
+    // Oldest-first paging, both by age and unconditionally. A week-long window,
+    // asked at an instant that puts its cutoff between the two seeded Calls.
     let pass = |stars| retention::AgePass {
-        cutoff_ms: 5_500,
+        now_ms: 5_500 + 7 * 86_400_000,
+        windows: retention::Windows::Uniform(7),
         stars,
     };
     let aged = repo::calls_older_than(db, &pass(retention::StarKeep::None), 100)
@@ -560,10 +562,15 @@ async fn run_retention_suite(db: &Db) {
         "a Call that is not there cannot be starred"
     );
     assert_eq!(
-        repo::oldest_calls(db, 1).await.unwrap().len(),
+        repo::calls_due_soonest(db, retention::Windows::Uniform(7), 1)
+            .await
+            .unwrap()
+            .len(),
         1,
         "paging honours the limit"
     );
+
+    assert_retention_windows(db).await;
 
     // Deleting drops the rows and the keys they referenced, and the total with them.
     assert_eq!(repo::delete_calls(db, &[big, small]).await.unwrap(), 2);
@@ -597,6 +604,228 @@ async fn seed_sized_call(
     .await
     .unwrap()
     .id
+}
+
+/// **A Call's retention window is the same window in SQL as it is in Rust**
+/// (#69), and the two query shapes answer identically.
+///
+/// Since #69 a Call's window depends on its own Talkgroup and System, so the
+/// comparison is per row and the arithmetic is the database's — while
+/// [`retention::Window`] has to be able to say the same thing in Rust. That is
+/// `assert_activity_buckets`' situation one policy along, and it gets the same
+/// answer: run one against the other, on **both dialects**, because either alone
+/// answers confidently and wrongly.
+///
+/// There are *three* implementations to hold together, not two, and the third is
+/// the one an eye would skip: `Windows::Uniform` keeps the pre-#69 statement —
+/// a comparison against the `call_at_ms` index rather than a join — which is only
+/// sound because adding the same constant to every Call cannot reorder or
+/// reclassify any of them. So every case below is asserted under **both** shapes,
+/// and `PerEntity` is made to answer a question it has no override for.
+///
+/// Seeds an archive of its own: two Systems, two channels each, one Call apiece,
+/// a decade apart in age so a window of days can separate them cleanly.
+async fn assert_retention_windows(db: &Db) {
+    use radio_scout::retention::{AgePass, StarKeep, Window, Windows};
+
+    const DAY: i64 = 86_400_000;
+    let now = 400 * DAY;
+
+    // Four Calls under two Systems, at 10, 20, 30 and 40 days old.
+    let mut seeded = Vec::new();
+    for (i, (system_ref, talkgroup_ref)) in [(7001, 1), (7001, 2), (7002, 1), (7002, 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let age_days = 10 * (i as i64 + 1);
+        let id = seed_sized_call(
+            db,
+            system_ref,
+            talkgroup_ref,
+            8,
+            now - age_days * DAY,
+            &format!("w{i}"),
+        )
+        .await;
+        seeded.push((id, system_ref, talkgroup_ref, now - age_days * DAY));
+    }
+
+    // Overrides, written straight onto the rows: the 7002 System keeps a
+    // quarter, and its channel 2 is bounded back to a fortnight inside it —
+    // which is the direction a floor would have made inexpressible.
+    set_system_window(db, 7002, Some(90)).await;
+    set_talkgroup_window(db, 7002, 2, Some(14)).await;
+    // …and one channel kept for good on a System that keeps nothing special.
+    set_talkgroup_window(db, 7001, 2, Some(0)).await;
+    // …and one written backwards, which no surface can produce and a hand-edited
+    // database can. The SQL reads whatever is in the column, so this is the only
+    // way to find out whether both halves mean the same thing by it.
+    set_talkgroup_window(db, 7001, 1, Some(-5)).await;
+
+    // What Rust says should happen, per Call, for a handful of Instance-wide
+    // windows — including `0`, which before #69 meant there was no pass at all
+    // and now means "whatever the overrides say".
+    for instance_days in [0_u32, 7, 15, 25, 35, 45, 200] {
+        let expected_due: Vec<(i64, i64)> = seeded
+            .iter()
+            .map(|&(id, system_ref, talkgroup_ref, at_ms)| {
+                let talkgroup = match (system_ref, talkgroup_ref) {
+                    (7002, 2) => Some(14),
+                    (7001, 2) => Some(0),
+                    (7001, 1) => Some(-5),
+                    _ => None,
+                };
+                let system = (system_ref == 7002).then_some(90);
+                (
+                    id,
+                    Window::of(talkgroup, system, instance_days).due_at_ms(at_ms),
+                )
+            })
+            .collect();
+
+        let windows = Windows::of(
+            instance_days,
+            repo::has_retention_overrides(db).await.unwrap(),
+        );
+        assert_eq!(
+            windows,
+            Windows::PerEntity(instance_days),
+            "an archive carrying overrides reports itself per-entity"
+        );
+        let pass = AgePass {
+            now_ms: now,
+            windows,
+            stars: StarKeep::None,
+        };
+
+        // The age pass takes exactly the Calls Rust says are due.
+        let mut want: Vec<i64> = expected_due
+            .iter()
+            .filter(|&&(_, due)| due < now)
+            .map(|&(id, _)| id)
+            .collect();
+        want.sort_unstable();
+        let mut got: Vec<i64> = repo::calls_older_than(db, &pass, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|c| seeded.iter().any(|&(id, ..)| id == c.id))
+            .map(|c| c.id)
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, want, "what is due at {instance_days} days");
+
+        // The size cap takes them due-soonest first, Rust's ordering again.
+        let mut by_due = expected_due.clone();
+        by_due.sort_by_key(|&(id, due)| {
+            (
+                due,
+                seeded.iter().find(|&&(i, ..)| i == id).map(|&(.., at)| at),
+                id,
+            )
+        });
+        let ranked: Vec<i64> = repo::calls_due_soonest(db, windows, 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|c| seeded.iter().any(|&(id, ..)| id == c.id))
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(
+            ranked,
+            by_due.iter().map(|&(id, _)| id).collect::<Vec<_>>(),
+            "the cap's order at {instance_days} days"
+        );
+    }
+
+    // **And now the third implementation.** With every override cleared, the
+    // Archive reports itself uniform and takes the indexed statement — which must
+    // select and order exactly what the joined one does over the same rows.
+    set_system_window(db, 7002, None).await;
+    set_talkgroup_window(db, 7002, 2, None).await;
+    set_talkgroup_window(db, 7001, 2, None).await;
+    set_talkgroup_window(db, 7001, 1, None).await;
+    for instance_days in [0_u32, 7, 15, 25, 35, 45, 200] {
+        let uniform = Windows::of(
+            instance_days,
+            repo::has_retention_overrides(db).await.unwrap(),
+        );
+        assert_eq!(
+            uniform,
+            Windows::Uniform(instance_days),
+            "an archive with nothing overridden reports itself uniform"
+        );
+        let per_entity = Windows::PerEntity(instance_days);
+        let page = |windows| async move {
+            let pass = AgePass {
+                now_ms: now,
+                windows,
+                stars: StarKeep::None,
+            };
+            (
+                repo::calls_older_than(db, &pass, 100)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|c| c.id)
+                    .collect::<Vec<_>>(),
+                repo::calls_due_soonest(db, windows, 10_000)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|c| c.id)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            page(uniform).await,
+            page(per_entity).await,
+            "the indexed shape and the joined one at {instance_days} days"
+        );
+    }
+
+    for &(id, ..) in &seeded {
+        repo::delete_calls(db, &[id]).await.unwrap();
+    }
+}
+
+/// Write a System's retention override directly, the way curation does.
+async fn set_system_window(db: &Db, system_ref: i64, days: Option<i64>) {
+    use radio_scout::db::entities::system;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let row = system::Entity::find()
+        .filter(system::Column::Ref.eq(system_ref))
+        .one(db)
+        .await
+        .unwrap()
+        .expect("the seeded System");
+    let mut row: system::ActiveModel = row.into();
+    row.retention_days = Set(days);
+    row.update(db).await.unwrap();
+}
+
+/// The same for one channel inside a System.
+async fn set_talkgroup_window(db: &Db, system_ref: i64, talkgroup_ref: i64, days: Option<i64>) {
+    use radio_scout::db::entities::{system, talkgroup};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let system = system::Entity::find()
+        .filter(system::Column::Ref.eq(system_ref))
+        .one(db)
+        .await
+        .unwrap()
+        .expect("the seeded System");
+    let row = talkgroup::Entity::find()
+        .filter(talkgroup::Column::SystemId.eq(system.id))
+        .filter(talkgroup::Column::Ref.eq(talkgroup_ref))
+        .one(db)
+        .await
+        .unwrap()
+        .expect("the seeded Talkgroup");
+    let mut row: talkgroup::ActiveModel = row.into();
+    row.retention_days = Set(days);
+    row.update(db).await.unwrap();
 }
 
 /// Seed a self-contained dataset and assert the whole archive-search surface —

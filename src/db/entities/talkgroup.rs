@@ -26,6 +26,12 @@ pub struct Model {
     /// hole nobody asked for. `false` opens one channel on an otherwise gated
     /// System, the `enhancement` shape read in the other direction.
     pub restricted: Option<bool>,
+    /// How many days Calls on this channel are kept (#69). `NULL` inherits the
+    /// System, which inherits `[retention] days`; `0` keeps them for good. The
+    /// most specific row wins in **both** directions, so one chatty channel can
+    /// be bounded inside a System kept for good, and one channel kept for good
+    /// inside a System that is not.
+    pub retention_days: Option<i64>,
     pub created_at_ms: i64,
 }
 

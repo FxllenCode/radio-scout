@@ -63,6 +63,14 @@ pub struct SystemRow {
     /// Talkgroup may still open itself back up, the `enhancement` shape read the
     /// other way round.
     pub restricted: bool,
+    /// How many days Calls here are kept (#69, spec US 53). `null` inherits
+    /// `[retention] days`; `0` keeps them for good, the reading every window in
+    /// that section has.
+    ///
+    /// Read as an `i64` where a form may only **write** a `u32`: what a listing
+    /// owes an Operator is whatever the column actually says, and what a form may
+    /// put there is only a window that means something.
+    pub retention_days: Option<i64>,
     pub talkgroups: u64,
     pub units: u64,
     /// Calls in the Archive under this System — what a delete would take.
@@ -88,6 +96,8 @@ pub struct NewSystem {
     pub enhancement: Option<bool>,
     #[serde(default)]
     pub restricted: bool,
+    /// Days to keep Calls here, or absent to inherit `[retention] days` (#69).
+    pub retention_days: Option<u32>,
 }
 
 /// What an edit carries. Absent means **leave alone**; `null` on a nullable
@@ -103,6 +113,8 @@ pub struct SystemPatch {
     #[serde(default, deserialize_with = "nullable")]
     pub enhancement: Option<Option<bool>>,
     pub restricted: Option<bool>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub retention_days: Option<Option<u32>>,
 }
 
 /// `GET /api/admin/systems` — every System, with what hangs off it.
@@ -145,6 +157,7 @@ pub async fn create(
         blacklist: Set(blacklist_text(&body.blacklist)),
         enhancement: Set(body.enhancement),
         restricted: Set(body.restricted),
+        retention_days: Set(body.retention_days.map(i64::from)),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
@@ -166,6 +179,7 @@ pub async fn create(
         blacklist: blacklist_of(row.blacklist.as_deref()),
         enhancement: row.enhancement,
         restricted: row.restricted,
+        retention_days: row.retention_days,
         talkgroups: 0,
         units: 0,
         calls: 0,
@@ -221,6 +235,9 @@ pub async fn update(
     }
     if let Some(restricted) = body.restricted {
         row.restricted = Set(restricted);
+    }
+    if let Some(retention_days) = body.retention_days {
+        row.retention_days = Set(retention_days.map(i64::from));
     }
     row.update(db).await.map_err(Stage::Curate.failed())?;
     // Re-read whether anything is gated, on the request that could have changed
@@ -342,6 +359,7 @@ pub async fn read_all<C: ConnectionTrait>(db: &C) -> Result<Vec<SystemRow>, DbEr
             blacklist: blacklist_of(row.blacklist.as_deref()),
             enhancement: row.enhancement,
             restricted: row.restricted,
+            retention_days: row.retention_days,
             created_at_ms: row.created_at_ms,
         })
         .collect();

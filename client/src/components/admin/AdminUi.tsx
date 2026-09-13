@@ -3,6 +3,7 @@ import { useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { signInMessage } from '@/lib/adminError'
 import { curateFailure, refusedForCalls } from '@/lib/curateError'
+import { keepWindow, type KeepMode } from '@/lib/curate'
 import {
   useAdminLoginMutation,
   useAdminLogoutMutation,
@@ -218,5 +219,81 @@ export function RowList({
     >
       {children}
     </ul>
+  )
+}
+
+/**
+ * How long a System's or a channel's Calls are kept (#69, spec US 53).
+ *
+ * **One control for both entities**, the `inherit` select's reason one setting
+ * along: the System form and the Talkgroup form are asking the identical
+ * question, and two hand-written copies would be two chances for one of them to
+ * spell *forever* differently.
+ *
+ * Three options and a number box rather than a number box alone, because the
+ * wire spends `0` on **keep for good** — the reading `[retention] days` already
+ * has — and a box labelled "days to keep" where `0` means *never delete* is a
+ * trap an Operator falls into exactly once, irreversibly. [`keepMode`] and
+ * [`keepWindow`] are the two halves of the translation, and they are pure so the
+ * rule is tested without a DOM.
+ *
+ * The days box stays mounted and merely disabled under the other two modes, so
+ * switching to *forever* and back does not lose the number that was typed.
+ */
+export function RetentionField({
+  id,
+  mode,
+  days,
+  onMode,
+  onDays,
+  inheritsFrom,
+}: {
+  /** Unique per mounted form, so two rows open at once do not share input ids. */
+  id: string
+  mode: KeepMode
+  /** The raw text of the days box — text, not a number, for `ScopeEditor`'s
+   *  reason: re-rendering a field from its parsed value fights the typing. */
+  days: string
+  onMode: (mode: KeepMode) => void
+  onDays: (days: string) => void
+  /** What *inherit* follows here — the instance for a System, the System for a
+   *  channel. A select whose first option said only "inherit" would leave an
+   *  Operator guessing which of the two levels above it meant. */
+  inheritsFrom: string
+}) {
+  return (
+    <div className="grid grid-cols-[1fr_6rem] gap-2">
+      <Field label="Keep calls" htmlFor={`${id}-keep`}>
+        <select
+          id={`${id}-keep`}
+          className={controlClass}
+          value={mode}
+          onChange={(event) => onMode(event.target.value as KeepMode)}
+        >
+          <option value="inherit">{inheritsFrom}</option>
+          <option value="days">For a number of days</option>
+          <option value="forever">For good — never delete them</option>
+        </select>
+      </Field>
+      <Field label="Days" htmlFor={`${id}-keep-days`}>
+        <input
+          id={`${id}-keep-days`}
+          className={controlClass}
+          inputMode="numeric"
+          disabled={mode !== 'days'}
+          value={days}
+          onChange={(event) => onDays(event.target.value)}
+        />
+      </Field>
+      {keepWindow(mode, days) === undefined && (
+        // The blacklist field's rule: refused under the input, before the
+        // request. It lives in the control rather than in the two forms that
+        // mount it, so neither has to remember the sentence — they owe only the
+        // disabled button, which is the one thing they own.
+        <p role="alert" className="col-span-2 font-mono text-xs text-red-400">
+          Give a whole number of days, or choose one of the other two options.
+        </p>
+      )}
+    </div>
   )
 }

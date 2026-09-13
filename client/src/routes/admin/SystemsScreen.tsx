@@ -5,6 +5,7 @@ import {
   FailureNote,
   Field,
   Placeholder,
+  RetentionField,
   RowCard,
   RowList,
   SignOutButton,
@@ -14,6 +15,7 @@ import { Screen } from '@/components/layout/Screen'
 import { useAdminSession } from '@/hooks/useAdminSession'
 import { Button } from '@/components/ui/button'
 import { inherit, parseRefs } from '@/lib/curate'
+import { useRetentionWindow } from '@/hooks/useRetentionWindow'
 import {
   useCreateSystemMutation,
   useDeleteSystemMutation,
@@ -170,6 +172,7 @@ function SystemForm({
   const [blacklist, setBlacklist] = useState(row.blacklist.join(', '))
   const [ref, setRef] = useState(String(row.ref))
   const refs = parseRefs(blacklist)
+  const retention = useRetentionWindow(row.retentionDays)
 
   return (
     <form
@@ -193,6 +196,7 @@ function SystemForm({
               enhancement: enhancement === '' ? null : enhancement === 'on',
               restricted,
               blacklist: refs ?? [],
+              retentionDays: retention.value,
             },
           }).unwrap()
           onSaved()
@@ -253,6 +257,13 @@ function SystemForm({
           <option value="off">Never enhance</option>
         </select>
       </Field>
+      {/* **Retention** (#69, spec US 53) — so one System can keep a quarter
+          while the rest of the Instance keeps a fortnight. */}
+      <RetentionField
+        id={`system-${row.id}`}
+        {...retention.field}
+        inheritsFrom="Follow the instance setting"
+      />
       <Field
         label="Blacklisted talkgroup refs"
         htmlFor={`system-blacklist-${row.id}`}
@@ -281,7 +292,11 @@ function SystemForm({
         </p>
       )}
       {updating.error != null && <FailureNote error={updating.error} />}
-      <Button type="submit" size="sm" disabled={refs === undefined}>
+      <Button
+        type="submit"
+        size="sm"
+        disabled={refs === undefined || retention.value === undefined}
+      >
         Save
       </Button>
     </form>

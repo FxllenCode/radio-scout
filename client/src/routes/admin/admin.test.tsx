@@ -366,6 +366,10 @@ describe('systems', () => {
         // always carries what it reads.
         restricted: false,
         blacklist: [],
+        // Read as *inherit* and sent as the `null` that says so (#69), which an
+        // omitted key could not: the form is rendered from the row, so it always
+        // has an answer to give.
+        retentionDays: null,
       },
     })
   })
@@ -373,17 +377,23 @@ describe('systems', () => {
   /** `null` is how a nullable field goes back to inheriting — the whole reason
    *  the wire tells an omitted field from an explicit null. */
   it('clears a label and returns enhancement to inheriting', async () => {
-    instance.system({ label: 'Fulton', enhancement: true })
+    instance.system({ label: 'Fulton', enhancement: true, retentionDays: 90 })
     signedIn(<SystemsScreen />)
     await screen.findByRole('list', { name: 'Systems' })
     await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
 
     await userEvent.clear(screen.getByLabelText('Label'))
     await userEvent.selectOptions(screen.getByLabelText('Enhancement'), '')
+    // The retention window has the same third state, and the same `null` (#69).
+    await userEvent.selectOptions(screen.getByLabelText('Keep calls'), 'inherit')
     await userEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(wrote()).toHaveLength(1))
-    expect(wrote()[0].body).toMatchObject({ label: null, enhancement: null })
+    expect(wrote()[0].body).toMatchObject({
+      label: null,
+      enhancement: null,
+      retentionDays: null,
+    })
   })
 
   /** The blacklist an Operator types is checked **before** it is sent, because
@@ -522,6 +532,76 @@ describe('systems', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('already answers to 11')
     expect(screen.getByLabelText('Label')).toBeInTheDocument()
+  })
+
+  /** **Per-entity retention** (#69, spec US 53) — three options and a number,
+   *  because the wire spends `0` on *keep for good* and a box labelled "days to
+   *  keep" where `0` means never delete is a trap an Operator falls into exactly
+   *  once, irreversibly. */
+  it('keeps one system for longer than the instance does', async () => {
+    const system = instance.system({ label: 'Fulton' })
+    signedIn(<SystemsScreen />)
+    await screen.findByRole('list', { name: 'Systems' })
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    const editor = within(screen.getByRole('form', { name: 'Edit Fulton' }))
+    await userEvent.selectOptions(editor.getByLabelText('Keep calls'), 'days')
+    await userEvent.type(editor.getByLabelText('Days'), '90')
+    await userEvent.click(editor.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0]).toMatchObject({
+      path: `/api/admin/systems/${system.id}`,
+      body: { retentionDays: 90 },
+    })
+  })
+
+  /** *Keep for good* is `0` on the wire and is never a number an Operator types
+   *  — which is the whole reason this control is three options rather than one
+   *  box. It also opens on what the row already says. */
+  it('sends zero for keep-for-good', async () => {
+    instance.system({ label: 'Fulton', retentionDays: 90 })
+    signedIn(<SystemsScreen />)
+    await screen.findByRole('list', { name: 'Systems' })
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const editor = within(screen.getByRole('form', { name: 'Edit Fulton' }))
+
+    // Opened on the stored window, so the form shows what the row says.
+    expect(editor.getByLabelText('Keep calls')).toHaveValue('days')
+    expect(editor.getByLabelText('Days')).toHaveValue('90')
+
+    await userEvent.selectOptions(editor.getByLabelText('Keep calls'), 'forever')
+    await userEvent.click(editor.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].body).toMatchObject({ retentionDays: 0 })
+  })
+
+  /** The blacklist field's rule (#49) one setting along: refused under the input
+   *  rather than sent for the server to interpret, because the number box is
+   *  disabled under the other two modes and an empty one under *days* has not
+   *  said a window at all. */
+  it('refuses a window that is not a whole number of days', async () => {
+    instance.system({ label: 'Fulton' })
+    signedIn(<SystemsScreen />)
+    await screen.findByRole('list', { name: 'Systems' })
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const editor = within(screen.getByRole('form', { name: 'Edit Fulton' }))
+
+    await userEvent.selectOptions(editor.getByLabelText('Keep calls'), 'days')
+    expect(await editor.findByRole('alert')).toHaveTextContent(
+      'whole number of days',
+    )
+    expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    await userEvent.type(editor.getByLabelText('Days'), '7.5')
+    expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    await userEvent.clear(editor.getByLabelText('Days'))
+    await userEvent.type(editor.getByLabelText('Days'), '14')
+    expect(editor.queryByRole('alert')).not.toBeInTheDocument()
+    expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled()
+    expect(wrote()).toEqual([])
   })
 
   /** Closing an editor by hand leaves the row alone. */
@@ -771,6 +851,8 @@ describe('talkgroups', () => {
       // Untouched, and `null` because it is three-state: *follow the System*
       // is what a channel nobody has decided about carries (#68).
       restricted: null,
+      // The retention window reads the same way, one setting along (#69).
+      retentionDays: null,
       blacklisted: false,
     })
   })
@@ -864,6 +946,34 @@ describe('talkgroups', () => {
       expect(editor.getByLabelText(field)).toHaveValue('')
     }
     expect(editor.getByLabelText('LED')).toHaveValue('')
+  })
+
+  /** **A channel outranks its System** (#69) — the same control as the System
+   *  form, where *inherit* follows the System rather than the instance, so one
+   *  chatty channel can be bounded inside a System kept for a quarter. */
+  it('bounds one channel inside a system kept longer', async () => {
+    county()
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0])
+
+    const editor = within(
+      await screen.findByRole('form', { name: 'Edit Fire Dispatch' }),
+    )
+    // Scoped to this select, because the Access select one field up says the
+    // same words about a different question — which is right on screen and
+    // ambiguous to a query.
+    expect(
+      within(editor.getByLabelText('Keep calls')).getByRole('option', {
+        name: 'Follow the system',
+      }),
+    ).toBeInTheDocument()
+    await userEvent.selectOptions(editor.getByLabelText('Keep calls'), 'days')
+    await userEvent.type(editor.getByLabelText('Days'), '14')
+    await userEvent.click(editor.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].body).toMatchObject({ retentionDays: 14 })
   })
 
   /** A tag typed into the bulk box is sent as a *set*, where the sentinel that
@@ -1582,6 +1692,7 @@ describe('creating and paging', () => {
         enhancement: null,
         restricted: false,
         blacklist: [],
+        retentionDays: null,
       },
     })
   })

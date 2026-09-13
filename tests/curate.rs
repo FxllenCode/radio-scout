@@ -366,6 +366,10 @@ async fn a_system_is_created_edited_and_deleted() {
     assert_eq!(created["label"], "Fulton");
     assert_eq!(created["autoPopulate"], true);
     assert!(created["enhancement"].is_null());
+    assert!(
+        created["retentionDays"].is_null(),
+        "inherits the instance (#69)"
+    );
     assert_eq!(created["calls"], 0);
     let id = created["id"].as_i64().expect("an id");
 
@@ -381,16 +385,28 @@ async fn a_system_is_created_edited_and_deleted() {
     assert_eq!(edited["label"], "Fulton", "untouched by this patch");
     assert_eq!(edited["autoPopulate"], true);
 
+    // The retention window (#69) is the same shape, and `0` is a *value* on it
+    // rather than an absence: "keep this System's Calls for good".
+    let (status, kept) = app
+        .admin_patch(
+            &format!("/api/admin/systems/{id}"),
+            json!({"retentionDays": 0}),
+        )
+        .await;
+    assert_eq!(status, 200, "{kept}");
+    assert_eq!(kept["retentionDays"], 0, "zero is forever, not absent");
+
     // ...and `null` is how a nullable field goes back to inheriting, which an
     // absent field could never say.
     let (_, inherited) = app
         .admin_patch(
             &format!("/api/admin/systems/{id}"),
-            json!({"enhancement": null, "label": null}),
+            json!({"enhancement": null, "label": null, "retentionDays": null}),
         )
         .await;
     assert!(inherited["enhancement"].is_null(), "{inherited}");
     assert!(inherited["label"].is_null(), "{inherited}");
+    assert!(inherited["retentionDays"].is_null(), "{inherited}");
 
     let (status, _) = app.admin_delete(&format!("/api/admin/systems/{id}")).await;
     assert_eq!(status, 204);
@@ -1354,12 +1370,14 @@ async fn a_talkgroup_patch_sets_every_field_it_names() {
                 "tag": "  Fire  ",
                 "led": "cyan",
                 "enhancement": true,
+                "retentionDays": 90,
             }),
         )
         .await;
 
     assert_eq!(status, 200, "{edited}");
     assert_eq!(edited["label"], "FD1");
+    assert_eq!(edited["retentionDays"], 90);
     // Trimmed, so " Fire " and "Fire" are never two Tags.
     assert_eq!(edited["tag"], "Fire");
     assert_eq!(edited["led"], "cyan");
