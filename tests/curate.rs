@@ -413,6 +413,47 @@ async fn a_system_is_created_edited_and_deleted() {
     assert_eq!(app.count::<system::Entity>().await, 0);
 }
 
+/// **A retention window survives being set at *create* time** (#69), on both
+/// entities.
+///
+/// A create and a patch are separate writes, and the create is the one with
+/// nothing to compare against: a field dropped there produces a row that looks
+/// exactly like one an Operator never filled in, and the form that just sent it
+/// says *Follow the instance setting* when they reopen it. Both are here in one
+/// test because the two paths are the same mistake twice, and covering one of
+/// them is how this was nearly shipped — the Talkgroup's happened to be
+/// exercised by a document fixture and the System's by nothing at all.
+#[tokio::test]
+async fn a_window_set_when_a_row_is_created_is_the_window_it_keeps() {
+    let app = TestApp::spawn().await;
+    app.login().await;
+
+    let (status, system) = app
+        .admin_post(
+            "/api/admin/systems",
+            json!({"ref": 11, "label": "Fulton", "retentionDays": 90}),
+        )
+        .await;
+    assert_eq!(status, 201, "{system}");
+    assert_eq!(system["retentionDays"], 90);
+
+    let (status, talkgroup) = app
+        .admin_post(
+            "/api/admin/talkgroups",
+            json!({"systemId": system["id"], "ref": 100, "retentionDays": 14}),
+        )
+        .await;
+    assert_eq!(status, 201, "{talkgroup}");
+    assert_eq!(talkgroup["retentionDays"], 14);
+
+    // Re-read, because a create answers from the row it just inserted and an
+    // answer assembled in memory would agree with itself.
+    let (_, systems) = app.admin_get("/api/admin/systems").await;
+    assert_eq!(systems["results"][0]["retentionDays"], 90);
+    let (_, talkgroups) = app.admin_get("/api/admin/talkgroups").await;
+    assert_eq!(talkgroups["results"][0]["retentionDays"], 14);
+}
+
 /// A System created with no Ref is numbered the way #8 numbers one a recorder
 /// identified by name alone: the lowest free one.
 #[tokio::test]
