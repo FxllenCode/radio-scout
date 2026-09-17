@@ -255,6 +255,14 @@ pub(crate) struct Connection {
     /// most that may ever be said out loud about a code.
     held: Option<crate::access::CodeHeld>,
     heartbeat: Heartbeat,
+    /// Where a refusal this connection decides is counted (#70).
+    ///
+    /// Held rather than reached for, so [`Connection::on`] still awaits nothing
+    /// and reads nothing — a counter is a value like the rest of the table. A
+    /// connection built without one counts into a meter of its own, which is
+    /// what every test wants and what the one production call site overrides
+    /// with [`Connection::counting`].
+    metrics: crate::metrics::Metrics,
 }
 
 impl Connection {
@@ -270,6 +278,7 @@ impl Connection {
             scope,
             held: None,
             heartbeat: Heartbeat::default(),
+            metrics: crate::metrics::Metrics::default(),
         }
     }
 
@@ -280,6 +289,18 @@ impl Connection {
     /// table reads better for saying so.
     pub(crate) fn holding(mut self, held: Option<crate::access::CodeHeld>) -> Self {
         self.held = held;
+        self
+    }
+
+    /// The same connection, counting what it refuses into this Instance's
+    /// meters (#70).
+    ///
+    /// A builder for [`Connection::holding`]'s reason, and the one refusal here
+    /// that never becomes a response: a socket that has already been upgraded
+    /// has no status line left for the request middleware to read a
+    /// [`crate::metrics::Refused`] off.
+    pub(crate) fn counting(mut self, metrics: crate::metrics::Metrics) -> Self {
+        self.metrics = metrics;
         self
     }
 
@@ -378,9 +399,10 @@ impl Connection {
         // delivering for as long as the socket lasts.
         if let Some(expired) = self.ran_out(now_ms) {
             // **Through the one vocabulary**, not a hand-written `warn!` beside
-            // it: the slug an Operator greps and the slug the client is told are
-            // the same string because they are the same `Reason` (#92).
-            expired.record();
+            // it: the slug an Operator greps, the slug the client is told and
+            // the label a status surface counts under are the same string
+            // because they are the same `Reason` (#92, #70).
+            self.metrics.refuse(&expired);
             return vec![Action::Send(refused_frame(&expired)), Action::Close];
         }
         match self.heartbeat.on_tick() {
@@ -680,7 +702,7 @@ async fn handle_socket(mut socket: impl Socket, state: AppState, viewer: crate::
                     code_id: code.id,
                     limit: code.max_connections.unwrap_or_default(),
                 };
-                refused.record();
+                state.metrics.refuse(&refused);
                 // Said out loud and then closed. rdio tells its client `max` and
                 // carries on serving it, because by then it has already assigned
                 // the scope.
@@ -726,7 +748,9 @@ enum Flow {
 /// [`Connection::on`], and everything here either waits or does as it is told.
 async fn run_connection(mut socket: impl Socket, state: AppState, viewer: crate::access::Viewer) {
     let mut receiver = state.live.subscribe();
-    let mut conn = Connection::new(viewer.scope.clone()).holding(viewer.code().cloned());
+    let mut conn = Connection::new(viewer.scope.clone())
+        .holding(viewer.code().cloned())
+        .counting(state.metrics.clone());
 
     let opening = conn.on(Event::Opened);
     if !carried_on(perform(&mut socket, &state, &mut conn, opening).await) {

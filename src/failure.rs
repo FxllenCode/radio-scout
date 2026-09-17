@@ -146,6 +146,11 @@ stages! {
     /// because how many people listen to an Instance is the Operator's own
     /// business.
     LoadListenerHistory => "load-listener-history",
+    /// Reading what only the database and the disk can say about this
+    /// Instance's health (#70) — the status page and the Prometheus text alike,
+    /// because both are one aggregation and "which of the two asked" is
+    /// answered by the request line beside it.
+    ReadStatus => "read-status",
     // -- The admin surface -------------------------------------------------
     /// One page of the operator log (#30).
     SearchLogs => "search-logs",
@@ -382,12 +387,30 @@ pub enum Reason {
     ///
     /// One arm carrying a closed inner vocabulary, the [`Reason::BadImport`]
     /// shape: a `&'static str` per refusal would be an *open* arm inside a
-    /// closed enum, and #70 is about to put these slugs behind a metric label.
+    /// closed enum, and #70 puts these slugs behind a metric label.
     /// Unlike the others it also decides its own **status**, because one surface
     /// legitimately answers 400, 404 and 409 — which is exactly the information
     /// a form needs to tell "you typed something wrong" from "somebody else
     /// changed this underneath you".
     Curation(crate::curate::Rejected),
+    // -- Metrics (`crate::metrics`, #70) ------------------------------------
+    /// `[metrics] token` is unset, so `/metrics` is not served at all.
+    ///
+    /// A `404` rather than a `401`, because there is nothing here to
+    /// authenticate *to*: the token is the switch, so "not configured" and "no
+    /// such route" are the same fact. Answered identically to a route that does
+    /// not exist and distinguished in the **log**, which is the
+    /// [`Reason::SharingDisabled`] shape and where the Operator whose scraper
+    /// gets nothing goes to find out why.
+    MetricsDisabled,
+    /// A scraper presented no bearer token, or the wrong one.
+    ///
+    /// **WARN**, unlike every other dead-credential refusal here, and for
+    /// [`Reason::AccessCodeExpired`]'s reason: this is not somebody clicking a
+    /// stale link, it is an Operator's own monitoring silently seeing nothing,
+    /// which is a thing they act on. Names its source under rule 5's
+    /// authentication exemption — and never the token, presented or stored.
+    InvalidMetricsToken { client_addr: IpAddr },
 }
 
 /// The rdio `417` family: a body too incomplete to be a Call.
@@ -825,6 +848,19 @@ impl Reason {
                 rejected.status(),
                 Told::Json(rejected.body()),
             ),
+            Reason::MetricsDisabled => Refusal::new(
+                "metrics-disabled",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("metrics are not enabled on this instance\n"),
+            ),
+            Reason::InvalidMetricsToken { client_addr } => Refusal::new(
+                "invalid-metrics-token",
+                Level::WARN,
+                StatusCode::UNAUTHORIZED,
+                text("invalid metrics token\n"),
+            )
+            .attempted_from(*client_addr),
         }
     }
 }
@@ -897,6 +933,12 @@ impl Reason {
         if let Some((name, value)) = refusal.header {
             response.headers_mut().insert(name, value);
         }
+        // **Counted where it is answered** (#70), the [`Broke`] shape below: the
+        // request middleware is the one place that sees every response, so a
+        // route added later is counted by construction rather than by
+        // remembering. This is the one rendering of a refusal, so marking it
+        // here covers every surface that answers one.
+        crate::metrics::Refused::mark(&mut response, refusal.slug);
         response
     }
 }
@@ -982,9 +1024,20 @@ impl From<Incomplete> for Failure {
 #[derive(Debug, Clone)]
 pub struct Broke {
     stage: Stage,
+    // (`cause` and `origin` follow; `stage` is the only part anything outside
+    // this module reads — see [`Broke::stage`].)
     /// The underlying error's own words, which go to the log and nowhere else.
     cause: String,
     origin: Span,
+}
+
+impl Broke {
+    /// Where the server was when it broke, for the counter the request
+    /// middleware keeps (#70). The *cause* deliberately stays in here: it is the
+    /// error's own words, which go to the log and nowhere else.
+    pub(crate) fn stage(&self) -> &'static str {
+        self.stage.slug()
+    }
 }
 
 impl IntoResponse for Failure {
@@ -1229,6 +1282,21 @@ mod tests {
         Reason::AdminLockedOut { client_addr: LOCALHOST, retry_after_secs: 900 },
         "admin-locked-out", 429, "too many failed logins; try again later\n", " WARN "
     )]
+    // -- The metrics surface (#70) -----------------------------------------
+    // A 404 because the token *is* the switch, so "not configured" and "no such
+    // route" are one fact; a WARN on a bad one because an Operator's own
+    // monitoring seeing nothing is a thing they act on.
+    #[case::metrics_disabled(
+        Reason::MetricsDisabled,
+        "metrics-disabled",
+        404,
+        "metrics are not enabled on this instance\n",
+        " DEBUG "
+    )]
+    #[case::invalid_metrics_token(
+        Reason::InvalidMetricsToken { client_addr: LOCALHOST },
+        "invalid-metrics-token", 401, "invalid metrics token\n", " WARN "
+    )]
     #[tokio::test]
     async fn every_reason_decides_its_slug_status_body_and_level(
         #[case] reason: Reason,
@@ -1253,6 +1321,25 @@ mod tests {
         assert!(logged.contains(&format!("reason={slug}")), "{logged}");
         assert!(!logged.contains("reason=\""), "quoted: {logged}");
         assert!(logged.contains("request refused"), "{logged}");
+    }
+
+    /// **Every refusal marks the response it answers with**, which is how the
+    /// request middleware counts one without each handler remembering to (#70).
+    /// The slug it carries is the slug that was logged — one vocabulary, so a
+    /// dashboard's label and an Operator's grep are the same word.
+    #[tokio::test]
+    async fn a_refusal_marks_its_response_for_the_counter() {
+        let _capture = LogCapture::start();
+
+        let response = Reason::Duplicate { of: 41 }.into_response();
+
+        assert_eq!(
+            response
+                .extensions()
+                .get::<crate::metrics::Refused>()
+                .map(|marked| marked.reason()),
+            Some("duplicate")
+        );
     }
 
     /// ADR-0011 rule 5's third class, through the one rendering. An

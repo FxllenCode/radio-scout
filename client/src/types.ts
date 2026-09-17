@@ -971,3 +971,93 @@ export interface Unlocked {
   scope: SelectionMatrix
   expiresAtMs?: number
 }
+
+// -- The status page (#70, spec US 48) ---------------------------------------
+
+/** One background **Worker**'s reading. */
+export interface WorkerHealth {
+  name: string
+  /** Work handed to it and not yet settled. */
+  depth: number
+  /** Work settled since it started — monotonic. */
+  done: number
+  /** Whether its loop is still going. `false` is the one reading here an
+   *  Operator has to act on: a worker that died settles everything it was
+   *  holding on the way out, so its depth looks perfectly healthy. */
+  running: boolean
+}
+
+/** How much Archive there is. */
+export interface ArchiveHealth {
+  calls: number
+  audioBytes: number
+  /** **Event** audio frozen past retention (#67) — counted by the size cap and
+   *  never taken by it. */
+  frozenAudioBytes: number
+  oldestCallAtMs?: number
+}
+
+/** How much room is left where the audio lives. Both readings are **absent** on
+ *  the S3 backend, where the question is somebody else's machine's. */
+export interface StorageHealth {
+  freeBytes?: number
+  totalBytes?: number
+}
+
+/** What the retention policy is holding to. */
+export interface RetentionHealth {
+  /** `0` keeps forever. */
+  days: number
+  maxSizeBytes?: number
+}
+
+/** One **System**'s traffic. */
+export interface SystemHealth {
+  ref: number
+  label?: string
+  /** Calls inside `rateWindowMs`. */
+  calls: number
+  /** When it was last heard from, over the **whole** archive — so a receiver
+   *  that stopped two days ago reads as two days rather than as silence. */
+  lastCallAtMs?: number
+}
+
+/** One **Sink** roster — `downstream` or `webhook` — summarised. */
+export interface SinkHealth {
+  sink: string
+  total: number
+  disabled: number
+  failing: number
+  /** The durable queue depth across the roster. */
+  queued: number
+  /** When **anything** on this roster last delivered successfully. `failing` and
+   *  `queued` do not answer "is this still working at all" on a roster whose
+   *  peers are simply quiet. Which peer, and what it last said, stays on that
+   *  sink's own screen. */
+  lastSuccessMs?: number
+}
+
+/** `GET /api/admin/status` — is this Instance healthy (#70). */
+export interface InstanceStatus {
+  version: string
+  startedAtMs: number
+  uptimeSeconds: number
+  listeners: number
+  /** Ingest endings since boot, by what Ingest decided. */
+  ingest: Record<string, number>
+  /** Refusals since boot, by reason — every surface, not only ingest. */
+  refused: Record<string, number>
+  /** Server errors since boot, by the stage the server was at. */
+  errors: Record<string, number>
+  workers: WorkerHealth[]
+  /** When the database and disk readings below were taken. They are cached
+   *  server-side, so this is how the page says how old they are rather than
+   *  implying they are live. */
+  gaugesAtMs: number
+  rateWindowMs: number
+  archive: ArchiveHealth
+  storage: StorageHealth
+  retention: RetentionHealth
+  systems: SystemHealth[]
+  sinks: SinkHealth[]
+}

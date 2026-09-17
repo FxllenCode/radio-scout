@@ -1181,6 +1181,38 @@ pub enum Admission {
 }
 
 impl Admission {
+    /// Every ending there is, for a counter that wants a series per outcome
+    /// before any of them has happened (#70).
+    ///
+    /// A list rather than a derivation, because Rust cannot enumerate an enum's
+    /// variants — and held to being exactly the set
+    /// [`Admission::slug`] can produce by `mod tests`, so an arm added later
+    /// without a line here fails the suite rather than going uncounted until
+    /// somebody notices a dashboard that never draws it.
+    pub const OUTCOMES: &'static [&'static str] = &[
+        "stored",
+        "replaced",
+        "duplicate",
+        "blacklisted",
+        "not-populated",
+        "invalid-api-key",
+    ];
+
+    /// What this ending is called on an Operator-facing surface.
+    ///
+    /// **Derived from the refusal vocabulary rather than respelled**, so
+    /// `outcome="duplicate"` on the ingest counter and `reason="duplicate"` on
+    /// the refusal counter are the same word for the same ending, and a slug
+    /// renamed in [`Reason`] cannot leave a metric label behind. The two arms
+    /// with no refusal are the two that took the audio.
+    pub fn slug(&self) -> &'static str {
+        match self.reason() {
+            Some(reason) => reason.slug(),
+            None if matches!(self, Admission::Replaced { .. }) => "replaced",
+            None => "stored",
+        }
+    }
+
     /// What the caller is told, as the one closed vocabulary — `None` for a
     /// Call that was stored, which is the only arm that is not a refusal.
     fn reason(&self) -> Option<Reason> {
@@ -1262,10 +1294,17 @@ impl IntoResponse for Recorded {
     /// exactly why the line was written when the Admission was decided and not
     /// here.
     fn into_response(self) -> Response {
-        match self.0.reason() {
+        let mut response = match self.0.reason() {
             Some(reason) => reason.respond(),
             None => (StatusCode::OK, crate::failure::CALL_IMPORTED).into_response(),
-        }
+        };
+        // **Counted where it is answered** (#70): the request middleware is the
+        // one place that sees every response, so marking it here is what makes
+        // "how many Calls are arriving" true for both ingest dialects and for
+        // anything that renders an Admission later, rather than a line each
+        // handler has to remember.
+        crate::metrics::Admitted::mark(&mut response, self.0.slug());
+        response
     }
 }
 
@@ -2798,10 +2837,11 @@ mod tests {
     /// A snapshot rather than five assertions because what matters is the
     /// contract *as a whole*: a diff here is a diff every Trunk Recorder and
     /// SDRTrunk in the field would see.
-    #[tokio::test]
-    async fn the_wire_contract_every_admission_answers_with() {
-        let mut rendered = String::new();
-        for admission in [
+    /// Every ending an upload has, spelled once for the tests that need all of
+    /// them — the wire contract's snapshot, and the outcome vocabulary #70
+    /// counts by.
+    fn every_admission() -> Vec<Admission> {
+        vec![
             Admission::Stored {
                 call_id: 1,
                 audio_bytes: 44,
@@ -2817,7 +2857,64 @@ mod tests {
                 system_ref: 11,
                 talkgroup_ref: 54241,
             },
-        ] {
+        ]
+    }
+
+    /// **[`Admission::OUTCOMES`] is exactly the set [`Admission::slug`] can
+    /// produce** — no more, because a label nothing ever writes is a series a
+    /// dashboard waits forever for, and no fewer, because an arm missing from
+    /// the list is an outcome that reads as "no data" until the first one
+    /// happens (#70).
+    ///
+    /// Both directions, and the *distinctness* too: two arms sharing a slug
+    /// would add up under one label and be invisible in any reading of either.
+    #[test]
+    fn every_admission_has_a_slug_and_the_vocabulary_is_exactly_those_slugs() {
+        let slugs: Vec<&str> = every_admission()
+            .iter()
+            .map(Admission::slug)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let vocabulary: Vec<&str> = Admission::OUTCOMES
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        assert_eq!(slugs, vocabulary);
+        assert_eq!(
+            Admission::OUTCOMES.len(),
+            every_admission().len(),
+            "two admissions share a slug, or the list repeats one"
+        );
+    }
+
+    /// An ingest ending is counted where it is answered, so a status surface
+    /// can say how many Calls are arriving without a handler remembering to
+    /// say so. Rendering is what marks it — see [`Recorded::into_response`].
+    #[tokio::test]
+    async fn rendering_an_admission_marks_the_response_with_its_outcome() {
+        for admission in every_admission() {
+            let outcome = admission.slug();
+            let response = admission.record().into_response();
+
+            assert_eq!(
+                response
+                    .extensions()
+                    .get::<crate::metrics::Admitted>()
+                    .map(|marked| marked.outcome()),
+                Some(outcome),
+                "an answered upload carried no outcome for the counter"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wire_contract_every_admission_answers_with() {
+        let mut rendered = String::new();
+        for admission in every_admission() {
             let name = format!("{admission:?}");
             let response = admission.record().into_response();
             let status = response.status().as_u16();

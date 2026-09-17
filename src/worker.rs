@@ -14,7 +14,7 @@
 //! them.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::watch;
 
@@ -176,11 +176,63 @@ impl Drop for Ticket {
     }
 }
 
+/// Whether a Worker's loop is still going, readable by something other than
+/// the handle that owns it.
+///
+/// [`Worker::is_running`] is the other half of a health reading and the one a
+/// depth cannot give: a Worker that panicked settles everything it was holding
+/// on the way out, so it reads as perfectly idle. That answer lived only on the
+/// handle the `Instance` owns, and a status surface (#70) is given `AppState`
+/// and can never see an Instance — so the bit is shared the way a [`Meter`] is.
+///
+/// A flag set by a guard riding *inside* the task, rather than
+/// `JoinHandle::is_finished`, because only the guard is reachable from the
+/// registry — and it answers the same question in every way the task can end.
+/// `[profile.release]` spells `panic = "unwind"` on purpose, so a panicking
+/// worker unwinds through it; a cancelled one drops its future through it.
+#[derive(Debug, Clone)]
+pub struct Alive(Arc<AtomicBool>);
+
+impl Alive {
+    /// A Worker that is running.
+    ///
+    /// Named for the state rather than `new`, because there is no *default*
+    /// `Alive` and a type that offered one would hand a caller who forgot to
+    /// pass a real flag a Worker that reads healthy for ever.
+    pub fn running() -> Self {
+        Alive(Arc::new(AtomicBool::new(true)))
+    }
+
+    /// Whether its loop is still going.
+    pub fn is_running(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// The guard that clears it — moved into the task, so every way that task
+    /// can end goes through the same drop.
+    fn while_held(&self) -> Departed {
+        Departed(self.0.clone())
+    }
+}
+
+/// Clears an [`Alive`] when the task holding it ends, however it ends.
+struct Departed(Arc<AtomicBool>);
+
+impl Drop for Departed {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 /// One Worker's reading, as a status surface names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamedLoad {
     pub name: &'static str,
     pub load: Load,
+    /// Whether its loop is still going — see [`Alive`]. `false` on an Instance
+    /// that has not been asked to stop is the one reading here an Operator has
+    /// to act on.
+    pub running: bool,
 }
 
 /// Every Worker's reading, in one place both an `AppState` and an `Instance`
@@ -199,28 +251,29 @@ pub struct NamedLoad {
 #[derive(Clone, Default)]
 pub struct Workers(Arc<std::sync::Mutex<Vec<Registration>>>);
 
-/// One Worker's name and the meter it publishes to.
+/// One Worker's name, the meter it publishes to, and whether it is still going.
 #[derive(Clone)]
 struct Registration {
     name: &'static str,
     meter: Arc<Meter>,
+    alive: Alive,
 }
 
 impl Workers {
     /// Publish `name`'s reading. Called as each Worker is started, so the
     /// order a status surface shows is the order they came up in.
-    pub fn register(&self, name: &'static str, meter: Arc<Meter>) {
+    pub fn register(&self, name: &'static str, meter: Arc<Meter>, alive: Alive) {
         self.0
             .lock()
             .expect("workers")
-            .push(Registration { name, meter });
+            .push(Registration { name, meter, alive });
     }
 
     /// Publish this Worker's reading, and hand the handle straight back to
     /// whoever will stop it. One call rather than two, so a Worker cannot be
     /// started and then silently left off the status surface.
     pub fn adopt(&self, worker: Worker) -> Worker {
-        self.register(worker.name(), worker.meter());
+        self.register(worker.name(), worker.meter(), worker.alive());
         worker
     }
 
@@ -244,6 +297,7 @@ impl Workers {
             .map(|registered| NamedLoad {
                 name: registered.name,
                 load: registered.meter.load(),
+                running: registered.alive.is_running(),
             })
             .collect()
     }
@@ -332,6 +386,8 @@ impl Shutdown {
 pub struct Worker {
     name: &'static str,
     meter: Arc<Meter>,
+    /// Whether the loop is still going, shared with whoever reads the registry.
+    alive: Alive,
     /// Set to `true` to ask the loop to stop.
     tell_to_stop: watch::Sender<bool>,
     /// The task. Owned outright rather than behind an `Option`, because both
@@ -352,10 +408,20 @@ impl Worker {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let (tell_to_stop, stopping) = watch::channel(false);
-        let task = tokio::spawn(body(Shutdown(stopping)));
+        let alive = Alive::running();
+        // The guard is moved *into* the task rather than held beside it, so it
+        // is dropped by every ending the task has: returning, being cancelled,
+        // and unwinding out of a panic.
+        let departed = alive.while_held();
+        let running = body(Shutdown(stopping));
+        let task = tokio::spawn(async move {
+            let _departed = departed;
+            running.await;
+        });
         Worker {
             name,
             meter,
+            alive,
             tell_to_stop,
             task,
         }
@@ -371,14 +437,22 @@ impl Worker {
         self.meter.clone()
     }
 
+    /// Whether its loop is still going, shareable — the other half.
+    pub fn alive(&self) -> Alive {
+        self.alive.clone()
+    }
+
     /// Whether its loop is still going.
     ///
     /// The other half of a health reading, and the one a depth cannot give: a
     /// Worker that panicked settles everything it was holding on the way out,
     /// so it reads as perfectly idle. `false` before a stop was asked for means
     /// something an Operator has to act on.
+    ///
+    /// Read off the [`Alive`] the task carries rather than off the
+    /// `JoinHandle`, so this handle and the registry cannot come to disagree.
     pub fn is_running(&self) -> bool {
-        !self.task.is_finished()
+        self.alive.is_running()
     }
 
     /// What it owes right now.
@@ -582,8 +656,8 @@ mod tests {
         let workers = Workers::default();
         let sweeper = Meter::new();
         let sink = Meter::new();
-        workers.register("retention", sweeper.clone());
-        workers.register("log-sink", sink.clone());
+        workers.register("retention", sweeper.clone(), Alive::running());
+        workers.register("log-sink", sink.clone(), Alive::running());
 
         let ticket = sweeper.admit();
         drop(sink.admit());
@@ -594,14 +668,63 @@ mod tests {
                 NamedLoad {
                     name: "retention",
                     load: Load { depth: 1, done: 0 },
+                    running: true,
                 },
                 NamedLoad {
                     name: "log-sink",
                     load: Load { depth: 0, done: 1 },
+                    running: true,
                 },
             ]
         );
         drop(ticket);
+    }
+
+    /// **The half a depth cannot give** (#70). A Worker that panicked settles
+    /// everything it was holding on the way out, so it reads as perfectly idle
+    /// — which on a status page is indistinguishable from a healthy worker with
+    /// nothing to do. [`Worker::is_running`] answers that, and lived only on the
+    /// handle the `Instance` owns; a status handler is given `AppState` and can
+    /// never see an Instance, so the reading has to reach the registry too.
+    #[tokio::test]
+    async fn a_worker_that_has_ended_stops_reading_as_running() {
+        let workers = Workers::default();
+        let worker = workers.adopt(Worker::start(
+            "retention",
+            Meter::new(),
+            |mut stop| async move { stop.cancelled().await },
+        ));
+        assert!(worker.is_running());
+        assert!(workers.loads()[0].running, "a worker that is still going");
+
+        worker.stop().await;
+
+        assert!(
+            !workers.loads()[0].running,
+            "a worker whose loop has ended still read as running"
+        );
+    }
+
+    /// **A panic is the case this exists for.** `[profile.release]` spells
+    /// `panic = "unwind"` on purpose, so a worker that panics unwinds — and the
+    /// guard riding in its task is dropped on the way out, exactly as it is on
+    /// an ordinary stop. Nothing else notices: the meter settles its tickets,
+    /// the depth returns to zero, and the Instance goes on serving.
+    #[tokio::test]
+    async fn a_worker_that_panicked_stops_reading_as_running() {
+        let workers = Workers::default();
+        let worker = workers.adopt(Worker::start("enhancement", Meter::new(), |_stop| async {
+            panic!("the enhancement worker fell over");
+        }));
+
+        // Joining a panicked task is not an error to report — it ended, which
+        // is what `join` waits for.
+        worker.join().await;
+
+        assert!(
+            !workers.loads()[0].running,
+            "a worker that panicked still read as running"
+        );
     }
 
     /// One await for the whole Instance — what a test says instead of sleeping
@@ -611,8 +734,8 @@ mod tests {
         let workers = Workers::default();
         let sweeper = Meter::new();
         let sink = Meter::new();
-        workers.register("retention", sweeper.clone());
-        workers.register("log-sink", sink.clone());
+        workers.register("retention", sweeper.clone(), Alive::running());
+        workers.register("log-sink", sink.clone(), Alive::running());
         let sweeping = sweeper.admit();
         let storing = sink.admit();
 

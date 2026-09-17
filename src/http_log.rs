@@ -56,9 +56,7 @@ use tracing::{Instrument, Level, span};
 use uuid::Uuid;
 
 use crate::config::TrustedProxies;
-
-/// The header a reverse proxy names the original client in.
-const FORWARDED_FOR: &str = "x-forwarded-for";
+use crate::metrics::Metrics;
 
 /// The response header carrying the request's correlation id. An operator
 /// reading a client's failure can grep the server's log for the same value.
@@ -115,8 +113,12 @@ impl RouteClass {
         match path {
             "/api/call-upload" | "/api/trunk-recorder-call-upload" => RouteClass::Ingest,
             // A packaged deployment (#23) probes this every few seconds; at INFO
-            // that is thousands of lines a day saying nothing happened.
+            // that is thousands of lines a day saying nothing happened. A
+            // Prometheus scrape (#70) is the same traffic on the same cadence,
+            // and a 4xx still escalates either of them to WARN — which is how a
+            // scraper presenting the wrong token stays findable.
             "/healthz" => RouteClass::Chatty,
+            crate::metrics::METRICS_PATH => RouteClass::Chatty,
             _ if is_call_audio(path) || is_spa_asset(path) => RouteClass::Chatty,
             _ => RouteClass::Other,
         }
@@ -173,13 +175,37 @@ fn logs_client_addr(class: RouteClass, level: Level) -> bool {
     class == RouteClass::Ingest || matches!(level, Level::DEBUG | Level::TRACE)
 }
 
-/// Middleware: log one line per request, and hang a [`RequestId`] on the request
-/// (extensions), the response (`x-request-id`) and the span its handler runs in.
+/// What the request layer needs, and nothing else.
+///
+/// Two slices of [`crate::AppState`] rather than the whole of it, because the
+/// layer is added *before* `with_state` and these are the only parts it reads:
+/// whose forwarded address it may believe (#17), and where an outcome is counted
+/// (#70). A struct rather than a tuple so a third is a named field.
+#[derive(Clone)]
+pub struct Watching {
+    pub trusted_proxies: TrustedProxies,
+    pub metrics: Metrics,
+}
+
+/// Middleware: log one line per request, count how it ended, and hang a
+/// [`RequestId`] on the request (extensions), the response (`x-request-id`) and
+/// the span its handler runs in.
+///
+/// **The counting lives here for [`crate::failure::redact`]'s reason** (#70): it
+/// is the one place that sees every response, including the outcomes no handler
+/// wrote — so a route added later is counted by construction rather than by
+/// remembering. What it counts is what the response *carries*: a
+/// [`crate::metrics::Refused`], a [`crate::metrics::Admitted`], or the
+/// [`crate::failure::Broke`] a 5xx already rode here with.
 pub async fn log_requests(
-    State(trusted_proxies): State<TrustedProxies>,
+    State(watching): State<Watching>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    let Watching {
+        trusted_proxies,
+        metrics,
+    } = watching;
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let class = RouteClass::of(&path);
@@ -191,13 +217,7 @@ pub async fn log_requests(
             // Behind a reverse proxy or Docker's bridge the peer is the proxy,
             // and the address worth logging is the one it forwarded for — but
             // only if the operator said that hop may be believed (#17).
-            trusted_proxies.client_ip(
-                peer,
-                request
-                    .headers()
-                    .get(FORWARDED_FOR)
-                    .and_then(|value| value.to_str().ok()),
-            )
+            trusted_proxies.client_of(peer, request.headers())
         });
 
     let request_id = RequestId::new();
@@ -215,6 +235,9 @@ pub async fn log_requests(
 
     let status = response.status();
     let level = level_for(class, status);
+    // Before `redact`, which replaces the response and its extensions with a
+    // body carrying the request id alone.
+    count(&metrics, &response);
     let client_addr = peer.filter(|_| logs_client_addr(class, level));
     // Inside the span, so the failure's ERROR line carries the same id the
     // client is handed (#29) — the cause first, then the request it belonged to.
@@ -229,6 +252,26 @@ pub async fn log_requests(
         HeaderValue::from_str(request_id.as_str()).expect("a request id is 16 hex characters"),
     );
     response
+}
+
+/// Count how this request ended, from what its response carries (#70).
+///
+/// Three marks and no fourth, because there are three funnels: a refusal is
+/// rendered once ([`crate::failure::Reason::respond`], plus the share/event
+/// page's own HTML), an **Admission** is rendered once
+/// ([`crate::ingest::Recorded`]), and a break is a [`crate::failure::Broke`]
+/// riding the 5xx. A response carrying none of them is an ordinary answer, which
+/// this surface has nothing to say about.
+fn count(metrics: &Metrics, response: &Response) {
+    if let Some(refused) = response.extensions().get::<crate::metrics::Refused>() {
+        metrics.refused(refused.reason());
+    }
+    if let Some(admitted) = response.extensions().get::<crate::metrics::Admitted>() {
+        metrics.admitted(admitted.outcome());
+    }
+    if let Some(broke) = response.extensions().get::<crate::failure::Broke>() {
+        metrics.broke(broke.stage());
+    }
 }
 
 /// Emit the line. `tracing` bakes an event's level into a static callsite, so a
@@ -286,6 +329,7 @@ mod tests {
     #[case("/api/call/1/audio", RouteClass::Chatty)]
     #[case("/api/call/999999/audio", RouteClass::Chatty)]
     #[case("/healthz", RouteClass::Chatty)]
+    #[case("/metrics", RouteClass::Chatty)]
     #[case("/assets/index-a1b2c3.js", RouteClass::Chatty)]
     #[case("/assets/index-a1b2c3.css", RouteClass::Chatty)]
     #[case("/favicon.svg", RouteClass::Chatty)]

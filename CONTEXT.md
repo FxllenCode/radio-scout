@@ -179,6 +179,10 @@ _Avoid_: volume, traffic (fine in prose, wrong for the measurement), stats, metr
 How many **Listeners** were connected at once, sampled onto an interval and kept as a series. A count and an instant and nothing else: no address, no session, no per-**Talkgroup** breakdown, because on a quiet channel that would be a record of *who* was listening ([ADR-0011](docs/adr/0011-observability-logging-policy.md) rule 5). Each sample is the **peak** since the one before it rather than a reading taken at the tick, so somebody who arrived and left between two ticks is still somebody who was there. The **Operator's**, not the Listener's — an open Archive does not make how many people listen to an Instance public.
 _Avoid_: audience, traffic, users, sessions, analytics.
 
+**Metric**:
+A number an **Operator** scrapes, published in Prometheus' text format at one URL. The same truths the **status page** shows, rendered twice from one reading rather than aggregated twice — a second read behind the endpoint would be a second implementation of the thing it claims to describe. Every label value comes from a *closed* vocabulary — a refusal's reason, a **Stage**, an **Admission**'s ending, a **Worker**'s name — so nothing a stranger sends can grow an unbounded series, and there is deliberately no per-**Talkgroup** breakdown, for the **Listener count**'s reason. Its credential **is** its switch: an Instance given no token serves no endpoint, because these are the Operator's numbers and a surface that could be opened by accident would undo that from a sibling route.
+_Avoid_: stats, telemetry, analytics, **Activity** (how busy a stretch of Archive was, which is a **Listener**'s chart).
+
 **DVR**:
 The archive surface that plays one talkgroup (or a **Selection**) gaplessly across a time range, scrubbable on a call-density timeline. Oldest-first by construction — a DVR that plays backwards is a search result, not a DVR.
 

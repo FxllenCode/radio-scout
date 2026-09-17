@@ -177,6 +177,12 @@ a recorder's upload is answered before any of it starts.
 **Retention.** Prune by age, by total size, or both. A sweeper ages Calls out, enforces the
 cap, and reclaims audio no Call points at.
 
+**Is it healthy.** One page answers that in a word — what is arriving, per system; what has
+been refused and why; every background worker's queue depth and whether it is still alive; and
+how much room is left on the disk. The same truths come out of a Prometheus endpoint if you
+already have Grafana. Both are yours: the endpoint is served only when you set a token for it,
+because how many people are listening is not something an open archive makes public.
+
 Full detail: **[docs/using.md](docs/using.md)** for listening, **[docs/operating.md](docs/operating.md)**
 for running it.
 

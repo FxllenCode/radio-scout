@@ -65,10 +65,6 @@ use crate::failure::{Failure, Reason};
 use crate::secret::{Budget, Lockout};
 use crate::startup::AdminPassword;
 
-/// The header a reverse proxy names the original client in — the same one the
-/// request log reads (#28), and believed on the same terms.
-const FORWARDED_FOR: &str = "x-forwarded-for";
-
 /// The header a reverse proxy names the original scheme in — how a server that
 /// only ever speaks plain HTTP learns that the client's half of the hop was TLS.
 const FORWARDED_PROTO: &str = "x-forwarded-proto";
@@ -408,12 +404,7 @@ pub async fn login(
     // unless the operator named that peer as a proxy (#17). Believing
     // `X-Forwarded-For` unconditionally, as rdio does, makes the lockout both
     // evadable and weaponisable.
-    let client_addr = state.trusted_proxies.client_ip(
-        peer.ip(),
-        headers
-            .get(FORWARDED_FOR)
-            .and_then(|value| value.to_str().ok()),
-    );
+    let client_addr = state.trusted_proxies.client_of(peer.ip(), &headers);
 
     if let Some(retry_after) = state.admin.locked_for(client_addr, now) {
         return Err(Reason::AdminLockedOut {

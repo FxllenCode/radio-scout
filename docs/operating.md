@@ -960,6 +960,99 @@ coarser chart will do. How long the rows survive is `[retention] listener_days` 
 The chart is behind the admin password, unlike everything else a browser can read here. Listening
 is open; how many people take that up is yours.
 
+## Is it healthy
+
+Settings → Admin → **Status** answers that in a word, and shows the evidence under it. It
+refreshes itself while it is open, so it is a page you can leave up on a second screen.
+
+What it says, and why each one is there:
+
+- **A verdict** — healthy, worth a look, or needs attention — derived from the list beneath it, so
+  the two can never disagree. An empty list is a healthy instance.
+- **Per system**, how many calls arrived in the last hour and when that system was *last* heard
+  from. The last-heard reading is over the whole archive rather than the hour, because a receiver
+  that stopped two days ago is exactly what this page exists to show — a windowed answer would
+  draw it as silence indistinguishable from a system that has never keyed.
+- **Every background worker**, its queue depth, how much it has finished, and **whether it is
+  still running**. That last one is the half a depth cannot give: a worker that fell over settles
+  everything it was holding on the way out, so its depth reads as perfectly idle.
+- **Storage**: how much audio is stored, how much of that is frozen into events, how much room is
+  left on the volume it lives on, and what retention is holding to. The volume reading is absent
+  when your audio is in a bucket — "not on this machine" is a different fact from "no room".
+- **What has been refused** since the process started, by reason, and any 5xx by the stage it
+  happened at — the same words the log uses, so one number here is one grep there.
+- **Your downstreams and webhooks**: how many there are, how many are failing, how deep the
+  durable queue is, and **when either last delivered anything** — because on a roster whose peers
+  are simply quiet the first three read the same either way. Which peer, and what it last said,
+  stays on that sink's own screen, since a summary cannot name a row.
+
+Two things are deliberately **not** flagged. A system that has been quiet is shown with its age
+and no verdict: a county is silent at three in the morning and a rural system can be silent for a
+day, and every threshold anyone could pick is wrong for somebody. And an archive sitting *at* its
+size cap is the policy working, not a problem — what is flagged is frozen event audio over the cap
+on its own, which is the one storage state nothing can prune.
+
+The expensive half of the page — the archive totals and the per-system rates — is read from the
+database at most once every fifteen seconds and shared with the metrics endpoint below, so leaving
+the page open costs the same as not leaving it open. The page says how old those readings are.
+
+### Prometheus
+
+```toml
+[metrics]
+token = "a-long-random-string"
+```
+
+`GET /metrics` then serves the same truths in Prometheus' text format, and **the token is the
+switch**: with no token the endpoint is not served at all. There is deliberately no way to serve
+it openly — what it publishes is what the status page publishes, including how many people are
+listening, and that one is yours rather than the public's however open your archive is.
+
+Generate one with `openssl rand -hex 32`. It has no command-line flag, because `ps` is
+world-readable; `RADIO_SCOUT_METRICS_TOKEN` is the other place it can live.
+
+```yaml
+scrape_configs:
+  - job_name: radio-scout
+    authorization:
+      credentials: a-long-random-string
+    static_configs:
+      - targets: ['your-instance:3000']
+```
+
+Everything is prefixed `radio_scout_`. The ones worth a dashboard:
+
+| Metric | What it is |
+| --- | --- |
+| `radio_scout_ingest_total{outcome}` | uploads, by what ingest decided — `stored`, `replaced`, `duplicate`, `blacklisted`, `not-populated`, `invalid-api-key` |
+| `radio_scout_refused_total{reason}` | every refusal, anywhere, under the same `reason=` the log writes |
+| `radio_scout_errors_total{stage}` | 5xx, by the stage the server was at |
+| `radio_scout_worker_in_hand{worker}` · `radio_scout_worker_running{worker}` | what each background worker owes, and whether it is alive |
+| `radio_scout_listeners` | connections open right now |
+| `radio_scout_audio_bytes` · `radio_scout_storage_free_bytes` | what is stored, and what is left |
+| `radio_scout_system_calls{system}` · `radio_scout_system_last_call_timestamp_seconds{system}` | per-system traffic |
+| `radio_scout_sink_queue_depth{sink}` · `radio_scout_sink_last_success_timestamp_seconds{sink}` | what your downstreams and webhooks owe, and when one last got through |
+
+Two naming points worth knowing. **`worker_in_hand` is not a queue depth** — what one unit
+of a worker's work *is* belongs to that worker, and the two delivery senders count "I have caught
+up" rather than "one call", so their numbers are not comparable with the enhancement worker's and
+a rate of them is not a delivery rate. The queue depth you mean is `sink_queue_depth`. And a
+**system's name rides on `radio_scout_system_info`** rather than on its numeric series, so
+renaming a system in the browser does not orphan the panels you built before you renamed it;
+Grafana joins the two on `system`.
+
+A worker that is not running on this instance — the enhancement worker with `[enhancement] mode =
+"off"`, which is what ships — has no series at all rather than a row of zeroes. The page shows
+what is running.
+
+Every label value comes from a fixed vocabulary, so nothing a stranger sends can make this
+endpoint grow unbounded series. There is **no per-talkgroup breakdown**, for the reason listener
+counts have no breakdown either: on a quiet channel that is a record of who was listening.
+
+A scrape presenting the wrong token is refused and leaves a WARN in the log naming the address it
+came from — because a monitoring system that has quietly stopped seeing this instance is otherwise
+a silence you would have to guess at. The token itself is never written down.
+
 ## Logging
 
 Everything goes to **stdout** — journald, Docker or your terminal owns persistence and

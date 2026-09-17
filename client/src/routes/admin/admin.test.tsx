@@ -7,6 +7,7 @@ import { FakeInstance, curationHandlers, refusal } from '@/test/curation'
 import { ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderWithProviders } from '@/test/utils'
+import type { InstanceStatus } from '@/types'
 
 import { AdminScreen } from './AdminScreen'
 import { AdminTalkgroupsScreen } from './AdminTalkgroupsScreen'
@@ -16,6 +17,7 @@ import { DownstreamsScreen } from './DownstreamsScreen'
 import { GroupsScreen, TagsScreen } from './LabelsScreen'
 import { ListenersScreen } from './ListenersScreen'
 import { SharesScreen } from './SharesScreen'
+import { StatusScreen } from './StatusScreen'
 import { SystemsScreen } from './SystemsScreen'
 import { UnitsScreen } from './UnitsScreen'
 import { WebhooksScreen } from './WebhooksScreen'
@@ -104,6 +106,7 @@ describe('the admin gate', () => {
     const links = await screen.findAllByRole('link')
 
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      '/settings/admin/status',
       '/settings/admin/talkgroups',
       '/settings/admin/systems',
       '/settings/admin/units',
@@ -3724,5 +3727,236 @@ describe('share links', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/no such share link/)
     expect(link.id).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The status page (#70, spec US 48)
+// ---------------------------------------------------------------------------
+
+describe('instance status', () => {
+  /** A perfectly well instance, spoiled one field at a time. */
+  function healthy(): InstanceStatus {
+    return {
+      version: '0.1.0',
+      startedAtMs: 1_700_000_000_000,
+      uptimeSeconds: 7_200,
+      listeners: 3,
+      ingest: { stored: 120, duplicate: 2 },
+      refused: { duplicate: 2 },
+      errors: {},
+      workers: [
+        { name: 'retention', depth: 0, done: 1, running: true },
+        { name: 'quiet', depth: 2, done: 118, running: true },
+      ],
+      gaugesAtMs: 1_700_000_007_000,
+      rateWindowMs: 3_600_000,
+      archive: {
+        calls: 120,
+        audioBytes: 50_000_000,
+        frozenAudioBytes: 0,
+        oldestCallAtMs: 1_699_000_000_000,
+      },
+      storage: { freeBytes: 40_000_000_000, totalBytes: 64_000_000_000 },
+      retention: { days: 30 },
+      systems: [
+        { ref: 11, label: 'Fulton', calls: 40, lastCallAtMs: 1_700_000_003_000 },
+      ],
+      sinks: [
+        {
+          sink: 'downstream',
+          total: 1,
+          disabled: 0,
+          failing: 0,
+          queued: 0,
+          lastSuccessMs: 1_700_000_002_000,
+        },
+        { sink: 'webhook', total: 0, disabled: 0, failing: 0, queued: 0 },
+      ],
+    }
+  }
+
+  /** Serve one status document, and count how many times it was asked for. */
+  function reporting(status: InstanceStatus, asked?: { count: number }) {
+    server.use(
+      http.get(`${ORIGIN}/api/admin/status`, () => {
+        if (asked) asked.count += 1
+        return HttpResponse.json(status)
+      }),
+    )
+  }
+
+  /** The headline the ticket asks for: one glance, one answer. */
+  it('says whether the instance is healthy in a word', async () => {
+    reporting(healthy())
+    signedIn(<StatusScreen />)
+
+    expect(await screen.findByText('Healthy')).toBeInTheDocument()
+    expect(screen.getByText(/up 2h 0m/)).toBeInTheDocument()
+  })
+
+  /** The verdict is *derived* from the concerns, so the word at the top and the
+   *  list under it cannot disagree. A stopped worker is the case a queue-depth
+   *  table cannot show: it settles everything on the way out and reads idle. */
+  it('turns on the worker that stopped, and says which', async () => {
+    const status = healthy()
+    status.workers[1].running = false
+    reporting(status)
+    signedIn(<StatusScreen />)
+
+    expect(await screen.findByText('Needs attention')).toBeInTheDocument()
+    expect(screen.getByText(/The quiet worker has stopped/)).toBeInTheDocument()
+  })
+
+  /** Spec US 48's card set, in one document: per-System rate and last call,
+   *  queue depths, storage and retention headroom, listener count, and the two
+   *  sinks' health. */
+  it('shows the whole card set', async () => {
+    reporting(healthy())
+    signedIn(<StatusScreen />)
+    await screen.findByText('Healthy')
+
+    expect(screen.getByText('Listeners').nextSibling).toHaveTextContent('3')
+    expect(screen.getByText('Fulton').nextSibling).toHaveTextContent('40')
+    expect(screen.getByText('quiet').nextSibling).toHaveTextContent('2 queued · 118 done')
+    expect(screen.getByText('Audio stored').nextSibling).toHaveTextContent('50.0 MB')
+    expect(screen.getByText('Volume').nextSibling).toHaveTextContent(/40.0 GB free/)
+    expect(screen.getByText('Retention').nextSibling).toHaveTextContent(
+      '30 days · no size cap',
+    )
+    expect(screen.getByText('downstreams').nextSibling).toHaveTextContent(
+      '1 · 0 queued · 0 failing',
+    )
+    expect(screen.getByText('webhooks').nextSibling).toHaveTextContent('none configured')
+    expect(screen.getByText('duplicate').nextSibling).toHaveTextContent('2')
+    // **The readings the server caches say how old they are, on every card
+    // built from them.** They refresh on the server's own window, not the
+    // page's, so a card that stayed silent would read as five seconds old when
+    // it can be fifteen.
+    expect(screen.getAllByText(/as of /)).toHaveLength(3)
+  })
+
+  /** `failing` and `queued` do not answer "is anything still getting through"
+   *  on a roster whose peers are merely quiet. This is the reading that does —
+   *  and "nothing yet" is a different fact from "nothing lately". */
+  it('says when each sink last delivered anything', async () => {
+    reporting(healthy())
+    signedIn(<StatusScreen />)
+    await screen.findByText('Healthy')
+
+    expect(screen.getByText('downstreams').nextSibling).toHaveTextContent(/last /)
+    expect(screen.getByText('webhooks').nextSibling).toHaveTextContent(
+      'none configured',
+    )
+  })
+
+  /** A peer configured this afternoon that has taken nothing yet is a different
+   *  fact from one that stopped, and reads differently — "no successes" would
+   *  otherwise be drawn as an epoch timestamp or as silence. */
+  it('says when a configured sink has never delivered anything', async () => {
+    const status = healthy()
+    status.sinks[0].lastSuccessMs = undefined
+    reporting(status)
+    signedIn(<StatusScreen />)
+    await screen.findByText('Healthy')
+
+    expect(screen.getByText('downstreams').nextSibling).toHaveTextContent(
+      'nothing delivered yet',
+    )
+  })
+
+  /** "Not on this machine" is a different fact from "no room", and reads
+   *  differently: an S3 instance has no volume to report and must not be drawn
+   *  as a full disk. */
+  it('says the volume is not this machine when the audio is in a bucket', async () => {
+    const status = healthy()
+    status.storage = {}
+    reporting(status)
+    signedIn(<StatusScreen />)
+    await screen.findByText('Healthy')
+
+    expect(screen.getByText('Volume').nextSibling).toHaveTextContent(
+      'not on this machine',
+    )
+  })
+
+  /** A fresh instance, an instance in trouble, and an instance keeping
+   *  everything: the branches that decide what each row *says* rather than what
+   *  it holds. A 500 counted under its stage is the one an Operator acts on —
+   *  and "nothing refused" has to read as nothing rather than as an empty box. */
+  it('reads an empty instance and a troubled one', async () => {
+    const status = healthy()
+    status.systems = []
+    status.refused = {}
+    status.errors = { dedup: 4 }
+    status.retention = { days: 0, maxSizeBytes: 10_000_000_000 }
+    status.archive.frozenAudioBytes = 2_000_000
+    status.archive.oldestCallAtMs = undefined
+    status.sinks[0].failing = 1
+    reporting(status)
+    signedIn(<StatusScreen />)
+
+    expect(await screen.findByText('Worth a look')).toBeInTheDocument()
+    expect(screen.getByText(/1 of 1 downstreams are failing/)).toBeInTheDocument()
+    expect(screen.getByText('No systems yet')).toBeInTheDocument()
+    expect(screen.getByText('Nothing refused')).toBeInTheDocument()
+    expect(screen.getByText('error at dedup').nextSibling).toHaveTextContent('4')
+    expect(screen.getByText('Retention').nextSibling).toHaveTextContent(
+      'kept for good · cap 10.0 GB',
+    )
+    expect(screen.getByText('Audio stored').nextSibling).toHaveTextContent(
+      '52.0 MB · 2.0 MB frozen',
+    )
+    expect(screen.queryByText('Oldest call')).not.toBeInTheDocument()
+  })
+
+  /** A System that has never keyed is a different fact from one that went quiet,
+   *  and the page must not render an epoch timestamp for it. */
+  it('says a system has never been heard from', async () => {
+    const status = healthy()
+    status.systems = [{ ref: 12, calls: 0 }]
+    reporting(status)
+    signedIn(<StatusScreen />)
+    await screen.findByText('Healthy')
+
+    expect(screen.getByText('System 12').nextSibling).toHaveTextContent(
+      '0 · never heard',
+    )
+  })
+
+  /** "Refreshes live", which is what the ticket asks for — and the only way to
+   *  see a worker stop is to be asking again. */
+  it('asks again while it is on screen', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const asked = { count: 0 }
+    reporting(healthy(), asked)
+    signedIn(<StatusScreen />)
+    await screen.findByText('Healthy')
+    expect(asked.count).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    await waitFor(() => expect(asked.count).toBe(2))
+    vi.useRealTimers()
+  })
+
+  /** The gate is the screen's, not the endpoint's alone: a browser with no
+   *  session is shown the password form rather than an empty report it would
+   *  read as an instance with nothing wrong. */
+  it('is behind the admin session', async () => {
+    const asked = { count: 0 }
+    reporting(healthy(), asked)
+    server.use(
+      http.get(
+        `${ORIGIN}/api/admin/session`,
+        () => new HttpResponse(null, { status: 401 }),
+      ),
+    )
+    renderWithProviders(<StatusScreen />)
+
+    expect(
+      await screen.findByRole('button', { name: 'Sign in' }),
+    ).toBeInTheDocument()
+    expect(asked.count).toBe(0)
   })
 })

@@ -79,6 +79,12 @@ audioadapter-buffers = "4.0.0"
 # licence to the audit; what it adds is the right to call it, which beats
 # hand-rolling a DFT over a 3 kHz band on the hardware least able to afford one.
 realfft = "3.5.0"
+# How much room is left where the audio lives (#70). One `statvfs` on Unix and
+# one `GetDiskFreeSpaceExW` on Windows, which is the whole crate — `df`'s own
+# syscall rather than a system-information library, so every release target
+# builds it with no C toolchain and nothing new to audit. `default-features =
+# false` drops the file-locking half, which nothing here uses.
+fs4 = { version = "1.1.0", default-features = false }
 
 # What ships (#23, ADR-0007). Nothing had ever been built in release mode
 # before this ticket, so every value here is a deliberate choice rather than an

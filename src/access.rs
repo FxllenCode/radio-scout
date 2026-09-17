@@ -665,12 +665,7 @@ pub async fn unlock(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<UnlockRequest>,
 ) -> Result<Unlocked, Failure> {
-    let client_addr = state.trusted_proxies.client_ip(
-        peer.ip(),
-        headers
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok()),
-    );
+    let client_addr = state.trusted_proxies.client_of(peer.ip(), &headers);
 
     // **Trimmed, here and at creation**: a code is something somebody reads out
     // and somebody else pastes, and the whitespace either side of it was never

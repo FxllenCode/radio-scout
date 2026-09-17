@@ -33,6 +33,7 @@ import type {
   FrozenEvent,
   FilterOptions,
   IssuedAccessCode,
+  InstanceStatus,
   IssuedApiKey,
   ListenerQuery,
   Listing,
@@ -294,6 +295,19 @@ export const api = createApi({
      */
     getListenerHistory: builder.query<Series, ListenerQuery>({
       query: (range) => ({ url: `api/admin/listeners?${searchParams(range)}` }),
+    }),
+
+    /**
+     * Is this Instance healthy (#70, spec US 48).
+     *
+     * Behind the admin session, for the listener chart's reason. **Untagged**,
+     * because nothing a browser does invalidates it and everything in it moves
+     * on its own: the screen refreshes it on a timer instead, which is what
+     * "refreshes live" means here. The expensive half is cached server-side, so
+     * polling costs the database nothing between its own readings.
+     */
+    getInstanceStatus: builder.query<InstanceStatus, void>({
+      query: () => ({ url: 'api/admin/status' }),
     }),
 
     // -- Curation (#49, spec US 45–46) ------------------------------------
@@ -833,6 +847,7 @@ export const {
   useGetApiKeysQuery,
   useGetCallQuery,
   useGetCatalogQuery,
+  useGetInstanceStatusQuery,
   useGetListenerHistoryQuery,
   useGetQuietSpansQuery,
   useSetStarMutation,

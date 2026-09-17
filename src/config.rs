@@ -66,6 +66,7 @@ use crate::export::ExportConfig;
 use crate::ingest::IngestConfig;
 use crate::listeners::ListenerConfig;
 use crate::logsink;
+use crate::metrics::MetricsConfig;
 use crate::mining::MiningConfig;
 use crate::observability::{self, LogConfig};
 use crate::quiet::QuietConfig;
@@ -417,6 +418,7 @@ pub struct Config {
     pub share: ShareConfig,
     pub export: ExportConfig,
     pub listeners: ListenerConfig,
+    pub metrics: MetricsConfig,
     pub log: LogConfig,
 }
 
@@ -1224,6 +1226,27 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "metrics.token",
+        var: "RADIO_SCOUT_METRICS_TOKEN",
+        expected: crate::metrics::EXPECTED_TOKEN,
+        example: "a-long-random-string",
+        set: |setting, config, value| {
+            // Refused here as well as in the file's own deserializer, through
+            // the same predicate and the same expectation string: an Operator
+            // who exported a blank variable is told the same thing as one who
+            // wrote a blank key.
+            //
+            // `invalid` echoes the value, which would be a credential in a
+            // message (ADR-0011 rule 2) — except that the *only* value this
+            // refuses is blank or whitespace, so there is nothing to echo. Any
+            // token that could protect anything is accepted here and never
+            // mentioned.
+            config.metrics.token =
+                Some(crate::metrics::checked_token(value).map_err(|_| setting.invalid(value))?);
+            Ok(())
+        },
+    },
+    Setting {
         key: "share.enabled",
         var: "RADIO_SCOUT_SHARE_ENABLED",
         expected: "true or false",
@@ -1594,6 +1617,11 @@ impl FromIterator<ProxyNet> for TrustedProxies {
     }
 }
 
+/// The header a reverse proxy names the original client in. Spelled once, here,
+/// because the type that decides whether to *believe* it is the one place that
+/// should have to know what it is called.
+const FORWARDED_FOR: &str = "x-forwarded-for";
+
 impl TrustedProxies {
     /// Whether `addr` is one of the proxies the operator named.
     pub fn trusts(&self, addr: IpAddr) -> bool {
@@ -1613,6 +1641,24 @@ impl TrustedProxies {
     ///
     /// Anything unusable falls back to the peer — the one address the network
     /// stack, not a header, established.
+    /// The address to attribute a request to, read straight off its headers.
+    ///
+    /// [`TrustedProxies::client_ip`]'s one caller shape, written once: every
+    /// surface that names an address — the request log, an admin login, an
+    /// unlock, a refused scrape — wants the TCP peer resolved against the same
+    /// header under the same rules, and four copies of "get the header, hand it
+    /// over" is four chances for one of them to spell the header differently or
+    /// to believe it unconditionally. The name is spelled here and nowhere else
+    /// for the same reason.
+    pub fn client_of(&self, peer: IpAddr, headers: &axum::http::HeaderMap) -> IpAddr {
+        self.client_ip(
+            peer,
+            headers
+                .get(FORWARDED_FOR)
+                .and_then(|value| value.to_str().ok()),
+        )
+    }
+
     pub fn client_ip(&self, peer: IpAddr, forwarded_for: Option<&str>) -> IpAddr {
         if !self.trusts(peer) {
             return peer;
@@ -2033,6 +2079,30 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # with the count, so the range gets narrowed rather than half-delivered. Raise it
 # if you routinely hand over whole shifts, lower it on a metered connection.
 # max_calls = 1000
+
+[metrics]
+# The Prometheus endpoint (#70), at GET /metrics. **The token is the switch**:
+# with no token there is no endpoint, and a scraper must present the one you set
+# as `Authorization: Bearer <token>`.
+#
+# There is deliberately no way to serve this openly. What it publishes is what
+# the Settings -> Admin -> Status page publishes — ingest rates, refusals,
+# storage, and how many people are listening — and that last one is yours rather
+# than the public's, however open your archive is.
+#
+# Pick something long and random (`openssl rand -hex 32`). It has no
+# command-line flag on purpose: `ps` is world-readable. RADIO_SCOUT_METRICS_TOKEN
+# is the other place it can live.
+#
+# token = "a-long-random-string"
+
+# The scrape config that reads it:
+#   scrape_configs:
+#     - job_name: radio-scout
+#       authorization:
+#         credentials: <the same token>
+#       static_configs:
+#         - targets: ['your-instance:3000']
 
 [log]
 # Filter directives: a bare level, or per-target. RUST_LOG overrides this for a

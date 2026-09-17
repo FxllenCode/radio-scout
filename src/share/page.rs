@@ -65,6 +65,7 @@ impl Rendered {
 
 impl IntoResponse for Rendered {
     fn into_response(self) -> Response {
+        let mut refused = None;
         let status = match self.gone {
             // **Recorded here, rendered here.** `Reason::into_response` would
             // answer a human looking at a web page with a recorder's
@@ -74,11 +75,17 @@ impl IntoResponse for Rendered {
             Some(gone) => {
                 let reason = gone.reason();
                 reason.record();
+                // The one refusal here that does not go through
+                // `Reason::respond`, so it marks the response itself — see
+                // [`crate::metrics::Refused`]. Without this, a dead link would
+                // be the one refusal in the process a status surface could not
+                // count.
+                refused = Some(reason.slug());
                 reason.status()
             }
             None => StatusCode::OK,
         };
-        (
+        let mut response = (
             status,
             [
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -92,7 +99,11 @@ impl IntoResponse for Rendered {
             ],
             self.html,
         )
-            .into_response()
+            .into_response();
+        if let Some(reason) = refused {
+            crate::metrics::Refused::mark(&mut response, reason);
+        }
+        response
     }
 }
 

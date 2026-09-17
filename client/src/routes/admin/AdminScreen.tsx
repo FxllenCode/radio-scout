@@ -12,6 +12,11 @@ import { Screen } from '@/components/layout/Screen'
  *  when a recorder arrives. */
 const SECTIONS = [
   {
+    to: '/settings/admin/status',
+    label: 'Status',
+    hint: 'is this instance healthy',
+  },
+  {
     to: '/settings/admin/talkgroups',
     label: 'Talkgroups',
     hint: 'labels, LEDs, groups, tags, blacklists',

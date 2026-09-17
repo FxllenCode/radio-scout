@@ -31,6 +31,7 @@ pub mod live;
 pub mod logsink;
 pub mod logview;
 pub mod merge;
+pub mod metrics;
 pub mod mining;
 pub mod observability;
 pub mod query;
@@ -137,6 +138,11 @@ pub struct AppState {
     /// a status handler (#70) can serve depths it could never reach through the
     /// `Instance` that owns the handles.
     pub workers: crate::worker::Workers,
+    /// What this Instance has been doing (#70, spec US 48–49) — the counters
+    /// behind the status page and the Prometheus text, and `[metrics]`' own
+    /// token, which is the switch that decides whether the second one is served
+    /// at all.
+    pub metrics: crate::metrics::Metrics,
 }
 
 impl AppState {
@@ -164,6 +170,7 @@ impl AppState {
             access: crate::access::Access::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
+            metrics: crate::metrics::Metrics::default(),
         }
     }
 
@@ -254,6 +261,14 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/admin/login", post(admin::login))
         .merge(admin_routes(state.admin.clone()))
         .route("/healthz", get(healthz))
+        // **The Prometheus surface** (#70, spec US 49), outside `/api` because
+        // it is not this app's API — it is the one URL a third party is
+        // configured with, and `/metrics` is what every Prometheus example in
+        // the world already says. Always routed, never conditionally: a route
+        // registered only when a token is set would let the SPA fallback answer
+        // `/metrics` with the app's own HTML and a `200`, which is worse than
+        // any refusal. Its gate is the token, checked in the handler.
+        .route(metrics::METRICS_PATH, get(metrics::expose))
         // **The share surface, outside `/api` on purpose** (#64, spec US 32): it
         // is a page a stranger opens, and a short URL is the thing being pasted
         // into a message. The token rides the *query string* rather than the
@@ -278,7 +293,10 @@ pub fn build_app(state: AppState) -> Router {
         // it, because the layer is added before `with_state` and needs nothing
         // else.
         .layer(axum::middleware::from_fn_with_state(
-            state.trusted_proxies.clone(),
+            http_log::Watching {
+                trusted_proxies: state.trusted_proxies.clone(),
+                metrics: state.metrics.clone(),
+            },
             http_log::log_requests,
         ))
         .with_state(state)
@@ -301,6 +319,10 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
         // a Listener's — how many people take an open archive up is the
         // Operator's business, and it is counts alone either way.
         .route("/api/admin/listeners", get(listeners::history))
+        // Is this Instance healthy (#70, spec US 48) — one document, refreshed
+        // live. Behind the session for `listeners::history`'s reason: how an
+        // Operator's Instance is doing is the Operator's own business.
+        .route("/api/admin/status", get(metrics::status))
         .route(
             "/api/admin/talkgroups/import",
             post(import::import_talkgroups),

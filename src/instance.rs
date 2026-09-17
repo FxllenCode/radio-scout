@@ -436,7 +436,7 @@ impl Instance {
         // is also where it belongs, being the oldest.
         let workers = Workers::default();
         if let Some(log) = &self.log {
-            workers.register(log.name(), log.meter());
+            workers.register(log.name(), log.meter(), log.alive());
         }
         let run = assemble(
             config.clone(),
@@ -607,6 +607,27 @@ async fn assemble(
     // the same request.
     state.access.rearm(&db).await;
     state.clock = parts.clock;
+    // What this Instance has been doing (#70). Wired here rather than
+    // constructed in `AppState::new` because two of the three things it needs
+    // are configuration: `[metrics]`' own token, which is the switch that
+    // decides whether `/metrics` is served at all, and the two facts a status
+    // page reports but this module does not own — where the audio lives (so the
+    // disk can be asked how much room is left) and what Retention is holding
+    // to. The start instant is the run's, so `restart` gives an honest uptime.
+    state.metrics = crate::metrics::Metrics::new(
+        config.metrics.clone(),
+        crate::metrics::Wiring {
+            audio_root: match config.storage() {
+                crate::StorageConfig::Filesystem { root } => Some(root),
+                crate::StorageConfig::S3(_) => None,
+            },
+            retention: crate::metrics::RetentionHealth {
+                days: config.retention.days,
+                max_size_bytes: config.retention.max_size_bytes,
+            },
+        },
+        parts.clock.now_ms(),
+    );
     // Enhancement (#20) runs off its own queue, behind ingest rather than in
     // it. With `[enhancement] mode = "off"` — what ships — this spawns nothing,
     // and the first thing it does when it is on is pick up whatever a previous
