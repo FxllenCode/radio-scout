@@ -33,6 +33,9 @@ namespace {
 // uploads with, and which of its talkgroups leave the box.
 struct Configured_System {
   std::string short_name;
+  // The Radio-Scout System Ref this recorder system files under, or 0 to let
+  // Radio-Scout match `short_name` against a System's label.
+  long system_ref = 0;
   std::string api_key;
   radio_scout::TalkgroupFilter filter;
 };
@@ -125,9 +128,24 @@ public:
         system.short_name = entry.value("shortName", std::string(""));
         // Per-system keys are optional here, unlike the rdio uploader: the
         // native endpoint files a Call under the System it resolves from
-        // `short_name`, so one instance-wide key is the normal case and a
-        // per-system one is the exception.
+        // `short_name` (or the `systemId` below), so one instance-wide key is
+        // the normal case and a per-system one is the exception.
         system.api_key = entry.value("apiKey", api_key);
+        // `systemId`, the rdio uploader's own key for this, so an entry moving
+        // across keeps it. Anything but a positive whole number is refused
+        // loudly and ignored, which falls back to matching on `shortName` —
+        // silently filing under the wrong System is worse than a log line.
+        if (entry.contains("systemId")) {
+          const json &id = entry.at("systemId");
+          if (id.is_number_integer() && id.get<long>() > 0) {
+            system.system_ref = id.get<long>();
+          } else {
+            BOOST_LOG_TRIVIAL(error)
+                << "\t[" << plugin_name << "]\t" << system.short_name
+                << ": \"systemId\" must be a positive whole number — ignoring it, so this "
+                   "system is matched on its shortName";
+          }
+        }
         system.filter.allow = read_globs(entry, "talkgroupAllow", system.short_name);
         system.filter.deny = read_globs(entry, "talkgroupDeny", system.short_name);
         systems.push_back(system);
@@ -158,6 +176,7 @@ public:
     radio_scout::Upload upload;
     upload.server = server;
     upload.api_key = system != nullptr ? system->api_key : api_key;
+    upload.system_ref = system != nullptr ? system->system_ref : 0;
     // Trunk Recorder's own call JSON, exactly as `create_call_json` built it a
     // moment ago (`call_concluder.cc`) — nothing here re-serialises it, so
     // there is no second definition of the payload to drift from the parser.

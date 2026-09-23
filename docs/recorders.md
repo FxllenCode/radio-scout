@@ -103,6 +103,21 @@ That is the whole of it. Trunk Recorder appends the call's `.wav`, `.json` and `
 itself; the script picks the `.m4a` when `compressWav` made one (much smaller over a home
 uplink) and the `.wav` when it didn't.
 
+**Several sites of one network?** Trunk Recorder gives each `system` its own `shortName`, and
+by default Radio-Scout files a Call under the System whose label matches it — so two sites of
+one WACN/system ID arrive as two Systems. Say which Radio-Scout System they all belong to with
+`--system`, on each system's own `uploadScript` line (Trunk Recorder runs one per system):
+
+```jsonc
+"uploadScript": "/opt/radio-scout-upload.sh --env-file /etc/radio-scout.env --system 411"
+```
+
+`411` is the **Ref** shown beside the System in Settings → Admin (the number an API key
+scoped to a System, and every rdio-scanner upload, calls `system`). The System is created under
+that Ref if it does not exist yet, named after whichever site reaches it first. A `--system`
+that is not a positive whole number stops the script at once, because a typo there would
+otherwise quietly file a day's Calls somewhere you did not mean.
+
 If you would rather keep the key in your service manager than in a file, drop `--env-file` and
 set the two variables in the environment Trunk Recorder runs with —
 `Environment=RADIO_SCOUT_API_KEY=…` in a systemd unit, or `-e` on a `docker run`. The script
@@ -169,11 +184,16 @@ Then the `plugins` entry in `config.json`:
     // Optional. Default 60 — how long one upload may take before it is
     // abandoned and left to the retry.
     "timeoutSecs": 60,
-    // Optional, and only needed for per-system keys or filters. A system with
-    // no entry here uploads with the key above and sends everything.
+    // Optional, and only needed for per-system keys, filters or a System Ref.
+    // A system with no entry here uploads with the key above, sends everything,
+    // and is filed under the System whose label matches its shortName.
     "systems": [
       {
         "shortName": "<must match a system in your main config>",
+        // Optional. File this system's Calls under Radio-Scout System 411 rather
+        // than matching shortName against a label — give every site of one
+        // network the same number.
+        "systemId": 411,
         "talkgroupAllow": ["54241", "5424*"],
         "talkgroupDeny": ["54999"]
       }
@@ -184,8 +204,11 @@ Then the `plugins` entry in `config.json`:
 
 - **`server` is a bare base URL**, same as the rdio uploader's — the plugin appends
   `/api/trunk-recorder-call-upload` itself.
-- **There is no `systemId`.** The native endpoint files a Call under the System it resolves
-  from the recorder's own `shortName`, creating it if it has never been seen.
+- **`systemId` is optional here.** Without it the native endpoint files a Call under the
+  System whose label matches the recorder's own `shortName`, creating it if it has never been
+  seen. With it, the Call goes under that Ref whatever the site is called — which is what you
+  want when several sites share one network, and the same setting as `--system` on the
+  `uploadScript`. It has to be a positive whole number; anything else is logged and ignored.
 - **`talkgroupAllow` / `talkgroupDeny` take glob patterns** — `*` for any run of characters,
   `?` for exactly one, and every other character means itself, so `5.155` matches a talkgroup
   with a dot in it and nothing else. A non-empty allow list is exhaustive; deny then removes

@@ -370,6 +370,22 @@ async fn a_refused_key_is_loud_and_still_exits_zero() {
     &[],
     "cannot read --env-file"
 )]
+#[case::system_with_no_value(&["--system"], &[("RADIO_SCOUT_API_KEY", "k")], "--system needs")]
+#[case::system_that_is_not_a_number(
+    &["--server", "http://127.0.0.1:1", "--system", "butco"],
+    &[("RADIO_SCOUT_API_KEY", "k")],
+    "--system needs"
+)]
+#[case::system_zero(
+    &["--server", "http://127.0.0.1:1", "--system", "0"],
+    &[("RADIO_SCOUT_API_KEY", "k")],
+    "--system needs"
+)]
+#[case::system_negative(
+    &["--server", "http://127.0.0.1:1", "--system", "-4"],
+    &[("RADIO_SCOUT_API_KEY", "k")],
+    "--system needs"
+)]
 #[tokio::test]
 async fn a_broken_install_exits_non_zero_so_trunk_recorder_says_so(
     #[case] args: &[&str],
@@ -389,6 +405,47 @@ async fn a_broken_install_exits_non_zero_so_trunk_recorder_says_so(
     );
     let said = stderr_of(&output);
     assert!(said.contains(expected), "expected {expected:?} in {said:?}");
+}
+
+/// Two sites of one network have two `shortName`s and one identity, and
+/// `--system` is how the operator says so — Trunk Recorder runs an
+/// `uploadScript` per system, so the flag lands on exactly the sites that share
+/// a Ref. Without it Radio-Scout would match each `shortName` against a System's
+/// label and mint one System per site.
+#[tokio::test]
+async fn system_files_every_site_of_a_network_under_one_ref() {
+    if !curl_available() {
+        return skip("curl is not installed");
+    }
+    let app = TestApp::with_key("tr-key").await;
+
+    for short_name in ["butco_north", "butco_south"] {
+        let files = CallFiles::write(short_name);
+        let output = run_hook(
+            &["--server", &app.url(""), "--system", "411"],
+            &[("RADIO_SCOUT_API_KEY", "tr-key")],
+            &files,
+        )
+        .await;
+        assert!(output.status.success(), "{}", stderr_of(&output));
+        assert_eq!(stderr_of(&output), "");
+    }
+
+    // Both sites heard the same transmission (the fixture is one talkgroup at
+    // one instant), and once they share a System the dedup window sees what it
+    // is for: one Call. Filed by label they would be two Systems and two rows,
+    // and a Listener would hear it twice.
+    let calls = app.calls().await;
+    assert_eq!(
+        calls.len(),
+        1,
+        "one transmission heard from two sites is one Call"
+    );
+    let systems = app
+        .count::<radio_scout::db::entities::system::Entity>()
+        .await;
+    assert_eq!(systems, 1, "one Ref, one System");
+    assert_eq!(app.system_of(&calls[0]).await.r#ref, 411);
 }
 
 /// The metadata is the one file this script cannot do without — no `.json`, no
