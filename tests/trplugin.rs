@@ -618,6 +618,22 @@ async fn the_talkgroup_filter_decides_what_leaves_the_recorder(
     );
 }
 
+/// The plugin's counterpart of the uploadScript's `--system`: an entry's
+/// `systemId` reaches the core as one flag, and the Call is filed under that Ref
+/// whatever the recorder called the site.
+#[tokio::test]
+async fn a_named_system_ref_files_the_call_under_it() {
+    needs_toolchain!();
+    let app = TestApp::with_key("k").await;
+    let files = CallFiles::write(&tr_meta("butco_north"));
+
+    let output = run_upload(&app, "k", &files, &["--system", "411"]).await;
+
+    assert!(output.status.success(), "{}", stdout_of(&output));
+    let call = app.the_call().await;
+    assert_eq!(app.system_of(&call).await.r#ref, 411);
+}
+
 /// A Call on an encrypted talkgroup, which Trunk Recorder records as the
 /// vocoder's noise when `monitorEncrypted` is on.
 ///
@@ -705,7 +721,7 @@ fn curl_available() -> bool {
 /// Run `radio-scout-upload.sh` exactly as Trunk Recorder runs it — the three
 /// paths appended, and nothing in the environment but what `sh` and `curl` need
 /// plus the two settings an operator configures.
-async fn run_upload_script(app: &TestApp, key: &str, files: &CallFiles) -> Output {
+async fn run_upload_script(app: &TestApp, key: &str, files: &CallFiles, extra: &[&str]) -> Output {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("radio-scout-upload.sh");
     let mut command = Command::new(script);
     command.env_clear();
@@ -715,6 +731,7 @@ async fn run_upload_script(app: &TestApp, key: &str, files: &CallFiles) -> Outpu
     command
         .env("RADIO_SCOUT_URL", app.url(""))
         .env("RADIO_SCOUT_API_KEY", key)
+        .args(extra)
         .arg(&files.wav)
         .arg(&files.json)
         .arg(&files.m4a);
@@ -798,7 +815,7 @@ async fn the_upload_script_and_the_plugin_land_the_identical_call() {
     let files = CallFiles::write(&tr_meta("fulton"));
 
     let by_script = TestApp::with_key("k").await;
-    let script = run_upload_script(&by_script, "k", &files).await;
+    let script = run_upload_script(&by_script, "k", &files, &[]).await;
     assert!(
         script.status.success(),
         "the script: {}",
@@ -818,5 +835,41 @@ async fn the_upload_script_and_the_plugin_land_the_identical_call() {
         as_ingested(&by_plugin).await,
         "the uploadScript and the plugin disagree about the same Call — whichever \
          of the two learned something the other did not, teach it to both"
+    );
+}
+
+/// The same parity, for a recorder that names the System Ref itself. `--system`
+/// on the script and `systemId` on the plugin are two spellings of one setting,
+/// and the Call each files has to be the same one.
+#[tokio::test]
+async fn the_upload_script_and_the_plugin_agree_on_a_named_system_ref() {
+    needs_toolchain!();
+    if !curl_available() {
+        return skip("curl is not installed, so the uploadScript cannot run");
+    }
+    let files = CallFiles::write(&tr_meta("fulton"));
+
+    let by_script = TestApp::with_key("k").await;
+    let script = run_upload_script(&by_script, "k", &files, &["--system", "411"]).await;
+    assert!(
+        script.status.success(),
+        "the script: {}",
+        String::from_utf8_lossy(&script.stderr)
+    );
+
+    let by_plugin = TestApp::with_key("k").await;
+    let plugin = run_upload(&by_plugin, "k", &files, &["--system", "411"]).await;
+    assert!(
+        plugin.status.success(),
+        "the plugin: {}",
+        stdout_of(&plugin)
+    );
+
+    let script_call = by_script.the_call().await;
+    assert_eq!(by_script.system_of(&script_call).await.r#ref, 411);
+    assert_eq!(
+        as_ingested(&by_script).await,
+        as_ingested(&by_plugin).await,
+        "a named Ref is one more thing the two recorder-side paths must agree on"
     );
 }

@@ -46,6 +46,15 @@ struct Upload {
   // configures the same bare URL the rdio-scanner uploader takes.
   std::string server;
   std::string api_key;
+  // The Radio-Scout System Ref to file this Call under, or 0 to let Radio-Scout
+  // match the `short_name` in the metadata against a System's label.
+  //
+  // Sent as its own `system` part beside the metadata rather than written into
+  // it: the JSON is Trunk Recorder's, forwarded verbatim precisely so there is
+  // no second definition of it to drift, and a Ref is the operator's word about
+  // where it goes — not something the recorder knows. It exists because two
+  // sites of one network carry two `shortName`s and one identity.
+  long system_ref = 0;
   // Trunk Recorder's own call JSON, verbatim — `Call_Data_t::call_json`, the
   // object `create_call_json` just wrote beside the audio. Sending it
   // unmodified is why there is no field mapping here to drift from the parser.
