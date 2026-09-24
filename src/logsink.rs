@@ -30,13 +30,24 @@
 //! logging starts before the database does — the migration lines an operator
 //! most wants to read are written before anything could have stored them.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! # The rules that bind it
 //!
-//! **A second sink stores what was said** (#30): `src/logsink.rs` is a `tracing` Layer that queues events into the `logs` table, and Settings → Logs (`src/logview.rs`, `GET /api/admin/logs`, behind #19's session) is where an operator with no shell reads them back. Four rules bind it:
-//! - **Never in the path of the line that produced it.** `try_send` on a bounded queue, drained by a background task — a database that is slow, broken or not open yet cannot slow, fail, or be noticed by the request. A full queue drops and reports the count once per drained batch, never per loss; a failing write says so once and again on recovery; nothing propagates.
-//! - **`[log] database_level` is `off`/`error`/`warn`/`info` and refuses `debug`** at boot, naming rule 5 — DEBUG is where a listener's address rides, so the floor makes a stored address unreachable by construction rather than by a redaction pass that can be wrong (it also keeps a Pi from writing a row per range request, rule 8).
-//! - **Independent of the console.** The `EnvFilter` is attached to the fmt *layer*, not the subscriber, so `--log warn` never empties the Logs view and `--log debug` never fills it.
-//! - **`radio_scout::logsink` and `sqlx::query` are never stored** — both feed back (sqlx logs a line per statement, including the sink's own insert). Stored events are pruned by the retention sweeper on `[retention] log_days`, their own window.
+//! Stored events are read back in Settings → Logs (`src/logview.rs`, `GET
+//! /api/admin/logs`, behind #19's admin session), which is where an operator
+//! with no shell goes.
+//!
+//! - **A full queue drops**, and reports the count once per drained batch,
+//!   never per loss; a failing write says so once and again on recovery;
+//!   nothing propagates.
+//! - **`[log] database_level` is `off`/`error`/`warn`/`info`**, and `debug` or
+//!   `trace` refuses to boot, naming rule 5.
+//! - **It is independent of the console.** The `EnvFilter` is attached to the
+//!   fmt *layer*, not the subscriber, so `--log warn` never empties the Logs
+//!   view and `--log debug` never fills it.
+//! - **`radio_scout::logsink` and `sqlx::query` are never stored** — both feed
+//!   back (sqlx logs a line per statement, including the sink's own insert).
+//! - Stored events are pruned by the retention sweeper on `[retention]
+//!   log_days`, their own window.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

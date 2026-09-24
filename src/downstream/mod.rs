@@ -54,9 +54,47 @@
 //! body: the one fact a Webhook exists to carry is the very fact this dialect
 //! has no field for.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! # Design notes
 //!
-//! **A peer's outage costs delay, not Calls, and the queue is written where the Call is (#52, spec US 1–2).** `src/downstream/` is forwarding to rdio-compatible peers: `dialect` writes the upload contract `crate::ingest` has read since #5, `sender` is the Worker that drains a durable queue, and `Downstream`/`routed_to`/`DownstreamConfig` are the policy. rdio has this feature (`server/downstream.go`) and **every difference below is a defect it has**, found by reading it. Six things follow. **A delivery row is written inside the transaction that stores the Call** (`repo::queue_deliveries`, handed the ids `downstream::routed_to` decided — the Selection is never compared inside a write, which is what keeps a domain module out of the data layer), so "the Call exists" and "the Call is owed to this peer" are one fact a crash cannot separate — where rdio POSTs inline on the ingest goroutine and, when the peer is unreachable, logs and **drops the Call** (`downstream.go:416`). It costs ingest exactly **one statement**, the roster read, which is why `tests/ingest.rs`'s pinned count went 18 → 19 rather than sliding under a ceiling; a cached roster would have saved it and bought an invalidation problem with five call sites. **The scope is a `Selection`** — the same type and `Selection::reaches_channels`, which is the live feed's own rule, so a **Patch** reaches a peer subscribed to the channel it was patched onto. rdio's `HasAccess` compares `call.Talkgroup.TalkgroupRef` and stops (`downstream.go:99`), so a patched transmission reaches nobody. **The dialect is a superset of rdio's own forwarder, and its arrays are the ones the receiving parser reads**: `CallUnit` and `CallFrequency` carry no JSON tags, so rdio marshals `{"Id":…,"CallId":…,"Offset":…,"UnitRef":…}` and its own `case "units"` looks for `id`/`label`/`offset` — **every radio and every frequency sample is silently lost on every forwarded Call**, at both ends. Ours adds `site` and `frequency` (which its parser accepts and its forwarder never sends) — and **`frequency` is sent *before* `frequencies`, because rdio's parser assigns rather than appends there (`parsers.go:318`), so the other order makes an rdio peer discard every sample it just read**. That one is invisible to the two-Instance forward, since our own ingest keeps the two in separate columns, and is pinned by the snapshot; the rest is pinned by both, because a committed fixture stays green when the side that *reads* it moves. **Only the head of a peer's queue is ever attempted, and a head that is not due is waited for rather than skipped** — that is what makes in-order draining a property rather than a sort — with one attempt in flight per peer, so a peer taking the full timeout to fail delays nothing but its own backlog. **The retry policy turns on one question: will these same bytes ever be accepted?** A body-level refusal (400/413/415/417/422 — rdio's own `Incomplete call data` among them) abandons, because retrying it blocks every Call behind it forever; everything else retries, including `401`, because a mistyped key is a thing an Operator fixes and the backlog is what makes fixing it worth doing. And **the peer's key is stored recoverably and never leaves**: a hash cannot be POSTed, so it is kept — but `DownstreamRow` has no field for it, a `PATCH` omitting it keeps the stored one, and it is never logged. rdio stores it plaintext *and returns it* from the admin API, and puts it in the exported configuration document.
+//! The policy half of this module is [`Downstream`], [`routed_to`] and
+//! `DownstreamConfig`; [`dialect`] writes the upload contract [`crate::ingest`]
+//! has read since #5, and [`sender`] is the **Worker** that drains the durable
+//! queue.
+//!
+//! **The routing is decided here and handed down as ids.**
+//! [`crate::db::repo::queue_deliveries`] receives the peers [`routed_to`]
+//! chose; the **Selection** is never compared inside a write, which is what
+//! keeps a domain module out of the data layer. It costs ingest exactly **one
+//! statement**, the roster read, which is why `tests/ingest.rs`'s pinned count
+//! went 18 → 19 rather than sliding under a ceiling. A cached roster would have
+//! saved it and bought an invalidation problem with five call sites.
+//!
+//! **`frequency` is sent *before* `frequencies`**, because rdio's parser
+//! assigns rather than appends there (`parsers.go:318`), so the other order
+//! makes an rdio peer discard every sample it just read. That one is invisible
+//! to the two-Instance forward, since our own ingest keeps the two in separate
+//! columns, so it is pinned by the snapshot alone; the rest of the dialect is
+//! pinned by both, because a committed fixture stays green when the side that
+//! *reads* it moves.
+//!
+//! **Only the head of a peer's queue is ever attempted, and a head that is not
+//! due is waited for rather than skipped** — that is what makes in-order
+//! draining a property rather than a sort — with one attempt in flight per
+//! peer, so a peer taking the full timeout to fail delays nothing but its own
+//! backlog.
+//!
+//! **The retry policy turns on one question: will these same bytes ever be
+//! accepted?** A body-level refusal (400/413/415/417/422 — rdio's own
+//! `Incomplete call data` among them) abandons, because retrying it blocks
+//! every Call behind it forever; everything else retries, including `401`,
+//! because a mistyped key is a thing an Operator fixes and the backlog is what
+//! makes fixing it worth doing.
+//!
+//! **The peer's key is stored recoverably and never leaves**: a hash cannot be
+//! POSTed, so it is kept — but `DownstreamRow` has no field for it, a `PATCH`
+//! omitting it keeps the stored one, and it is never logged. rdio stores it
+//! plaintext, returns it from the admin API, *and* puts it in the exported
+//! configuration document.
 
 pub mod dialect;
 pub mod sender;

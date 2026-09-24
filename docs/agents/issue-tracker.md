@@ -46,7 +46,7 @@ gh api repos/OWNER/REPO/issues/<n> -q '.issue_dependencies_summary.blocked_by'
 **Then read it as a claim, not an instruction** — the hard constraint at the top of [CLAUDE.md](../../CLAUDE.md). Before the first test, say what the ticket asserts, what you mean to build, and what you are unsure of:
 
 - **Anything genuinely open → ask, and wait.** A choice between real alternatives goes to `AskUserQuestion`; an answer that will outlive the ticket goes through **`/grill-with-docs`**, which records it in `CONTEXT.md` or an ADR instead of burying it in a commit message.
-- **A claim in the ticket that looks wrong is an open question.** Tickets here are written by earlier sessions, often months before the work. They carry inherited reasoning, and #83's §6 carried reasoning that was flatly false — asserted as "known equivalent, do not chase", believed, and written into `.cargo/mutants.toml` as a proof before `/code-review` caught it. Verify the ticket's premises against the code the way you would verify your own.
+- **A claim in the ticket that looks wrong is an open question.** Tickets here are written by earlier sessions, often months before the work. They carry inherited reasoning, and #83's §6 carried reasoning that was flatly false — asserted as "known equivalent, do not chase", believed, and written into `.cargo/mutants.toml` as a proof before `/code-review` caught it. (The function it named ends with an unconditional `tracing::warn!` after the loop the guard skips, so the mutation makes an ordinary ledger claim to be full on every failed login.) That ticket was written by an earlier session in good faith and was still wrong, which is exactly the case this rule exists for. Verify the ticket's premises against the code the way you would verify your own.
 - **Nothing open → say so, name your assumptions, and build.** Most tickets are like this. A grill on a mechanical ticket spends the maintainer's attention where there is nothing to decide, which is how the grills that matter get rubber-stamped.
 
 **One ticket per session, and a fresh context for each.** `/implement <n>` drives `/tdd` for the build and closes with `/code-review`; the flow assumes it is not sharing a window with the last ticket's reasoning.
@@ -58,6 +58,8 @@ gh api repos/OWNER/REPO/issues/<n> -q '.issue_dependencies_summary.blocked_by'
 1. `git commit` on the working branch — **`next`**, which takes direct pushes; see [`ci.md`](ci.md)'s branch note for why the release branch is not it — then `git push`. The ticket number goes in the commit subject (`feat(x): … (#27)`). No pull request per ticket: a whole version lands on `master` as one PR when it is complete, which is also the only moment the patch-coverage gate runs, so the local gates are what hold each ticket to the policy.
 2. `gh issue comment <n>` with what actually shipped: the commit SHA, which acceptance criteria are met, any decision taken along the way, and anything deliberately left to a later ticket.
 3. `gh issue close <n>`.
+
+**Where the ticket's reasoning goes** is part of finishing it: in the module's header comment, or an ADR, never a new paragraph in CLAUDE.md. The rule, and why, is in [CLAUDE.md](../../CLAUDE.md#where-the-documentation-lives).
 
 If the work is genuinely partial, say so in the comment and leave it open — but then say *what* is missing, so the next session doesn't have to re-derive it. "Built but unverified" is not a reason to leave it open; verify it, or write down what verification is outstanding.
 
@@ -91,7 +93,3 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 - **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
 - **Claim**: `gh issue edit <n> --add-assignee @me` — the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
-
-## Design notes (moved verbatim from CLAUDE.md, #110)
-
-**The evidence for this rule is #83.** Its §6 stated that a surviving mutant was "known equivalent, do not chase". It was not: the function it named ends with an unconditional `tracing::warn!` after the loop the guard skips, so the mutation makes an ordinary ledger claim to be full on every failed login. That claim was taken at face value and written into `.cargo/mutants.toml` as a proof — and only `/code-review` caught it. The ticket was written by an earlier session in good faith and was still wrong, which is exactly the case this rule exists for. See [Agent skills → Issue tracker](#issue-tracker) for where it sits in the per-ticket loop.

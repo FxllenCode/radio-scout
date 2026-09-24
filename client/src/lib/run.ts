@@ -1,13 +1,34 @@
 /**
  * The **Run** — the ordered set of archived Calls a Listener is walking (#89).
  *
- * Pure: no React, no store, no network. Everything here is a value in and a
- * value out, which is what makes the transitions a table rather than a route
- * rendered and fed synthetic media events.
+ * Pure: no React, no store, no network. [`advance`] is the whole of it —
+ * started, advanced, back, a page in hand, the search changed, stopped — and it
+ * awaits nothing, renders nothing and reads no store, so every transition is a
+ * value `run.test.ts` constructs and asserts on rather than a route rendered
+ * and fed synthetic `ended` events. The screen is an adapter. Three
+ * consequences worth knowing:
  *
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ * - **Identity is [`sameSearch`], structural** (below).
+ * - **A Run carries its own window** ([`Run.from`]) separate from the window on
+ *   screen (`SearchScreen`'s `windowOffset`), so paging by hand moves one and
+ *   not the other; that separation is what lets the page-ahead survive
+ *   browsing, and it means the visible list no longer follows a Run across a
+ *   boundary.
+ * - **One answer covers both page mechanisms**: `RunView.wanted` names the page
+ *   that must be on hand, whether #32 is warming the boundary or US 25's
+ *   roll-on is waiting at it — the screen subscribes to it and hands it back,
+ *   and the Run refuses any page whose *request* is not the one it named (both
+ *   halves: right offset, right search).
  *
- * **The archive Run is a pure state machine, and the screen is an adapter (#89).** `lib/run.ts`'s `advance(run, event) -> Run | null` is the whole of it — started, advanced, back, a page in hand, the search changed, stopped — and it awaits nothing, renders nothing and reads no store, so every transition is a value `run.test.ts` constructs and asserts on rather than a route rendered and fed synthetic `ended` events. Three consequences worth knowing. **Identity is `sameSearch`, structural**, reusing `searchParams` (sorted keys, empties dropped) — what it replaced was a `JSON.stringify` whose own comment admitted it failed silently, which #61 was about to break two ways. **A Run carries its own window** (`Run.from`) separate from the window on screen (`SearchScreen`'s `windowOffset`), so paging by hand moves one and not the other; that separation is what lets the page-ahead survive browsing, and it means the visible list no longer follows a Run across a boundary. And **one answer covers both page mechanisms**: `RunView.wanted` names the page that must be on hand, whether #32 is warming the boundary or US 25's roll-on is waiting at it — the screen subscribes to it and hands it back, and the Run refuses any page whose *request* is not the one it named (both halves: right offset, right search). The handoff is deliberately *not* a listener middleware on `matchFulfilled` — a cached page emits no fulfilled action, which is precisely the case the page-ahead exists to create — and it reads **`currentData`, never `data`**: RTK Query keeps the previous argument's answer in `data` while the next is in flight, so a Run re-armed onto a new search was handed the page-ahead of the search the Listener had just left and went on playing Calls from it. That is a real bug `/code-review` caught here, and `tests/…/SearchScreen.test.tsx`'s "never carries a Run on with a page belonging to the search that ended" fails if either half is undone.
+ * The handoff is deliberately *not* a listener middleware on `matchFulfilled` —
+ * a cached page emits no fulfilled action, which is precisely the case the
+ * page-ahead exists to create — and the screen reads **`currentData`, never
+ * `data`**: RTK Query keeps the previous argument's answer in `data` while the
+ * next is in flight, so a Run re-armed onto a new search was handed the
+ * page-ahead of the search the Listener had just left and went on playing Calls
+ * from it. That is a real bug `/code-review` caught, and
+ * `SearchScreen.test.tsx`'s "never carries a Run on with a page belonging to
+ * the search that ended" fails if either half is undone.
  */
 import type { Call, SearchPage, SearchQuery } from '@/types'
 

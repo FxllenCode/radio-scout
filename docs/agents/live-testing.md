@@ -47,6 +47,15 @@ first run generates one and **writes it into `.env`** — it is never printed or
 logged (ADR-0011 rule 2), so read it back with `cat .env` and point the feeder
 or the recorder at it.
 
+The details of that write matter when it goes wrong. A real environment
+variable beats the file. The file is created `0600` if it isn't there, and
+every other setting in it is left untouched. With no `.env` anywhere, the key
+lands in `<base_dir>/.env` instead of the working directory, which under
+systemd or Docker is often read-only. If the write fails, no key is registered
+at all, so a retry actually retries. The key lives in `.env` rather than in
+`radio-scout.toml` because first run *writes* it; every other knob is the
+environment layer of the configuration and has a TOML key too.
+
 **The admin surface is gated** (#19, ADR-0008). `RADIO_SCOUT_ADMIN_PASSWORD`
 lives in the same `.env` for the same reason — first run *writes* it — and with
 none set, a wiped `./radio-scout-live-test` generates a fresh one and puts it
@@ -117,6 +126,9 @@ The things no jsdom test can answer:
 iOS background audio, lock-screen controls and Add-to-Home-Screen remain a
 **real-device manual gate** (ADR-0005). A desktop Chrome pass is not evidence
 about them.
+
+**A live test supplements the suites, never replaces them.** Fix what it finds
+test-first.
 
 ## Pointing Trunk Recorder at it
 
@@ -191,26 +203,3 @@ body Trunk Recorder got is one of our rdio-compatible strings:
 | Audio never plays, no error | a browser autoplay refusal — the app records it as paused, so look for the Play button |
 | TR logs `Upload Error (HTTP 401)` | wrong `apiKey` for that entry |
 | TR logs nothing and nothing arrives | wrong `server` host/port, or the Mac's firewall — curl the URL from the Pi |
-
-## Design notes (moved verbatim from CLAUDE.md, #110)
-
-**Two instances, never mixed:** `./radio-scout-live-test` is hermetic and **wiped at the start of every scripted run** (empty archive, empty queue, fresh key — so what a test observes is a fact, not leftover history); `./radio-scout-data` is the durable one a real recorder uploads to. Both gitignored.
-
-```bash
-cp .env.example .env                           # once: set RADIO_SCOUT_API_KEY to anything random
-cd client && npm run build && cd ..            # rust-embed reads client/dist AT COMPILE TIME
-rm -rf ./radio-scout-live-test
-RADIO_SCOUT_BASE_DIR=./radio-scout-live-test cargo run    # registers the key from .env
-cargo run --example feed -- --interval 4s                 # synthetic Calls, real WAV tones
-# browse http://localhost:3000  (phone: http://<MAC-LAN-IP>:3000)
-```
-
-**`.env` — the environment layer, and where the ingest key is *seeded*.** `RADIO_SCOUT_API_KEY` **seeds an empty key roster** — a first run, or a wiped database — and then stands aside (#49): keys are curated in Settings → Admin, so one revoked there does not return on the next boot. A key already in the roster is simply left alone, so a recorder's configured secret still survives restarts, and the feeder reads the same file — nothing gets copy-pasted. A real environment variable beats the file; with the key unset, first run **generates one and writes it into `.env`** (creating the file `0600` if it isn't there, and leaving every other setting in it untouched), then logs the path — never the key (ADR-0011 rule 2). So the key is `cat`-able after the scrollback is gone, and the next boot pins the same one. With no `.env` anywhere, it lands in `<base_dir>/.env` instead of the working directory, which under systemd/Docker is often read-only. If that write fails, no key is registered at all, so a retry actually retries. `.env` is gitignored, `.env.example` is the committed template, and a **disabled** key is never revived by re-registering it (ADR-0008). The key lives here rather than in `radio-scout.toml` because first run *writes* it; every other knob is the environment layer of [Configuration](#configuration) and has a TOML key too.
-
-`examples/feed.rs` (key from `.env`) posts rdio-format multipart with **real audio** — a mono 16-bit WAV pitched by Talkgroup, so a wrong-Call bug is audible before it's visible. `--burst N` fills the listening queue, `--patches A:B` exercises patch fanout, `--seconds 8` gives the waveform something to walk.
-
-**Browser:** live tests hit the **embedded build on `:3000`** (one origin, exactly what ships and what a phone hits), not the Vite dev server. Driving it needs the Claude browser extension installed, signed into the same account, and granted permission for `localhost:3000`. Never trigger an `alert`/`confirm` — a dialog freezes the extension until a human clears it — and read the console before calling anything a pass.
-
-**Trunk Recorder:** Radio-Scout runs on the Mac; the Pi's TR gets a **second** `rdioscanner_uploader` entry beside the existing rdio-scanner one, so the real feed is untouched (verified in TR source: `plugin_manager.cc:41` loads every `plugins` entry, and each keeps its own config). `server` is a bare base URL — the plugin appends `/api/call-upload` itself, so it lands on the generic rdio endpoint (#5), not the TR-native one (#6). Config snippet, `talkgroupAllow` globs, and how to read TR's upload-error logs: see the doc.
-
-**A live test supplements the suites, never replaces them** — fix what it finds test-first. And a desktop Chrome pass says nothing about iOS background audio, lock-screen controls, or Add-to-Home-Screen: those stay a real-device manual gate (ADR-0005).

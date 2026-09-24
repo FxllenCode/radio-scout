@@ -8,6 +8,9 @@
 //! thing it claims to describe, which is the argument #50 makes about a
 //! preview.
 //!
+//! `GET /api/admin/status` answers the JSON; `/metrics` the exposition. The two
+//! would otherwise agree right up until one of them moved.
+//!
 //! # Two kinds of number, and only one of them costs anything
 //!
 //! What the **process** knows — how long it has been up, what it has admitted,
@@ -25,6 +28,12 @@
 //! `activityWindowMs` rule, which exists so a client cannot come to describe a
 //! window that has moved.
 //!
+//! [`GAUGE_TTL`] is fifteen seconds — Prometheus' own default scrape interval —
+//! so a status page held open beside a Grafana scraping every second costs the
+//! database the same as neither. `tests/metrics.rs` asserts that as a
+//! statement-count **difference** between the first ask and the second rather
+//! than a pinned number.
+//!
 //! # Counted where it is answered
 //!
 //! A refusal is counted in the **request middleware**, from a [`Refused`] the
@@ -34,6 +43,12 @@
 //! [`crate::failure::Reason::respond`] is the one rendering of a refusal,
 //! [`crate::share::page::Rendered`] is the one HTML rendering of one, and
 //! [`crate::ingest::Recorded`] is the one rendering of an **Admission**.
+//!
+//! So a route added later is counted by construction — `failure::redact`'s reason
+//! for living in the middleware too. A process-global registry was the obvious
+//! alternative and is what every Rust metrics crate does; it is wrong here
+//! because it would not isolate between tests sharing a process under `cargo
+//! test`.
 //!
 //! The exception is a refusal that answers *nobody*: a live-feed connection over
 //! its **Access code**'s limit has already been upgraded and has no status line
@@ -53,6 +68,13 @@
 //! Worker's own name — so no request can put unbounded cardinality behind one,
 //! which is the other half of why #92 made those vocabularies closed.
 //!
+//! [`crate::ingest::Admission::slug`] is **derived** from `Reason::slug` rather
+//! than respelled, so `outcome="duplicate"` and `reason="duplicate"` are the same
+//! word for the same ending; `Admission::OUTCOMES` is the list that seeds a
+//! series per ending at boot (so a dashboard reads `0` rather than "no data"),
+//! and `mod tests` holds it to being *exactly* the set `slug` can produce, in
+//! both directions.
+//!
 //! # The token is the switch
 //!
 //! `[metrics] token` absent means `/metrics` is not served at all; set means a
@@ -64,25 +86,62 @@
 //! also the switch cannot be turned on by accident; it is the **Webhook** URL's
 //! bargain, one surface along.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! It has no command-line flag (`[storage.s3]`'s reason: `ps` is world-readable),
+//! and the refusal is a `404` rather than a `401`, because with no token there is
+//! nothing to authenticate *to*. The **route is registered either way**: left
+//! out, the SPA fallback would answer `/metrics` with the app's own HTML and a
+//! `200`, which is worse than any refusal. `/metrics` also joins `/healthz` in
+//! `http_log`'s `Chatty` class — a scrape is the same traffic on the same cadence
+//! — and a 4xx still escalates it to WARN, which is how a scraper with the wrong
+//! token stays findable.
 //!
-//! **Two surfaces, one aggregation, and the credential is the switch (#70, spec US 48–49).** `src/metrics.rs` is the status document an Operator reads and the Prometheus text a scraper reads: `Status` is the value, `GET /api/admin/status` answers it as JSON, and `render` turns the *same struct* into the exposition — a second read behind `/metrics` would be a second implementation of the thing it claims to describe, and the two would agree right up until one of them moved. Six things follow.
+//! # Two names are load-bearing
 //!
-//! **A refusal is counted in the request middleware**, from a `metrics::Refused` the response carries — `failure::Broke`'s own shape, for `failure::redact`'s reason: the middleware is the one place that sees every outcome of every route, including the ones no handler wrote, so a route added later is counted by construction. Three funnels insert the mark and there are no others, because `Reason::respond` is the one rendering of a refusal, `share::page::Rendered` is the one HTML rendering of one, and `ingest::Recorded` is the one rendering of an **Admission**. The exception is a refusal that answers *nobody* — a live-feed connection over its **Access code**'s limit has already been upgraded and has no status line left — and `Metrics::refuse` is what those two call sites use: it writes the line *and* counts, so the counter is not a thing they can forget. A process-global registry was the obvious alternative and is what every Rust metrics crate does; it is wrong here because it would not isolate between tests sharing a process under `cargo test`.
+//! `/code-review` found both. The Worker families are `worker_in_hand` /
+//! `worker_settled_total` and deliberately **not** `worker_queue_depth` /
+//! `worker_completed_total`, because #93's own rule is that *what one unit of a
+//! Worker's work is belongs to that Worker*: the two delivery senders count "I
+//! have caught up", so a family called `queue_depth` reads as a backlog it is not
+//! and `rate(worker_completed_total{worker="downstream"})` reads as a delivery
+//! rate it is not. The queue depth an Operator means is `sink_queue_depth`, which
+//! is the durable row count and really is one.
 //!
-//! **Every label value comes from a closed vocabulary**, which is the other half of why #92 closed them: `Reason::slug`, `Stage::slug`, `Admission::slug`, a Worker's own name. Nothing a stranger sends can put unbounded cardinality behind a label. `Admission::slug` is **derived** from `Reason::slug` rather than respelled, so `outcome="duplicate"` and `reason="duplicate"` are the same word for the same ending; `Admission::OUTCOMES` is the list that seeds a series per ending at boot (so a dashboard reads `0` rather than "no data"), and `mod tests` holds it to being *exactly* the set `slug` can produce, in both directions.
+//! And a **System's label rides on `radio_scout_system_info`** rather than on its
+//! numeric series — `build_info`'s shape — because a label is an Operator's to
+//! change and a numeric series carrying one becomes a *different* series the day
+//! they rename it, quietly orphaning every `by (system)` panel built before the
+//! rename.
 //!
-//! **Two names are load-bearing, and `/code-review` found both.** The Worker families are `worker_in_hand` / `worker_settled_total` and deliberately **not** `worker_queue_depth` / `worker_completed_total`, because #93's own rule is that *what one unit of a Worker's work is belongs to that Worker*: the two delivery senders count "I have caught up", so a family called `queue_depth` reads as a backlog it is not and `rate(worker_completed_total{worker="downstream"})` reads as a delivery rate it is not. The queue depth an Operator means is `sink_queue_depth`, which is the durable row count and really is one. And a **System's label rides on `radio_scout_system_info`** rather than on its numeric series — `build_info`'s shape — because a label is an Operator's to change and a numeric series carrying one becomes a *different* series the day they rename it, quietly orphaning every `by (system)` panel built before the rename.
+//! # What a depth cannot say
 //!
-//! **The token is the switch.** `[metrics] token` absent means `/metrics` is not served at all; set means a bearer. There is deliberately no third state, because what this publishes is what #62 put behind the admin session — CONTEXT.md's **Listener count** says it plainly, *an open Archive does not make how many people listen to an Instance public* — so an endpoint that could be switched on openly would undo that decision from a sibling route. A credential that is also the switch cannot be turned on by accident (the **Webhook** URL's bargain), it has no command-line flag (`[storage.s3]`'s reason: `ps` is world-readable), and the refusal is a `404` rather than a `401` because with no token there is nothing to authenticate *to*. The **route is registered either way**: left out, the SPA fallback would answer `/metrics` with the app's own HTML and a `200`, which is worse than any refusal. `/metrics` also joins `/healthz` in `http_log`'s `Chatty` class — a scrape is the same traffic on the same cadence — and a 4xx still escalates it to WARN, which is how a scraper with the wrong token stays findable.
+//! **A Worker's liveness.** `Worker::is_running` existed and lived on the handle
+//! the `Instance` owns, which a handler can never see; `worker::Alive` is that
+//! bit shared the way a `Meter` is, cleared by a guard riding *inside* the task
+//! so a panic (`panic = "unwind"` is deliberate in `[profile.release]`) and a
+//! cancellation both go through the same drop. Without it a worker that fell over
+//! reads as perfectly idle, because it settles every Ticket it was holding on the
+//! way out.
 //!
-//! **What the process knows is free and what the database knows is not.** Uptime, counters, **Worker** depths and the Listener count are atomics; the Archive totals, the per-System rates and the disk are a scan of `calls`, read at most once every `GAUGE_TTL` (fifteen seconds, Prometheus' own default scrape interval) and **shared by both surfaces** — so a status page held open beside a Grafana scraping every second costs the database the same as neither. *When* they were read rides on the wire (`gaugesAtMs`), `catalog`'s `activityWindowMs` rule, so no client has to guess how old they are. `tests/metrics.rs` asserts it as a statement-count **difference** between the first ask and the second rather than a pinned number.
+//! **A Sink's roster is folded, and the fold carries when it last worked.**
+//! `failing` and `queued` are the two readings #52 and #54 already put on their
+//! own screens; neither answers *is anything still getting through* on a roster
+//! whose peers are merely quiet, which is why `SinkHealth` also carries the
+//! newest `last_success_ms` across the roster. What it deliberately does not
+//! carry is a **counter** of deliveries by verdict: `delivery::Failed`'s slugs
+//! are not `Reason`s, and threading a `Metrics` down to `delivery::say` would
+//! reach through two senders' `Outbox` traits for a rate the acceptance criteria
+//! do not ask for. Which peer, and what it last said, stays on that sink's screen
+//! — a fold cannot name a row.
 //!
-//! **A Worker's liveness is the half a depth cannot give.** `Worker::is_running` existed and lived on the handle the `Instance` owns, which a handler can never see; `worker::Alive` is that bit shared the way a `Meter` is, cleared by a guard riding *inside* the task so a panic (`panic = "unwind"` is deliberate in `[profile.release]`) and a cancellation both go through the same drop. Without it a worker that fell over reads as perfectly idle, because it settles every Ticket it was holding on the way out.
+//! # Two things are deliberately not verdicts
 //!
-//! **A Sink's roster is folded, and the fold carries when it last worked.** `failing` and `queued` are the two readings #52 and #54 already put on their own screens; neither answers *is anything still getting through* on a roster whose peers are merely quiet, which is why `SinkHealth` also carries the newest `last_success_ms` across the roster. What it deliberately does not carry is a **counter** of deliveries by verdict: `delivery::Failed`'s slugs are not `Reason`s, and threading a `Metrics` down to `delivery::say` would reach through two senders' `Outbox` traits for a rate the acceptance criteria do not ask for. Which peer, and what it last said, stays on that sink's screen — a fold cannot name a row.
-//!
-//! And **two things are deliberately not verdicts**, which is `lib/status.ts`'s own rule: a **System** that has gone quiet (a county is silent at 3am and a rural system for a day — every threshold is wrong for somebody, so the age is shown and the Operator reads it), and an Archive sitting *at* its size cap (Retention prunes down to it, so that is the policy working). What *is* flagged is frozen **Event** audio over the cap on its own, which is the one storage state nothing can prune and which `retention::sweep` already reports once per sweep.
+//! That is `client/src/lib/status.ts`'s own rule: a **System** that has gone
+//! quiet (a county is silent at 3am and a rural system for a day — every
+//! threshold is wrong for somebody, so the age is shown and the Operator reads
+//! it), and an Archive sitting *at* its size cap (Retention prunes down to it, so
+//! that is the policy working). What *is* flagged is frozen **Event** audio over
+//! the cap on its own, which is the one storage state nothing can prune and which
+//! `retention::sweep` already reports once per sweep.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

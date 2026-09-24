@@ -1,5 +1,7 @@
 /**
- * What this session has done to **Stars** (#66, spec US 37).
+ * What this session has done to **Stars** (#66, spec US 37). What a Star *is* —
+ * the Instance's mark, not a browser's — is `src/star.rs` and
+ * [ADR-0016](../../../docs/adr/0016-stars-are-instance-wide.md).
  *
  * # Why an override map rather than the answer itself
  *
@@ -21,11 +23,15 @@
  *
  * The map only ever holds what somebody tapped, so it is bounded by taps and
  * cleared by a reload — which is safe precisely because it is an override of a
- * durable fact rather than the fact itself.
+ * durable fact rather than the fact itself. It is deliberately **not
+ * persisted**: the durable record is the Instance's, and a reload is how it is
+ * meant to empty. Everything reads it through `selectStarred`.
  *
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
- *
- * And **the client's override is why a tap is instant** (`store/stars.ts`). A Call is in the archive's RTK Query cache, in `live`'s history and queue, *and* in `playback`'s page snapshot at once, and only the first can be refetched — so patching each would be three rules that can disagree about what a Star is. One map of what this session did, read through `selectStarred`, is one rule; it is deliberately **not persisted**, because the durable record is the Instance's and a reload is how it is meant to empty. `hooks/useStar.ts` is the shared toggle, so `StarButton` on a row, the Live display's control and the session log's action sheet cannot come to disagree about what tapping one does. The invalidation is a `Star` tag rather than `Call`, or a tap would re-fetch the catalog, the density ribbon and the filter options too.
+ * `hooks/useStar.ts` is the shared toggle, so `StarButton` on a row, the Live
+ * display's control and the session log's action sheet cannot come to disagree
+ * about what tapping one does. The invalidation is a `Star` tag rather than
+ * `Call`, or a tap would re-fetch the catalog, the density ribbon and the
+ * filter options too.
  */
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
 

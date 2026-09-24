@@ -57,9 +57,29 @@
 //!   Operator changed rather than when they last looked. The date rides in the
 //!   `Content-Disposition` filename, where they actually read it.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! # A version is read before a shape
 //!
-//! **The curated configuration is one portable document, and a version is read before a shape (#51, spec US 47).** `src/curate/document.rs` is `GET /api/admin/config` and `POST /api/admin/config/import` — Systems with blacklists, Talkgroups with Groups/Tags/LEDs/member Refs, Units with Ranges, and the API-key roster minus every secret. rdio has this feature and every difference is a fix: its export is the config document **including `apikeys` with their plaintext keys**, its version check is *literally commented out* in `import-export-config.component.ts`, and its import is client-side key-munging followed by the whole-document `PUT` whose absences delete. Six things follow. **A document is a state where a CSV row is an edit** — #18's blank cell means *leave alone* because a spreadsheet cannot spell the difference, and a document entry is a snapshot of the whole row, which is exactly what makes export → import *reproduce* rather than merge. So the two upserts are separate code and share the layer below, not the policy. **The version is read off the raw body before the shape is enforced**, because `deny_unknown_fields` applied first rejects every document from a *newer* release with "unknown field `downstreams`" instead of the one sentence that tells an Operator to upgrade; `read_document` takes the version, then holds a document claiming to be ours to our shape, and a body that is neither is `malformed-document` rather than axum's bare 422. **The document is a pure function of the configuration** — no ids, no timestamp, everything ordered, so two Instances with the same setup write the same bytes and a `git diff` shows what an Operator changed rather than when they looked; the date rides in `Content-Disposition`. **No secret leaves in any form** (`api_keys.key_hash` is unsalted SHA-256, so an exported hash is offline-crackable for a memorable key) — an imported key is re-issued, shown once, matched on (label, scope) so a retried restore issues nothing, and a **preview counts** what it would issue rather than minting a credential it would roll back. **Absence never deletes**, and **only Units carrying curation** are carried, because a bare roster entry re-rosters from the first Call that keys. The headline test is a **move between two Instances**, asserted twice — the document round-trips to identical bytes *and* the catalogs match — because a wipe-and-restore would pass while the document still leaned on something local. Review also collapsed three copies of the Group/Tag write into `repo::set_talkgroup_groups` + `repo::ensure_group`/`ensure_tag`, which is CLAUDE.md's own "written once" rule catching up with a third caller.
+//! The version is read off the raw body **before the shape is enforced**,
+//! because `deny_unknown_fields` applied first rejects every document from a
+//! *newer* release with "unknown field `downstreams`" instead of the one
+//! sentence that tells an Operator to upgrade. `read_document` takes the
+//! version, then holds a document claiming to be ours to our shape, and a body
+//! that is neither is `malformed-document` rather than axum's bare 422.
+//!
+//! # What else it owes
+//!
+//! - **Everything is ordered**, not only id- and timestamp-free, so two
+//!   Instances with the same setup write the same bytes.
+//! - **A re-issued key is matched on (label, scope)**, so a retried restore
+//!   issues nothing, and a **preview counts** what it would issue rather than
+//!   minting a credential it would roll back.
+//! - **The headline test is a move between two Instances**, asserted twice —
+//!   the document round-trips to identical bytes *and* the catalogs match —
+//!   because a wipe-and-restore would pass while the document still leaned on
+//!   something local.
+//! - Review collapsed three copies of the Group/Tag write into
+//!   `repo::set_talkgroup_groups` + `repo::ensure_group`/`ensure_tag` — the
+//!   rule that a policy is written once, catching up with a third caller.
 
 use std::collections::{HashMap, HashSet};
 

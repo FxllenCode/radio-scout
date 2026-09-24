@@ -1,21 +1,48 @@
 //! One lifecycle envelope for every background worker (#93).
 //!
-//! A **Worker** (CONTEXT.md) is a background task an Instance owns. There are
-//! five — the retention sweeper, the enhancement worker, the **Mining** sweep
-//! (#48), the **Downstream** sender (#52) and the operator log writer — and
-//! before this module each had invented its own answers to the same four
-//! questions: how it
-//! is started, how it is stopped, how much work it has in hand, and how
-//! anything else knows it has settled.
+//! A **Worker** (CONTEXT.md) is a background task an Instance owns — the
+//! retention sweeper, the enhancement worker, the **Mining** sweep (#48), the
+//! **Downstream** and **Webhook** senders (#52, #54), the tone detector, the
+//! quiet scanner, the listener sampler and the operator log writer. Before this
+//! module the five that existed then — the sweeper, the enhancement worker, the
+//! Mining sweep, the Downstream sender and the log writer — had each invented
+//! their own answers to the same four questions: how it is started, how it is
+//! stopped, how much work it has in hand, and how anything else knows it has
+//! settled.
+//!
+//! This module owns that envelope: start once, `stop()` (ask *and* join),
+//! `join()`, `idle()`, `settled_at_least(n)`, and a `Load { depth, done }` an
+//! Operator can be shown. The readings live in a `Workers` registry held by both
+//! `Instance` and `AppState`, because a status handler (#70) is given `AppState`
+//! and can never see an Instance.
 //!
 //! The loop bodies stay hand-written. A ticker, a bounded queue, a broadcast
 //! subscription and a batching drain genuinely differ, and shapes that merely
-//! rhyme should not share a skeleton. What is shared is the envelope around
-//! them.
+//! rhyme should not share a skeleton. What is shared is the envelope around them.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! # What one unit of work is belongs to the Worker
 //!
-//! **A background task is a `worker::Worker` (#93), and there is one shape for all of them.** `src/worker.rs` owns the envelope — start once, `stop()` (ask *and* join), `join()`, `idle()`, `settled_at_least(n)`, and a `Load { depth, done }` an Operator can be shown. What one *unit* of that work is, though, is the Worker's own decision, and #52's is the case that proves it: the Downstream sender's — which since #54 is also the Webhook sender's, since both drain through `crate::delivery` — is "I have caught up", because a delivery waiting out a retry is owed by nobody and a Worker that stayed non-idle through a peer's outage would hang every `settle()` in the suite. The loop bodies stay hand-written, because a ticker, a bounded queue, a broadcast subscription and a batching drain genuinely differ. Four rules bind a new one: **double-spawn is structurally impossible** (`self`-by-value on a non-`Clone` owner, as `retention::Sweeper` does, or a `worker::Handoff` holding the state a second worker must not have a second of, as `downstream` does with the right to drain and `enhance` with its inbox); **work is admitted where it is handed over, before the task is spawned**, so nothing reads idle before it has woken up; **a `Ticket` rides with the work** and settles on drop, so a cancelled or refused item leaves the depth honest without an arm remembering to; and **the Instance owns the handle** and stops them in reverse order of starting. The one exception is the log writer, which belongs to the *process* rather than to a run — `stop_run()` (what `restart` calls) leaves it draining, `stop()` ends it after a final drain of what it already holds. The readings live in a `Workers` registry held by both `Instance` and `AppState`, because a status handler (#70) is given `AppState` and can never see an Instance.
+//! Ticket #52's is the case that proves it: the Downstream sender's — which since
+//! #54 is also the Webhook sender's, since both drain through `crate::delivery` —
+//! is "I have caught up", because a delivery waiting out a retry is owed by
+//! nobody and a Worker that stayed non-idle through a peer's outage would hang
+//! every `settle()` in the suite. See `crate::downstream::sender` for the two
+//! wrong readings.
+//!
+//! # Four rules bind a new one
+//!
+//! - **Double-spawn is structurally impossible**: `self`-by-value on a
+//!   non-`Clone` owner, as `retention::Sweeper` does, or a `worker::Handoff`
+//!   holding the state a second worker must not have a second of, as `downstream`
+//!   does with the right to drain and `enhance` with its inbox.
+//! - **Work is admitted where it is handed over, before the task is spawned**, so
+//!   nothing reads idle before it has woken up.
+//! - **A `Ticket` rides with the work** and settles on drop, so a cancelled or
+//!   refused item leaves the depth honest without an arm remembering to.
+//! - **The Instance owns the handle** and stops them in reverse order of
+//!   starting. The one exception is the log writer, which belongs to the
+//!   *process* rather than to a run — `stop_run()` (what `restart` calls) leaves
+//!   it draining, `stop()` ends it after a final drain of what it already holds.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

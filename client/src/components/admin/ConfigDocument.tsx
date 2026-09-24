@@ -1,7 +1,3 @@
-/**
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
- * **A backup is a file, and a restore is previewed (#51).** `components/admin/ConfigDocument.tsx` sits on the admin hub. **The export is a `fetch` and not an `<a download>`**, for two reasons that are the same reason: a navigation that 401s leaves an Operator staring at a button that did nothing, and the browser would name the file after the URL's last segment (`config`) rather than after the date the server put in `Content-Disposition`. **The import takes the fold's road** — `?dryRun`, render what came back, then send the identical document — and the preview lists each refused entry with its **path into the file** (`systems[0].talkgroups[3]`), because a document is something an Operator has open in an editor and "something was wrong" sends them hunting through a county of JSON. A file that is not JSON never reaches the server: the browser can tell, and a sentence beats a refusal they have to interpret.
- */
 import { useRef, useState } from 'react'
 
 import { FailureNote } from '@/components/admin/AdminUi'
@@ -30,7 +26,16 @@ import type { Applied, DocumentReport, IssuedApiKey } from '@/types'
  * transaction, show what came back — the counts, the entries it would refuse,
  * each with its **path** into the file — and only then send the identical
  * document for real. A restore an Operator could not inspect first is a restore
- * they would not run.
+ * they would not run. The path is spelled the way the file is
+ * (`systems[0].talkgroups[3]`), because a document is something an Operator
+ * has open in an editor and "something was wrong" sends them hunting through a
+ * county of JSON.
+ *
+ * It sits on the admin hub. The export's `fetch` (rather than an
+ * `<a download>`) answers two reasons that are the same reason — a navigation
+ * that 401s leaves a button that did nothing, and the browser would name the
+ * file after the URL — and a file that is not JSON never reaches the server,
+ * because the browser can tell and a sentence beats a refusal to interpret.
  */
 export function ConfigDocument() {
   const [preview, previewing] = usePreviewConfigMutation()

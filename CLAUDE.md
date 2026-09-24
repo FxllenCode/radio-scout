@@ -23,9 +23,11 @@ Three readers, and a document is written for exactly one of them. Keeping a fact
 | **Listener** — uses the app | [`docs/using.md`](docs/using.md) |
 | **Contributor** — this file's reader | `CLAUDE.md`, [`CONTEXT.md`](CONTEXT.md), [`docs/adr/`](docs/adr/), [`docs/agents/`](docs/agents/), [`docs/spec/`](docs/spec/) |
 
-**`tests/docs.rs` gates the operator-facing set**: every `RADIO_SCOUT_*` they name must be one `src/` reads, the README's platform table must match the release matrix, the `curl | sh` URL must match `install.sh`'s own repository slug, and every relative link and image must resolve. Prose is not gated — this pins the facts that drift, not the writing. ADRs are deliberately excluded: an ADR is a dated record and is *supposed* to keep saying what it said at the time.
+**`tests/docs.rs` gates the operator-facing set**: every `RADIO_SCOUT_*` they name must be one `src/` reads, the README's platform table must match the release matrix, the `curl | sh` URL must match `install.sh`'s own repository slug, and every relative link and image must resolve. Prose is not gated — this pins the facts that drift, not the writing. ADRs are deliberately excluded: an ADR is a dated record and is *supposed* to keep saying what it said at the time. It also holds this file to its budget, and this file's and the agent docs' links to resolving.
 
 `--write-config` remains the settings reference (two tests hold it complete), so `docs/operating.md` explains *whether you want* a setting and never restates the list.
+
+**This file holds only rules that bind work in any module.** It loads into every session, so every character here is paid for before any work starts, and `tests/docs.rs` fails it above 40,000 characters. **A ticket's rationale goes in its module's `//!` (or `/** */`) header** — why *this* module is shaped the way it is, what rdio does differently, what review found — **or in an ADR if it overrides the spec or its own ticket.** A lesson that genuinely applies everywhere earns one line under [Lessons that apply everywhere](#lessons-that-apply-everywhere), never a paragraph. Harness and CI detail lives in [`docs/agents/testing.md`](docs/agents/testing.md) and [`docs/agents/ci.md`](docs/agents/ci.md).
 
 ## Hard constraints
 
@@ -43,7 +45,7 @@ Three readers, and a document is written for exactly one of them. Keeping a fact
 - **rdio-scanner compatibility — as a floor, not a ceiling.** Figure out what features exist in rdio-scanner — all of them need to work in Radio-Scout. Upstream and downstream must exist and should be backwards compatible with rdio-scanner if at all possible. **But Radio-Scout must _improve_ on rdio, not clone it.** For every feature, first research how rdio does it, then research how to do it *better* — the goal is a superset that fixes rdio's weaknesses (see [Improve, don't clone](#improve-dont-clone-rdio)). Compatibility is preserved at the wire/contract boundaries (ingest response strings, recorder payloads, and the `/rdio-scanner` legacy surface *if it is ever built*); everything behind those boundaries is free to be better.
 - **Recorder integrations.** Create an integration or plugin (per their docs) for both SDRTrunk and Trunk Recorder. The maintainer runs Trunk Recorder on their scanner, so have a plugin/integration ready for that testing phase.
 
-  **Trunk Recorder has two shipped ways in, and a feature goes into both or neither.** `radio-scout-upload.sh` (#43) and `plugins/trunk-recorder/` (#44) are two programs in two languages posting the same contract; teaching one to send something new and forgetting the other is invisible from either side, and surfaces as an operator's Calls quietly carrying less than their neighbour's depending which path they happened to pick. This is not a convention to remember — **`tests/trplugin.rs::the_upload_script_and_the_plugin_land_the_identical_call` runs both against two instances over the same call files and compares the rows whole**, so anything either learns to send and the other does not fails the suite, including fields that do not exist yet. It is also how the first divergence was found: the script sent `audio/x-wav` where the plugin sent `audio/wav`. If a change genuinely belongs to only one of them — a `uploadScript`-only flag, say — the divergence has to be argued in that test, not worked around it.
+  **Trunk Recorder has two shipped ways in, and a feature goes into both or neither.** `radio-scout-upload.sh` (#43) and `plugins/trunk-recorder/` (#44) post the same contract, and `tests/trplugin.rs::the_upload_script_and_the_plugin_land_the_identical_call` compares the rows they land, whole. A divergence that genuinely belongs to one of them is argued in that test, never worked around it ([`docs/agents/testing.md`](docs/agents/testing.md#recorder-artifacts)).
 
   **SDRTrunk cannot have a plugin, and does not need one (#48)** — **Mining** is its integration; the design is in `src/mining/mod.rs` and `src/mining/sweep.rs`.
 
@@ -63,14 +65,41 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 
 **The pyramid (where each layer pays off):**
 - **Backend** — unit (`#[cfg(test)] mod tests`, incl. edge-branch tables) for pure logic; **integration** (`tests/`, real HTTP/WS via the harness in `tests/common/`) for behavior + contracts. **Dual-dialect Postgres** in CI (#22: a `postgres:17` service, a database per test) and **real S3** (#35: MinIO in `Backend`, Garage in a job of its own, a bucket per test). rdio-scanner wire responses pinned with **insta** snapshots.
-  - **The harness, `settle()`, the fault seams, the recorder-artifact tests and the dual-dialect run** are in [`docs/agents/testing.md`](docs/agents/testing.md). Each module's own design notes are in its `//!` header.
-
 - **Frontend** — Vitest + RTL **integration is the workhorse** (network mocked with **MSW** at the boundary — never fetch/module mocking); unit for pure logic (`store/`, `lib/`, `utils/` at per-file 100%); **Vitest Browser Mode** (real browser) for audio-player + Media-Session component wiring — **wired up in #34**, `client/src/**/*.browser.test.tsx`, `npm run test:browser`; **narrow Playwright E2E** (PWA install/offline/service-worker) — **wired up in #15**, `client/e2e/`, `npm run test:e2e`.
-  - Each module's design notes are in its header comment; the browser layers are in [`docs/agents/testing.md`](docs/agents/testing.md).
-
 - **iOS background audio, lock-screen/Control-Center controls, and Add-to-Home-Screen install are a real-device MANUAL release gate.** Playwright's WebKit is not iOS Safari and cannot validate them ([ADR-0005](docs/adr/0005-client-audio-media-session-background.md)).
 
-Tooling, coverage exclusions, equivalent mutants, the CI gates, `master` protection, the `next` branch, arm64, real S3 and the nextest profile: [`docs/agents/ci.md`](docs/agents/ci.md).
+**The machinery** is [`docs/agents/testing.md`](docs/agents/testing.md). The rules it enforces:
+
+- **Every integration test drives `common::TestApp`**, which starts the same Instance the binary boots. Build new plumbing into the harness, never a second hand-rolled `spawn` or multipart builder in a test file; a file-local shorthand naming that file's own domain is fine.
+- **The suite waits with `app.settle()`, and nothing else.** A sleep can only say "not yet". If `settle()` cannot see some new asynchrony, the fix is that the new thing is a **Worker**.
+- **A fault is injected at the module's own interface** (`blob::AudioStore`, `db::Db`, `enhance::Archive`). Never damage the thing underneath, and never encode a caller's call order in the fault machinery.
+- **Both dialects, always.** `TEST_POSTGRES_URL` moves the whole suite to Postgres ([`docs/agents/dual-dialect.md`](docs/agents/dual-dialect.md)). A SQLite-only loop cannot see a Postgres failure, so run it before calling database work done.
+- **What runs on a recorder is tested by running it**, never by asserting against a committed fixture of what it is supposed to emit.
+- **An equivalent mutant is excluded one at a time, with its proof written beside it** in `.cargo/mutants.toml`. Never exclude a whole function or file.
+
+### Lessons that apply everywhere
+
+Each was paid for once, in a module whose header tells the story.
+
+- **Decide purely, then perform.** A protocol, a policy or a state machine is a function from values to values (`live::Connection::on`, `ingest::admit`, `lib/run.ts`'s `advance`), and the socket, database or screen is an adapter around it.
+- **A policy is written once**, whatever number of surfaces ask it (#92). A surface's *shape* may differ; the rule underneath may not.
+- **Every child table of `calls` is named in `repo::delete_calls`.** Forget one and the retention sweep fails at the oldest marked Call, forever. Each such feature carries an "a marked Call is still prunable" test.
+- **`SUM` goes through `db::sum_bigint`**, and **an aggregate groups by the output column's alias** (`activity::bucket_group`). Both are Postgres failures a SQLite run cannot see.
+- **Assert cost as a statement-count difference** (`statements_issued()` sampled either side of the work, at two sizes), not as a ceiling. It is the only way an N+1 is visible from outside.
+- **A flattened document owns its keys.** A field beside a `#[serde(flatten)]` is named for what it is, never for a key the flattened type already spends.
+- **A cached gate is re-read on the same request that changes it** (`Tones::armed`, `Access::is_gating`). A stale "off" is a silent failure.
+- **A credential never reaches a listing row or a log line.** One that must travel in a URL rides the query string, which `http_log` never writes.
+- **A control that would be refused is not offered.** The catalog says what this Instance allows, so the client draws from it.
+- **Out of scope answers exactly like not there** — a 404, never a 403 that works as an oracle.
+
+## CI, branches and the local ritual
+
+Detail and reasons: [`docs/agents/ci.md`](docs/agents/ci.md).
+
+- **Hard gates** (block merge): `cargo fmt --check`, `clippy -D warnings`, the full suite on **both dialects**, doctests, the backend floor (`--fail-under-lines`) and the frontend Vitest `thresholds`, and **100% patch coverage** on every changed line, backend and frontend separately. The mutation run, the Playwright PWA suite and the nightly mutation sweep are **advisory**.
+- **`next` is the working branch.** It takes direct pushes, one ticket at a time. A version lands on `master` as one pull request when it is complete, and `master` is protected with nine required checks.
+- **The patch-coverage gate only runs on that pull request**, so between releases **the local ritual is what holds the line**: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo nextest run` (+ `cargo test --doc`), `cargo llvm-cov` over the floor, and the client `tsc`/`oxlint`/`vitest --coverage` gates.
+- **Clean up after it** ([`docs/agents/machine-hygiene.md`](docs/agents/machine-hygiene.md)): `cargo clean -p radio-scout` (never a bare `cargo clean`), and no background shell left polling a job.
 
 ## Logging policy
 
@@ -85,13 +114,15 @@ Full rationale + the incident that bought these rules: [ADR-0011](docs/adr/0011-
 7. **Levels mean something:** ERROR = an operator must act · WARN = something was rejected or dropped **and an operator would want to know** (a refusal an Operator would not act on is DEBUG, #92) · INFO = notable normal events (startup, ingest outcome, one line per request) · DEBUG = per-asset/per-range requests, listener IPs, protocol detail · TRACE = wire dumps.
 8. **Nothing logs unguarded in a hot loop.** Per-Call fine; per-range-request is DEBUG; per-sample never.
 
-The stored log (`src/logsink.rs`), the console (`src/observability.rs`) and the request line (`src/http_log.rs`) carry their own design notes.
+Output goes to **stdout only**; journald, Docker or the terminal own persistence. How the console filter, the stored operator log and the per-request line implement these rules is in `src/observability.rs`, `src/logsink.rs` and `src/http_log.rs`.
 
 ## Configuration
 
 Full rationale: [ADR-0012](docs/adr/0012-configuration-model.md) + its #87 and #90 amendments. One `Config` (`src/config.rs`), resolved once at boot, from four layers — **CLI flag > environment variable > `radio-scout.toml` > default**, loudest first. rdio-scanner has this backwards: `flag.Parse()` runs first and the INI is then loaded *over* the flags (`server/config.go:96-137`), so a flag cannot override a configured value.
 
-How the Instance is assembled and what a Worker is: `src/instance.rs`, `src/worker.rs`.
+**A new subsystem is a configuration section wired inside `src/instance.rs`, never in `main.rs`**, which is excluded from coverage, so anything wired there is unreachable by a test. It earns a place in `Wiring` only if it genuinely varies between two real runs.
+
+**A background task is a `worker::Worker`** (`src/worker.rs`), and four rules bind a new one: double-spawn is structurally impossible; work is admitted where it is handed over, before the task is spawned; a `Ticket` rides with the work and settles on drop; and the Instance owns the handle. What one *unit* of its work is, is the Worker's own decision.
 
 **Adding a setting is a field, a default, a template line and a row (#87).** Each section **is** its subsystem's own configuration type — `[admin]` *is* `admin::AdminConfig`, `[retention]` *is* `retention::RetentionConfig`, `[storage]` and `[storage.s3]` are `blob`'s, `[enhancement]` is `enhance`'s, `[ingest]` is `ingest`'s, `[downstream]` is `downstream`'s, `[webhook]` is `webhook`'s — deriving `Serialize`/`Deserialize` and carrying its own serde attributes. There is no mirrored struct and no `Config::admin()` to translate; there is one type, so the file's defaults and the code's cannot drift because they are the same values. `[server]` and `[database]` stay in `config.rs`: they have no subsystem to belong to. `[log]` is the one section spanning two, so it is `observability::LogConfig` (`directives`, the console's) holding a `logsink::StoredLevel` (`database_level`, the sink's).
 
@@ -100,7 +131,7 @@ Two things follow that are easy to get wrong:
 - **Units live at the serde boundary.** A `Duration` field keeps its `_secs` key through `config::secs`; `retention.max_size_bytes` keeps `max_size_gb` through `retention::gigabytes`. Both **refuse an unusable value in the deserializer**, the `ProxyNet` precedent — so the refusal carries a line and column, and the expectation text is one constant shared with the environment layer.
 - **`config::SETTINGS` is the environment layer**, not a description of it: `resolve` walks it, and so do the tests, against the serialized shape of `Config` in both directions — so a setting with no environment spelling fails the suite, and so does an entry naming a key no configuration has. `.env.example` is asserted against the same table in `tests/docs.rs`, both ways, with every value it shows fed through the setting that would read it. One gap is deliberately left open (Rust has no reflection): a *newly added optional* setting, which serializes to nothing at its default, is invisible until something sets it.
 
-The rest of the file's behaviour is described in `src/config.rs`.
+**Strict validation**: an unknown key or an unusable value from any layer refuses to boot with exit `2`, naming the source, the value and what was expected. **Every setting has both spellings**, a TOML key and a `RADIO_SCOUT_*` variable. **Two credentials never go in the TOML** (`RADIO_SCOUT_API_KEY`, `RADIO_SCOUT_ADMIN_PASSWORD`), because first run *writes* them. The rest of the file's behaviour is described in `src/config.rs`.
 
 ## Improve, don't clone rdio
 
@@ -181,27 +212,26 @@ npm run lint                # oxlint
 
 **Embedded UI:** the Rust binary serves `client/dist/` via `rust-embed` (`src/web.rs`), so **`npm run build` (in `client/`) must run before `cargo build`/`cargo test`** for the real UI to be served; without it the backend serves a minimal fallback page and the frontend-serving tests assert that fallback instead. `client/dist/` is gitignored; `build.rs` creates the (empty) folder so `rust-embed` compiles on a fresh checkout even before the frontend is built. CI does this by building the SPA once in its `client` job and downloading it into every job that runs cargo (#22) — the artifact is a build input, not an output beside them.
 
-The browser layers (Browser Mode, Playwright, the iOS gate): [`docs/agents/testing.md`](docs/agents/testing.md).
+The browser layers (Browser Mode, Playwright, the iOS gate): [`docs/agents/testing.md`](docs/agents/testing.md#the-browser-layers).
 
 **PWA app icons** are rasterized from `client/icons/icon.svg` by `client/scripts/build-icons.sh` (macOS `sips`) into `client/public/`. The PNGs are committed, so neither the build nor CI runs it — re-run it by hand only when the mark changes.
 
 ## Packaging & release
 
-Full rationale: [ADR-0007](docs/adr/0007-single-binary-embedded-frontend-distribution.md) + its #23 amendment; the operator-facing guide is [`docs/deploy.md`](docs/deploy.md). What binds day-to-day work:
+Full rationale: [ADR-0007](docs/adr/0007-single-binary-embedded-frontend-distribution.md) + its #23 amendment; the operator-facing guide is [`docs/deploy.md`](docs/deploy.md). Detail: [`docs/agents/ci.md`](docs/agents/ci.md#packaging--release). What binds day-to-day work:
 
-The release details: [`docs/agents/ci.md`](docs/agents/ci.md).
+- **One asset name, three consumers** — `release.yml`, `install.sh` and `docs/deploy.md` — held together by `tests/packaging.rs`, which runs the installer for real.
+- **No cross-compilation.** Linux ships static musl built natively; nothing is built for a target on a different architecture.
+- **`[profile.release]` is deliberate** (fat LTO, symbols kept, `panic = "unwind"`), and `release.yml` is the only place `--release` runs.
+- **The platform is a value, not a `cfg`**: `radio-scout service` returns a `Plan`, so every platform's unit file renders and is snapshot-tested everywhere.
+- **One Rust, pinned in `rust-toolchain.toml`** ([ADR-0015](docs/adr/0015-pinned-rust-toolchain.md)); bumps arrive as a Renovate PR to be read, never automerged.
+- **A release is a `v*` tag matching `Cargo.toml`'s version.**
 
 ## Live testing (real binary, real browser, real recorder)
 
-The suites can't answer "does a Call actually arrive and make a sound". Full procedure: [`docs/agents/live-testing.md`](docs/agents/live-testing.md); `/live-test` runs it.
-
-The procedure, the two instances, `.env` and the Trunk Recorder setup: [`docs/agents/live-testing.md`](docs/agents/live-testing.md).
+The suites can't answer "does a Call actually arrive and make a sound". Full procedure, the two instances (`./radio-scout-live-test` hermetic and wiped each run, `./radio-scout-data` durable), `.env` and the Trunk Recorder setup: [`docs/agents/live-testing.md`](docs/agents/live-testing.md); `/live-test` runs it. Live tests hit the **embedded build on `:3000`**, never trigger an `alert`/`confirm`, and read the console before calling anything a pass. **A live test supplements the suites, never replaces them**: fix what it finds test-first.
 
 ## Agent skills
-
-### Live testing
-
-`/live-test` — build, launch hermetically, feed synthetic Calls, drive Chrome, report, tear down. See `docs/agents/live-testing.md`.
 
 ### Issue tracker
 

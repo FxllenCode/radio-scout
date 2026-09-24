@@ -1,7 +1,3 @@
-/**
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
- * And **the browser applies the chain fold the CSV refuses**: `member-ref-owns-members` exists so a file keeps describing what it made, and a form has no file to round-trip, so it carries the members across and says which came. Building the screen also surfaced a real #45 defect — a carried member kept the position it held on the channel it came from, colliding with one just handed out, so two rows shared a position and the rendered order was whatever the database returned first (and the two dialects need not agree); `repo::renumber_members` runs only when a fold carried something, so the steady-state cost is unchanged.
- */
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -28,6 +24,18 @@ import type { AdminTalkgroup, MergeReport, MovedRef } from '@/types'
  * The delta is why this is not a set editor. A form is submitted by a tab that
  * read the list some minutes ago, and inferring an unmerge from absence is the
  * rdio-scanner failure the whole curation surface exists to not repeat.
+ *
+ * **The browser applies the chain fold the CSV refuses.** The CSV's
+ * `member-ref-owns-members` refusal exists so a file keeps describing what it
+ * made; a form has no file to round-trip, so a fold here carries the absorbed
+ * channel's own members across and the confirmation says which came. Building
+ * this screen also surfaced a real #45 defect — a carried member kept the
+ * position it held on the channel it came from, colliding with one just handed
+ * out, so two rows shared a position and the rendered order was whatever the
+ * database returned first (and the two dialects need not agree);
+ * `repo::renumber_members` runs only when a fold carried something, so the
+ * steady-state cost is unchanged. The server half — the delta wire, the
+ * rolled-back preview, per-Ref reporting — is `src/curate/members.rs`.
  */
 
 /** The Refs one channel answers to, and the edits to them.

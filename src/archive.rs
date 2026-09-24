@@ -32,11 +32,56 @@
 //! behind them are [`crate::db::entities`], and everything that *writes* the
 //! Archive stays in [`crate::db::repo`].
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! `live.rs` asks this module for its Backfill ([`emitted_since`] pairs each
+//! Call with the **Emission** it went out as) instead of composing one, and
+//! [`stored_calls`] is the only denormalizer there is (#86).
 //!
-//! `src/archive.rs`'s `within` is the SQL: per System the matrix resolves to **everything except a list** or **exactly a list** (the default is the wildcard else `all`, and every entry agreeing with it says nothing), which is what makes it expressible without a `CASE` per row. An all-off scanner is `never()` — an explicit `1 = 0`, because an empty `Condition::any()` renders as *no* condition and therefore as every Call, the exact inversion of what the Listener said. m0019 indexes `call_patches(talkgroup_ref, call_id)`, m0011's argument one table along.
+//! # What follows from one module (#98)
 //!
-//! **The Archive is read by one module, and what it answers with is a window (#98).** `src/archive.rs` is every filtered read of the Archive: `page(db, &CallSearch)` gives the Calls *and* the total behind them, `emitted_since(db, since, limit)` gives the **Backfill**'s window with each Call paired to the **Emission** it went out as, `call_detail`/`call_download` are the single-Call reads, `options` is the cascading filter set, and `stored_calls` is the denormalizer all of them share and the only one there is (#86). Everything that *writes* the Archive stays in `db::repo`; `live.rs` now asks this module for its Backfill instead of composing one. Four things follow. **The join bookkeeping is a value, not a protocol** — `CallQuery` joins idempotently, and asking twice is asking once; what it replaced was a `Joined { system, talkgroup, tag }` flag set every caller filled in by hand *plus* an unwritten fourth rule (the Group facet query had to have its own filter cleared, or the filters would join the same tables again). That rule was load-bearing and unexercised: no test had ever set a Group filter, and setting one is `ambiguous column name: groups.name`. Two tests hold it now — `archive::tests::a_join_asked_for_twice_is_made_once` asks for every join twice on purpose, and `tests/db.rs::assert_every_dimension_cascades` covers every dimension against every other, on both dialects. The **`DISTINCT`** that guarded the Group filter is *gone*, not relocated: `groups.name` is `UNIQUE` and `talkgroup_groups` is keyed `(talkgroup_id, group_id)`, so a name filter matches at most one link per Call and no join here can multiply one. Removing it failed no test — an unkillable mutation buying a sort buffer per group search — and `a_group_filter_cannot_multiply_a_call` now pins the two constraints that make it unnecessary. **The page and its total come from the same filter by construction** — the window is applied to the rows and nowhere else — and `assert_the_total_describes_the_rows_above_it` walks every window of every filter rather than pinning three numbers. **The download names its own file**, because that is where the recorder's `audio_name` (which `StoredCall` deliberately omits) and the System/Talkgroup labels (which only the view carries) are in hand at once; the handler no longer gets a view plus a loose column to assemble. And **`db::repo` builds no view at all** — the last handler-module import out of the data layer went with it, `repo::catalog` moving to `catalog::read` beside the types it returns. `tests/archive.rs` asserts the cost the way `tests/live.rs` does for the Backfill: two page sizes, equal statement counts, never a pinned number.
+//! - **The join bookkeeping is a value, not a protocol** — `CallQuery` joins
+//!   idempotently, and asking twice is asking once. What it replaced was a
+//!   `Joined { system, talkgroup, tag }` flag set every caller filled in by
+//!   hand *plus* an unwritten fourth rule (the Group facet query had to have
+//!   its own filter cleared, or the filters would join the same tables again).
+//!   That rule was load-bearing and unexercised: no test had ever set a Group
+//!   filter, and setting one is `ambiguous column name: groups.name`. Two tests
+//!   hold it now — `archive::tests::a_join_asked_for_twice_is_made_once` asks
+//!   for every join twice on purpose, and
+//!   `tests/db.rs::assert_every_dimension_cascades` covers every dimension
+//!   against every other, on both dialects.
+//! - **The `DISTINCT` that guarded the Group filter is *gone*, not relocated**:
+//!   `groups.name` is `UNIQUE` and `talkgroup_groups` is keyed `(talkgroup_id,
+//!   group_id)`, so a name filter matches at most one link per Call and no join
+//!   here can multiply one. Removing it failed no test — an unkillable mutation
+//!   buying a sort buffer per group search — and
+//!   `a_group_filter_cannot_multiply_a_call` now pins the two constraints that
+//!   make it unnecessary.
+//! - **The page and its total come from the same filter by construction** — the
+//!   window is applied to the rows and nowhere else — and
+//!   `assert_the_total_describes_the_rows_above_it` walks every window of every
+//!   filter rather than pinning three numbers.
+//! - **The download names its own file**, because this is where the recorder's
+//!   `audio_name` (which `StoredCall` deliberately omits) and the
+//!   System/Talkgroup labels (which only the view carries) are in hand at once;
+//!   the handler no longer gets a view plus a loose column to assemble.
+//! - **`db::repo` builds no view at all** — the last handler-module import out
+//!   of the data layer went with it, `repo::catalog` moving to `catalog::read`
+//!   beside the types it returns.
+//! - **Cost is asserted, not pinned**: `tests/archive.rs` asserts it the way
+//!   `tests/live.rs` does for the Backfill — two page sizes, equal statement
+//!   counts, never a pinned number.
+//!
+//! # A Selection as SQL (#63)
+//!
+//! `within` is the SQL for a **Selection** (the DVR's scope, and an **Access
+//! code**'s): per System the matrix resolves to **everything except a list** or
+//! **exactly a list** (the default is the wildcard else `all`, and every entry
+//! agreeing with it says nothing), which is what makes it expressible without a
+//! `CASE` per row. An all-off scanner is `never()` — an explicit `1 = 0`,
+//! because an empty `Condition::any()` renders as *no* condition and therefore
+//! as every Call, the exact inversion of what the Listener said. m0019 indexes
+//! `call_patches(talkgroup_ref, call_id)`, m0011's argument one table along.
+//! Why the DVR scopes by a Selection at all is in `client/src/lib/dvr.ts`.
 
 use std::collections::HashMap;
 

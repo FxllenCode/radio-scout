@@ -11,6 +11,10 @@
 //! the targets tabulated, the installer's URL, and every link and image. What is
 //! deliberately not pinned is prose — this is a test about facts that drift, not
 //! a style checker.
+//!
+//! The contributor-facing front door is held too, more narrowly (#110):
+//! CLAUDE.md to a size budget, and it and the agent docs it points into to
+//! links that resolve.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -333,19 +337,60 @@ fn the_documented_installer_url_points_at_this_repositorys_installer() {
 #[test]
 fn every_relative_link_and_image_in_the_docs_resolves() {
     for doc in DOCS {
-        let text = read(doc);
-        let dir = repo().join(doc).parent().expect("a parent").to_path_buf();
-        for target in link_targets(&text) {
-            // Strip an anchor: `operating.md#retention` is a link to a file.
-            let file = target.split('#').next().unwrap_or_default();
-            if file.is_empty() {
-                continue; // a pure in-page anchor
-            }
-            assert!(
-                dir.join(file).exists(),
-                "{doc} links to `{target}`, which does not exist"
-            );
+        assert_links_resolve(doc);
+    }
+}
+
+fn assert_links_resolve(doc: &str) {
+    let text = read(doc);
+    let dir = repo().join(doc).parent().expect("a parent").to_path_buf();
+    for target in link_targets(&text) {
+        // Strip an anchor: `operating.md#retention` is a link to a file.
+        let file = target.split('#').next().unwrap_or_default();
+        if file.is_empty() {
+            continue; // a pure in-page anchor
         }
+        assert!(
+            dir.join(file).exists(),
+            "{doc} links to `{target}`, which does not exist"
+        );
+    }
+}
+
+/// The most CLAUDE.md may be, in characters (#110).
+///
+/// It loads in full into every session, so every character is paid for before
+/// any work starts. It reached 205k — over the hard limit — one per-ticket
+/// paragraph at a time, because nothing said no. This says no: a ticket's
+/// rationale belongs in its module's header or an ADR, and only rules that
+/// bind work in any module belong here.
+const CLAUDE_MD_BUDGET: usize = 40_000;
+
+#[test]
+fn claude_md_stays_inside_its_budget() {
+    let chars = read("CLAUDE.md").chars().count();
+    assert!(
+        chars <= CLAUDE_MD_BUDGET,
+        "CLAUDE.md is {chars} characters, over its {CLAUDE_MD_BUDGET} budget. Move a \
+         ticket's rationale into its module's `//!` header (or an ADR), and keep \
+         only rules that bind work in any module"
+    );
+}
+
+/// Every relative link in the contributor docs resolves.
+///
+/// These matter more than they did: since #110 most of what CLAUDE.md used to
+/// say lives behind a link, in `docs/agents/`, an ADR or a module header.
+#[test]
+fn every_relative_link_in_the_contributor_docs_resolves() {
+    for doc in [
+        "CLAUDE.md",
+        "docs/agents/ci.md",
+        "docs/agents/issue-tracker.md",
+        "docs/agents/live-testing.md",
+        "docs/agents/testing.md",
+    ] {
+        assert_links_resolve(doc);
     }
 }
 

@@ -35,9 +35,24 @@
  * and the one thing guaranteed to disagree with it after a seek, a stall or a
  * lock-screen scrub.
  *
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ * # The adapter around it
  *
- * **Catch-up is two levers and one pure module, and the rest is an adapter (#59, spec US 23).** `lib/catchup.ts` is the whole of it — `CATCHUP_RATE`, `stepAt` (where am I, now what) and `backlog` (how long is left) — pure, so the ticket's headline criterion is arithmetic a test constructs rather than a stopwatch held against a browser. Five things follow. **A step, not a plan**: the player asks several times a second and acts on one answer, where a schedule would mean this module keeping a second copy of a position the element already owns — the one thing guaranteed to disagree with it after a seek, a stall or a lock-screen scrub. **A gap running to the end *advances* rather than seeking**, because seeking to exactly the duration is a request browsers answer differently and the queue already has one way to move on; it is also the commonest gap there is. **`backlog` takes one parameter, not two** — catching up, or not — because the rate and the trim are the same decision, and a signature that separated them would allow the answer nobody wants *and* let the readout subtract gaps a Listener with Catch-up off is about to sit through. **It ends at live in the reducer wrapper, not in six reducers**: the queue can empty six ways (the last Call coming off, a jump, a drop, a play-now, a purge after a Selection change, a Hold or an Avoid), so `liveReducer` clears the flag whenever the queue is empty and a seventh way added later is covered without anybody remembering — #92's argument one layer up. And **the spans are written onto the Calls themselves** (`quietFound`), not into a table beside them, because an archive Call already carries `call.quiet`; every id *asked about* is written, including the ones the server had nothing to say about, or the ordinary Call with no gaps would be re-requested on every pass forever. `hooks/useCatchupQuiet.ts` is the pull, mounted in `AppShell` for the reason the element and the socket are — Catch-up drains the queue wherever the Listener is looking.
+ * This module is `CATCHUP_RATE`, [`stepAt`] and [`backlog`]; the rest is an
+ * adapter, and two of its decisions are worth knowing:
+ *
+ * - **Catch-up ends at live in the reducer wrapper, not in six reducers.** The
+ *   queue can empty six ways (the last Call coming off, a jump, a drop, a
+ *   play-now, a purge after a Selection change, a Hold or an Avoid), so
+ *   `liveReducer` (`store/live.ts`) clears the flag whenever the queue is empty
+ *   and a seventh way added later is covered without anybody remembering —
+ *   #92's argument one layer up.
+ * - **The spans are written onto the Calls themselves** (`quietFound`), not
+ *   into a table beside them, because an archive Call already carries
+ *   `call.quiet`; every id *asked about* is written, including the ones the
+ *   server had nothing to say about, or the ordinary Call with no gaps would be
+ *   re-requested on every pass forever. `hooks/useCatchupQuiet.ts` is the pull,
+ *   mounted in `AppShell` for the reason the element and the socket are —
+ *   Catch-up drains the queue wherever the Listener is looking.
  */
 import type { Call } from '@/types'
 

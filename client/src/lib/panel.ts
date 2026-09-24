@@ -48,11 +48,54 @@
  * a clock — and a list that re-sorted itself under the Listener's thumb every
  * thirty seconds is not a list. [`Panel.ticking`] is the other half: it says
  * whether anything *drawn* is such a subtraction, so a panel of switches and
- * counts keeps no clock at all.
+ * counts keeps no clock at all. (Where those counts and instants come from —
+ * one grouped, bounded query on `GET /api/catalog` — is `src/catalog.rs`.)
  *
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ * # A panel at four hundred rows, not a scroll (#57, spec US 29)
  *
- * **The Talkgroups panel is a panel at four hundred rows, not a scroll (#57, spec US 29).** #91 made it derive once; this makes it *usable* at county scale, and every rule it needs is in `lib/panel.ts` beside the ones already there — what is **Pin**ned, what order the rows are in, which Systems are folded away — so all of it is a value `panel.test.ts` constructs. Five things follow. **`lib/window.ts` is the windowing, as arithmetic**: a count, a row height, a scroll offset and a viewport in; a range and two paddings out. Every edge is a table row (the list still below the fold, the list scrolled clean past, the empty list), the invariant that `padTop + drawn + padBottom` is always the whole list's height is asserted rather than commented — a windowed list that stands shorter than it is moves the page's scroll height under the Listener's thumb — and lists under `WHOLE_BELOW` are drawn whole, which is every list on a small instance and every existing test. `hooks/useWindowedRows.ts` is the adapter, and it measures against the **page** rather than a scroll container of its own, because a nested scroller on iOS gives up momentum chaining, pull-to-refresh and the URL-bar collapse; it keeps the *range* in state rather than the pixel offset, so a flick redraws once per overscan instead of once per frame; and it re-measures after **every render**, not only on scroll, because a System folding away above a list moves it up the page with no scroll event and no change to its own row count — a window measured on scroll alone would leave that section drawing nothing but padding until the Listener happened to scroll it. **The row height is a number, not a class** (`ROW_HEIGHT`, applied as a style), so the height the browser lays out and the height the arithmetic assumes cannot drift. **A folded System builds no rows at all** — four hundred `rowOf`s each resolving an LED is precisely the work the fold exists to avoid, and a fold that only *hid* them would be a fold in name. **A fold is stored as what the Listener *said***, per System (`expanded`), not as a list of what is shut — the size rule (`COLLAPSE_ABOVE`) decides for a System they have not touched, so a county System is folded on first sight and stays open once opened, and typing a filter opens everything because a search answered with a shut box is not an answer. **A Pin is ordering only** (CONTEXT.md): the pinned section is above every System and across all of them, and the row *stays* in its System, so that System's count is still honest. Its control is a sibling of the row's switch and never inside it — a button within a button is what #47 got burned on. And the panel's arrangement is part of a **Profile**: `store/panel.ts` is a slice of its own (nothing in it can change what plays), persisted under one key read field by field, so a sort naming an order this build no longer has cannot also cost the Listener six Pins picked out of four hundred Talkgroups.
+ * #91 made it derive once; #57 makes it *usable* at county scale, and every
+ * rule that needs — what is **Pin**ned, what order the rows are in, which
+ * Systems are folded away — is here, so all of it is a value `panel.test.ts`
+ * constructs.
+ *
+ * - **A folded System builds no rows at all** — four hundred `rowOf`s each
+ *   resolving an LED is precisely the work the fold exists to avoid, and a fold
+ *   that only *hid* them would be a fold in name.
+ * - **A fold is stored as what the Listener *said***, per System (`expanded`),
+ *   not as a list of what is shut — the size rule ([`COLLAPSE_ABOVE`]) decides
+ *   for a System they have not touched, so a county System is folded on first
+ *   sight and stays open once opened, and typing a filter opens everything
+ *   because a search answered with a shut box is not an answer.
+ * - **A Pin is ordering only** (CONTEXT.md): the pinned section is above every
+ *   System and across all of them, and the row *stays* in its System, so that
+ *   System's count is still honest. Its control is a sibling of the row's
+ *   switch and never inside it — a button within a button is what #47 got
+ *   burned on.
+ * - **The arrangement is part of a Profile**: `store/panel.ts` is a slice of
+ *   its own (nothing in it can change what plays), persisted under one key read
+ *   field by field, so a sort naming an order this build no longer has cannot
+ *   also cost the Listener six Pins picked out of four hundred Talkgroups.
+ *
+ * The rows themselves are windowed. **`lib/window.ts` is the windowing, as
+ * arithmetic**: a count, a row height, a scroll offset and a viewport in; a
+ * range and two paddings out. Every edge is a table row (the list still below
+ * the fold, the list scrolled clean past, the empty list), the invariant that
+ * `padTop + drawn + padBottom` is always the whole list's height is asserted
+ * rather than commented — a windowed list that stands shorter than it is moves
+ * the page's scroll height under the Listener's thumb — and lists under
+ * `WHOLE_BELOW` are drawn whole, which is every list on a small instance and
+ * every existing test. `hooks/useWindowedRows.ts` is the adapter, and it
+ * measures against the **page** rather than a scroll container of its own,
+ * because a nested scroller on iOS gives up momentum chaining, pull-to-refresh
+ * and the URL-bar collapse; it keeps the *range* in state rather than the pixel
+ * offset, so a flick redraws once per overscan instead of once per frame; and
+ * it re-measures after **every render**, not only on scroll, because a System
+ * folding away above a list moves it up the page with no scroll event and no
+ * change to its own row count — a window measured on scroll alone would leave
+ * that section drawing nothing but padding until the Listener happened to
+ * scroll it. **The row height is a number, not a class** (`ROW_HEIGHT` in
+ * `routes/TalkgroupsScreen.tsx`, applied as a style), so the height the browser
+ * lays out and the height the arithmetic assumes cannot drift.
  */
 import { ledForCall, type LedColor } from './led'
 import {

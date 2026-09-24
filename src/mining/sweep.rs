@@ -3,39 +3,44 @@
 //! [`super`] is the dialect and [`crate::ingest`] is where a new Call goes
 //! through it. This is the other half of the ticket: an Operator who has been
 //! running SDRTrunk for a year has an Archive full of MP3s with a configured
-//! radio alias and a tower's name inside every one of them, and nothing has
-//! ever looked. This walks it.
+//! radio alias and a tower's name inside every one of them, and nothing has ever
+//! looked. This walks it.
 //!
 //! **Deliberately not called a Backfill.** CONTEXT.md spends that word on the
 //! Calls a Listener missed while **Feed down**, which `live.rs` replays on
-//! reconnect; this is a periodic pass over the Archive under a policy, which is
-//! a **Sweep** — the same shape [`crate::retention`] runs.
+//! reconnect; this is a periodic pass over the Archive under a policy, which is a
+//! **Sweep** — the same shape [`crate::retention`] runs.
 //!
 //! Four things shape it, and they are the ticket's own acceptance criteria:
 //!
-//! - **Off the ingest path entirely.** It is a [`Worker`] on a ticker, like the
-//!   retention sweeper — a recorder's upload never waits behind it.
-//! - **Resumable.** The cursor is a column, `calls.mined_at_ms`, so a restart
-//!   halfway through resumes rather than restarts. It is stamped whatever is
-//!   found, *including nothing*, because the question the sweep asks is "has
-//!   this been read?" — anything else and every barren Call in the Archive is
-//!   re-read on every sweep forever.
-//! - **Rate-bounded.** A batch per tick, both configurable. At the defaults a
-//!   hundred thousand Calls are mined in something under nine hours, and an
-//!   Operator on metered object storage can slow it down or switch it off.
+//! - **Off the ingest path entirely.** It is a [`Worker`] on the retention
+//!   sweeper's ticker shape — a recorder's upload never waits behind it.
+//! - **Resumable.** The cursor is a column, `calls.mined_at_ms`, rather than an
+//!   in-memory offset, so a restart halfway through resumes rather than restarts.
+//!   It is stamped whatever is found, *including nothing*, because the question
+//!   the sweep asks is "has this been read?" — anything else and every barren
+//!   Call in the Archive is re-read on every sweep forever.
+//! - **Rate-bounded, and on by default** (`[mining] sweep`, 100 Calls / 30 s,
+//!   both configurable), unlike Enhancement's master switch: it reads each stored
+//!   object once and then has nothing left to do, so an Operator upgrading gets
+//!   their archive's names without finding a setting. At the defaults a hundred
+//!   thousand Calls are mined in something under nine hours, and an Operator on
+//!   metered object storage can slow it down or switch it off.
 //! - **Nothing here can fail a Call, and nothing can stall the sweep.** A tag
-//!   that is malformed, absent or somebody else's settles as
-//!   [`Settled::Nothing`] with a reason; audio that cannot be read settles as
-//!   [`Settled::Failed`]. What gets *stamped* is [`sweep`]'s one rule, and it
-//!   is the rule that keeps this alive — see it for why a page that read
-//!   nothing claims nothing, and why a page that read something claims all of
-//!   it.
+//!   that is malformed, absent or somebody else's settles as [`Settled::Nothing`]
+//!   with a reason; audio that cannot be read settles as [`Settled::Failed`].
+//!   Failures are reported once per sweep rather than once per Call, the
+//!   `logsink` rule.
 //!
-//! It never touches audio bytes. Mining is a read.
+//! **What gets stamped is one rule, and it is the rule that keeps the sweep
+//! alive** — see [`sweep`]: a pass that could read *nothing at all* claims
+//! nothing, so an Instance booted with bad credentials never silently marks its
+//! whole Archive read; and any other pass stamps everything it reached, including
+//! what it could not read, because the page is `ORDER BY id DESC` and one corrupt
+//! object left unstamped sits at its head blocking every older Call forever.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
-//!
-//! `src/mining/sweep.rs` is the other half: a **Worker** on the retention sweeper's ticker shape that mines the Archive that was already there. It is a **Sweep** and deliberately not a **Backfill** — CONTEXT.md spends that word on the Calls a Listener missed while Feed down. Its cursor is a column (`calls.mined_at_ms`) rather than an in-memory offset, so it resumes across a restart — and it is stamped **whatever is found, including nothing**, because the question is "has this been read?" and anything else re-reads every barren Call forever. **What gets stamped is one rule, and it is the rule that keeps the sweep alive**: a pass that could read *nothing at all* claims nothing — so an Instance booted with bad credentials never silently marks its whole Archive read — and any other pass stamps everything it reached, including what it could not read, because the page is `ORDER BY id DESC` and one corrupt object left unstamped sits at its head blocking every older Call forever. Failures are reported once per sweep rather than once per Call, the `logsink` rule. It is **on by default and rate-bounded** (`[mining] sweep`, 100 Calls / 30 s), unlike Enhancement's master switch: it reads each stored object once and then has nothing left to do, so an Operator upgrading gets their archive's names without finding a setting — and one on metered object storage can turn it off. It never touches audio bytes, which is what keeps a stored Call's URL `immutable`.
+//! It never touches audio bytes — mining is a read — which is what keeps a stored
+//! Call's URL `immutable`.
 
 use std::fmt::Display;
 use std::sync::Arc;

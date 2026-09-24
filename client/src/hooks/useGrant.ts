@@ -7,9 +7,21 @@
  * Every *fetch* gets it for nothing from the base query (`store/api`); this is
  * for the URLs a browser navigates to or plays, which never go through it.
  *
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ * **The grant is attached in one place per mechanism, never per call site**:
+ * the base query rewrites every `fetch`'s URL, this hook serves what a browser
+ * navigates to or plays, and `connectLiveFeed` takes it as an option — with the
+ * socket re-opened when it changes, because the server resolves a connection's
+ * scope once.
  *
- * And **the client attaches the grant in one place per mechanism, never per call site**: the base query rewrites every `fetch`'s URL, `useGrant` serves the four URLs a browser *navigates to or plays* (an `<audio src>`, three download links, an export), and `connectLiveFeed` takes it as an option — with the socket re-opened when it changes, because the server resolves a connection's scope once. The one ordering bug worth remembering was found by a test: `invalidatesTags` fires on the fulfilled action, *before* any caller could store what came back, so the refetch went out without the grant and answered with exactly the channels the Listener had just unlocked being absent. Holding it first and invalidating by hand is the fix, and doing both inside the endpoint is what keeps a second caller from having to know.
+ * The one ordering bug worth remembering was found by a test: `invalidatesTags`
+ * fires on the fulfilled action, *before* any caller could store what came
+ * back, so the refetch after an unlock went out without the grant and answered
+ * with exactly the channels the Listener had just unlocked being absent. Holding
+ * it first and invalidating by hand is the fix, and doing both inside the
+ * endpoint is what keeps a second caller from having to know.
+ *
+ * The server half — what a grant is, what it reaches, and why it rides the
+ * query string — is `src/access.rs`.
  */
 import { selectGrant } from '@/store/access'
 import { useAppSelector } from '@/store/hooks'

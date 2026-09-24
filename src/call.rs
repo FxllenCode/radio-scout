@@ -11,9 +11,47 @@
 //! These live here rather than beside their handlers so anything may build them
 //! without depending on the HTTP layer.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! # Which radio a Call is shown under (#47, spec US 42–44)
 //!
-//! **A radio names itself, and a Call is shown under one of them (#47, spec US 42–44).** The **Unit** roster takes either alias a Call carries — `NewCallUnit::name`, the configured one else the **OTA alias** — where before #47 only the configured one counted, so a zero-configuration install rostered nothing however loudly its radios named themselves. Six things follow. **`talkerAlias` moved to `tag_ota`**: CONTEXT.md defines the OTA alias as exactly that field and SDRTrunk's `getTalkerAlias` reads a `TalkerAliasIdentifier`, so storing it as `label` made the one column recording *who said this name* lie on every SDRTrunk upload. **`crate::call::unit_name` is the precedence, written once**, because the roster decides what an apparatus is *named* and `stored_calls` decides what a Call is *shown as*, and a Listener reading one and searching the other would find nothing. **`StoredCall` carries `unit_ref` + `unit_label` and no longer a `source`** — that field was the rdio dialect's singular one, read off the Call row, and therefore absent on every Trunk Recorder Call there has ever been; the radio is now the first row of `call_units`, resolved to its owning Unit, so `calls.source_ref` is *dropped* rather than left written and unread (m0011, which also indexes `call_units` both ways — it stopped being a table read one Call at a time). **The batched resolver is `repo::units_owning`**, two statements for a whole page rather than two per Call — the N+1 #86 deleted, in the denormalizer behind every search page, every live frame *and* `call_detail`'s whole timeline, where every radio carries the curated name and not only the first. **The unit filter is a subquery, not a join**: `call_units` is the first genuinely to-many table a filter here reaches (TR lists a radio once per stretch it keys), which is exactly the case `CallQuery::rows` says would owe a `DISTINCT` — a subquery owes nothing, and `archive::Filters` is the type that makes "resolve the apparatus before building the query" unforgettable rather than a rule. And **what it resolves to is a `merge::UnitScope`, which carries a System per Range** (`repo::unit_scope`): a Ref is unique only within one, so a flat span list applied to a search that named no System quietly answers with another System's radios — a wrong answer that looks perfectly ordinary. Carrying the System *in the scope* rather than narrowing the lookup by one is also what lets the cascading filter options clear the System filter, which is exactly what they do.
+//! A radio names itself, and a Call is shown under one of those names. The
+//! **Unit** roster takes either alias a Call carries — `NewCallUnit::name`, the
+//! configured one else the **OTA alias** — where before #47 only the configured
+//! one counted, so a zero-configuration install rostered nothing however loudly
+//! its radios named themselves.
+//!
+//! - **`talkerAlias` moved to `tag_ota`**: CONTEXT.md defines the OTA alias as
+//!   exactly that field and SDRTrunk's `getTalkerAlias` reads a
+//!   `TalkerAliasIdentifier`, so storing it as `label` made the one column
+//!   recording *who said this name* lie on every SDRTrunk upload.
+//! - **[`unit_name`] is the precedence, written once**, because the roster
+//!   decides what an apparatus is *named* and `stored_calls` decides what a
+//!   Call is *shown as*, and a Listener reading one and searching the other
+//!   would find nothing.
+//! - **`StoredCall` carries `unit_ref` + `unit_label` and no longer a
+//!   `source`** — that field was the rdio dialect's singular one, read off the
+//!   Call row, and therefore absent on every Trunk Recorder Call there has ever
+//!   been. The radio is now the first row of `call_units`, resolved to its
+//!   owning Unit, so `calls.source_ref` is *dropped* rather than left written
+//!   and unread (m0011, which also indexes `call_units` both ways — it stopped
+//!   being a table read one Call at a time).
+//! - **The batched resolver is `repo::units_owning`**, two statements for a
+//!   whole page rather than two per Call — the N+1 #86 deleted, in the
+//!   denormalizer behind every search page, every live frame *and*
+//!   `call_detail`'s whole timeline, where every radio carries the curated name
+//!   and not only the first.
+//! - **The unit filter is a subquery, not a join**: `call_units` is the first
+//!   genuinely to-many table a filter here reaches (TR lists a radio once per
+//!   stretch it keys), which is exactly the case `CallQuery::rows` says would
+//!   owe a `DISTINCT` — a subquery owes nothing, and `archive::Filters` is the
+//!   type that makes "resolve the apparatus before building the query"
+//!   unforgettable rather than a rule.
+//! - **What it resolves to is a `merge::UnitScope`, which carries a System per
+//!   Range** (`repo::unit_scope`): a Ref is unique only within one, so a flat
+//!   span list applied to a search that named no System quietly answers with
+//!   another System's radios — a wrong answer that looks perfectly ordinary.
+//!   Carrying the System *in the scope* rather than narrowing the lookup by one
+//!   is also what lets the cascading filter options clear the System filter,
+//!   which is exactly what they do.
 
 use std::cmp::Ordering;
 

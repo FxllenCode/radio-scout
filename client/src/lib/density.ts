@@ -29,9 +29,30 @@
  * away from the page it is pointing at as a Listener scrubs. They are tested as
  * a round trip rather than each against a table of expected numbers.
  *
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ * # The control around it
  *
- * **The ribbon is the chart, and jumping is a window move (#62, spec US 34–35).** `lib/density.ts` is the whole of what a Listener does with a `Series` — bar heights, which bucket a pointer is over, how far into the results a bucket starts, and which bucket the page on screen is in — pure, so `DensityRibbon` draws and listens and decides nothing. Five things follow. **The offset costs no request**: the bars already say how many Calls each bucket holds and the ordering says which side the earlier rows are on, so `offsetOfBucket` is a running total — asking the server "how far in is 3am" would have been a count query per drag frame. **It moves `windowOffset`, never the filters**, which is #89's separation exactly: the search does not change, so a **Run** that is walking keeps walking, and a scrub *replaces* rather than pushes because the address bar's job is to describe the screen and Back should return to before the drag rather than through every bucket it passed. **A drag moves the thumb and only releasing moves the window**, because the aggregate is cached per search but the *page* is not: jumping live would issue a page query for every bucket a thumb crossed, which is a hundred and twenty searches for one journey — and the readout under the bars stops being decoration once that is true, since it becomes the only thing saying where a drag is going. The thumb then stays where it was put until the control is blurred, for the reason a slider's does: the window is a page, so the offset behind it cannot represent a single bucket, and snapping back after every arrow press would make keyboard scrubbing look broken for the thirty presses it takes to cross a page. **`offsetOfBucket` and `bucketOfOffset` are inverses and are tested as a round trip**, because the marker and the page it points at have to be the same place or scrubbing drifts a little further every time. **The ordering's default lives in the module** (`Ordering` includes `undefined`), not at each call site: `SearchQuery` types `sort` as optional though `readSearchUrl` always spells it, so a `?? 'newest'` per use would be one untestable branch per use and one chance each to default the other way. And **one control, two views**: `ActivityHeatmap` folds the *same* search's hourly buckets into a local week, fetched only when it is opened, and its cells are deliberately not tappable — "every Tuesday at 09:00" is not a moment, so there is no archive to open at it. A minimum bar height in both is the one rendering rule that is really a correctness rule: one Call beside four hundred is a quarter of a percent tall, and a chart that draws traffic as nothing is saying something false about it.
+ * `DensityRibbon` draws and listens; three of its behaviours follow from the
+ * arithmetic here and are worth knowing:
+ *
+ * - **A scrub *replaces* rather than pushes** a history entry, because the
+ *   address bar's job is to describe the screen, and Back should return to
+ *   before the drag rather than through every bucket it passed.
+ * - **A drag moves the thumb and only releasing moves the window**, because the
+ *   aggregate is cached per search but the *page* is not: jumping live would
+ *   issue a page query for every bucket a thumb crossed — a hundred and twenty
+ *   searches for one journey — and the readout under the bars stops being
+ *   decoration once that is true, since it becomes the only thing saying where
+ *   a drag is going. The thumb then stays where it was put until the control is
+ *   blurred, for the reason a slider's does: the window is a page, so the offset
+ *   behind it cannot represent a single bucket, and snapping back after every
+ *   arrow press would make keyboard scrubbing look broken for the thirty presses
+ *   it takes to cross a page.
+ * - **One control, two views**: `ActivityHeatmap` folds the *same* search's
+ *   hourly buckets into a local week, fetched only when it is opened, and its
+ *   cells are deliberately not tappable — "every Tuesday at 09:00" is not a
+ *   moment, so there is no archive to open at it. Both draw with the minimum
+ *   bar height ([`MIN_BAR`]'s rule), the one rendering rule that is really a
+ *   correctness rule.
  */
 import type { Series } from '@/types'
 

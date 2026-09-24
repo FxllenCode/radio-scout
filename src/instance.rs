@@ -34,9 +34,21 @@
 //! connection's own table now, so nothing has to shorten a period from outside
 //! in order to watch one happen.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! # What `start` does, in order
 //!
-//! **One module consumes it: `src/instance.rs` (#90).** `instance::start(config, wiring)` creates the base directory, opens the database, drains the log sink, provisions both credentials, opens the store, starts every worker, builds the router, binds and serves, and hands back a handle carrying the address, the database, the store, a `stop` and a `restart`. `main.rs` calls it; so does the test harness. **A new subsystem is a configuration section wired inside `instance` — never in `main.rs`**, which is excluded from coverage, so a subsystem wired there is one no test can reach. It earns an entry in the second parameter (`Wiring`) only if something genuinely varies between two real runs: today the object store, a **decorator around the database handle** (#97 — the Instance still opens and migrates its own database; this only wraps the result, so a caller can put something between the application and the driver), the clock, the credential *sources*, the log writer, and — on borrowed time, documented as such — the bind address. The live-feed heartbeat was a seventh until #94: it varied between *tests* rather than between real runs, and reaping became a row in the live connection's own table, so nothing has to shorten a period from outside in order to watch one happen. Credential sources are inputs rather than `std::env::var` calls inside `start`, so a test gets a genuinely provisioned Instance and `AdminAuth::locked()` is an *outcome* (an unwritable env file) rather than a knob.
+//! It creates the base directory, opens the database, drains the log sink,
+//! provisions both credentials, opens the store, starts every **Worker**,
+//! builds the router, binds and serves; the handle it returns carries the
+//! address, the database, the store, a `stop` and a `restart`. `main.rs` calls
+//! it, and so does the test harness.
+//!
+//! The database decorator (#97) only *wraps* the handle — the Instance still
+//! opens and migrates its own database — so a caller can put something between
+//! the application and the driver. The heartbeat left [`Wiring`] because it
+//! varied between *tests* rather than between real runs. Credential sources are
+//! inputs rather than `std::env::var` calls inside [`start`], so a test gets a
+//! genuinely provisioned Instance and `AdminAuth::locked()` is an *outcome* (an
+//! unwritable env file) rather than a knob.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

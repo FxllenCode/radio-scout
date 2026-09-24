@@ -37,11 +37,71 @@
 //! too once there is one — because **Dirwatch** (#72) will decide one with no
 //! request in reach to answer, and rule 3 is about what the server wrote down.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! # Design notes
 //!
-//! **Ingest resolves, decides purely, then performs, and answers with an Admission (#96).** `ingest::admit(&Facts, &NewCall, &IngestConfig, now_ms) -> Decision` is the whole of what an upload's ending depends on — authorization, the auto-populate/blacklist policy, the dedup window — and it awaits nothing, so every arm is a value a test constructs. One pass (`resolve`) reads the API key, the System, the Talkgroup its Ref resolves to (#45) and the Calls inside the dedup window; `perform` writes the object, inserts, publishes and offers for enhancement. Four things follow that are worth knowing. **The channel is resolved once**, where the policy and the insert each used to resolve it — invisible from outside except as a number, so `tests/ingest.rs` pins the exact statement count of a steady-state Call the way #86 pinned Backfill's. **The dedup window is a range, written once** (`ingest::dedup_window`): the candidate query bounds on it and the decision re-applies it, so no mutation can move one edge without moving the other, and the near misses are `proptest`ed rather than posted twice over a socket. **The line is written where the Admission is decided**, not where it is rendered — because #72's Dirwatch decides one with no request to answer, and ADR-0011 rule 3 is about what the server wrote down. `Admission::record` is the only way to obtain the `Recorded` that `IntoResponse` is implemented for, so an unrecorded Admission still cannot reach a caller; `Reason::into_response` is `record()` + `respond()` for every other surface. And **`repo::insert_call` takes a `blob::StoredAudio`**, which only a completed write produces, so ADR-0001's "object before row" is a type rather than a comment — `NewCall` carries the recorder's facts only, has no `Default`, and is built with `..NewCall::new(system, talkgroup, at_ms)`.
+//! **[`admit`] is the whole of what an upload's ending depends on** —
+//! `admit(&Facts, &NewCall, &IngestConfig, now_ms) -> Decision` decides
+//! authorization, the auto-populate/blacklist policy and the dedup window, and
+//! awaits nothing, so every arm is a value a test constructs. **The channel is
+//! resolved once** — invisible from outside except as a number, so
+//! `tests/ingest.rs` pins the exact statement count of a steady-state Call the
+//! way #86 pinned Backfill's. **The dedup window is a range, written once**
+//! (`dedup_window`): the candidate query bounds on it and the decision
+//! re-applies it, so no mutation can move one edge without moving the other,
+//! and the near misses are `proptest`ed rather than posted twice over a socket.
 //!
-//! **The same transmission is one Call, and the better copy of it is the one kept (#46).** The duplicate test is no longer `(System, Talkgroup, ±window)` — it is same System, inside the window, and **reaching a Talkgroup in common**: its own canonical channel or an overlapping **Patch** membership, compared as canonical Refs so a merge (#45) and a patch are answered by one predicate. Five things follow. **The candidate read widened to the System**, because the second copy may arrive on a genuinely different Talkgroup or on a patch-minted Ref no Talkgroup owns yet (rdio's #466), and neither is reachable from a query keyed on the arriving Call's channel — so the *matching* is `admit`'s, purely, and the **System scope is the query's**, which is why `tests/ingest.rs` proves it over real rows, on both dialects, rather than a pure test proving it against itself. **The read stays flat**: patch rows and error counts for the candidates cost one statement each and only when the window turned something up, so an empty window costs exactly the one statement it always did, and `tests/ingest.rs` holds the cost equal across two window sizes rather than pinning a number. **`Quality::better_than` is the whole compare policy** — fewer decode errors, then longer Duration — and a criterion **abstains unless both copies can answer it**, so a copy never wins by having said less and a tie never costs a write; **audio outranks it entirely, in both directions**, because an Encrypted Call stores none while still winning on TR's own duration, and either arm of that leaves a Listener hearing a call they could have heard. **A winner replaces under the stable Call id** (`repo::store_replacement`, the `enhance::step` swap precedent: new key, old object left for orphan-GC): audio, signal detail and the recorder's facts become the winner's, patch membership is **unioned**, the id/System/Talkgroup/instant stay, enhancement resets, and **nothing is published** — a second frame for a Call the Listener already has is the double-play this exists to end. And **replacement is bounded in storage time** (`ingest::still_replaceable`, read by `serve` too), because two copies share a `call_at_ms` forever and `Cache-Control: immutable` has to stay true; a copy arriving after that bound is still a duplicate, only the upgrade is missed. That bound is **`[ingest] dedup_replace_secs`, deliberately not `dedup_window_ms`** — one is transmission proximity (`call_at_ms`, identical across copies), the other is upload separation (the wall clock, seconds apart on a real recorder), and sharing a number would mean either keep-best never firing or the matching window silently eating real traffic. Two more knobs return rdio's semantics: `dedup_scope` and `dedup_keep`. **One mapping writes a Call's columns for both writers** (`repo::describe_transmission`), so a field added later cannot reach the insert and miss the replacement.
+//! **An unrecorded Admission cannot reach a caller.** [`Admission::record`] is
+//! the only way to obtain the `Recorded` that `IntoResponse` is implemented
+//! for; `Reason::into_response` is `record()` + `respond()` for every other
+//! surface. And `NewCall` carries the recorder's facts only, has no `Default`,
+//! and is built with `..NewCall::new(system, talkgroup, at_ms)` — the other
+//! half of ADR-0001's "object before row" being a type rather than a comment.
+//!
+//! ## The same transmission is one Call, and the better copy is kept (#46)
+//!
+//! The duplicate test is no longer `(System, Talkgroup, ±window)` — it is same
+//! System, inside the window, and **reaching a Talkgroup in common**: its own
+//! canonical channel or an overlapping **Patch** membership, compared as
+//! canonical Refs so a merge (#45) and a patch are answered by one predicate.
+//!
+//! - **The candidate read widened to the System**, because the second copy may
+//!   arrive on a genuinely different Talkgroup or on a patch-minted Ref no
+//!   Talkgroup owns yet (rdio's #466), and neither is reachable from a query
+//!   keyed on the arriving Call's channel — so the *matching* is `admit`'s,
+//!   purely, and the **System scope is the query's**, which is why
+//!   `tests/ingest.rs` proves it over real rows, on both dialects, rather than
+//!   a pure test proving it against itself.
+//! - **The read stays flat**: patch rows and error counts for the candidates
+//!   cost one statement each and only when the window turned something up, so
+//!   an empty window costs exactly the one statement it always did, and
+//!   `tests/ingest.rs` holds the cost equal across two window sizes rather than
+//!   pinning a number.
+//! - **`Quality::better_than` is the whole compare policy** — fewer decode
+//!   errors, then longer Duration — and a criterion **abstains unless both
+//!   copies can answer it**, so a copy never wins by having said less and a tie
+//!   never costs a write; **audio outranks it entirely, in both directions**,
+//!   because an Encrypted Call stores none while still winning on TR's own
+//!   duration, and either arm of that leaves a Listener hearing a call they
+//!   could have heard.
+//! - **A winner replaces under the stable Call id** (`repo::store_replacement`,
+//!   the `enhance::step` swap precedent: new key, old object left for
+//!   orphan-GC): audio, signal detail and the recorder's facts become the
+//!   winner's, patch membership is **unioned**, the id/System/Talkgroup/instant
+//!   stay, enhancement resets, and **nothing is published** — a second frame
+//!   for a Call the Listener already has is the double-play this exists to end.
+//! - **Replacement is bounded in storage time** (`still_replaceable`, read by
+//!   `serve` too), because two copies share a `call_at_ms` forever and
+//!   `Cache-Control: immutable` has to stay true; a copy arriving after that
+//!   bound is still a duplicate, only the upgrade is missed. That bound is
+//!   **`[ingest] dedup_replace_secs`, deliberately not `dedup_window_ms`** —
+//!   one is transmission proximity (`call_at_ms`, identical across copies), the
+//!   other is upload separation (the wall clock, seconds apart on a real
+//!   recorder), and sharing a number would mean either keep-best never firing
+//!   or the matching window silently eating real traffic. Two more knobs return
+//!   rdio's semantics: `dedup_scope` and `dedup_keep`.
+//! - **One mapping writes a Call's columns for both writers**
+//!   (`repo::describe_transmission`), so a field added later cannot reach the
+//!   insert and miss the replacement.
 
 use std::sync::Arc;
 

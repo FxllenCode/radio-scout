@@ -5,11 +5,15 @@
 //! moment does not mean sharing the Instance: the link opens one Call, for a
 //! bounded window, and reaches no search, no catalog and no other audio.
 //!
+//! This module is minting (`POST /api/call/{id}/share`), the page a recipient
+//! opens (`GET /s?t=…`, server-rendered) and the audio behind it (`GET
+//! /s/audio?t=…`); `src/curate/shares.rs` is the Operator's listing and revoke.
+//!
 //! rdio-scanner has nothing like this. Its only addressable state is `?id=` on a
 //! Profile, so "listen to this" there means "go to my scanner, set these
 //! filters, and find it".
 //!
-//! # Five things worth knowing
+//! # What is worth knowing
 //!
 //! **One live link per Call, which is the whole abuse bound.** Minting is
 //! unauthenticated, because a Listener holds no credential and US 32 is a
@@ -31,6 +35,11 @@
 //! than by a redaction pass that can be wrong. `/s?t=…`, and `/s/audio?t=…` for
 //! the bytes.
 //!
+//! `tests/share.rs::a_share_token_never_reaches_the_log` is what would notice.
+//! The same rule takes the token off the admin listing (`ShareRow` has no field
+//! for it, the `WebhookRow` shape): what an Operator is asking is *what is being
+//! shared*, which is the **Call**.
+//!
 //! **The audio is served through the token, never through `/api/call/{id}`.**
 //! It is the same [`crate::serve`] decision — the filesystem store proxies with
 //! range support, an S3-shaped store redirects to a presigned URL — reached
@@ -38,6 +47,10 @@
 //! implementation. The door matters: listening is open today (ADR-0008), and
 //! when #68 makes it scoped a share link must still open exactly one Call
 //! rather than inherit whatever the Archive's own audio route then permits.
+//!
+//! Concretely it is `serve::serve_call`, so ranges, presigning and the
+//! `immutable`-versus-thirty-seconds cache policy are #31's and #46's rather than
+//! rebuilt.
 //!
 //! **The page is server-rendered and self-contained.** A messaging app's link
 //! preview is fetched by a crawler that does not run JavaScript, so an OG card
@@ -49,27 +62,40 @@
 //! opened in a browser that has this Instance installed, and only in that
 //! browser.
 //!
+//! `share::page::render` is pure, so every rule about the page is a value a test
+//! states — including that **a label is escaped**, which is the only place in the
+//! project that puts a Recorder-supplied string into markup rather than into JSON
+//! a browser escapes for us. The instant is rendered in **UTC** with three lines
+//! of script localising it, because neither the server nor the crawler is in the
+//! recipient's timezone. Absolute tags (`og:url`, `og:image`, `og:audio`) are
+//! omitted without `[server] public_url` — #54's rule unchanged: a guessed origin
+//! in somebody's link preview is worse than a card with no image.
+//!
 //! **An expiry is a promise about the link that was handed out.** So an expired
 //! row is re-minted with a *new* token ([`Mint::Issue`]) rather than having its
 //! old one brought back to life, and revoking deletes the row, which kills that
 //! URL for good — a token is 128 random bits and is never reissued to the same
 //! value.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! **A refusal is recorded here and rendered there.** `Gone` has three arms and
+//! each is a `Reason` (`share-not-found`, `share-expired`, `sharing-disabled`),
+//! so the audio route answers in the one refusal vocabulary while the page calls
+//! `Reason::record()` and renders HTML with `Reason::status()` — #92's rule
+//! exactly, and the reason `Reason` grew a `status()` accessor rather than the
+//! page a second table. `Disabled` is deliberately *indistinguishable from
+//! unknown* to whoever is knocking and distinct in the log, which is where the
+//! Operator who turned it off goes.
 //!
-//! **A share link is a capability over one Call, and the token rides the query string (#64, spec US 32).** `src/share/` is minting (`POST /api/call/{id}/share`), the page a recipient opens (`GET /s?t=…`, server-rendered) and the audio behind it (`GET /s/audio?t=…`); `src/curate/shares.rs` is the Operator's listing and revoke. rdio-scanner has nothing like it — its only addressable state is `?id=` on a Profile, so "listen to this" there means "go to my scanner, set these filters, find it". Six things follow.
+//! **`repo::delete_calls` names `share_links`**, which is #55's lesson paid
+//! again: a child table left out passes every test that stores and reads, then
+//! fails the **retention sweep** — which walks oldest-first, so from the moment
+//! the oldest shared Call comes due every sweep fails at the same row forever and
+//! an Operator's disk quietly stops being bounded.
+//! `tests/share.rs::a_shared_call_is_still_prunable` is what would notice.
 //!
-//! **One live link per Call is the abuse bound, not a convenience.** Minting is unauthenticated because a **Listener** holds no credential and US 32 is a Listener's story; a table keyed on anything but the Call would let anybody fill a Pi's disk by POSTing in a loop, where keyed on the Call it is bounded by the Calls table, which **Retention** already bounds. So a second mint is `Mint::Extend` — the token already in circulation, its window pushed out — and two Listeners sharing one Call share one link, which is what makes an Operator's revoke mean *this Call is no longer shared*. An **expired** row is re-issued with a new token rather than resurrected, because an expiry is a promise about the URL that was handed out.
-//!
-//! **The token is in the query string, and that is an ADR-0011 rule-2 decision rather than URL design.** The whole link is a bearer credential, the way a **Webhook**'s URL is — and `http_log` logs a request's *path* and deliberately never its query, because ADR-0008 puts access codes in a query parameter. Putting it there makes "a share token is never logged" true by construction instead of by a redaction pass that can be wrong. `tests/share.rs::a_share_token_never_reaches_the_log` is what would notice. The same rule takes the token off the admin listing (`ShareRow` has no field for it, the `WebhookRow` shape): what an Operator is asking is *what is being shared*, which is the **Call**.
-//!
-//! **The audio comes through the token, never through `/api/call/{id}/audio`** — `serve::serve_call`, the same decision through a different door, so ranges, presigning and the `immutable`-versus-thirty-seconds cache policy are #31's and #46's rather than rebuilt. That is what makes "works on both storage backends" free. The door itself matters: listening is open today, and when #68 scopes it a share link must still open exactly one Call rather than inherit whatever the Archive's own route then permits.
-//!
-//! **The page is server-rendered and self-contained, and it has to be.** A messaging app's preview is fetched by a crawler that runs no JavaScript, so an OG card cannot come from the SPA; and "playable without the app" is kept by being one file with its own `<audio>`, working in a checkout where `client/dist` was never built. `share::page::render` is pure, so every rule about it is a value a test states — including that **a label is escaped**, which is the only place in the project that puts a Recorder-supplied string into markup rather than into JSON a browser escapes for us. The instant is rendered in **UTC** with three lines of script localising it, because neither the server nor the crawler is in the recipient's timezone. Absolute tags (`og:url`, `og:image`, `og:audio`) are omitted without `[server] public_url` — #54's rule unchanged: a guessed origin in somebody's link preview is worse than a card with no image.
-//!
-//! **A refusal is recorded here and rendered there.** `Gone` has three arms and each is a `Reason` (`share-not-found`, `share-expired`, `sharing-disabled`), so the audio route answers in the one refusal vocabulary while the page calls `Reason::record()` and renders HTML with `Reason::status()` — #92's rule exactly, and the reason `Reason` grew a `status()` accessor rather than the page a second table. `Disabled` is deliberately *indistinguishable from unknown* to whoever is knocking and distinct in the log, which is where the Operator who turned it off goes.
-//!
-//! And **`repo::delete_calls` names `share_links`**, which is #55's lesson paid again: a child table left out passes every test that stores and reads, then fails the **retention sweep** — which walks oldest-first, so from the moment the oldest shared Call comes due every sweep fails at the same row forever and an Operator's disk quietly stops being bounded. `tests/share.rs::a_shared_call_is_still_prunable` is what would notice. The other cross-cutting piece is `GET /api/catalog`'s `sharing` bit: the client draws the control from it, because a control that is offered and then refused is a control that lies.
+//! **The control is drawn from the catalog.** `GET /api/catalog`'s `sharing` bit
+//! is what the client reads, because a control that is offered and then refused
+//! is a control that lies.
 
 pub mod page;
 

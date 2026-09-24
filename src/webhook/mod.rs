@@ -32,6 +32,16 @@
 //! - [`sender`] is the errand; the queue around it is [`crate::delivery`],
 //!   shared with the Downstream sender.
 //!
+//! The trigger is a `Mark`, and #55 added one variant: the roster read, the
+//! routing, the queue, the payload and the admin form are all written against the
+//! *set* rather than against Emergency, so a new mark is a variant plus a word in
+//! `client/src/lib/webhook.ts`'s `markName`. There is deliberately **no "every
+//! Call"** — that is what a Downstream is for, and a county's routine traffic
+//! posted into a chat room would exhaust Discord's rate limit within a minute of
+//! being switched on. And **what is sent is the overlap, not the Call's whole
+//! mark set**, so a webhook watching only for tone-outs never has to work out why
+//! it was woken.
+//!
 //! # What it costs a Call that carries no mark: nothing
 //!
 //! [`crate::ingest`] reads the Downstream roster on **every** upload, because
@@ -40,6 +50,12 @@
 //! [`Marks::is_empty`] is checked before a statement is issued. On a Pi taking a
 //! Call a second, an Emergency happens a few times a day, so this feature's
 //! steady-state cost at ingest is **zero statements** rather than one.
+//!
+//! `tests/webhook.rs` asserts that as a difference between two uploads rather
+//! than as a pinned number, so it survives every statement ingest gains later.
+//! `reached_channels` is the Talkgroup set both sinks scope on, written once,
+//! because a set that differed between them would mean a **Patch** reaching a
+//! peer and not a webhook.
 //!
 //! #55's mark does not change that, because it is not known at ingest: a page is
 //! found by [`crate::tone::worker`] afterwards, and the roster read that follows
@@ -65,27 +81,79 @@
 //! durable queue rather than an inline POST that drops what it cannot send, and
 //! the scope walks patches rather than comparing one Talkgroup Ref.
 //!
+//! # One queue, two sinks
+//!
+//! [`crate::delivery`] is the queue, and both sinks drain through it: the retry
+//! policy (`Verdict`, `Failed`), the backoff (`Retry`), the ordering rule (`plan`
+//! — one attempt in flight per sink, a head that is not due *stops* that sink
+//! rather than being stepped over), the accounting (`Dispatcher`, where #52's two
+//! wrong readings of "one unit of work" are written down) and the loop (`run`)
+//! are one implementation over an `Outbox` of four questions. **Sink** is
+//! CONTEXT.md's word for what both are, which is why the failure slugs a stored
+//! row and a log line carry are `sink-refused`/`sink-unreachable`: *peer* is a
+//! Downstream, and a Discord channel is not a peer of anything.
+//!
+//! What is *not* shared is the port below one attempt —
+//! `downstream::sender::Deliveries` asks for a Call in the rdio dialect plus its
+//! audio bytes, `webhook::sender::Sinks` asks for the Call a Listener sees and no
+//! bytes at all — because merging those would produce an interface that is the
+//! union of two errands and the shape of neither. Nor are the *sentences*:
+//! `delivery::say` fixes the level each settlement earns (ADR-0011 rule 7) and
+//! carries `sink=` as a **field**, which is #92's rule that a surface's shape may
+//! differ where the policy underneath may not.
+//!
+//! # The URL is the credential
+//!
+//! That is the one place this is stricter than a Downstream (public URL, secret
+//! key). It never leaves: `WebhookRow` has no field for it and carries
+//! `webhook::host_of`'s answer instead, so an Operator can tell two Discord rows
+//! apart without the token reaching anyone who opens the page; the span on every
+//! delivery line names the **Id**; and the transport error goes through
+//! `without_url`. It is also why **webhooks are absent from the configuration
+//! document entirely** (#51's "no secret leaves in any form"): exporting the row
+//! minus its URL would restore an inert webhook, and exporting it whole would
+//! stop a backup being a file an Operator can email. `tests/webhook.rs` asserts
+//! the document contains neither the token nor the word.
+//!
+//! # A malformed link is worse than no link
+//!
+//! That is a `400` we would abandon Calls over. A `StoredCall`'s `audio_url` is a
+//! path, because every other consumer is a browser already on this origin; a
+//! Discord embed answers `400 Not a well formed URL` for one, and `400` is
+//! `Verdict::Abandon`. So `[server] public_url` is the Operator saying where this
+//! Instance lives, it is refused at boot unless `webhook::is_postable_url`
+//! accepts it (in the environment layer *and* in `validate`, the `ProxyNet`
+//! precedent), and an Instance that has not been told sends every fact and **no
+//! link at all**. It is a parameter to `payload::body` rather than something that
+//! module reaches for, which is what keeps the render pure.
+//!
+//! **One predicate, three surfaces.** `is_postable_url` is what the `[server]
+//! public_url` boot check, the admin form's URL validation and the browser's own
+//! pre-submit check all ask — scheme, host, no whitespace — because a browser
+//! that accepted what the server refuses would send a credential up only to have
+//! it bounced, by which point the form has cleared it and the Operator has to go
+//! back to Discord. Everything else about the Discord body is *its* schema rather
+//! than ours, which is why `DiscordEmbed` carries **no `rename_all`**: Discord is
+//! snake_case, so a blanket camelCase rule would be inert today and quietly wrong
+//! the first time somebody adds a `footer.icon_url` — and the snapshot would pin
+//! the wrong name just as happily. Blank labels are treated as absent for the
+//! same family of reason: Discord refuses an empty title or field value, and a
+//! Call whose Talkgroup label is `""` would be *dropped* rather than rendered
+//! under its Ref.
+//!
+//! # Encrypted Calls and Replacements
+//!
+//! **An Encrypted Call is delivered here and never forwarded** — the asymmetry is
+//! the two sinks' subjects, not an oversight. The rdio dialect requires an audio
+//! object an encrypted Call does not have; a webhook carries facts, and an
+//! encrypted Emergency is exactly the fact an Operator most wants. A
+//! **Replacement** (#46) re-enqueues for both, because a better copy can turn an
+//! encrypted Call into a decoded one and a webhook that fired on the worse copy
+//! would link to audio this Instance has since improved on; the unique index
+//! makes the usual case (a replacement arriving before the first copy was sent) a
+//! no-op rather than a second message.
+//!
 //! [ADR-0014]: https://github.com/FxllenCode/radio-scout/blob/next/docs/adr/0014-no-notifications.md
-//!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
-//!
-//! **An Operator's own inbox is a delivery, and the queue that drains it is written once (#54, spec US 21).** `src/webhook/` posts marked Calls to an address an Operator configured — `payload` renders the two shapes (ours, and one Discord accepts), `sender` is the errand, and `Mark`/`Marks`/`Webhook`/`routed_to`/`WebhookConfig` are the policy. rdio-scanner has no webhooks at all, so there is nothing to be compatible with and the whole design is ours. Seven things follow.
-//!
-//! **`src/delivery.rs` is the queue, and both sinks drain through it.** The retry policy (`Verdict`, `Failed`), the backoff (`Retry`), the ordering rule (`plan` — one attempt in flight per sink, a head that is not due *stops* that sink rather than being stepped over), the accounting (`Dispatcher`, where #52's two wrong readings of "one unit of work" are written down) and the loop (`run`) are one implementation over an `Outbox` of four questions. **Sink** is CONTEXT.md's word for what both are, which is why the failure slugs a stored row and a log line carry became `sink-refused`/`sink-unreachable`: *peer* is a Downstream, and a Discord channel is not a peer of anything. What is *not* shared is the port below one attempt — `downstream::sender::Deliveries` asks for a Call in the rdio dialect plus its audio bytes, `webhook::sender::Sinks` asks for the Call a Listener sees and no bytes at all — because merging those would produce an interface that is the union of two errands and the shape of neither. Nor are the *sentences*: `delivery::say` fixes the level each settlement earns (ADR-0011 rule 7) and carries `sink=` as a **field**, which is #92's rule that a surface's shape may differ where the policy underneath may not.
-//!
-//! **The trigger is a `Mark`, and #55 adds one variant.** `Mark::Emergency` is the only one today; the roster read, the routing, the queue, the payload and the admin form are all written against the *set* rather than against Emergency, so tone-out is a variant plus a word in `lib/webhook.ts`'s `markName`. There is deliberately **no "every Call"** — that is what a Downstream is for, and a county's routine traffic posted into a chat room would exhaust Discord's rate limit within a minute of being switched on.
-//!
-//! **An unmarked Call costs this feature nothing — not one statement.** Downstream reads its roster on every upload because any Call may reach a peer; `ingest::enqueue_webhooks` checks `Marks::is_empty` *before* issuing anything, because a Call with no mark can reach no Webhook. `tests/webhook.rs` asserts it as a difference between two uploads rather than as a pinned number, so it survives every statement ingest gains later. `reached_channels` is the Talkgroup set both sinks scope on, written once, because a set that differed between them would mean a **Patch** reaching a peer and not a webhook.
-//!
-//! **The URL *is* the credential**, which is the one place this is stricter than a Downstream (public URL, secret key). It never leaves: `WebhookRow` has no field for it and carries `webhook::host_of`'s answer instead, so an Operator can tell two Discord rows apart without the token reaching anyone who opens the page; the span on every delivery line names the **Id**; and the transport error goes through `without_url`. It is also the reason **webhooks are absent from the configuration document entirely** (#51's "no secret leaves in any form"): exporting the row minus its URL would restore an inert webhook, and exporting it whole would stop a backup being a file an Operator can email. `tests/webhook.rs` asserts the document contains neither the token nor the word.
-//!
-//! **A malformed link is worse than no link, and that is a `400` we would abandon Calls over.** A `StoredCall`'s `audio_url` is a path, because every other consumer is a browser already on this origin; a Discord embed answers `400 Not a well formed URL` for one, and `400` is `Verdict::Abandon`. So `[server] public_url` is the Operator saying where this Instance lives, it is refused at boot unless `webhook::is_postable_url` accepts it (in the environment layer *and* in `validate`, the `ProxyNet` precedent), and an Instance that has not been told sends every fact and **no link at all**. It is a parameter to `payload::body` rather than something that module reaches for, which is what keeps the render pure.
-//!
-//! **One predicate, three surfaces.** `is_postable_url` is what the `[server] public_url` boot check, the admin form's URL validation and the browser's own pre-submit check all ask — scheme, host, no whitespace — because a browser that accepted what the server refuses would send a credential up only to have it bounced, by which point the form has cleared it and the Operator has to go back to Discord. Everything else about the Discord body is *its* schema rather than ours, which is why `DiscordEmbed` carries **no `rename_all`**: Discord is snake_case, so a blanket camelCase rule would be inert today and quietly wrong the first time somebody adds a `footer.icon_url` — and the snapshot would pin the wrong name just as happily. Blank labels are treated as absent for the same family of reason: Discord refuses an empty title or field value, and a Call whose Talkgroup label is `""` would be *dropped* rather than rendered under its Ref.
-//!
-//! **An Encrypted Call is delivered here and never forwarded** — the asymmetry is the two sinks' subjects, not an oversight. The rdio dialect requires an audio object an encrypted Call does not have; a webhook carries facts, and an encrypted Emergency is exactly the fact an Operator most wants. A **Replacement** (#46) re-enqueues for both, because a better copy can turn an encrypted Call into a decoded one and a webhook that fired on the worse copy would link to audio this Instance has since improved on; the unique index makes the usual case (a replacement arriving before the first copy was sent) a no-op rather than a second message.
-//!
-//! And **what is sent is the overlap, not the Call's whole mark set**, so a webhook watching only for tone-outs never has to work out why it was woken.
 
 pub mod payload;
 pub mod sender;

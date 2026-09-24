@@ -1,7 +1,3 @@
-/**
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
- * **Nothing folds without being shown first, and there is one road to a fold (#50).** `hooks/useMerge.ts` is preview-then-commit as a value: the row editor, the per-Ref unfold button and the bulk bar are the same flow against different deltas, so a path that skipped the preview would have to be written on purpose. Three things follow. **`apply` lives on `pending`, not beside `preview`** — committing something never previewed is not *expressible*, where a guard on a top-level `apply()` would say the same thing and could be forgotten (it was also an unreachable branch no test could kill). **The delta applied is the identical one that was shown**, not one rebuilt from the report, which is the whole meaning of a confirmation; and a refused commit takes the preview down with it, because whatever the server refused, what is on screen has stopped being a promise about the run that follows. **The bulk fold's survivor comes from the selection** (`BulkFold`) — tick the churn rows and the real channel, pick which one lives — and the control is **disabled across two Systems** rather than explained afterwards, because a Ref is unique only within one and the explanation would need a request sent first. That survivor is **derived from the selection rather than stored**: the selection changes underneath the control, so a remembered id could name a row no longer in it while a different channel silently absorbed the rest — and the select is the only place the survivor is named, until the confirmation gained an `into` line. Select-all is the other half of *foldable in bulk*: a patch-happy system leaves dozens of near-identical rows, and forty individual ticks is the afternoon US 46 exists to save. `components/admin/RangesEditor.tsx` is the Unit half and has no preview at all, for the server's reason.
- */
 import { useState } from 'react'
 
 import { useFoldMembersMutation, usePreviewFoldMutation } from '@/store/api'
@@ -18,7 +14,29 @@ import type { MemberDelta, MergeReport } from '@/types'
  * A hook rather than three copies, because the row editor, the unfold button and
  * the bulk bar are the same flow against different deltas — and because "the
  * preview always precedes the write" is a promise about *all* of them. A second
- * copy is how one of them would come to skip it.
+ * copy is how one of them would come to skip it: a path that skipped the
+ * preview would have to be written on purpose.
+ *
+ * **The delta applied is the identical one that was shown**, not one rebuilt
+ * from the report, which is the whole meaning of a confirmation; and a refused
+ * commit takes the preview down with it, because whatever the server refused,
+ * what is on screen has stopped being a promise about the run that follows.
+ *
+ * **The bulk fold's survivor comes from the selection** — tick the churn rows
+ * and the real channel, pick which one lives — and the control is **disabled
+ * across two Systems** rather than explained afterwards, because a Ref is
+ * unique only within one and the explanation would need a request sent first.
+ * That survivor is **derived from the selection rather than stored**: the
+ * selection changes underneath the control, so a remembered id could name a row
+ * no longer in it while a different channel silently absorbed the rest — and
+ * the select was the only place the survivor was named, until the confirmation
+ * gained an `into` line. Select-all is the other half of *foldable in bulk*: a
+ * patch-happy system leaves dozens of near-identical rows, and forty individual
+ * ticks is the afternoon US 46 exists to save.
+ *
+ * `components/admin/RangesEditor.tsx` is the Unit half and has no preview at
+ * all, for the server's reason (`src/curate/members.rs`: a Call names the
+ * radios it heard by Ref, never by a Unit's Id).
  */
 
 /** A merge that has been previewed and is waiting on the Operator.
@@ -26,7 +44,8 @@ import type { MemberDelta, MergeReport } from '@/types'
  *  **`apply` lives here rather than beside `preview`**, so committing something
  *  that was never previewed is not expressible: there is no `apply` to call
  *  until a preview has come back and produced one of these. A guard on a
- *  top-level `apply()` would say the same thing and could be forgotten. */
+ *  top-level `apply()` would say the same thing and could be forgotten (it was
+ *  also an unreachable branch no test could kill). */
 export interface Pending {
   delta: MemberDelta
   report: MergeReport

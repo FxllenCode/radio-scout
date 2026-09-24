@@ -10,7 +10,32 @@
  * was the only order, so nothing had to say what "next" meant. Once a Talkgroup
  * can outrank another, "next" and "what the cap drops" become one decision made
  * in one place — and #58 turned Priority on by passing a different
- * [`PriorityOf`] ([`priorityFrom`]), not by editing the reducers again.
+ * [`PriorityOf`] ([`priorityFrom`]), not by editing the reducers again:
+ * `queuePolicy` in `store/live.ts` is `{ limit: QUEUE_LIMIT, priorityOf }`.
+ *
+ * # The array is play order, and the cap obeys it
+ *
+ * **The array *is* play order**, maintained on insert rather than sorted on
+ * take, so "the head is what plays next" is one statement and `transport.ts`'s
+ * `selectQueue(state)[0]` page-ahead stays correct under **Priority** without
+ * knowing the rule.
+ *
+ * **The cap truncates in the same order it plays** — lowest Priority first,
+ * then stalest — which is #95's reason for existing: dropping "the stalest" was
+ * right while order was arrival order, and once a Talkgroup can outrank another
+ * it discards the one thing the **Listener** said mattered while routine
+ * chatter plays on. The cap gives up one Call at a time by scanning for the
+ * worst rather than sorting, because [`enqueue`] adds one and every other
+ * writer shrinks — so the loop runs once, where a sort would spend `n log n`
+ * ordering ninety-nine Calls it was never going to drop.
+ *
+ * "Property-tested" here is **exhaustive enumeration** — every assignment of
+ * three Priority levels across four arrivals, 81 queues, fed through `it.each`
+ * so a failure names the assignment the way a shrunk counterexample would —
+ * because the client has no `proptest` counterpart in ADR-0010's stack and this
+ * input space is small enough to cover *completely*, which beats sampling it
+ * and has no seed to report; the ceiling the enumeration cannot reach is one
+ * explicit case at 250 arrivals.
  *
  * # The arrival stamp (#58)
  *
@@ -19,16 +44,23 @@
  * about an array's shape can give:
  *
  * - [`reorder`], when the Listener changes a Priority under a queue that is
- *   already deep. A *promotion* could be recovered from position; a
- *   **demotion** cannot, because the Calls it falls back among are all newly
- *   tied and their arrival order was never written down anywhere else.
+ *   already deep. Order is maintained *on insert*, so without it a waiting
+ *   Call would not jump when its Talkgroup is promoted — the one moment a
+ *   Listener reaches for Priority. A *promotion* could be recovered from
+ *   position; a **demotion** cannot, because the Calls it falls back among are
+ *   all newly tied and their arrival order was never written down anywhere
+ *   else (no field on a `Call` is arrival order: `id` is the server's, which
+ *   #94 established is not even emission order). The oracle is 81 shapes × 81
+ *   shapes, every re-ordering of four Calls into every other.
  * - [`newest`], which is what jump-to-newest means. Under Priority the tail of
  *   the queue is the *lowest-ranked* Call, not the last to arrive — so jumping
  *   to the tail would hand a Listener the stalest routine chatter there is and
  *   call it catching up.
  *
  * An ordinal rather than a clock, so the module stays pure and a queue is still
- * a value a test constructs. The slice counts.
+ * a value a test constructs. The slice counts. (`Queued { call, at }`,
+ * [`reorder`], [`newest`], [`withdraw`] and [`priorityFrom`] all arrived with
+ * #58.)
  *
  * # What this deliberately is not
  *
@@ -38,23 +70,68 @@
  * playing — the glossary calls that out by name as SDRTrunk's stronger notion,
  * which this is not.
  *
- * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ * # The surfaces over it (#58, spec US 24–28)
  *
- * **The listening queue's order is a policy, and the cap obeys it (#95).** `lib/queue.ts` is where a **Call** joins the queue (`enqueue`), where the next one comes off (`takeNext`) and where a matrix change takes one out (`retain`) — pure, so every rule is a value `queue.test.ts` constructs rather than a slice driven through a socket. Four things follow. **The array *is* play order**, maintained on insert rather than sorted on take, so "the head is what plays next" is one statement and `transport.ts`'s `selectQueue(state)[0]` page-ahead stays correct under **Priority** without knowing the rule. **That invariant had one precondition, and #58 met it**: order is maintained *on insert*, so a `priorityOf` that changes under a non-empty queue would leave that queue stale — a waiting Call not jumping when its Talkgroup is promoted, which is the one moment a Listener reaches for Priority. #95 left it open rather than papering over it, because the honest fix needs an **arrival stamp** the queue did not have: re-sorting recovers a promotion from position, but not a demotion, since ranking two newly-tied Calls by staleness needs to know which arrived first and no field on a `Call` is arrival order (`id` is the server's, which #94 established is not even emission order). #58 added the stamp and `reorder`; see its bullet below. **The cap truncates in the same order it plays** — lowest Priority first, then stalest — which is the ticket's reason for existing: dropping "the stalest" was right while order was arrival order, and once a Talkgroup can outrank another it discards the one thing the **Listener** said mattered while routine chatter plays on. With no Priority anywhere the queue is a single band, so it degenerates to exactly the old `slice(-limit)`, which is what keeps today's behaviour true. And **Priority is a parameter, not a rewrite**: `queuePolicy` in `store/live.ts` is `{ limit: QUEUE_LIMIT, priorityOf }`, and #58 turned it on by passing a different `PriorityOf` rather than by editing three reducers and the cap. The entry point is `enqueue` and not `admit` because CONTEXT.md reserves **Admission** for what **Ingest** decided about a Call (#96). "Property-tested" here is **exhaustive enumeration** — every assignment of three Priority levels across four arrivals, 81 queues, fed through `it.each` so a failure names the assignment the way a shrunk counterexample would — because the client has no `proptest` counterpart in ADR-0010's stack and this input space is small enough to cover *completely*, which beats sampling it and has no seed to report; the ceiling the enumeration cannot reach is one explicit case at 250 arrivals. The cap gives up one Call at a time by scanning for the worst rather than sorting, because `enqueue` adds one and every other writer shrinks — so the loop runs once, where a sort would spend `n log n` ordering ninety-nine Calls it was never going to drop.
+ * The queue is a tool, Priority is a level, and the Avoid you did not mean is
+ * one tap back — four Listener-facing surfaces over one slice, each closing a
+ * gap rdio-scanner still has: it shows a queue count and offers nothing behind
+ * it, has no per-talkgroup Priority at all, silences a channel with no undo and
+ * no list of what is silenced, and remembers nothing of what you heard beyond
+ * the last few rows.
  *
- * **The queue is a tool, Priority is a level, and the Avoid you did not mean is one tap back (#58, spec US 24–28).** Four Listener-facing surfaces over one slice, and each one closes a gap rdio-scanner still has: it shows a queue count and offers nothing behind it, has no per-talkgroup Priority at all, silences a channel with no undo and no list of what is silenced, and remembers nothing of what you heard beyond the last few rows. Six things follow.
- *
- * **A queued Call carries an arrival ordinal, and that is what `reorder` needed.** `lib/queue.ts` grew `Queued { call, at }`, `reorder`, `newest`, `withdraw` and `priorityFrom`; the slice counts the ordinals, so the module still has no clock and a queue is still a value a test constructs. A *promotion* could have been recovered from position — the array is already in play order — but a **demotion** cannot: the Calls it falls back among are all newly tied, and their arrival order was never written anywhere else. The oracle is 81 shapes × 81 shapes, every re-ordering of four Calls into every other. `newest` exists for the same reason in the other direction: under Priority the *tail* of the queue is the lowest-ranked Call there is, so jump-to-newest reading the tail would hand a Listener the stalest routine chatter and call it catching up.
- *
- * **Priority lives in `live`, not in `panel`.** `store/panel.ts`'s own rule is that nothing in it can change what plays, and this changes what plays *next* — so it sits beside the **Selection** and the **Avoids**, is persisted under a key of its own (`lib/persist`'s per-list rule: a list an older build cannot read costs the Listener that list alone), and `markPriority` is written once because two controls reach it — the panel row and the Live screen's control over the Call the display is showing (#56's subject, so Hold, Avoid and Priority cannot be about three different Calls). A **patched** Call reaching a marked Talkgroup is promoted, the same rule `wants` already applies to whether it is heard at all.
- *
- * **Only the jump is counted as missed.** The ticket asks for that explicitly — "counted as missed, never silent" — and the asymmetry with the per-row *drop* is the point: `missed` admits traffic the Listener *wanted* and did not get (`turnFeedOff`'s rule), and a Call they read in the sheet and let go is not that. Jumping is the one Listener-initiated discard where they did not look at what went.
- *
- * **The undo carries what the Avoid displaced, and lives in the shell.** `AvoidUndo` holds the previous deadline *and* the **Hold** avoiding released — an undo that put back only the silence would be a half-undo that quietly cost a hold — and it cannot put back the Calls the purge took, which the offer is honest about being "the channel is not muted" rather than "nothing happened". The bar renders in `AppShell` beside the mini-player, for the reason #56 put the strip there: the offer has a deadline, and a Listener who avoids a channel and then goes to look at Talkgroups has spent none of it. The deadline is a *moment* in the store, so a remount waits out what is left rather than starting again.
- *
- * **A press acts on the Call the finger went down on.** `hooks/useLongPress.ts` captures the subject at `pointerdown` rather than reading it when the timer fires, because the session log grows at the top as Calls are heard — so a menu that opened over whichever Call had slid into that place would be a mis-tap on a control that silences a channel. `key={call.id}` is the other half, so React moves a row's node rather than rewriting it. The queue sheet has the same hazard and answers it *without* a gesture — its controls are ordinary buttons that each name a **Call id**, never a position, so a re-order moves the button rather than changing what it means — which is why only one screen uses the hook. The click after a hold is swallowed, or holding a row to reach *Avoid* would replay the Call on the way there.
- *
- * **A row is `aria-disabled`, never `disabled`, when the feed is not the Listener's audio.** A disabled button fires no pointer events, so gating the row that way took *Hold*, *Avoid* and *Download* down with *Replay* — none of those three is audio, and all of them are what a Listener browsing with the feed off came for. Only the tap is refused. And **the session log is a route, and `replay` reads it.** `routes/SessionScreen.tsx` is up to 250 Calls deep where RECENT is five, so it gets a screen the way `UnitScreen` does rather than a sheet over the one it was opened from. Each Call appears once in first-heard order — a replay is hearing it again, which also keeps `key={call.id}` unique (#82's lesson one list along) — and `replay` now looks a Call up in the log rather than in the history, because the history is strictly the newest five of it and a screen offering a replay that silently did nothing is worse than no screen. Encrypted Calls are in it: they never play, but they are the only record that a channel was busy.
+ * - **Priority lives in `live`, not in `panel`.** `store/panel.ts`'s own rule
+ *   is that nothing in it can change what plays, and this changes what plays
+ *   *next* — so it sits beside the **Selection** and the **Avoids**, is
+ *   persisted under a key of its own (`lib/persist`'s per-list rule: a list an
+ *   older build cannot read costs the Listener that list alone), and
+ *   `markPriority` is written once because two controls reach it — the panel
+ *   row and the Live screen's control over the Call the display is showing
+ *   (#56's subject, so Hold, Avoid and Priority cannot be about three different
+ *   Calls). A **patched** Call reaching a marked Talkgroup is promoted, the
+ *   same rule `wants` already applies to whether it is heard at all.
+ * - **Only the jump is counted as missed.** The ticket asks for that explicitly
+ *   — "counted as missed, never silent" — and the asymmetry with the per-row
+ *   *drop* is the point: `missed` admits traffic the Listener *wanted* and did
+ *   not get (`turnFeedOff`'s rule), and a Call they read in the sheet and let
+ *   go is not that. Jumping is the one Listener-initiated discard where they
+ *   did not look at what went.
+ * - **The undo carries what the Avoid displaced, and lives in the shell.**
+ *   `AvoidUndo` holds the previous deadline *and* the **Hold** avoiding
+ *   released — an undo that put back only the silence would be a half-undo
+ *   that quietly cost a hold — and it cannot put back the Calls the purge took,
+ *   which the offer is honest about being "the channel is not muted" rather
+ *   than "nothing happened". The bar renders in `AppShell` beside the
+ *   mini-player, for the reason #56 put the strip there: the offer has a
+ *   deadline, and a Listener who avoids a channel and then goes to look at
+ *   Talkgroups has spent none of it. The deadline is a *moment* in the store,
+ *   so a remount waits out what is left rather than starting again.
+ * - **A press acts on the Call the finger went down on.**
+ *   `hooks/useLongPress.ts` captures the subject at `pointerdown` rather than
+ *   reading it when the timer fires, because the session log grows at the top
+ *   as Calls are heard — so a menu that opened over whichever Call had slid
+ *   into that place would be a mis-tap on a control that silences a channel.
+ *   `key={call.id}` is the other half, so React moves a row's node rather than
+ *   rewriting it. The queue sheet has the same hazard and answers it *without*
+ *   a gesture — its controls are ordinary buttons that each name a **Call id**,
+ *   never a position, so a re-order moves the button rather than changing what
+ *   it means — which is why only one screen uses the hook. The click after a
+ *   hold is swallowed, or holding a row to reach *Avoid* would replay the Call
+ *   on the way there.
+ * - **A row is `aria-disabled`, never `disabled`, when the feed is not the
+ *   Listener's audio.** A disabled button fires no pointer events, so gating
+ *   the row that way took *Hold*, *Avoid* and *Download* down with *Replay* —
+ *   none of those three is audio, and all of them are what a Listener browsing
+ *   with the feed off came for. Only the tap is refused.
+ * - **The session log is a route, and `replay` reads it.**
+ *   `routes/SessionScreen.tsx` is up to 250 Calls deep where RECENT is five, so
+ *   it gets a screen the way `UnitScreen` does rather than a sheet over the one
+ *   it was opened from. Each Call appears once in first-heard order — a replay
+ *   is hearing it again, which also keeps `key={call.id}` unique (#82's lesson
+ *   one list along) — and `replay` looks a Call up in the log rather than in
+ *   the history, because the history is strictly the newest five of it and a
+ *   screen offering a replay that silently did nothing is worse than no screen.
+ *   Encrypted Calls are in it: they never play, but they are the only record
+ *   that a channel was busy.
  */
 import { talkgroupKey } from './selection'
 import type { Call } from '@/types'

@@ -38,25 +38,106 @@
 //!   than queued, because a queue would only mean the Pi is late for two people
 //!   instead of one.
 //!
-//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//! # Design notes
 //!
-//! **An export declares itself before it reads anything, and then cannot change its mind (#65, spec US 33).** `src/export/` is a range of the Archive as a file — `zip` is a hand-rolled store-method archive, `stitch` is the pure-Rust WAV concatenation, and the handler is a thin adapter over both. rdio-scanner has no export at all; the nearest thing it offers is downloading Calls one at a time, so a folder of an incident is a hundred clicks and no manifest. Seven things follow.
+//! `zip` is a hand-rolled store-method archive, `stitch` is the pure-Rust WAV
+//! concatenation, and the handler is a thin adapter over both.
 //!
-//! **`archive::extent` is one statement, and every refusal is taken from it** — how many Calls, how many bytes of audio, how long altogether, and when the range starts. That is what makes "too many", "too large" and "nothing there" *sentences* rather than a download that goes wrong four gigabytes in, and it is why the client can say "that range holds 4,312 calls" **before** the wait (the cap rides on `GET /api/catalog`, `sharing`'s precedent taken one step further, because here the *number* is the message).
+//! **Every refusal is a sentence, not a failed download.** Because [`Extent`]
+//! answers how many Calls, how many bytes, how long and when the range starts,
+//! "too many", "too large" and "nothing there" are said before anything is sent
+//! rather than going wrong four gigabytes in — and the client can say "that
+//! range holds 4,312 calls" **before** the wait, because the cap rides on `GET
+//! /api/catalog` (`sharing`'s precedent taken one step further: here the
+//! *number* is the message).
 //!
-//! **The stitched file's timeline is declared, not discovered.** A WAV states its length in its first 44 bytes and an export cannot know the length of decoded audio without decoding it, which is the one thing it must not do twice and must not hold whole — so the length is `SUM(duration_ms)` and each Call is **fitted** into the room that sum reserved for it. One decode pass, an exact `Content-Length`, and a memory cost of one Call. The three alternatives all lose something real: a two-pass decode costs 2× CPU and 2× object reads, a temp-file spool writes the whole export to a Pi's SD card, and an unknown-length WAV makes "one listenable file" a claim about the player rather than about us.
+//! **The stitched file's timeline is declared, not discovered.** An export
+//! cannot know the length of decoded audio without decoding it, which is the
+//! one thing it must not do twice and must not hold whole — so the length is
+//! `SUM(duration_ms)` and each Call is **fitted** into the room that sum
+//! reserved for it. One decode pass, an exact `Content-Length`, and a memory
+//! cost of one Call. The three alternatives all lose something real: a two-pass
+//! decode costs 2× CPU and 2× object reads, a temp-file spool writes the whole
+//! export to a Pi's SD card, and an unknown-length WAV makes "one listenable
+//! file" a claim about the player rather than about us.
 //!
-//! **Which means the stitch holds only what it can place.** A Call whose length this Instance never measured is not in it — spelled as `min_duration_ms.max(Some(0))`, because "a Call whose length was never measured never matches" is already the kerchunk filter's own documented rule and a second way of saying it would be a second thing to keep true — and neither is an **Encrypted Call**. Both are in the zip's manifest, where the activity is the point. And **an object that has gone since the pre-pass is silence of exactly its declared length**: a valid header over a short body does not fail, it plays as every later Call being the wrong one.
+//! **Which means the stitch holds only what it can place.** A Call whose length
+//! this Instance never measured is not in it — spelled as
+//! `min_duration_ms.max(Some(0))`, because "a Call whose length was never
+//! measured never matches" is already the kerchunk filter's own documented rule
+//! and a second way of saying it would be a second thing to keep true — and
+//! neither is an **Encrypted Call**. Both are in the zip's manifest, where the
+//! activity is the point. And **an object that has gone since the pre-pass is
+//! silence of exactly its declared length**: a valid header over a short body
+//! does not fail, it plays as every later Call being the wrong one.
 //!
-//! **The manifest is written *first*, which is only possible because a Call's name in the zip is a function of *that Call alone*** (`archive::export_filename`: a UTC stamp, the download name, the Id). So the pass that writes the manifest can name files the pass behind it has not written yet, and nothing accumulates — where a manifest written last is a manifest held in memory, which is the thing this feature is not allowed to do. It costs a second pass over *metadata* and no second read of any object. **The name was an ordinal first, and `/code-review` killed it**: the two passes are two reads of a live Archive, so a name derived from a row's *position* slides by one for every Call **Retention** prunes between them — leaving a manifest whose `file` names a real file belonging to a different Call, which is worse than a missing one. The stamp leads so a folder of extracted files still sorts into the order the incident happened. The rows are `StoredCall` plus a `file`, deliberately the wire shape a search page already answers with, so a field added to the Archive reaches the manifest without anybody remembering.
+//! **The manifest is written *first*, which is only possible because a Call's
+//! name in the zip is a function of *that Call alone***
+//! (`archive::export_filename`: a UTC stamp, the download name, the Id). So the
+//! pass that writes the manifest can name files the pass behind it has not
+//! written yet, and nothing accumulates — a manifest written last is a manifest
+//! held in memory, which is the thing this feature is not allowed to do. It
+//! costs a second pass over *metadata* and no second read of any object. **The
+//! name was an ordinal first, and `/code-review` killed it**: the two passes
+//! are two reads of a live Archive, so a name derived from a row's *position*
+//! slides by one for every Call **Retention** prunes between them — leaving a
+//! manifest whose `file` names a real file belonging to a different Call, which
+//! is worse than a missing one. The stamp leads so a folder of extracted files
+//! still sorts into the order the incident happened. The rows are `StoredCall`
+//! plus a `file`, deliberately the wire shape a search page already answers
+//! with, so a field added to the Archive reaches the manifest without anybody
+//! remembering.
 //!
-//! **Both containers are 32-bit, and that coincidence is worth naming rather than duplicating**: a ZIP's local-header offsets and a WAV's two lengths have the same ceiling, so one `ExportTooLarge` covers both — which is also what makes ZIP64 unnecessary rather than merely omitted. The ZIP writer sets **general-purpose bit 3** and puts the CRC and both lengths in a **data descriptor** behind the data, which is the format's own answer to streaming; `ZipStream::begin` hands back an `Open` that is the only thing able to produce a central-directory record, and it does so in `Open::end`, so an entry begun and not ended is a value left lying around rather than an archive whose index is silently missing a file.
+//! **Both containers are 32-bit, and that coincidence is worth naming rather
+//! than duplicating**: a ZIP's local-header offsets and a WAV's two lengths
+//! have the same ceiling, so one `ExportTooLarge` covers both — which is also
+//! what makes ZIP64 unnecessary rather than merely omitted. The ZIP writer sets
+//! **general-purpose bit 3** and puts the CRC and both lengths in a **data
+//! descriptor** behind the data, which is the format's own answer to streaming;
+//! `ZipStream::begin` hands back an `Open` that is the only thing able to
+//! produce a central-directory record, and it does so in `Open::end`, so an
+//! entry begun and not ended is a value left lying around rather than an
+//! archive whose index is silently missing a file.
 //!
-//! **Two things a stranger with a URL must not be able to do.** A store that has gone away fails *every* read, so an unreadable object is **counted and reported once when the export finishes** rather than once per Call — `crate::mining::sweep`'s rule one surface along, and ADR-0011 rule 8's whole point. And the manifest records an **allow-list** of filter parameters rather than "the query string minus `format`": a manifest is a file handed to strangers, #68's **Access code** rides in a query string (ADR-0008), and that is exactly why `http_log` logs a path and never a query — denying one key by name would publish the next credential somebody adds, where allowing by name fails the safe way (a filter added later is *missing* from the manifest until it is listed).
+//! **Two things a stranger with a URL must not be able to do.** A store that
+//! has gone away fails *every* read, so an unreadable object is **counted and
+//! reported once when the export finishes** rather than once per Call —
+//! `crate::mining::sweep`'s rule one surface along, and ADR-0011 rule 8's whole
+//! point. And the manifest records an **allow-list** of filter parameters
+//! rather than "the query string minus `format`": a manifest is a file handed
+//! to strangers, #68's **Access code** rides in a query string (ADR-0008), and
+//! that is exactly why `http_log` logs a path and never a query — denying one
+//! key by name would publish the next credential somebody adds, where allowing
+//! by name fails the safe way (a filter added later is *missing* from the
+//! manifest until it is listed).
 //!
-//! **The body is a task writing into a bounded channel**, not a hand-rolled `Stream`: the writers then read as the sequential loops they are, and the channel's *depth* is where the memory bound is stated instead of being implied by a state enum. `stitch::Segment` is the other half of that bound and was also `/code-review`'s: a Call's place is written in `CHUNK_SAMPLES`-sized pieces because its *length* comes from `calls.duration_ms` — a number a Recorder said, not one we chose — and the silence filling an unread Call is bounded by nothing at all, so one row claiming seventy-four hours was four gigabytes of zeroes in a single allocation on a Pi. The absent `Content-Length` on a zip is what `tests/export.rs` asserts streaming *by*: hyper states a length it knows, so a body sent chunked is a body the server had not built when it answered. When the Listener closes the tab the receiver drops, the next send fails, the task ends and the permit goes back — which is the case a queue would have got wrong. **One export at a time**, refused `429` and not `503`: the Instance is healthy and this is rate limiting, and a 5xx would put an ERROR line in the operator log every time two Listeners exported at once (rule 7). The decode is on `spawn_blocking` for `enhance::step`'s reason.
+//! **The body is a task writing into a bounded channel**, not a hand-rolled
+//! `Stream`: the writers then read as the sequential loops they are, and the
+//! channel's *depth* is where the memory bound is stated instead of being
+//! implied by a state enum. `stitch::Segment` is the other half of that bound
+//! and was also `/code-review`'s: a Call's place is written in
+//! `CHUNK_SAMPLES`-sized pieces because its *length* comes from
+//! `calls.duration_ms` — a number a Recorder said, not one we chose — and the
+//! silence filling an unread Call is bounded by nothing at all, so one row
+//! claiming seventy-four hours was four gigabytes of zeroes in a single
+//! allocation on a Pi. The absent `Content-Length` on a zip is what
+//! `tests/export.rs` asserts streaming *by*: hyper states a length it knows, so
+//! a body sent chunked is a body the server had not built when it answered.
+//! When the Listener closes the tab the receiver drops, the next send fails,
+//! the task ends and the permit goes back — which is the case a queue would
+//! have got wrong. The second export is refused `429` and not `503`: the
+//! Instance is healthy and this is rate limiting, and a 5xx would put an ERROR
+//! line in the operator log every time two Listeners exported at once (ADR-0011
+//! rule 7). The decode is on `spawn_blocking` for `enhance::step`'s reason.
 //!
-//! And **the export is tested by a real extractor**. `tests/export.rs::unzipped` shells out to the system's `unzip` — a container format this suite writes and this suite reads proves only that we are consistent with ourselves, which is exactly the failure a hand-rolled format has (`tests/uploadscript.rs`'s argument, one artifact along). The bounded-memory criterion is asserted as *the first bytes arriving before the last ones*, over six hundred Calls, because a server that assembled the archive and then sent it could not do that however correct its output.
+//! **The export is tested by a real extractor.** `tests/export.rs::unzipped`
+//! shells out to the system's `unzip` — a container format this suite writes
+//! and this suite reads proves only that we are consistent with ourselves,
+//! which is exactly the failure a hand-rolled format has
+//! (`tests/uploadscript.rs`'s argument, one artifact along). The bounded-memory
+//! criterion is asserted as *the first bytes arriving before the last ones*,
+//! over six hundred Calls, because a server that assembled the archive and then
+//! sent it could not do that however correct its output.
 
 pub mod stitch;
 pub mod zip;
