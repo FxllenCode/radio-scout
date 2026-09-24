@@ -1052,6 +1052,23 @@ async fn a_key_scoped_to_the_named_system_authorizes_the_call() {
     assert!(body.contains("system 412"), "{body:?}");
 }
 
+/// A recorder that names neither — no `system` part and a call JSON with no
+/// `short_name` — leaves nothing to resolve a System from. The Call is still
+/// taken, filed under Ref 0, the value the parser has always answered with for
+/// that case, rather than refused for a field its author never promised.
+#[tokio::test]
+async fn trunk_recorder_naming_no_system_at_all_files_under_ref_zero() {
+    let app = TestApp::with_key("k").await;
+
+    let (status, body) = app
+        .upload_tr(CallUpload::tr(r#"{"talkgroup":54241,"start_time":1}"#))
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let call = app.the_call().await;
+    assert_eq!(app.system_of(&call).await.r#ref, 0);
+}
+
 /// A `system` that is not a positive number says nothing, and the label decides
 /// as it always did — the generic endpoint's own stance (`system` missing or
 /// unreadable there mints a Ref), so the two dialects fail the same way.
