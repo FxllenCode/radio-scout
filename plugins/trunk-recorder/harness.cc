@@ -45,6 +45,8 @@ int main(int argc, char *argv[]) {
       upload.server = args[++i];
     } else if (flag == "--key" && has_value) {
       upload.api_key = args[++i];
+    } else if (flag == "--system" && has_value) {
+      upload.system_ref = std::stol(args[++i]);
     } else if (flag == "--meta" && has_value) {
       meta_path = args[++i];
     } else if (flag == "--wav" && has_value) {

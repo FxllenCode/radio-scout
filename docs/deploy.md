@@ -191,11 +191,80 @@ cd client && npm ci && npm run build && cd ..
 cargo build --release
 ```
 
-The result is `target/release/radio-scout`. There is no Docker image to build
-from source — `docker/Dockerfile` is a *packaging* file that assembles an image
-around binaries the release workflow has already produced, which is why the
-image and the release are provably the same bytes rather than two builds that
-happen to have the same version number.
+The result is `target/release/radio-scout`.
+
+### A Docker image from source
+
+The repository's `docker/Dockerfile` is a *packaging* file: it assembles the published image
+around binaries the release workflow has already produced, which is why that image and the
+release are provably the same bytes rather than two builds that happen to share a version
+number. So there is no from-source Dockerfile in the tree, and nothing published is built this
+way.
+
+If you want to run a branch or a fork in Docker anyway — to try a fix before it is released —
+save the following as `docker/Dockerfile.source` and build it yourself. It is the release's own
+build (Node 22 for the client, a static musl binary in `rust:alpine`) followed by the same
+runtime layout as the published image:
+
+```dockerfile
+FROM node:22-alpine AS client
+WORKDIR /src/client
+COPY client/package.json client/package-lock.json ./
+RUN npm ci
+COPY client/ ./
+RUN npm run build
+
+FROM rust:alpine AS build
+RUN apk add --no-cache musl-dev cmake make g++ perl
+WORKDIR /src
+COPY . .
+# rust-embed reads client/dist at compile time.
+COPY --from=client /src/client/dist client/dist
+# rust-toolchain.toml pins the compiler; rustup fetches it on first use.
+RUN cargo build --release --locked
+
+FROM alpine:3 AS prep
+RUN apk add --no-cache ca-certificates && \
+    mkdir -p /out/data && chown 65532:65532 /out/data && \
+    mkdir -m 1777 -p /out/tmp
+
+FROM scratch
+COPY --from=prep /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=prep --chown=65532:65532 /out/data /data
+COPY --from=prep /out/tmp /tmp
+COPY --from=build --chmod=0755 /src/target/release/radio-scout /radio-scout
+USER 65532:65532
+ENV RADIO_SCOUT_BASE_DIR=/data
+EXPOSE 3000
+VOLUME ["/data"]
+ENTRYPOINT ["/radio-scout"]
+```
+
+The repository's `.dockerignore` excludes everything except `dist/`, which would leave that
+build with an empty context. BuildKit reads a per-Dockerfile ignore file first, so give it one
+beside the Dockerfile as `docker/Dockerfile.source.dockerignore`:
+
+```
+.git
+target
+client/node_modules
+client/dist
+radio-scout-data
+radio-scout-live-test
+*.csv
+*.tar.gz
+```
+
+```sh
+docker build -f docker/Dockerfile.source -t radio-scout:local .
+```
+
+Three things to know. The link step of a fat-LTO release build wants several GB of RAM, so give
+a small machine swap (or set `CARGO_PROFILE_RELEASE_LTO=thin` in the build stage, at some cost
+in binary size and speed). The result is for the architecture you build on; a multi-arch image is
+what the release workflow is for. And keep both files out of `git status` with
+`.git/info/exclude` rather than committing them — the image you run this way is *not* the
+release, and nothing here makes it one.
 
 Contributing, and the test policy every change is held to: [CLAUDE.md](../CLAUDE.md).
 

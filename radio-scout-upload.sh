@@ -23,6 +23,8 @@ ENDPOINT="/api/trunk-recorder-call-upload"
 # than an assignment whose ordering has to be remembered.
 CLI_SERVER=""
 ENV_FILE=""
+# Set only by `--system`. Empty means "let Radio-Scout match on TR's shortName".
+SYSTEM_REF=""
 
 usage() {
 	cat <<EOF
@@ -41,6 +43,12 @@ Options:
                      in shell syntax — quote a value with spaces. Keep it mode
                      0600 and readable by the user Trunk Recorder runs as; it
                      holds the key.
+  --system <ref>     File this recorder system's Calls under Radio-Scout System
+                     <ref> (a positive number), instead of matching the shortName
+                     Trunk Recorder writes against a System's label. Needed when
+                     one network has several sites, each with its own shortName:
+                     give them all the same ref. Trunk Recorder runs an
+                     uploadScript per system, so it is set per system too.
   -h, --help         This.
 
 The API key comes from \$RADIO_SCOUT_API_KEY or --env-file, and deliberately
@@ -92,6 +100,17 @@ while [ $# -gt 0 ]; do
 	--env-file)
 		ENV_FILE="${2:-}"
 		[ -n "$ENV_FILE" ] || die "--env-file needs a path"
+		shift 2
+		;;
+	--system)
+		SYSTEM_REF="${2:-}"
+		# A setup error, so the operator finds out on the first call rather than
+		# after a day's Calls landed under a System they did not mean: `die`
+		# exits non-zero, and this is the one place a typo can be told about —
+		# Radio-Scout itself ignores a `system` it cannot read.
+		case "$SYSTEM_REF" in
+		'' | *[!0-9]* | 0*) die "--system needs a positive whole number (a Radio-Scout System ref), got \"$SYSTEM_REF\"" ;;
+		esac
 		shift 2
 		;;
 	--) # everything after this is Trunk Recorder's, whatever it looks like
@@ -179,7 +198,15 @@ BODY_FILE=$(mktemp) || die "cannot create a temporary file"
 trap 'rm -f "$BODY_FILE"' EXIT INT TERM
 
 HTTP_STATUS=$(
-	printf 'form-string = key=%s\n' "$KEY" |
+	{
+		printf 'form-string = key=%s\n' "$KEY"
+		# Not a secret, and it could as well be an argument. It rides the same
+		# config so there is one place the form is assembled and no conditional
+		# argument to splice into a POSIX `sh` command line.
+		if [ -n "$SYSTEM_REF" ]; then
+			printf 'form-string = system=%s\n' "$SYSTEM_REF"
+		fi
+	} |
 		curl -sS -K - \
 			--max-time 30 \
 			-o "$BODY_FILE" \

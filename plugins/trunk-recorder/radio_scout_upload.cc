@@ -132,6 +132,13 @@ Result send(const Upload &upload) {
   curl_mime_name(part, "key");
   curl_mime_data(part, upload.api_key.c_str(), upload.api_key.size());
 
+  if (upload.system_ref > 0) {
+    const std::string system_ref = std::to_string(upload.system_ref);
+    part = curl_mime_addpart(mime);
+    curl_mime_name(part, "system");
+    curl_mime_data(part, system_ref.c_str(), system_ref.size());
+  }
+
   part = curl_mime_addpart(mime);
   curl_mime_name(part, "meta");
   curl_mime_data(part, upload.meta_json.c_str(), upload.meta_json.size());

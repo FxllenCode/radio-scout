@@ -1540,6 +1540,7 @@ pub async fn trunk_recorder_call_upload(
 ) -> Result<Recorded, Failure> {
     let mut key = String::new();
     let mut meta_json: Option<String> = None;
+    let mut system: Option<String> = None;
     let mut audio: Option<Vec<u8>> = None;
     let mut audio_name = None;
     let mut audio_mime = None;
@@ -1562,6 +1563,7 @@ pub async fn trunk_recorder_call_upload(
             }
             "key" => key = part.text().await.unwrap_or_default(),
             "meta" => meta_json = part.text().await.ok(),
+            "system" => system = part.text().await.ok(),
             _ => {}
         }
     }
@@ -1580,13 +1582,28 @@ pub async fn trunk_recorder_call_upload(
         _ => return Err(Incomplete::NoAudio.into()),
     };
 
-    // TR has no numeric system ref — resolve one from `short_name`.
+    // TR's own call JSON has no numeric system ref, so one is either *named* —
+    // a `system` part beside `meta`, which the recorder's operator sets — or
+    // resolved from `short_name`.
+    //
+    // The part exists because two sites of one network are two `short_name`s
+    // and one identity, and a label match alone would file them as two Systems.
+    // Where present it wins outright, ahead of any label: it is the more
+    // specific word, and it is the number an API key's scope speaks.
+    //
+    // One that is not a positive integer is ignored rather than refused — the
+    // generic endpoint's own stance on a `system` it cannot read — and the label
+    // decides as it always did. The shipped recorder-side paths refuse to send
+    // one at setup, which is where a typo can be told about.
     let short_name = clean(meta.short_name.clone());
-    let system_ref = match &short_name {
-        Some(name) => repo::system_ref_for_short_name(&state.db, name)
-            .await
-            .map_err(Stage::ResolveSystem.failed())?,
-        None => 0,
+    let system_ref = match named_system(system.as_deref()) {
+        Some(system_ref) => system_ref,
+        None => match &short_name {
+            Some(name) => repo::system_ref_for_short_name(&state.db, name)
+                .await
+                .map_err(Stage::ResolveSystem.failed())?,
+            None => 0,
+        },
     };
 
     let new_call = build_tr_call(
@@ -1846,6 +1863,14 @@ fn is_set(flag: Option<i64>) -> bool {
 /// Parse a decimal integer field, tolerating surrounding whitespace.
 fn parse_i64(value: &str) -> Option<i64> {
     value.trim().parse().ok()
+}
+
+/// The System Ref a recorder named, if it named a usable one: a positive
+/// integer, the only kind a Ref ever is.
+fn named_system(value: Option<&str>) -> Option<i64> {
+    value
+        .and_then(parse_i64)
+        .filter(|system_ref| *system_ref > 0)
 }
 
 /// The audio object-key extension, from the uploaded filename (default `wav`).

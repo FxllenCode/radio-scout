@@ -103,6 +103,21 @@ That is the whole of it. Trunk Recorder appends the call's `.wav`, `.json` and `
 itself; the script picks the `.m4a` when `compressWav` made one (much smaller over a home
 uplink) and the `.wav` when it didn't.
 
+**Several sites of one network?** Trunk Recorder gives each `system` its own `shortName`, and
+by default Radio-Scout files a Call under the System whose label matches it — so two sites of
+one WACN/system ID arrive as two Systems. Say which Radio-Scout System they all belong to with
+`--system`, on each system's own `uploadScript` line (Trunk Recorder runs one per system):
+
+```jsonc
+"uploadScript": "/opt/radio-scout-upload.sh --env-file /etc/radio-scout.env --system 411"
+```
+
+`411` is the **Ref** shown beside the System in Settings → Admin (the number an API key
+scoped to a System, and every rdio-scanner upload, calls `system`). The System is created under
+that Ref if it does not exist yet, named after whichever site reaches it first. A `--system`
+that is not a positive whole number stops the script at once, because a typo there would
+otherwise quietly file a day's Calls somewhere you did not mean.
+
 If you would rather keep the key in your service manager than in a file, drop `--env-file` and
 set the two variables in the environment Trunk Recorder runs with —
 `Environment=RADIO_SCOUT_API_KEY=…` in a systemd unit, or `-e` on a `docker run`. The script
@@ -169,11 +184,16 @@ Then the `plugins` entry in `config.json`:
     // Optional. Default 60 — how long one upload may take before it is
     // abandoned and left to the retry.
     "timeoutSecs": 60,
-    // Optional, and only needed for per-system keys or filters. A system with
-    // no entry here uploads with the key above and sends everything.
+    // Optional, and only needed for per-system keys, filters or a System Ref.
+    // A system with no entry here uploads with the key above, sends everything,
+    // and is filed under the System whose label matches its shortName.
     "systems": [
       {
         "shortName": "<must match a system in your main config>",
+        // Optional. File this system's Calls under Radio-Scout System 411 rather
+        // than matching shortName against a label — give every site of one
+        // network the same number.
+        "systemId": 411,
         "talkgroupAllow": ["54241", "5424*"],
         "talkgroupDeny": ["54999"]
       }
@@ -184,21 +204,32 @@ Then the `plugins` entry in `config.json`:
 
 - **`server` is a bare base URL**, same as the rdio uploader's — the plugin appends
   `/api/trunk-recorder-call-upload` itself.
-- **There is no `systemId`.** The native endpoint files a Call under the System it resolves
-  from the recorder's own `shortName`, creating it if it has never been seen.
+- **`systemId` is optional here.** Without it the native endpoint files a Call under the
+  System whose label matches the recorder's own `shortName`, creating it if it has never been
+  seen. With it, the Call goes under that Ref whatever the site is called — which is what you
+  want when several sites share one network, and the same setting as `--system` on the
+  `uploadScript`. It has to be a positive whole number; anything else is logged and ignored.
 - **`talkgroupAllow` / `talkgroupDeny` take glob patterns** — `*` for any run of characters,
   `?` for exactly one, and every other character means itself, so `5.155` matches a talkgroup
   with a dot in it and nothing else. A non-empty allow list is exhaustive; deny then removes
   from what is left.
-- **Failures name themselves in Trunk Recorder's log**, prefixed with the plugin's `name`:
+- **Every outcome is logged in Trunk Recorder's own format**, the same header and wording its
+  `rdioscanner_uploader` uses, with the plugin's `name` where that one prints its own:
 
   ```
-  [radio-scout]	fulton TG 54155	upload failed: Failed to connect to scout.lan port 3000
-  [radio-scout]	fulton TG 54155	upload refused (HTTP 401): Invalid API key for system 0 talkgroup 54155.
+  [fulton]	10C	TG:      54155 (EMS Dispatch)	Freq: 773.181250 MHz	radio-scout Upload Success - file size: 32597
+  [fulton]	10C	TG:      54155 (EMS Dispatch)	Freq: 773.181250 MHz	radio-scout Upload Error: Failed to connect to scout.lan port 3000
+  [fulton]	10C	TG:      54155 (EMS Dispatch)	Freq: 773.181250 MHz	radio-scout Upload Error (HTTP 401): Invalid API key for system 0 talkgroup 54155.
   ```
 
-  `upload failed` means nobody answered; `upload refused` means Radio-Scout did, and the rest
-  of the line is its own words. Neither ever contains the API key.
+  `Upload Error: …` with no HTTP status means nobody answered; `Upload Error (HTTP …)` means
+  Radio-Scout did, and the rest of the line is its own words. Neither ever contains the API key.
+  A Call kept back by `talkgroupAllow`/`talkgroupDeny` says `Skipped upload due to talkgroup
+  filter`.
+- **`Upload Success` means Radio-Scout accepted the request, not that it kept the Call.** A
+  Call on a Talkgroup or System it has no record of, with auto-populate off, is answered
+  `200` and dropped (rdio-scanner's own behaviour, so recorders never retry it); the reason is
+  in Radio-Scout's log as `reason=not-populated`.
 
 > **A Call on an encrypted talkgroup is forwarded, not dropped.** The `rdioscanner_uploader`
 > plugin discards those (`rdioscanner_uploader.cc:171-173`), because the rdio dialect has no

@@ -967,6 +967,136 @@ async fn trunk_recorder_same_short_name_reuses_one_system() {
     );
 }
 
+/// Two Trunk Recorder systems that are two sites of one network have two
+/// `shortName`s and one identity. A recorder that names the System Ref itself
+/// files both under it — where matching on the label alone would mint a System
+/// per `shortName`, and the Operator's one network arrives as two.
+#[tokio::test]
+async fn trunk_recorder_can_name_the_system_ref_itself() {
+    let app = TestApp::with_key("k").await;
+
+    for (short_name, talkgroup) in [("butco_north", 1), ("butco_south", 2)] {
+        let meta = format!(
+            r#"{{"short_name":"{short_name}","talkgroup":{talkgroup},"start_time":{talkgroup}}}"#
+        );
+        let (status, body) = app.upload_tr(CallUpload::tr(&meta).system(411)).await;
+        assert_eq!(status, 200, "{body:?}");
+    }
+
+    let systems = system::Entity::find().all(&app.db).await.unwrap();
+    assert_eq!(
+        systems.len(),
+        1,
+        "one Ref, one System, whatever the sites are called"
+    );
+    assert_eq!(systems[0].r#ref, 411);
+    assert_eq!(
+        systems[0].label.as_deref(),
+        Some("butco_north"),
+        "a System is named by whichever site reached it first, and never renamed after"
+    );
+    assert!(
+        app.calls()
+            .await
+            .iter()
+            .all(|c| c.system_id == systems[0].id)
+    );
+}
+
+/// The Operator's word is the more specific one: a System that already carries
+/// the `shortName` as its label does not pull the Call away from the Ref the
+/// recorder asked for.
+#[tokio::test]
+async fn an_explicit_system_ref_beats_a_label_match() {
+    let app = TestApp::with_key("k").await;
+    repo::resolve_or_create_system(&app.db, 7, Some("butco".into()), 0)
+        .await
+        .expect("seed a System labelled like the short_name");
+
+    let (status, body) = app
+        .upload_tr(
+            CallUpload::tr(r#"{"short_name":"butco","talkgroup":1,"start_time":1}"#).system(411),
+        )
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let call = app.the_call().await;
+    assert_eq!(app.system_of(&call).await.r#ref, 411);
+}
+
+/// An API key scoped to a System is checked against the Ref the Call lands on,
+/// so a per-System key now works from a recorder whose `shortName` is not the
+/// label — the reason to name the Ref at all is that it is the thing keys speak.
+#[tokio::test]
+async fn a_key_scoped_to_the_named_system_authorizes_the_call() {
+    let app = TestApp::spawn().await;
+    let scoped = "scoped-key";
+    app.create_api_key_for_system(scoped, 411).await;
+
+    let (status, body) = app
+        .upload_tr(
+            CallUpload::tr(r#"{"short_name":"whatever","talkgroup":1,"start_time":1}"#)
+                .key(scoped)
+                .system(411),
+        )
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let (status, body) = app
+        .upload_tr(
+            CallUpload::tr(r#"{"short_name":"whatever","talkgroup":1,"start_time":9}"#)
+                .key(scoped)
+                .system(412),
+        )
+        .await;
+    assert_eq!(status, 401, "{body:?}");
+    assert!(body.contains("system 412"), "{body:?}");
+}
+
+/// A recorder that names neither — no `system` part and a call JSON with no
+/// `short_name` — leaves nothing to resolve a System from. The Call is still
+/// taken, filed under Ref 0, the value the parser has always answered with for
+/// that case, rather than refused for a field its author never promised.
+#[tokio::test]
+async fn trunk_recorder_naming_no_system_at_all_files_under_ref_zero() {
+    let app = TestApp::with_key("k").await;
+
+    let (status, body) = app
+        .upload_tr(CallUpload::tr(r#"{"talkgroup":54241,"start_time":1}"#))
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let call = app.the_call().await;
+    assert_eq!(app.system_of(&call).await.r#ref, 0);
+}
+
+/// A `system` that is not a positive number says nothing, and the label decides
+/// as it always did — the generic endpoint's own stance (`system` missing or
+/// unreadable there mints a Ref), so the two dialects fail the same way.
+#[rstest::rstest]
+#[case("")]
+#[case("abc")]
+#[case("0")]
+#[case("-3")]
+#[tokio::test]
+async fn an_unusable_system_ref_falls_back_to_the_short_name(#[case] system: &str) {
+    let app = TestApp::with_key("k").await;
+    repo::resolve_or_create_system(&app.db, 7, Some("butco".into()), 0)
+        .await
+        .expect("seed the short_name's System");
+
+    let (status, body) = app
+        .upload_tr(
+            CallUpload::tr(r#"{"short_name":"butco","talkgroup":1,"start_time":1}"#)
+                .set("system", system),
+        )
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let call = app.the_call().await;
+    assert_eq!(app.system_of(&call).await.r#ref, 7);
+}
+
 /// A **disabled** API key is denied even though its hash matches (ADR-0008). This
 /// is the load-bearing security branch `authorize_ingest` guards — a revoked key
 /// must not ingest.

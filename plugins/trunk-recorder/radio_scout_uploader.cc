@@ -24,6 +24,8 @@
 #include <boost/log/trivial.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include <sys/stat.h>
+
 #include <string>
 #include <vector>
 
@@ -33,6 +35,9 @@ namespace {
 // uploads with, and which of its talkgroups leave the box.
 struct Configured_System {
   std::string short_name;
+  // The Radio-Scout System Ref this recorder system files under, or 0 to let
+  // Radio-Scout match `short_name` against a System's label.
+  long system_ref = 0;
   std::string api_key;
   radio_scout::TalkgroupFilter filter;
 };
@@ -85,9 +90,13 @@ class Radio_Scout_Uploader : public Plugin_Api {
     return nullptr;
   }
 
+  // The header every Trunk Recorder log line about a Call opens with —
+  // `[short_name]  10C  TG: 703 (tag)  Freq: 773.181250 MHz` — from the
+  // recorder's own `log_header`, so a Call reads the same whichever uploader is
+  // talking about it and an operator can grep one Call across all of them.
   std::string log_prefix(const Call_Data_t &call_info) const {
-    return "\t[" + plugin_name + "]\t" + call_info.short_name + " TG " +
-           std::to_string(call_info.talkgroup) + "\t";
+    return log_header(call_info.short_name, call_info.call_num, call_info.talkgroup_display,
+                      call_info.freq);
   }
 
 public:
@@ -125,9 +134,24 @@ public:
         system.short_name = entry.value("shortName", std::string(""));
         // Per-system keys are optional here, unlike the rdio uploader: the
         // native endpoint files a Call under the System it resolves from
-        // `short_name`, so one instance-wide key is the normal case and a
-        // per-system one is the exception.
+        // `short_name` (or the `systemId` below), so one instance-wide key is
+        // the normal case and a per-system one is the exception.
         system.api_key = entry.value("apiKey", api_key);
+        // `systemId`, the rdio uploader's own key for this, so an entry moving
+        // across keeps it. Anything but a positive whole number is refused
+        // loudly and ignored, which falls back to matching on `shortName` —
+        // silently filing under the wrong System is worse than a log line.
+        if (entry.contains("systemId")) {
+          const json &id = entry.at("systemId");
+          if (id.is_number_integer() && id.get<long>() > 0) {
+            system.system_ref = id.get<long>();
+          } else {
+            BOOST_LOG_TRIVIAL(error)
+                << "\t[" << plugin_name << "]\t" << system.short_name
+                << ": \"systemId\" must be a positive whole number — ignoring it, so this "
+                   "system is matched on its shortName";
+          }
+        }
         system.filter.allow = read_globs(entry, "talkgroupAllow", system.short_name);
         system.filter.deny = read_globs(entry, "talkgroupDeny", system.short_name);
         systems.push_back(system);
@@ -151,13 +175,18 @@ public:
     const Configured_System *system = configured(call_info.short_name);
 
     if (system != nullptr && !system->filter.admits(call_info.talkgroup)) {
-      BOOST_LOG_TRIVIAL(debug) << log_prefix(call_info) << "not uploaded: talkgroup filter";
+      // INFO, as the rdio uploader's own line is: a Call missing from Radio-Scout
+      // because a filter kept it here is the first thing to rule out.
+      BOOST_LOG_TRIVIAL(info) << log_prefix(call_info)
+                              << "Skipped upload due to talkgroup filter (tg="
+                              << call_info.talkgroup << ")";
       return 0;
     }
 
     radio_scout::Upload upload;
     upload.server = server;
     upload.api_key = system != nullptr ? system->api_key : api_key;
+    upload.system_ref = system != nullptr ? system->system_ref : 0;
     // Trunk Recorder's own call JSON, exactly as `create_call_json` built it a
     // moment ago (`call_concluder.cc`) — nothing here re-serialises it, so
     // there is no second definition of the payload to drift from the parser.
@@ -171,21 +200,25 @@ public:
       // Reachable because Trunk Recorder ignores what `parse_config` returned
       // (`plugin_manager.cc:56`). DEBUG, not ERROR: `parse_config` already said
       // this once at startup, and a line per Call would bury it.
-      BOOST_LOG_TRIVIAL(debug) << log_prefix(call_info) << "not uploaded: not configured";
+      BOOST_LOG_TRIVIAL(debug) << log_prefix(call_info) << plugin_name
+                               << " not uploaded: not configured";
       return 0;
     }
     if (result.sent) {
-      BOOST_LOG_TRIVIAL(info) << log_prefix(call_info) << "uploaded";
+      struct stat file_info {};
+      stat(upload.audio_path.c_str(), &file_info);
+      BOOST_LOG_TRIVIAL(info) << log_prefix(call_info) << plugin_name
+                              << " Upload Success - file size: " << file_info.st_size;
       return 0;
     }
     if (result.http_code != 0) {
       // Radio-Scout's own words: the rdio-compatible response strings, which
       // say which of the two API keys was refused and for what.
-      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << "upload refused (HTTP "
+      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << plugin_name << " Upload Error (HTTP "
                                << result.http_code << "): " << result.body;
     } else {
-      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << "upload failed: "
-                               << result.transport_error;
+      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << plugin_name
+                               << " Upload Error: " << result.transport_error;
     }
     return 1;
   }
