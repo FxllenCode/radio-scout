@@ -1,6 +1,10 @@
 //! The database layer (ADR-0003): SeaORM entities, migrations, and the
 //! repository over SQLite (default) and Postgres (opt-in). Audio lives in object
 //! storage (ADR-0002); this layer holds only small metadata.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! Applying a migration logs its name at INFO (`db::migrate`, one migration at a time so the line lands after the migration it reports); an already-current schema says so at DEBUG.
 
 pub mod entities;
 mod handle;

@@ -37,6 +37,20 @@
 //! shared [`crate::activity::Series`] shape and is also the truth: a stretch
 //! with no samples in it is a stretch where this Instance was not running, and
 //! an Instance that is not running has nobody listening to it.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **A listener count is a count, and there is nowhere in the schema for it to be anything else (#62, spec US 41).** `src/listeners.rs` is the counter a live-feed connection joins (`Listeners::arrive`, a guard taken in `handle_socket` so a connection is a Listener for exactly as long as it runs), the ticker **Worker** that writes it down, and the bucketed read behind `GET /api/admin/listeners`. Five things follow.
+//!
+//! **`listener_samples` has three columns** — id, instant, count — and `tests/listeners.rs` asserts the column *set*, not the rows, because that is the only place a fourth would be noticed: an address or a session added later would pass every other test in the suite and look perfectly ordinary in the Logs view. ADR-0011 rule 5 is what it is enforcing, and it is why there is deliberately **no per-Talkgroup breakdown**: on a quiet channel with one listener, that is a record of who was listening.
+//!
+//! **The sample is the peak since the previous one**, not a reading at the tick — one `fetch_max` on connect — because a Listener who arrived and left between two ticks is still one who was there, and a peak chart that silently under-reports its peaks is indistinguishable from one that does not. The window re-seeds at *whoever is still connected* rather than at zero, or a steady evening listener would be counted once and never again.
+//!
+//! **It is admin-gated, and it is the only read surface here that is.** The Archive is open because listening is open (ADR-0008); how many people take that up is the Operator's business rather than a fact a Listener gets to publish on their behalf. `Listeners::current()` is the live half, sitting in `AppState` for #70's status page to read.
+//!
+//! **It ships on**, like `[quiet] enabled` and the Mining sweep and unlike `[enhancement] mode`, because history cannot be recovered afterwards: an Operator who has to find a setting first has already lost whatever happened before they found it. A day is 1,440 rows. `[retention] listener_days` bounds the table on its own window, swept by the sweeper that already sweeps the log — a quarter, because "was last winter busier" is a question about a period whose audio went months ago.
+//!
+//! And **the first tick is not immediate**, which is the one place this differs from the retention sweeper: a sweep at boot catches up on a policy that may have gone unenforced for hours, where a sample at boot is a window nobody was connected for, and an Instance that restarts often would fill its own chart with zeroes it created.
 
 use std::collections::HashMap;
 use std::sync::Arc;

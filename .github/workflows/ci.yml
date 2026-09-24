@@ -39,7 +39,8 @@ env:
   CARGO_INCREMENTAL: 0
   # ADR-0010's documented coverage exclusions: generated entities, schema DDL,
   # `main()` bootstrap glue, the `#[cfg(test)]`-only helpers, and build.rs. Kept
-  # byte-identical to CLAUDE.md's command and `.cargo/mutants.toml`'s list.
+  # byte-identical to CLAUDE.md's Commands block, docs/agents/ci.md's coverage
+  # exclusions and `.cargo/mutants.toml`'s list.
   COVERAGE_IGNORE: '(db/entities/|db/migration\.rs|src/main\.rs|src/testing\.rs|build\.rs)'
   # The ratcheting project floor (ADR-0010) — raised as the measured number
   # rises, never lowered. Backend measures ~96%.

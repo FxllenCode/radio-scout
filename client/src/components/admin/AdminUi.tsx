@@ -1,3 +1,7 @@
+/**
+ * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ * **The admin section is one gate and one CSRF decision (#49).** `components/admin/AdminUi.tsx`'s `AdminGate` is the password gate all seven operator screens sit behind — the client's counterpart to the server's prefix layer, and what the Logs screen's own inline sign-in became when there stopped being one screen behind it. The CSRF token is attached in **`prepareHeaders`**, on mutations only, read from the session already in the RTK Query cache: a mutation added later inherits it instead of remembering a header, which is exactly the class of omission #18 had to be shipped around on the server. Three more things worth knowing. **A refusal is rendered from the server's own sentence** (`lib/curateError.ts`) rather than re-derived — the server is the side that knows the LED palette and how many Calls a delete would take — and `refusedForCalls` gates the offer to force on the *slug*, never the status, because a name collision is also a 409 and a "delete it anyway" button there would do nothing. **A form's buttons need `type="button"`**: `Button` renders a bare `<button>`, so "Deselect" and "Clear their tags" were submitting the bulk action until a test caught it. And **changing a filter drops the selection**, because a bulk action over rows that scrolled out of the answer is the one thing multi-select must never do.
+ */
 import { useState, type ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'

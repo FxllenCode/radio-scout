@@ -1,6 +1,6 @@
 # cargo-mutants configuration (ADR-0010).
 #
-# Mirrors the documented coverage exclusions in CLAUDE.md so the merge-gate
+# Mirrors the documented coverage exclusions in docs/agents/ci.md so the merge-gate
 # command — `cargo mutants --in-diff <(git diff origin/master...)` — reports only
 # real gaps. Exclusions are listed here rather than applied ad-hoc on the command
 # line so they stay auditable: anything skipped is skipped for a written reason.

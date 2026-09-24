@@ -15,6 +15,10 @@
  * incident they think they kept is short two transmissions. The server counts
  * them apart for that reason; this is where the counting becomes something to
  * read.
+ *
+ * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ *
+ * And **the client's report is the parent's, which is the bug a test caught.** `AddToEvent` reports through `onResult` rather than rendering its own notice, because a successful freeze drops the selection and the selection going is what *unmounts* that control — so a report rendered inside it vanished at the exact moment it was worth reading. `lib/events.ts`'s `freezeNotice` is **silent when everything worked**, so a notice appearing at all means something is worth reading: a Call that aged out while an Operator was reading the page is normal, and one whose audio would not read means the store is unwell and the incident is short a transmission (no row is written for that one, so adding it again really does freeze it). The four endings are counted apart for that reason. Multi-select lives on the **Search** screen and is *absent* rather than disabled for a Listener; changing a filter drops it, which is #49's rule one screen along — a bulk action over rows that scrolled out of the answer is the one thing multi-select must never do — and it lives in the effect that already tells the **Run** the search changed, so the back button gets the same treatment as a dropdown.
  */
 import type { FreezeReport } from '@/types'
 

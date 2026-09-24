@@ -55,7 +55,7 @@ gh api repos/OWNER/REPO/issues/<n> -q '.issue_dependencies_summary.blocked_by'
 
 **A ticket is not finished until it is committed, pushed, *and* closed.** All three, in that order, in the session that did the work — never left for "next time". An issue left open after its code shipped is worse than no tracker at all: the frontier query reads open blockers as live gates, so a built-but-open ticket silently blocks everything behind it (#28 sat blocked on an already-finished #27 for exactly this reason), and the next session can't tell "built" from "not started" without reading the diff.
 
-1. `git commit` on the working branch — **`next`**, which takes direct pushes; see CLAUDE.md's branch note for why the release branch is not it — then `git push`. The ticket number goes in the commit subject (`feat(x): … (#27)`). No pull request per ticket: a whole version lands on `master` as one PR when it is complete, which is also the only moment the patch-coverage gate runs, so the local gates are what hold each ticket to the policy.
+1. `git commit` on the working branch — **`next`**, which takes direct pushes; see [`ci.md`](ci.md)'s branch note for why the release branch is not it — then `git push`. The ticket number goes in the commit subject (`feat(x): … (#27)`). No pull request per ticket: a whole version lands on `master` as one PR when it is complete, which is also the only moment the patch-coverage gate runs, so the local gates are what hold each ticket to the policy.
 2. `gh issue comment <n>` with what actually shipped: the commit SHA, which acceptance criteria are met, any decision taken along the way, and anything deliberately left to a later ticket.
 3. `gh issue close <n>`.
 
@@ -91,3 +91,7 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 - **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
 - **Claim**: `gh issue edit <n> --add-assignee @me` — the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
+
+## Design notes (moved verbatim from CLAUDE.md, #110)
+
+**The evidence for this rule is #83.** Its §6 stated that a surviving mutant was "known equivalent, do not chase". It was not: the function it named ends with an unconditional `tracing::warn!` after the loop the guard skips, so the mutation makes an ordinary ledger claim to be full on every failed login. That claim was taken at face value and written into `.cargo/mutants.toml` as a proof — and only `/code-review` caught it. The ticket was written by an earlier session in good faith and was still wrong, which is exactly the case this rule exists for. See [Agent skills → Issue tracker](#issue-tracker) for where it sits in the per-ticket loop.

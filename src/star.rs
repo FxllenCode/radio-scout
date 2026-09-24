@@ -32,6 +32,18 @@
 //! What the Instance will do is on the wire ([`crate::catalog::StarOffer`]),
 //! `sharing`'s precedent one step on: a control that quietly means less than a
 //! Listener thinks it does is a control that lies.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **A Star is the Instance's mark, and what it is worth is the Operator's (#66, spec US 37).** `src/star.rs` is `POST`/`DELETE /api/call/{id}/star`, and the whole feature is one nullable column, one filter and one retention window. rdio-scanner has nothing like it — the archive there is a list you re-find things in. Five things follow.
+//!
+//! **The ticket said "per-browser" and that is not what shipped**, which is the grill this ticket earned: a Star takes no credential to leave, because a **Listener** holds none, and the two ways of making it personal each cost something already refused twice. A `call_stars(call_id, starrer)` is a per-browser record of what somebody kept — the listening history ADR-0011 rule 5 exists to stop an Instance accumulating, and why #62 gave `listener_samples` three columns — *and* a table whose rows are Calls × browsers rather than bounded by the Calls table, which is #64's abuse bound inverted. The other reading, keeping the set in `localStorage` and sending it with the search, buys per-browser filtering and still needs a server-side keep for **Retention**, which then drifts every time somebody clears their site data. So the mark is the Instance's, anybody sets or clears it, and everybody's "Starred" is one shortlist. The cost is real and is the county instance's to bear: on a public scanner the list is shared.
+//!
+//! **A column, not a child table**, and that is the same decision from the other side. `call_tones` (#55) and `share_links` (#64) each had to be remembered in `repo::delete_calls`, and forgetting one is invisible until the **retention sweep** meets its oldest marked Call and fails there forever — both were real, both were `/code-review`'s. A column goes with its row, so there is nothing to forget and `stored_calls` reads it for no statement, `carrying`'s rule.
+//!
+//! **The exemption is a longer age window, not a switch** — `[retention] starred_days`, absent by default. That bounds the two ways an unauthenticated keep goes wrong on its own (a Listener who stars a thousand Calls; a Star nobody comes back for), it is one number in the units `[retention]` already reads, and it needs no second pass: `retention::AgePass` carries a `StarKeep` and `repo::spared_from` is one `OR` — which costs *no clause at all* under `StarKeep::None`, so an Instance that never turned it on pays nothing. Boot refuses a window shorter than `days`, because a bookmark that deletes what it marked is the one outcome nobody would ever mean. And **the size cap outranks it**: `oldest_calls` never asks about Stars, because a cap a Listener can defeat is not a cap.
+//!
+//! **What it is worth rides on the catalog** (`starred: { kept, keptDays }`), `sharing`'s precedent one step on: a control that is *refused* lies, and one that quietly means less than a Listener thinks it does tells the same lie more slowly. `lib/archive.ts`'s `starsKept` is the sentence, and `keptDays: 0` is "indefinitely" rather than "for zero days" — the reading every window in that section has, and the one a naive render inverts.
 
 use axum::extract::{Path, State};
 use serde::Serialize;

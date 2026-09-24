@@ -73,8 +73,8 @@ jobs:
       # the same released code every night and never see the version being
       # built. That is a silent failure — a green sweep of the wrong commit
       # reads exactly like a green sweep. The sweep is worth having only if it
-      # follows the code that is changing, which is `next` (see CLAUDE.md's
-      # branch note). If `next` is ever retired, this fails loudly rather than
+      # follows the code that is changing, which is `next` (see
+      # docs/agents/ci.md's branch note). If `next` is ever retired, this fails loudly rather than
       # quietly sweeping the wrong branch, which is the intended failure mode.
       - uses: actions/checkout@v7
         with:

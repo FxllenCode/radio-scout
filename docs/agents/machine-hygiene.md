@@ -6,7 +6,7 @@ outlive what they were watching**, and **build trees that grow without bound**. 
 on a laptop, from one repository.
 
 Neither is a tooling bug. Both are the direct consequence of the loop
-[CLAUDE.md](../../CLAUDE.md#enforcement) prescribes per ticket: run the suite repeatedly, measure
+[`docs/agents/ci.md`](ci.md) prescribes per ticket: run the suite repeatedly, measure
 coverage, sweep mutants. This file is the other half of that loop.
 
 ## Shells

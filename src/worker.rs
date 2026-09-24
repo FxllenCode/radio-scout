@@ -12,6 +12,10 @@
 //! subscription and a batching drain genuinely differ, and shapes that merely
 //! rhyme should not share a skeleton. What is shared is the envelope around
 //! them.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **A background task is a `worker::Worker` (#93), and there is one shape for all of them.** `src/worker.rs` owns the envelope — start once, `stop()` (ask *and* join), `join()`, `idle()`, `settled_at_least(n)`, and a `Load { depth, done }` an Operator can be shown. What one *unit* of that work is, though, is the Worker's own decision, and #52's is the case that proves it: the Downstream sender's — which since #54 is also the Webhook sender's, since both drain through `crate::delivery` — is "I have caught up", because a delivery waiting out a retry is owed by nobody and a Worker that stayed non-idle through a peer's outage would hang every `settle()` in the suite. The loop bodies stay hand-written, because a ticker, a bounded queue, a broadcast subscription and a batching drain genuinely differ. Four rules bind a new one: **double-spawn is structurally impossible** (`self`-by-value on a non-`Clone` owner, as `retention::Sweeper` does, or a `worker::Handoff` holding the state a second worker must not have a second of, as `downstream` does with the right to drain and `enhance` with its inbox); **work is admitted where it is handed over, before the task is spawned**, so nothing reads idle before it has woken up; **a `Ticket` rides with the work** and settles on drop, so a cancelled or refused item leaves the depth honest without an arm remembering to; and **the Instance owns the handle** and stops them in reverse order of starting. The one exception is the log writer, which belongs to the *process* rather than to a run — `stop_run()` (what `restart` calls) leaves it draining, `stop()` ends it after a final drain of what it already holds. The readings live in a `Workers` registry held by both `Instance` and `AppState`, because a status handler (#70) is given `AppState` and can never see an Instance.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

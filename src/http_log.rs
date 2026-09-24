@@ -42,6 +42,10 @@
 //! reverse proxy or Docker's bridge (#23), naming the hop makes the forwarded
 //! address the one that gets logged. Which entry of the chain that is, and why,
 //! is [`TrustedProxies::client_ip`].
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **Every HTTP request leaves one line** (`src/http_log.rs`, #28): `method`, `path`, `status`, `duration_us`, under a span carrying a 16-hex `request_id` that the response echoes as `x-request-id` — so a handler's own lines correlate, and the id a 5xx hands the client (#29) is the same one. The level is the **louder of the route's class and its outcome**: SPA assets, `/api/call/{id}/audio` and `/healthz` rest at DEBUG (chatty — a Pi must not write a line per range request or per probe), everything else at INFO, and a 4xx/5xx escalates to WARN/ERROR whatever the class. The **path only, never the query string** (rule 2 — access codes are a query parameter in ADR-0008's shape). The client address is the **TCP peer's** unless the operator named that peer in `[server] trusted_proxies` (#17) — the header is spoofable, so with the list empty (what ships) it is never read; when the peer is trusted, the address is the **rightmost entry of `X-Forwarded-For` that isn't itself a trusted proxy** — and rule 5 decides whether it rides: ingest lines always, everything else only on a line that is already DEBUG. The live feed logs its upgrade + connect/disconnect, never a frame.
 
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};

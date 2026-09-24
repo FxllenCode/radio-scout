@@ -170,8 +170,8 @@ pub async fn ensure_group<C: ConnectionTrait>(
 /// **Make a Talkgroup's Groups exactly `names`**, and say how many Groups that
 /// brought into existence.
 ///
-/// One writer, because CLAUDE.md's rule about Groups and Tags being *written
-/// once* applies to this too: the browser's Talkgroup form and the
+/// One writer, because [`crate::curate`]'s rule about Groups and Tags being
+/// *written once* applies to this too: the browser's Talkgroup form and the
 /// configuration document both set the whole set, and two copies are two
 /// chances for one to forget the stale-link delete and leave a channel in a
 /// Group its own row says it left.
@@ -1085,8 +1085,8 @@ pub async fn store_replacement<C: ConnectionTrait>(
 /// Archive describing audio nobody holds any more. Written twice, a field added
 /// by a later ticket would silently reach only one of them, and nothing about
 /// either path would look wrong; that is the same failure the shipped Trunk
-/// Recorder artifacts have a whole test to prevent (CLAUDE.md's two-artifact
-/// rule), applied to the two ways a row is written here.
+/// Recorder artifacts have a whole test to prevent
+/// (`tests/trplugin.rs::the_upload_script_and_the_plugin_land_the_identical_call`), applied to the two ways a row is written here.
 ///
 /// Deliberately *not* the identity columns — `system_id`, `talkgroup_id`,
 /// `talkgroup_ref`, `call_at_ms`, `created_at_ms`, `site_id` — which the two

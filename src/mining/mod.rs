@@ -2,7 +2,7 @@
 //! *inside* a Call's audio, and folding it into the Archive.
 //!
 //! SDRTrunk cannot have a plugin — its broadcast formats are compiled-in
-//! classes with no extension point (CLAUDE.md) — so the usual answer to "teach
+//! classes with no extension point (see the design notes below) — so the usual answer to "teach
 //! the recorder to send more" is closed. It turns out not to be needed: every
 //! MP3 SDRTrunk uploads *already* carries an ID3v2.4 tag, written by
 //! `AudioSegmentRecorder.recordMP3` before the first MPEG frame and uploaded
@@ -33,6 +33,12 @@
 //! and nothing read. Both callers — [`crate::ingest`] mining a Call as it
 //! arrives, and [`sweep`] mining one already stored — decide what to *do* with
 //! the result.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **SDRTrunk cannot have a plugin, and does not need one (#48).** Its broadcast formats are compiled-in classes under `sdrtrunk/src/main/java/io/github/dsheirer/audio/broadcast/`, registered in `BroadcastFactory`; there is no plugin mechanism to write against, so the only ways to a native format are a fork or an upstream contribution. **Mining** (CONTEXT.md) is the path taken instead, and it needs no cooperation from SDRTrunk at all: `AudioSegmentRecorder.recordMP3` writes an ID3v2.4 tag ahead of the MPEG frames and `RdioScannerBroadcaster` posts that file's bytes verbatim, so the facts have been arriving since before Radio-Scout existed — `TPE1` carries the FROM radio plus **the alias list an Operator configured in SDRTrunk**, which no `FormField` of its sends, and `COMM` carries `Site:`/`Decoder:`/`Frequency:`, where the rdio dialect has no site field at all. `TIT2`/`TALB`/`TIT1` are ignored on purpose: they duplicate `talkgroupLabel` and `systemLabel`. So "an integration for both" is satisfied for SDRTrunk by the rdio-dialect broadcaster it already ships plus mining, and the two-artifact rule above is Trunk Recorder's alone.
+//!
+//! Four things about it are load-bearing. **It runs at Ingest, not in an off-path worker** — which is where #48's own acceptance criteria said to put it, and is wrong for this feature: the live-feed frame is published at ingest and nothing republishes one (#46), so a name that lands afterwards never reaches the Listener who heard the Call; Enhancement rewrites the object and destroys the tag, which a worker would race and lose; and the cost is a *header read* in the pass `audio_meta::read` was already making for the Duration, where "never on the ingest path" was written about enhancement's decode-and-encode. A three-byte `starts_with(b"ID3")` gate keeps a container parse off every Trunk Recorder upload. **It fills and never overwrites** — the wire is the Recorder speaking now, the container is a snapshot it wrote earlier, and a curated name survives (#8's rule, one layer up) — and a name lands only on a radio the Call actually heard, cross-checked by Ref, because an apparatus's name on the wrong apparatus is worse than no name. **The gate is `TCOM`**, matched as a prefix (`sdrtrunk v0.6.1`, `sdrtrunk nightly - …`): without it `TPE1` on any MP3 in the Archive parses as a radio id followed by a name, and "50 Cent" is a perfectly good radio 50. And **there are two writers** — `mining::apply` for a Call being assembled and `repo::apply_mined` for one that has existed for a year — held to landing the identical Call by `tests/mining.rs::both_paths_land_the_identical_call`, the way #44 holds the upload script and the plugin together.
 
 use std::time::Duration;
 

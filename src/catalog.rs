@@ -21,6 +21,10 @@
 //! (#98): a data-layer module that has to import a handler module's view types
 //! in order to build them has the dependency backwards, and this was the last
 //! place it did.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **Activity comes from the server or not at all**: `GET /api/catalog` gained `recentCalls` + `lastCallAtMs` per Talkgroup from one grouped query bounded to `ACTIVITY_WINDOW_MS` — unbounded last-heard would be an index scan of every Call ever stored, on every app open, on a Pi — and the window itself rides on the wire (`activityWindowMs`) so "most active in the last 24h" cannot come to describe a window that has moved. The most-active sort orders by the **count**, tie-broken by the stored instant, and never by an **age**, for `panelOf`'s no-clock rule: a count and an instant are facts the server measured where an age is a subtraction from a clock, and a list that re-sorted itself under the Listener's thumb every thirty seconds is not a list. `Panel.ticking` is that rule's other half — it says whether anything *drawn* is such a subtraction (a timed Avoid's countdown, a last-heard age under the A–Z sort), so the screen keeps one 30-second timer for the whole panel or none at all, where a parked phone showing switches and counts used to redraw itself twice a minute for nothing.
 
 use axum::extract::State;
 use sea_orm::{

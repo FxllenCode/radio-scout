@@ -19,6 +19,10 @@
 //! The roster and queue reads that used to sit beside them are now
 //! [`crate::delivery::Outbox`]'s, because they are the loop's questions rather
 //! than an attempt's: [`Forwarding`] answers those, and is one line each.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **What one unit of a Worker's work is belongs to that Worker (#52, #93).** The sender's is **"I have caught up with what was handed to me"**, and the two more obvious readings both make `app.settle()` hang for the whole suite: one admission per *delivery* never settles while a peer is down; one per *attempt* never settles for the Calls queued behind a stuck head, because only the head is attempted. So an admission means "there is something new to look at" and is discharged by the pass that finds nothing in flight — which on a working peer is after the queue has drained, and on a broken one is after one attempt, which is the honest answer. A **retry** is deliberately outside it, so watching a recovery is `Downstreams::deliveries_settled` — which is this Worker's `Load::done` in the only place it can live, since its meter's unit is "caught up" rather than "one Call" — published *after* the row is gone rather than when the peer answered. The double-spawn guard is a `worker::Handoff` holding **the right to drain**, because two senders would each take the same head and the peer would receive one Call twice. The Operator-facing queue depth is a different number entirely: `COUNT(*)` on the table, which is what survives a restart and what the admin screen shows. `tests/common/peer.rs` is a real peer on an ephemeral port, and it **checks the API key itself** — switching a stub between statuses to model a mistyped key leaves a window in which an in-flight attempt lands under the old one, which is a one-in-nine flake that `cargo mutants` found by refusing to run against a baseline that would not stay green.
 
 use std::sync::Arc;
 

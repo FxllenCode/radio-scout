@@ -22,6 +22,10 @@
  * The map only ever holds what somebody tapped, so it is bounded by taps and
  * cleared by a reload — which is safe precisely because it is an override of a
  * durable fact rather than the fact itself.
+ *
+ * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ *
+ * And **the client's override is why a tap is instant** (`store/stars.ts`). A Call is in the archive's RTK Query cache, in `live`'s history and queue, *and* in `playback`'s page snapshot at once, and only the first can be refetched — so patching each would be three rules that can disagree about what a Star is. One map of what this session did, read through `selectStarred`, is one rule; it is deliberately **not persisted**, because the durable record is the Instance's and a reload is how it is meant to empty. `hooks/useStar.ts` is the shared toggle, so `StarButton` on a row, the Live display's control and the session log's action sheet cannot come to disagree about what tapping one does. The invalidation is a `Star` tag rather than `Call`, or a tap would re-fetch the catalog, the density ribbon and the filter options too.
  */
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
 

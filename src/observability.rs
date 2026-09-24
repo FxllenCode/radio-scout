@@ -21,6 +21,10 @@
 //!   `sea_orm_migration` narrates migrations in formatted sentences that
 //!   [`crate::db`] re-emits as structured events, so leaving it at INFO means
 //!   saying everything twice. `RUST_LOG=debug` gets both back.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! Output goes to **stdout only** (journald/Docker/terminal own persistence and rotation — never a file sink), initialised in `src/observability.rs` and coloured only when stdout is a terminal. The filter selects level *and* target and comes from `--log` / `RUST_LOG` / `[log] directives` / the default `info,sqlx::query=warn,sea_orm_migration=warn` (#17, in that order) — sqlx logs a line per statement at INFO, which on a Pi taking a Call a second is protocol detail belonging at DEBUG, and our own migration lines replace sea-orm's sentences. Directives are **validated at boot**: a filter `tracing` can't parse refuses to start and names the layer it came from, because an operator who asked for TRACE and silently got INFO debugs the wrong log (`observability::subscriber` still falls back to the default as a last resort — a subscriber that fails to build would mean silence).
 
 use std::io::{self, IsTerminal};
 

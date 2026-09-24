@@ -39,6 +39,10 @@
 //! Before this, the ninety-line loop around three tested decisions had no test of
 //! its own, and the only way to watch a connection be reaped was to shorten the
 //! shipped heartbeat from outside and then sleep through it.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **A live-feed connection is a state machine, and the socket is an adapter (#94).** `live::Connection::on(Event) -> Vec<Action>` is the whole protocol — subscribe, delivery, Backfill, heartbeat, reaping, hanging up — and nothing in it awaits, opens a socket or reads a database, so every row is a value a test constructs and a value it asserts on. `run_connection` pumps events in and carries actions out over a `Socket` trait that axum's `WebSocket` implements and `mod tests` substitutes; **that is what makes reaping provable without a sleep** (a tick is an event, and under `tokio::time::pause` the shipped thirty-second period costs microseconds). Two consequences worth knowing: an **ordering is a value**, so the ack-before-Backfill is `[Send(subscribed), Backfill(cursor)]` in a returned list rather than two statements that could be swapped without a test noticing; and the **access scope is an input** (`Connection::new`), so a restricted connection is something a test can open, on the Backfill path as well as the live one. Production resolves to `AccessScope::All` in one line of `ws_handler` until #68 grants a scope. The **Backfill cursor is an `Emission`** (CONTEXT.md), not a Call id — see ADR-0004's #94 amendment for why storage order is insufficient and what it costs on the wire (`protocol: 2`, a `seq` on every `call` frame, a `gap` frame when a page could not reach back far enough).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

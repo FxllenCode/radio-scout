@@ -21,6 +21,10 @@
  * catches regressions this ticket's own fix would not — a renamed glob, a newly
  * inherited exclude, or a project dropped from `tsconfig.json`'s `references`,
  * which is the door the first draft of this file left open.
+ *
+ * ## Design notes (moved verbatim from CLAUDE.md, #110)
+ *
+ * **What `npm run typecheck` looks at is itself asserted** (#102), because a TypeScript project that resolves to no files reports success at speed, forever. `tsconfig.test.json` and `tsconfig.worker.json` set an `include` and *inherited* `tsconfig.app.json`'s `exclude`, which names exactly those patterns — so every test file, and `src/sw.ts`, went unchecked from the day the projects were split out, and CI's `Client` job ran the same no-op. Both now override `exclude`, and **`client/src/typecheck.test.ts`** resolves each project through TypeScript's own config machinery and asserts the files are really in it. Pinning the *set* rather than the config is the point: a repository cannot commit an example of the wrong payload that should fail, but it can commit "these files are checked", and that also catches a renamed glob or a project dropped from the references. This is `tests/ci.rs`'s job on the client side.
  */
 import { relative, resolve, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'

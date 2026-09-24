@@ -53,6 +53,22 @@
 //! find their whole Archive being read back on the next boot. What a restart
 //! *does* pick up is `pending` — work this Instance already accepted and had not
 //! finished.
+//!
+//! # Design notes (moved verbatim from CLAUDE.md, #110)
+//!
+//! **Catch-up needs a place to jump to, and only the server can say where (#59, spec US 23).** `src/quiet/` finds the stretches of a Call where nobody is talking — `detect::spans` turns audio into **Quiet spans** (CONTEXT.md), `worker` reads one Call and writes them down, and `pack`/`unpack` are the column. rdio-scanner has no catch-up at all, so the whole design is ours. Six things follow.
+//!
+//! **The client cannot answer this, and that is a consequence of ADR-0005 rather than a preference.** One `<audio>` element and no WebAudio means a browser here cannot look at a sample; the levers it has are `playbackRate` and `currentTime`, and the second is worth nothing without somewhere to point it. So raising the rate is free and skipping the silence is a fact the server has to supply.
+//!
+//! **It is the first Worker that looks at every Call.** Enhancement ships `off`; #55's tone worker is *clear without the object ever being read* on any channel with no profile, which is nearly every Call on nearly every Instance. There is no equivalent gate here — whether a Call holds a gap can only be answered by looking — so `[quiet] enabled` is the whole switch, it ships **on** (a Listener should not have to find a setting before the queue can be drained), and `tests/ingest.rs`'s pinned count went 20 → 23: one statement on the ingest path to mark the Call, and the worker's own read and write behind it. It is also the *cheapest* of the three — a decode and a scan, where enhancement decodes, resamples twice, filters, measures loudness and re-encodes.
+//!
+//! **The reference is the peak of a moving median, and both obvious alternatives fail silently.** The threshold is a fraction of how loud *this Call's* speech is, because gain is the recorder's and enhancement is off. Referencing the loudest frame lets one squelch pop put the threshold above every word and report the whole Call as quiet — Catch-up skipping a Call. A high percentile survives that and then fails on the Call this feature exists for: a TR file holding one keyup and nine seconds of hang time is *mostly* gap, so even a 90th percentile lands inside the silence. A median discards what is shorter than half its window, which is exactly the difference between a click and a syllable.
+//!
+//! **A span covering the whole Call is never reported.** Digital silence and a recording made at a gain this cannot measure are indistinguishable from here and want opposite answers, so the honest reading is that a Call with nothing to trim has nothing to trim. Deciding a Listener hears *none* of a Call is theirs, from the queue sheet (#58).
+//!
+//! **The floor is what makes a generous threshold safe.** `MIN_SPAN_MS` plus two `GUARD_MS` means a stretch has to stay under the threshold for 1.44 seconds to be reported at all — no syllable, fricative or inter-word pause is — which is why the ratio can be set for the analogue channel whose noise floor is 25 dB down rather than 40. The guard is paid only where there is speech beside it: a span opening the Call keeps its left edge, and the trailing one (the squelch tail, the commonest gap there is) keeps its right.
+//!
+//! And **the spans reach a queued Call by being *pulled*, which is the one thing the ticket did not say.** The live frame is published at ingest, ahead of the scan, and nothing republishes one (#46) — so `quiet` on `StoredCall` serves the Archive and #63's DVR and does nothing for the queue. `GET /api/calls/quiet?ids=…` is one statement for a whole window, asked only while Catch-up is engaged. Pull rather than a `quiet` frame on the socket, because a Listener who is caught up — nearly all of them, nearly all of the time — can never use a span, and a frame per Call carrying one is traffic every Pi pays for and almost nobody spends.
 
 pub mod detect;
 pub mod worker;

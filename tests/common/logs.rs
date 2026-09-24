@@ -23,8 +23,8 @@
 //! nothing. [`ask_every_time`] installs a global subscriber that records nothing
 //! but answers `Interest::sometimes`, forcing `tracing` to ask the *current
 //! thread's* subscriber per event. (`cargo nextest` gives each test its own
-//! process and would not need it — `cargo test` still works, and CLAUDE.md
-//! documents both.)
+//! process and would not need it — `cargo test` still works, and CLAUDE.md's
+//! Commands block documents both.)
 
 use std::io;
 use std::sync::{Arc, Mutex, Once};
