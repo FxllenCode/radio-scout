@@ -213,15 +213,23 @@ Then the `plugins` entry in `config.json`:
   `?` for exactly one, and every other character means itself, so `5.155` matches a talkgroup
   with a dot in it and nothing else. A non-empty allow list is exhaustive; deny then removes
   from what is left.
-- **Failures name themselves in Trunk Recorder's log**, prefixed with the plugin's `name`:
+- **Every outcome is logged in Trunk Recorder's own format**, the same header and wording its
+  `rdioscanner_uploader` uses, with the plugin's `name` where that one prints its own:
 
   ```
-  [radio-scout]	fulton TG 54155	upload failed: Failed to connect to scout.lan port 3000
-  [radio-scout]	fulton TG 54155	upload refused (HTTP 401): Invalid API key for system 0 talkgroup 54155.
+  [fulton]	10C	TG:      54155 (EMS Dispatch)	Freq: 773.181250 MHz	radio-scout Upload Success - file size: 32597
+  [fulton]	10C	TG:      54155 (EMS Dispatch)	Freq: 773.181250 MHz	radio-scout Upload Error: Failed to connect to scout.lan port 3000
+  [fulton]	10C	TG:      54155 (EMS Dispatch)	Freq: 773.181250 MHz	radio-scout Upload Error (HTTP 401): Invalid API key for system 0 talkgroup 54155.
   ```
 
-  `upload failed` means nobody answered; `upload refused` means Radio-Scout did, and the rest
-  of the line is its own words. Neither ever contains the API key.
+  `Upload Error: …` with no HTTP status means nobody answered; `Upload Error (HTTP …)` means
+  Radio-Scout did, and the rest of the line is its own words. Neither ever contains the API key.
+  A Call kept back by `talkgroupAllow`/`talkgroupDeny` says `Skipped upload due to talkgroup
+  filter`.
+- **`Upload Success` means Radio-Scout accepted the request, not that it kept the Call.** A
+  Call on a Talkgroup or System it has no record of, with auto-populate off, is answered
+  `200` and dropped (rdio-scanner's own behaviour, so recorders never retry it); the reason is
+  in Radio-Scout's log as `reason=not-populated`.
 
 > **A Call on an encrypted talkgroup is forwarded, not dropped.** The `rdioscanner_uploader`
 > plugin discards those (`rdioscanner_uploader.cc:171-173`), because the rdio dialect has no
