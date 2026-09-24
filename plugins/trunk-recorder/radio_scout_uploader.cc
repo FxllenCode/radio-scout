@@ -24,6 +24,8 @@
 #include <boost/log/trivial.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include <sys/stat.h>
+
 #include <string>
 #include <vector>
 
@@ -88,9 +90,13 @@ class Radio_Scout_Uploader : public Plugin_Api {
     return nullptr;
   }
 
+  // The header every Trunk Recorder log line about a Call opens with —
+  // `[short_name]  10C  TG: 703 (tag)  Freq: 773.181250 MHz` — from the
+  // recorder's own `log_header`, so a Call reads the same whichever uploader is
+  // talking about it and an operator can grep one Call across all of them.
   std::string log_prefix(const Call_Data_t &call_info) const {
-    return "\t[" + plugin_name + "]\t" + call_info.short_name + " TG " +
-           std::to_string(call_info.talkgroup) + "\t";
+    return log_header(call_info.short_name, call_info.call_num, call_info.talkgroup_display,
+                      call_info.freq);
   }
 
 public:
@@ -169,7 +175,11 @@ public:
     const Configured_System *system = configured(call_info.short_name);
 
     if (system != nullptr && !system->filter.admits(call_info.talkgroup)) {
-      BOOST_LOG_TRIVIAL(debug) << log_prefix(call_info) << "not uploaded: talkgroup filter";
+      // INFO, as the rdio uploader's own line is: a Call missing from Radio-Scout
+      // because a filter kept it here is the first thing to rule out.
+      BOOST_LOG_TRIVIAL(info) << log_prefix(call_info)
+                              << "Skipped upload due to talkgroup filter (tg="
+                              << call_info.talkgroup << ")";
       return 0;
     }
 
@@ -190,21 +200,25 @@ public:
       // Reachable because Trunk Recorder ignores what `parse_config` returned
       // (`plugin_manager.cc:56`). DEBUG, not ERROR: `parse_config` already said
       // this once at startup, and a line per Call would bury it.
-      BOOST_LOG_TRIVIAL(debug) << log_prefix(call_info) << "not uploaded: not configured";
+      BOOST_LOG_TRIVIAL(debug) << log_prefix(call_info) << plugin_name
+                               << " not uploaded: not configured";
       return 0;
     }
     if (result.sent) {
-      BOOST_LOG_TRIVIAL(info) << log_prefix(call_info) << "uploaded";
+      struct stat file_info {};
+      stat(upload.audio_path.c_str(), &file_info);
+      BOOST_LOG_TRIVIAL(info) << log_prefix(call_info) << plugin_name
+                              << " Upload Success - file size: " << file_info.st_size;
       return 0;
     }
     if (result.http_code != 0) {
       // Radio-Scout's own words: the rdio-compatible response strings, which
       // say which of the two API keys was refused and for what.
-      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << "upload refused (HTTP "
+      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << plugin_name << " Upload Error (HTTP "
                                << result.http_code << "): " << result.body;
     } else {
-      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << "upload failed: "
-                               << result.transport_error;
+      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << plugin_name
+                               << " Upload Error: " << result.transport_error;
     }
     return 1;
   }
