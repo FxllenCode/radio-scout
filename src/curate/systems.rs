@@ -36,7 +36,7 @@ use super::{
 };
 use crate::AppState;
 use crate::db::entities::{
-    call, site, system, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
+    call, frequency_health, site, system, talkgroup, talkgroup_group, talkgroup_ref, unit, unit_ref,
 };
 use crate::db::repo;
 use crate::failure::{Failure, Stage};
@@ -300,8 +300,17 @@ pub async fn remove(
             .map_err(Stage::Curate.failed())?;
     }
     // Everything keyed on the System, member Refs and Ranges included (#45) —
-    // a member Ref outliving its System is a row resolution could never resolve.
+    // a member Ref outliving its System is a row resolution could never resolve
+    // — and the per-frequency health history (#71), whose foreign key would
+    // otherwise refuse the delete outright. That refusal is the point: #55's
+    // lesson was that a child table left out of a delete is invisible until a
+    // sweep meets its oldest marked row, and a declared key turns that into a
+    // failure here instead.
     for result in [
+        frequency_health::Entity::delete_many()
+            .filter(frequency_health::Column::SystemId.eq(id))
+            .exec(&txn)
+            .await,
         talkgroup_ref::Entity::delete_many()
             .filter(talkgroup_ref::Column::SystemId.eq(id))
             .exec(&txn)

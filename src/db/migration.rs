@@ -43,6 +43,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0022_events::Migration),
             Box::new(m0023_access_codes::Migration),
             Box::new(m0024_retention_overrides::Migration),
+            Box::new(m0025_rf_health::Migration),
         ]
     }
 }
@@ -2250,6 +2251,112 @@ mod m0024_retention_overrides {
                         .to_owned(),
                 )
                 .await
+        }
+    }
+}
+
+/// **What the radio conditions were, kept after the audio is gone** (#71, spec
+/// US 51).
+///
+/// Four columns on `calls` that Trunk Recorder has written into every `.json`
+/// since long before Radio-Scout existed and nothing had ever read — how far off
+/// frequency the demodulator pulled, the signal and noise it measured, and which
+/// SDR did it — and the rollup they are folded into.
+///
+/// The columns are guarded one by one for the reason m0003 wrote down: m0001
+/// generates its DDL from the *live* entities, so a database created after this
+/// release already has them by the time this runs. The table needs no guard,
+/// the m0005 precedent: nothing exists for it to diverge from.
+///
+/// **The unique index is the feature.** Without it the upsert in
+/// [`crate::db::repo::add_frequency_health`] has nothing to conflict on and
+/// every Call writes a new row, which is a rollup only in name. `sdr` is
+/// `NOT NULL` for the same reason — see the entity.
+mod m0025_rf_health {
+    use super::*;
+    use crate::db::entities::frequency_health;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0025_rf_health"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            for column in [
+                call::Column::FreqErrorHz,
+                call::Column::SignalDbm,
+                call::Column::NoiseDbm,
+                call::Column::SourceNum,
+            ] {
+                let name = ColumnDef::new(column).get_column_name();
+                if manager.has_column("calls", &name).await? {
+                    continue;
+                }
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(ColumnDef::new(column).big_integer().null())
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(frequency_health::Entity))
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_frequency_health_key")
+                        .table(frequency_health::Entity)
+                        .col(frequency_health::Column::SystemId)
+                        .col(frequency_health::Column::Freq)
+                        .col(frequency_health::Column::Sdr)
+                        .col(frequency_health::Column::BucketAtMs)
+                        .unique()
+                        .to_owned(),
+                )
+                .await?;
+            // The chart's own access path — a window of buckets, oldest first —
+            // and the retention sweep's, which walks the same column.
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_frequency_health_time")
+                        .table(frequency_health::Entity)
+                        .col(frequency_health::Column::BucketAtMs)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(frequency_health::Entity).to_owned())
+                .await?;
+            for column in [
+                call::Column::SourceNum,
+                call::Column::NoiseDbm,
+                call::Column::SignalDbm,
+                call::Column::FreqErrorHz,
+            ] {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .drop_column(column)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
         }
     }
 }

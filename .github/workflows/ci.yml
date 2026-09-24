@@ -451,25 +451,35 @@ jobs:
       # operator unpacks it. Naming the sources one by one here would build a
       # different plugin than the one that ships, and the file left off the list
       # would be the one nobody remembers.
-      - name: Stage the plugin where a recorder would find it
+      - name: Stage the plugins where a recorder would find them
         run: |
           mkdir -p trunk-recorder/user_plugins/radio-scout
           cp -a radio-scout/plugins/trunk-recorder/. trunk-recorder/user_plugins/radio-scout/
-      - name: Build it
+          mkdir -p trunk-recorder/user_plugins/radio-scout-status
+          cp -a radio-scout/plugins/trunk-recorder-status/. \
+            trunk-recorder/user_plugins/radio-scout-status/
+      # Both shipped plugins, in one configure. The status plugin (#71) links
+      # against the recorder's own `Source`/`System`/`Call` methods where the
+      # uploader deliberately links against none of it, so building only one of
+      # them would leave the other's link line unproven.
+      - name: Build them
         working-directory: trunk-recorder
         run: |
           cmake -B build -DCMAKE_C_COMPILER_LAUNCHER=ccache \
                          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build --target radio_scout_uploader -- -j"$(nproc)"
+          cmake --build build --target radio_scout_status -- -j"$(nproc)"
       # A plugin Trunk Recorder cannot find the entry point in is a plugin that
       # loads and does nothing. `create_plugin` is the symbol it imports by that
       # exact name (`plugin_manager.cc:23-27`).
       - name: The recorder's entry point is exported
         working-directory: trunk-recorder
         run: |
-          library=$(find build -name 'libradio_scout_uploader.so' -print -quit)
-          test -n "$library"
-          nm -D --defined-only "$library" | grep -q create_plugin
+          for name in libradio_scout_uploader.so libradio_scout_status.so; do
+            library=$(find build -name "$name" -print -quit)
+            test -n "$library"
+            nm -D --defined-only "$library" | grep -q create_plugin
+          done
 
   # --------------------------------------------------------------------------
   # The pipeline checks itself: a malformed workflow is not a failing run, it is

@@ -7,7 +7,7 @@ import { FakeInstance, curationHandlers, refusal } from '@/test/curation'
 import { ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderWithProviders } from '@/test/utils'
-import type { InstanceStatus } from '@/types'
+import type { Dashboard, HealthReport, InstanceStatus, RecorderView } from '@/types'
 
 import { AdminScreen } from './AdminScreen'
 import { AdminTalkgroupsScreen } from './AdminTalkgroupsScreen'
@@ -16,6 +16,7 @@ import { ApiKeysScreen } from './ApiKeysScreen'
 import { DownstreamsScreen } from './DownstreamsScreen'
 import { GroupsScreen, TagsScreen } from './LabelsScreen'
 import { ListenersScreen } from './ListenersScreen'
+import { RecordersScreen } from './RecordersScreen'
 import { SharesScreen } from './SharesScreen'
 import { StatusScreen } from './StatusScreen'
 import { SystemsScreen } from './SystemsScreen'
@@ -107,6 +108,7 @@ describe('the admin gate', () => {
 
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
       '/settings/admin/status',
+      '/settings/admin/recorders',
       '/settings/admin/talkgroups',
       '/settings/admin/systems',
       '/settings/admin/units',
@@ -3953,6 +3955,383 @@ describe('instance status', () => {
       ),
     )
     renderWithProviders(<StatusScreen />)
+
+    expect(
+      await screen.findByRole('button', { name: 'Sign in' }),
+    ).toBeInTheDocument()
+    expect(asked.count).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The recorder dashboard (#71, spec US 50–51)
+// ---------------------------------------------------------------------------
+
+describe('the recorder dashboard', () => {
+  const AT = 1_700_000_000_000
+
+  function dialedIn(over: Partial<RecorderView> = {}): RecorderView {
+    return {
+      id: 1,
+      name: 'butco-pi',
+      connected: true,
+      connectedAtMs: AT - 7_200_000,
+      lastMessageMs: AT - 1_000,
+      captureDir: '/captures',
+      sdrs: [
+        {
+          sourceNum: 0,
+          driver: 'osmosdr',
+          device: 'rtl=0',
+          centerHz: 774_000_000,
+          rateHz: 2_400_000,
+          gain: 40,
+          errorHz: 0,
+          minHz: 773_000_000,
+          maxHz: 775_000_000,
+          demodulators: 4,
+        },
+      ],
+      systems: [
+        {
+          sysNum: 0,
+          shortName: 'butco',
+          systemType: 'p25',
+          sysid: '123',
+          decodeRate: 39.3,
+          controlChannels: [774_031_250],
+        },
+      ],
+      demodulators: [
+        { id: '0_0', kind: 'P25', sourceNum: 0, recNum: 0, state: 'recording', calls: 6, recordedSeconds: 76.9 },
+        { id: '0_1', kind: 'P25', sourceNum: 0, recNum: 1, state: 'available', calls: 0, recordedSeconds: 0 },
+      ],
+      calls: [],
+      notRecorded: [],
+      refused: [],
+      ...over,
+    }
+  }
+
+  function health(over: Partial<HealthReport> = {}): HealthReport {
+    return {
+      fromMs: AT - 3_600_000,
+      toMs: AT,
+      bucketMs: 900_000,
+      finestBucketMs: 900_000,
+      channels: [
+        {
+          systemRef: 11,
+          systemLabel: 'Fulton',
+          freq: 774_031_250,
+          sdr: 0,
+          samples: 8,
+          airMs: 32_000,
+          errorCount: 24,
+          spikeCount: 2,
+          errorRate: [45, null, 12, 30],
+          spikeRate: [3.75, null, 1, 2],
+          signalDbm: [-61, null, -63, -70],
+          noiseDbm: [-94, null, -94, -94],
+          driftHz: [-137, null, -140, -150],
+        },
+      ],
+      omitted: 0,
+      ...over,
+    }
+  }
+
+  /** Serve one dashboard and one health report. */
+  function watching(dashboard: Dashboard, report: HealthReport = health(), asked?: { count: number }) {
+    server.use(
+      http.get(`${ORIGIN}/api/admin/recorders`, () => {
+        if (asked) asked.count += 1
+        return HttpResponse.json(dashboard)
+      }),
+      http.get(`${ORIGIN}/api/admin/recorders/health`, () => HttpResponse.json(report)),
+    )
+  }
+
+  /** The ticket's first criterion, on screen: a recorder's own truth, rendered. */
+  it('renders what the recorder said', async () => {
+    watching({ atMs: AT, recorders: [dialedIn()] })
+    signedIn(<RecordersScreen />)
+
+    expect(await screen.findByText('butco-pi')).toBeInTheDocument()
+    expect(screen.getByText('All receiving')).toBeInTheDocument()
+    expect(screen.getByText('butco').nextSibling).toHaveTextContent('39.3 msg/s')
+    expect(screen.getByText(/SDR 0 · rtl=0/).nextSibling).toHaveTextContent(
+      /1\/4 free/,
+    )
+  })
+
+  /** Why-not-recorded, which is the ticket's second criterion — in words rather
+   *  than in Trunk Recorder's own enum. */
+  it('says why a transmission was not recorded', async () => {
+    watching({
+      atMs: AT,
+      recorders: [
+        dialedIn({
+          calls: [
+            {
+              id: 'a',
+              talkgroup: 101,
+              talkgroupLabel: 'FIRE DISPATCH',
+              freq: 774_031_250,
+              state: 'monitoring',
+              notRecorded: 'no-recorder',
+              encrypted: false,
+              emergency: false,
+              sourceNum: 0,
+              startedAtMs: AT - 2_000,
+              elapsedSeconds: 2,
+            },
+          ],
+          notRecorded: [
+            {
+              reason: 'no-recorder',
+              count: 4,
+              lastAtMs: AT - 2_000,
+              lastTalkgroup: 101,
+              lastTalkgroupLabel: 'FIRE DISPATCH',
+            },
+          ],
+        }),
+      ],
+    })
+    signedIn(<RecordersScreen />)
+    await screen.findByText('butco-pi')
+
+    expect(screen.getAllByText('No demodulator free').length).toBeGreaterThan(0)
+    expect(screen.getByText('FIRE DISPATCH')).toBeInTheDocument()
+  })
+
+  /** The tally says how often; the refused list says **what** — the
+   *  transmissions a receiver turned down, newest first, by name. */
+  it('lists the transmissions it recently turned down', async () => {
+    const refusedCall = {
+      id: 'b',
+      talkgroup: 202,
+      talkgroupLabel: 'PD TAC 2',
+      freq: 774_031_250,
+      state: 'monitoring',
+      notRecorded: 'encrypted',
+      encrypted: true,
+      emergency: false,
+      sourceNum: 0,
+      startedAtMs: AT - 90_000,
+      elapsedSeconds: 4,
+    }
+    watching({
+      atMs: AT,
+      recorders: [
+        dialedIn({
+          refused: [refusedCall, { ...refusedCall, id: 'c', talkgroup: 303, talkgroupLabel: undefined }],
+        }),
+      ],
+    })
+    signedIn(<RecordersScreen />)
+    await screen.findByText('butco-pi')
+
+    const list = screen.getByRole('list', { name: 'Recently turned down' })
+    const rows = within(list).getAllByRole('listitem')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toHaveTextContent('PD TAC 2')
+    expect(rows[0]).toHaveTextContent('Encrypted')
+    expect(rows[1]).toHaveTextContent('Talkgroup 303')
+  })
+
+  /** **Disconnect is visible** — the row stays, marked, because one that
+   *  vanished would be indistinguishable from a recorder never set up. */
+  it('keeps a recorder that hung up, and says so', async () => {
+    watching({
+      atMs: AT,
+      recorders: [dialedIn({ connected: false, disconnectedAtMs: AT - 30_000 })],
+    })
+    signedIn(<RecordersScreen />)
+
+    expect(await screen.findByText('Needs attention')).toBeInTheDocument()
+    expect(
+      screen.getByText(/disconnected and has not come back/),
+    ).toBeInTheDocument()
+  })
+
+  /** And a receiver that is connected and silent, which is the failure no other
+   *  signal on the instance would show. */
+  it('flags a recorder that has stopped reporting', async () => {
+    watching({
+      atMs: AT,
+      recorders: [dialedIn({ lastMessageMs: AT - 60_000 })],
+    })
+    signedIn(<RecordersScreen />)
+
+    expect(await screen.findByText('Needs attention')).toBeInTheDocument()
+    expect(screen.getByText(/stopped reporting/)).toBeInTheDocument()
+  })
+
+  /** **Nothing breaks when no recorder dials in** — and the screen says what to
+   *  do about it rather than looking broken. */
+  it('says how to set one up when none has dialed in', async () => {
+    watching({ atMs: AT, recorders: [] })
+    signedIn(<RecordersScreen />)
+
+    expect(await screen.findByText('No recorder connected')).toBeInTheDocument()
+    expect(screen.getByText(/docs\/recorders.md/)).toBeInTheDocument()
+  })
+
+  /** The charts — the ticket's third criterion, and the half the status socket
+   *  cannot answer at all. */
+  it('charts how each frequency has been receiving', async () => {
+    watching({ atMs: AT, recorders: [dialedIn()] }, health())
+    signedIn(<RecordersScreen />)
+    await screen.findByText('butco-pi')
+
+    expect(await screen.findByText('774.0313 MHz · SDR 0')).toBeInTheDocument()
+    // 24 errors over 32 seconds of air is 45 a minute.
+    expect(screen.getByText(/45.0 err\/min/)).toBeInTheDocument()
+    expect(screen.getByText(/3.8 spikes\/min/)).toBeInTheDocument()
+    expect(screen.getByText(/-65 dBm · noise -94 dBm/)).toBeInTheDocument()
+    expect(screen.getByText(/-142 Hz/)).toBeInTheDocument()
+    // All four the spec names are charts, not just numbers — and a bucket
+    // nothing was heard in stays a gap in every one of them.
+    for (const name of ['Decode errors', 'Spikes', 'Signal', 'Drift']) {
+      expect(
+        screen.getByRole('img', { name: new RegExp(`^${name}, 4 buckets`) }),
+      ).toBeInTheDocument()
+    }
+  })
+
+  /** A cap nobody is told about reads as "that is all there is". */
+  it('says how many channels it left out', async () => {
+    watching({ atMs: AT, recorders: [] }, health({ omitted: 3 }))
+    signedIn(<RecordersScreen />)
+
+    expect(await screen.findByText('Not shown')).toBeInTheDocument()
+    expect(screen.getByText('Not shown').nextSibling).toHaveTextContent(
+      '3 quieter channels',
+    )
+  })
+
+  /** An instance that has taken no Calls says so rather than drawing an empty
+   *  chart, which reads as a receiver hearing nothing. */
+  it('says when nothing has been measured yet', async () => {
+    watching({ atMs: AT, recorders: [] }, health({ channels: [] }))
+    signedIn(<RecordersScreen />)
+
+    expect(await screen.findByText('No calls measured yet')).toBeInTheDocument()
+  })
+
+  /** "Right now" means asking again — the only way to watch a recorder go. */
+  it('asks again while it is on screen', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const asked = { count: 0 }
+    watching({ atMs: AT, recorders: [dialedIn()] }, health(), asked)
+    signedIn(<RecordersScreen />)
+    await screen.findByText('butco-pi')
+    expect(asked.count).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    await waitFor(() => expect(asked.count).toBe(2))
+    vi.useRealTimers()
+  })
+
+  /** An emergency on a call the recorder has in hand is the one thing on this
+   *  screen worth interrupting somebody for, so it is marked rather than left to
+   *  a column an Operator has to read across. */
+  it('marks an emergency on a call in hand', async () => {
+    watching({
+      atMs: AT,
+      recorders: [
+        dialedIn({
+          calls: [
+            {
+              id: 'a',
+              talkgroup: 101,
+              freq: 774_031_250,
+              state: 'recording',
+              encrypted: false,
+              emergency: true,
+              sourceNum: 0,
+              startedAtMs: AT - 2_000,
+              elapsedSeconds: 2,
+            },
+          ],
+        }),
+      ],
+    })
+    signedIn(<RecordersScreen />)
+    await screen.findByText('butco-pi')
+
+    expect(screen.getByText('emergency')).toBeInTheDocument()
+    // And a call the recorder never named a channel for still reads as
+    // *something*: a blank row is indistinguishable from a bug.
+    expect(screen.getByText('Talkgroup 101')).toBeInTheDocument()
+  })
+
+  /** A recorder that named nothing about itself — the default `instanceId` is
+   *  empty, so this is the common install rather than the odd one. */
+  it('renders a recorder that named nothing', async () => {
+    watching({
+      atMs: AT,
+      recorders: [
+        {
+          id: 4,
+          connected: true,
+          connectedAtMs: AT - 60_000,
+          lastMessageMs: AT - 1_000,
+          sdrs: [
+            {
+              sourceNum: 0,
+              centerHz: 774_000_000,
+              rateHz: 2_400_000,
+              gain: 40,
+              errorHz: 0,
+              minHz: 773_000_000,
+              maxHz: 775_000_000,
+              demodulators: 1,
+            },
+          ],
+          systems: [
+            { sysNum: 2, systemType: 'conventionalP25', decodeRate: 0, controlChannels: [] },
+          ],
+          demodulators: [],
+          calls: [],
+          notRecorded: [],
+          refused: [],
+        },
+      ],
+    })
+    signedIn(<RecordersScreen />)
+
+    expect(await screen.findByText('Recorder 4')).toBeInTheDocument()
+    expect(screen.getByText('System 2').nextSibling).toHaveTextContent('conventional')
+    expect(screen.getByText('SDR 0')).toBeInTheDocument()
+  })
+
+  /** A channel the recorder said nothing about the SDR for — every rdio-dialect
+   *  upload — charts under its frequency alone. */
+  it('charts a channel with no SDR behind it', async () => {
+    const report = health()
+    report.channels[0] = { ...report.channels[0], sdr: undefined, airMs: 0 }
+    watching({ atMs: AT, recorders: [] }, report)
+    signedIn(<RecordersScreen />)
+
+    expect(await screen.findByText('774.0313 MHz')).toBeInTheDocument()
+    expect(screen.getAllByText(/no air/)).toHaveLength(2)
+  })
+
+  /** The gate is the screen's, not the endpoint's alone. */
+  it('is behind the admin session', async () => {
+    const asked = { count: 0 }
+    watching({ atMs: AT, recorders: [] }, health(), asked)
+    server.use(
+      http.get(
+        `${ORIGIN}/api/admin/session`,
+        () => new HttpResponse(null, { status: 401 }),
+      ),
+    )
+    renderWithProviders(<RecordersScreen />)
 
     expect(
       await screen.findByRole('button', { name: 'Sign in' }),

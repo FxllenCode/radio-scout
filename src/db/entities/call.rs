@@ -153,6 +153,33 @@ pub struct Model {
     /// nothing (`call_tones`' cost, which a page-out earns by being searchable
     /// and this is not).
     pub quiet: Option<String>,
+    /// How far off frequency the demodulator had to pull to hear this, in Hz
+    /// — Trunk Recorder's `freq_error` (#71, spec US 51).
+    ///
+    /// **Signed**, and averaged as such: a receiver pulling consistently one way
+    /// is the thing worth seeing, and a mean over magnitudes would hide exactly
+    /// that. `NULL` on every Call in the rdio dialect, which has no field for
+    /// it, and on every Call stored before #71.
+    pub freq_error_hz: Option<i64>,
+    /// The signal level the recorder measured, in dBm — TR's `signal`.
+    ///
+    /// `999` is TR's own "never measured" sentinel ([`crate::rf`]) and is read
+    /// as absent rather than stored: it is written into the `.json` like any
+    /// other number, so a column that kept it would put a county's receive
+    /// level at several hundred dBm the first time anything averaged it.
+    pub signal_dbm: Option<i64>,
+    /// The noise floor the recorder measured, in dBm — TR's `noise`, on
+    /// [`Model::signal_dbm`]'s terms.
+    pub noise_dbm: Option<i64>,
+    /// Which SDR heard this — TR's `source_num`, the index of the device in the
+    /// recorder's own `sources` array (#71, spec US 51).
+    ///
+    /// The **SDR**, not the demodulator: TR's `recorder_num` names one of the
+    /// several demodulator slots a single dongle carries, and "a dying dongle"
+    /// is a question about the dongle. The live recorder dashboard shows the
+    /// slots; the health history is per device, because that is what an Operator
+    /// unplugs.
+    pub source_num: Option<i64>,
     /// When a **Listener** last starred this Call (#66, spec US 37), or `NULL`
     /// for the Calls nobody has.
     ///

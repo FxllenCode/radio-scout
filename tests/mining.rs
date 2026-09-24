@@ -268,11 +268,19 @@ async fn mining_a_call_with_nothing_in_it_costs_no_statements_at_all() {
     app.settle().await;
     let bare_cost = app.statements_issued() - before;
 
-    // A plain rdio upload naming the same radio, on the same rows: what a Call
-    // costs when no container is mined at all.
+    // A plain rdio upload naming the same radio **and the same frequency**, on
+    // the same rows: what a Call costs when no container is mined at all. The
+    // frequency matters since #71 — a Call that names one writes a row of
+    // receive history and a Call that names none does not, and this test is
+    // about the container rather than about that.
     let before = app.statements_issued();
-    app.upload_ok(CallUpload::new().set("unit", "1234567").at(120_000))
-        .await;
+    app.upload_ok(
+        CallUpload::new()
+            .set("unit", "1234567")
+            .set("frequency", "851012500")
+            .at(120_000),
+    )
+    .await;
     app.settle().await;
     let plain_cost = app.statements_issued() - before;
 

@@ -670,15 +670,11 @@ pub async fn extent<C: sea_orm::ConnectionTrait>(
         .select_only()
         .column_as(event_call::Column::Id.count(), "calls")
         .column_as(
-            event_call::Column::AudioSize
-                .sum()
-                .cast_as(sea_orm::sea_query::Alias::new("BIGINT")),
+            crate::db::sum_bigint(event_call::Column::AudioSize),
             "bytes",
         )
         .column_as(
-            event_call::Column::DurationMs
-                .sum()
-                .cast_as(sea_orm::sea_query::Alias::new("BIGINT")),
+            crate::db::sum_bigint(event_call::Column::DurationMs),
             "duration_ms",
         )
         .column_as(event_call::Column::CallAtMs.min(), "first_ms")

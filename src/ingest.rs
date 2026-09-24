@@ -544,8 +544,15 @@ async fn run_pipeline(
             replace(state, of, new_call, audio, &facts.resolved, auto_populate).await?
         }
         // Nothing is performed for a Call that is not stored, so a refusal is
-        // already the whole Admission.
-        Decision::Refused(admission) => admission,
+        // already the whole Admission — save one thing about a duplicate.
+        Decision::Refused(admission) => {
+            if let (Admission::Duplicate { .. }, Some(system)) =
+                (&admission, &facts.resolved.system)
+            {
+                heard_again(state, system.id, &new_call).await;
+            }
+            admission
+        }
     };
 
     // **The one line**, and the one place it is written (#96). Here rather than
@@ -554,6 +561,22 @@ async fn run_pipeline(
     // wrote down, not about what a recorder was told. What comes back is the
     // receipt, which is the only thing that can be rendered.
     Ok(admission.record())
+}
+
+/// **A Copy that lost was still received** (#71): its readings go into
+/// **Receive health** under its own SDR, because a second receiver decoding the
+/// same transmission worse is exactly how a dying dongle shows itself — and
+/// counting it only when it happened to arrive first would make the chart a
+/// record of upload order.
+///
+/// A failed write is a WARN and never a failed upload. The recorder's answer is
+/// about its copy, which *is* a duplicate; a `500` would only have it retry, and
+/// every retry would count the same reception again. A Call that names no
+/// frequency costs this nothing, not one statement.
+async fn heard_again(state: &AppState, system_id: i64, new_call: &NewCall) {
+    if let Err(cause) = repo::add_frequency_health(&state.db, system_id, new_call).await {
+        warn!(%cause, "receive health for a duplicate was not recorded");
+    }
 }
 
 /// What this Call's own audio can add to what its Recorder said — read in one
@@ -1636,6 +1659,18 @@ struct TrMeta {
     site: Option<i64>,
     #[serde(default)]
     freq: Option<f64>,
+    /// What the radio conditions were (#71, spec US 51) — written into every
+    /// call's `.json` since long before Radio-Scout existed, and read by nothing
+    /// until now. `signal`/`noise` carry TR's own `DB_UNSET` where they were
+    /// never measured, which [`crate::rf`] reads as absent.
+    #[serde(default)]
+    freq_error: Option<f64>,
+    #[serde(default)]
+    signal: Option<f64>,
+    #[serde(default)]
+    noise: Option<f64>,
+    #[serde(default)]
+    source_num: Option<f64>,
     #[serde(default)]
     patched_talkgroups: Vec<f64>,
     #[serde(default, rename = "freqList")]
@@ -1772,6 +1807,14 @@ fn build_tr_call(
         encrypted: is_set(meta.encrypted),
         priority: meta.priority.map(|p| p as i32),
         audio_type: clean(meta.audio_type),
+        freq_error_hz: meta.freq_error.map(|hz| hz as i64),
+        signal_dbm: meta.signal.map(|dbm| dbm as i64),
+        noise_dbm: meta.noise.map(|dbm| dbm as i64),
+        // A negative index is not a device. TR sets this from the recorder that
+        // took the call, so it is only ever absent or real — but the field is a
+        // number a stranger can send, and a sentinel row on every chart is what
+        // believing one would cost.
+        source_num: meta.source_num.map(|n| n as i64).filter(|n| *n >= 0),
         site_ref: meta.site.filter(|s| *s > 0),
         // Trunk Recorder names no tower, and **Mining** (#48) fills this on the
         // one dialect that does — inside the audio, after the parse. `enrich`

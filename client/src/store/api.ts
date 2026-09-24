@@ -32,6 +32,9 @@ import type {
   EventShare,
   FrozenEvent,
   FilterOptions,
+  Dashboard,
+  HealthQuery,
+  HealthReport,
   IssuedAccessCode,
   InstanceStatus,
   IssuedApiKey,
@@ -308,6 +311,33 @@ export const api = createApi({
      */
     getInstanceStatus: builder.query<InstanceStatus, void>({
       query: () => ({ url: 'api/admin/status' }),
+    }),
+
+    /**
+     * What the SDRs are doing right now (#71, spec US 50).
+     *
+     * **A poll, not a push.** The answer is a value the server already holds in
+     * memory, so serving it is a serialize and nothing else — a second live
+     * protocol would owe a version, a heartbeat and a reaping rule for one admin
+     * screen that is read in bursts. Untagged for `getInstanceStatus`'s reason:
+     * nothing a browser does changes what a recorder is saying.
+     */
+    getRecorders: builder.query<Dashboard, void>({
+      query: () => ({ url: 'api/admin/recorders' }),
+    }),
+
+    /**
+     * How each frequency has been receiving (#71, spec US 51).
+     *
+     * A separate query from the dashboard above because the two move on completely
+     * different timescales — the dashboard is polled every couple of seconds and
+     * this is a quarter-hourly rollup, so folding them into one document would
+     * mean re-reading a chart of last month twenty times a minute.
+     */
+    getFrequencyHealth: builder.query<HealthReport, HealthQuery>({
+      query: (range) => ({
+        url: `api/admin/recorders/health?${searchParams(range)}`,
+      }),
     }),
 
     // -- Curation (#49, spec US 45–46) ------------------------------------
@@ -847,8 +877,10 @@ export const {
   useGetApiKeysQuery,
   useGetCallQuery,
   useGetCatalogQuery,
+  useGetFrequencyHealthQuery,
   useGetInstanceStatusQuery,
   useGetListenerHistoryQuery,
+  useGetRecordersQuery,
   useGetQuietSpansQuery,
   useSetStarMutation,
   useGetDownstreamsQuery,

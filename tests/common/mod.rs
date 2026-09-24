@@ -64,6 +64,7 @@ mod audio;
 mod faults;
 pub mod logs;
 mod peer;
+mod recorder;
 pub mod s3;
 mod sink;
 mod upload;
@@ -80,6 +81,8 @@ pub use audio::{
 pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faults_over_store, faulty_store};
 #[allow(unused_imports)]
 pub use peer::{Peer, Received, unreachable_url};
+#[allow(unused_imports)]
+pub use recorder::{FakeRecorder, call_frame};
 #[allow(unused_imports)]
 pub use sink::{Sink, unreachable_hook_url};
 #[allow(unused_imports)]
@@ -1549,6 +1552,78 @@ impl TestApp {
             .expect("ws connect");
         let first = serde_json::from_str(&next_text(&mut ws).await).expect("a first frame");
         (ws, first)
+    }
+
+    // -- The recorder status socket (#71) -----------------------------------
+
+    /// Dial in as a **Recorder** would, presenting an **API key** in the query
+    /// string the way Trunk Recorder's bare `statusServer` URL forces.
+    ///
+    /// Panics if the connection is refused, which is what makes
+    /// [`TestApp::dial_recorder_refused`] the way to test a bad key.
+    pub async fn dial_recorder(&self, key: &str) -> FakeRecorder {
+        let (socket, _) = tokio_tungstenite::connect_async(self.recorder_url(key))
+            .await
+            .expect("the recorder socket was refused");
+        FakeRecorder::over(socket)
+    }
+
+    /// The status code a refused dial got, for a key this Instance will not
+    /// take. The upgrade never happens, so this really is an ordinary HTTP
+    /// refusal — which is the whole point of checking the key first (#71).
+    pub async fn dial_recorder_refused(&self, key: &str) -> u16 {
+        match tokio_tungstenite::connect_async(self.recorder_url(key)).await {
+            Ok(_) => panic!("the recorder socket was accepted"),
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                response.status().as_u16()
+            }
+            Err(other) => panic!("expected an HTTP refusal, got {other}"),
+        }
+    }
+
+    fn recorder_url(&self, key: &str) -> String {
+        format!("ws://{}/api/recorder-status?key={key}", self.addr)
+    }
+
+    /// The recorder dashboard, as an Operator's browser polls it.
+    pub async fn recorders(&self) -> serde_json::Value {
+        let (status, body) = self.admin_get("/api/admin/recorders").await;
+        assert_eq!(status, 200, "{body:?}");
+        body
+    }
+
+    /// Read the recorder dashboard until `ready` says it shows what a test
+    /// arranged — waking on each **change** the Instance makes to it, never on a
+    /// timer (#93: nothing in this suite waits on a sleep).
+    ///
+    /// A fake recorder's frames travel a real socket, so they are in flight when
+    /// its `send` returns and there is no Worker to `settle()` on. The watch is
+    /// subscribed *before* each read, so a change landing between the read and
+    /// the wait still wakes it. The budget reports a dashboard that never caught
+    /// up rather than hanging the suite on one.
+    pub async fn recorders_until(
+        &self,
+        ready: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let mut changes = self.instance.state.recorders.changes();
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                changes.borrow_and_update();
+                let dashboard = self.recorders().await;
+                if ready(&dashboard) {
+                    return dashboard;
+                }
+                changes
+                    .changed()
+                    .await
+                    .expect("the roster outlives the app");
+            }
+        })
+        .await;
+        match waited {
+            Ok(dashboard) => dashboard,
+            Err(_) => panic!("the dashboard never caught up: {}", self.recorders().await),
+        }
     }
 
     /// Open a live-feed WebSocket and read nothing — the raw socket, `hello`

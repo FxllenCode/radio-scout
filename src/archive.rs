@@ -1192,24 +1192,18 @@ struct ExtentRow {
 /// **How big this export would be**, in one statement over the same filters the
 /// export itself will walk (#65).
 ///
-/// The two `SUM`s are cast to `BIGINT` for [`crate::db::repo::total_audio_bytes`]'s
-/// reason: Postgres widens `SUM(bigint)` to `numeric` where SQLite keeps it an
-/// integer, and the cast is what makes one query decode on both dialects.
+/// Both sums go through [`crate::db::sum_bigint`], so the one query decodes on
+/// both dialects.
 pub async fn extent<C: ConnectionTrait>(db: &C, search: &CallSearch) -> Result<Extent, DbErr> {
-    use sea_orm::sea_query::Alias;
-
     let filters = Filters::resolve(db, search).await?;
     let row = CallQuery::new()
         .filtered_by(&filters)
         .rows()
         .select_only()
         .column_as(call::Column::Id.count(), "calls")
+        .column_as(crate::db::sum_bigint(call::Column::AudioSize), "bytes")
         .column_as(
-            call::Column::AudioSize.sum().cast_as(Alias::new("BIGINT")),
-            "bytes",
-        )
-        .column_as(
-            call::Column::DurationMs.sum().cast_as(Alias::new("BIGINT")),
+            crate::db::sum_bigint(call::Column::DurationMs),
             "duration_ms",
         )
         .column_as(call::Column::CallAtMs.min(), "first_ms")

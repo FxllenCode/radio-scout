@@ -213,6 +213,66 @@ Then the `plugins` entry in `config.json`:
 > (`call_concluder.cc:1244-1252`). Nothing to configure either way — the plugin is simply
 > right when it is asked.
 
+### The live dashboard: `radio_scout_status`
+
+A **second, optional** plugin, and a completely separate job from uploading. It sends no audio
+and no Calls — it pushes what your SDRs are doing right now, so **Settings → Admin →
+Recorders** shows active calls, why any of them are *not* being recorded, control-channel
+decode rates and every demodulator's state. Nothing about your uploads changes, and skipping
+this leaves that screen empty and nothing else affected.
+
+> **Trunk Recorder has a status plugin and does not build it.** `plugins/stat_socket` is in the
+> recorder's source tree, and the top-level `CMakeLists.txt` compiles five plugins by name —
+> that is not one of them. So a stock recorder cannot dial a status socket at all, whatever
+> `statusServer` says. Radio-Scout ships that plugin, built against the same recorder, with a
+> `server` key of its own so it can run beside anything already reading `statusServer`, and with
+> two upstream defects fixed (a member read before it is written, and a reconnect delay that
+> grows without bound).
+
+Fetch it onto the **recorder**, into the Trunk Recorder source tree you built from:
+
+```bash
+cd /path/to/trunk-recorder
+curl -fsSLO https://github.com/FxllenCode/radio-scout/releases/latest/download/radio-scout-tr-status-plugin.tar.gz
+curl -fsSL  https://github.com/FxllenCode/radio-scout/releases/latest/download/SHA256SUMS \
+  | grep radio-scout-tr-status-plugin | sha256sum -c -
+mkdir -p user_plugins
+tar -xzf radio-scout-tr-status-plugin.tar.gz -C user_plugins
+cmake -B build && cmake --build build -j"$(nproc)" && sudo cmake --install build
+```
+
+The configure step prints `Added user plugin: radio-scout-status` when it has found it.
+
+Then the `plugins` entry — beside the uploader's, if you have one:
+
+```jsonc
+"plugins": [
+  {
+    "name": "radio_scout_status",
+    "library": "libradio_scout_status.so",
+    // The **same API key** your recorder already uploads with. It rides in the
+    // query string because that is the only thing a WebSocket URL can carry —
+    // and Radio-Scout never writes a query string to its log.
+    "server": "ws://<host>:3000/api/recorder-status?key=<the key from .env>"
+  }
+]
+```
+
+- **`ws://`, not `http://`.** This is a WebSocket. Behind a TLS reverse proxy it is `wss://`.
+- **Leave `server` out** and it falls back to the recorder's global `statusServer`, which is
+  what to do if nothing else is reading that.
+- **A wrong key is refused before the socket opens** — an ordinary `401`, logged on the
+  instance as `reason=invalid-recorder-key`, and never carrying the key itself.
+- **A recorder that goes quiet is reaped** after thirty to forty-five seconds and shown as
+  gone, rather than left on the screen as a row that might be fine. Trunk Recorder reconnects
+  on its own.
+
+The **health charts** on that same screen come from somewhere else entirely: they are measured
+from the per-call metadata your uploads already carry (tuning error, signal, noise, decode and
+spike counts, and which SDR took the call), so they work whether or not this plugin is
+installed — but only on the Trunk-Recorder-native paths, because the rdio dialect has no field
+for any of it. See [the note below](#a-note-on-the-trunk-recorder-native-endpoint).
+
 ### The alternative: the rdio-scanner uploader plugin
 
 Add an entry to the `plugins` array in `config.json`:
@@ -343,6 +403,19 @@ the System named in the message.
 
 **404s from Trunk Recorder.** Almost always `/api/call-upload` typed into `server`. It is a
 base URL.
+
+**The Recorders screen is empty.** Either the status plugin is not loaded — the recorder's
+configure step prints `Added user plugin: radio-scout-status` when it is, and its startup log
+lists the plugins it loaded — or its `server` is wrong. It must start `ws://` (or `wss://`) and
+end with `/api/recorder-status?key=…`; a refused key shows up on the instance as
+`reason=invalid-recorder-key`. Uploading is unaffected either way, so Calls arriving is not
+evidence that this is working.
+
+**The receive-health charts show errors but no signal or drift.** Signal, noise, tuning drift
+and which SDR took the call come from Trunk Recorder's own call metadata, so they need the
+`uploadScript` or the first-party plugin above. The rdio-scanner uploader has no field for any
+of those four — but it does send each frequency's decode error and spike counts, so Calls
+arriving that way still chart errors and spikes, under their frequency with no SDR named.
 
 **Calls arrive with numeric names instead of labels.** That is auto-populate doing its job:
 the recorder sent a Talkgroup it had no name for. Import a talkgroup CSV to fix the names in

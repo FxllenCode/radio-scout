@@ -206,6 +206,18 @@ jobs:
           mkdir -p staging/radio-scout
           cp -a plugins/trunk-recorder/. staging/radio-scout/
           tar -czf dist/radio-scout-tr-plugin.tar.gz -C staging radio-scout
+      # The status plugin (#71) is a second recorder-side artifact and a second
+      # tarball, not a directory inside the first: the two do unrelated jobs, and
+      # an operator who only wants the dashboard should not have to build an
+      # uploader they are not using. It exists at all because Trunk Recorder's
+      # own `plugins/stat_socket` is in its source tree and is *not* compiled by
+      # it, so there is no status plugin for a stock recorder to load.
+      - name: Stage the Trunk Recorder status plugin
+        run: |
+          mkdir -p staging/radio-scout-status
+          cp -a plugins/trunk-recorder-status/. staging/radio-scout-status/
+          tar -czf dist/radio-scout-tr-status-plugin.tar.gz \
+            -C staging radio-scout-status
       # One file, one format, computed by one tool — `install.sh` reads it with
       # `awk` and refuses to install anything that does not match a line in it.
       - name: Checksums

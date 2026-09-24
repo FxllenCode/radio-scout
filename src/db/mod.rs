@@ -14,6 +14,18 @@ use tracing::{debug, info};
 pub use handle::{Connection, Db, Transaction, Txn};
 pub use sea_orm::DbBackend;
 
+/// `SUM(column)`, cast back to `BIGINT` — the only way to spell a sum here.
+///
+/// Postgres widens `SUM(bigint)` to `numeric` where SQLite keeps it an integer,
+/// so an uncast sum decodes into an `i64` on one dialect and fails the whole
+/// statement on the other (docs/agents/dual-dialect.md). It has been forgotten
+/// once already (#71's health report 500'd on Postgres), which is why there is
+/// one of these rather than a rule to remember at every call site.
+pub fn sum_bigint(column: impl sea_orm::ColumnTrait) -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::sea_query::Alias;
+    column.sum().cast_as(Alias::new("BIGINT"))
+}
+
 /// Connect to the database at `url` and bring the schema up to date.
 ///
 /// SQLite URLs get `foreign_keys = ON` (off by default in SQLite). Postgres

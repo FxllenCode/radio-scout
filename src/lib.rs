@@ -36,7 +36,9 @@ pub mod mining;
 pub mod observability;
 pub mod query;
 pub mod quiet;
+pub mod recorder;
 pub mod retention;
+pub mod rf;
 pub mod secret;
 pub mod selection;
 pub mod serve;
@@ -138,6 +140,11 @@ pub struct AppState {
     /// a status handler (#70) can serve depths it could never reach through the
     /// `Instance` that owns the handles.
     pub workers: crate::worker::Workers,
+    /// What the **Recorder**s dialled into this Instance are doing right now
+    /// (#71, spec US 50) — a live view, held in memory and never written down.
+    /// Like a Webhook and unlike enhancement there is no disabled form: a
+    /// Recorder is a *connection*, so an Instance with none has an empty roster.
+    pub recorders: crate::recorder::Recorders,
     /// What this Instance has been doing (#70, spec US 48–49) — the counters
     /// behind the status page and the Prometheus text, and `[metrics]`' own
     /// token, which is the switch that decides whether the second one is served
@@ -170,6 +177,7 @@ impl AppState {
             access: crate::access::Access::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
+            recorders: crate::recorder::Recorders::default(),
             metrics: crate::metrics::Metrics::default(),
         }
     }
@@ -221,6 +229,14 @@ pub fn build_app(state: AppState) -> Router {
             post(ingest::trunk_recorder_call_upload),
         )
         .route("/api/live", any(live::ws_handler))
+        // **Where a Recorder dials in** (#71, spec US 50). Outside
+        // `/api/admin/` because a recorder holds no admin session — it presents
+        // the same **API key** it uploads with, in the query string, which is
+        // the only credential Trunk Recorder's bare `statusServer` URL can
+        // carry and the one place `http_log` never writes down (ADR-0011 rule
+        // 2). The dashboard it feeds is admin-gated; this is the recorder's
+        // door.
+        .route("/api/recorder-status", any(recorder::ws::ws_handler))
         // Archive read surface (#13): search, its cascading filter options, and
         // per-Call download.
         .route("/api/calls", get(archive::search))
@@ -323,6 +339,12 @@ fn admin_routes(admin: AdminAuth) -> Router<AppState> {
         // live. Behind the session for `listeners::history`'s reason: how an
         // Operator's Instance is doing is the Operator's own business.
         .route("/api/admin/status", get(metrics::status))
+        // What the SDRs are doing right now (#71, spec US 50), and how each
+        // frequency has been receiving (US 51). Behind the session for
+        // `listeners::history`'s reason: an Operator's own receivers are the
+        // Operator's business.
+        .route("/api/admin/recorders", get(recorder::ws::dashboard))
+        .route("/api/admin/recorders/health", get(rf::health))
         .route(
             "/api/admin/talkgroups/import",
             post(import::import_talkgroups),

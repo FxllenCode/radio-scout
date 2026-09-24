@@ -89,6 +89,16 @@ pub struct RetentionConfig {
     /// bytes where a Call is a megabyte of audio, and "was last winter busier
     /// than this one" is a question about a period whose audio went months ago.
     pub listener_days: u32,
+    /// Prune per-frequency health rows (#71) older than this many days. `0`
+    /// keeps them forever, matching [`RetentionConfig::days`]'s reading.
+    ///
+    /// **Longer than the Archive's on purpose**, and for
+    /// [`RetentionConfig::listener_days`]'s reason one subject along: a row here
+    /// is one quarter-hour of one frequency on one SDR, and "was this receiver
+    /// always this bad, or is it going?" is a question about a period whose
+    /// audio went months ago. A quarter, like the listener chart, so a season is
+    /// comparable with the one before it.
+    pub health_days: u32,
     /// How much longer a **Star** (#66, spec US 37) keeps a Call than
     /// [`RetentionConfig::days`] would — the operator policy the ticket asks
     /// for, and the only thing on this Instance that can hold a Call back from
@@ -138,6 +148,9 @@ impl Default for RetentionConfig {
             // shape of the question this table exists to answer. Still under
             // 130,000 rows at the default cadence.
             listener_days: 90,
+            // A quarter again, and for the same reason: the two charts an
+            // Operator compares seasons on should reach back equally far.
+            health_days: 90,
             // A Star holds nothing back until an Operator says it may. See the
             // field: the exemption is a disk commitment, and only they can make
             // one.
@@ -380,6 +393,12 @@ impl RetentionConfig {
         cutoff_for(self.listener_days, now_ms)
     }
 
+    /// And once more, for per-frequency health and
+    /// [`RetentionConfig::health_days`] (#71).
+    pub fn health_cutoff_ms(&self, now_ms: i64) -> Option<i64> {
+        cutoff_for(self.health_days, now_ms)
+    }
+
     /// The cadence [`Sweeper`] will actually sweep on. A zero interval is read as
     /// "unset" and falls back to the default rather than panicking the ticker.
     pub fn effective_interval(&self) -> Duration {
@@ -403,6 +422,7 @@ impl RetentionConfig {
             max_size_bytes = ?self.max_size_bytes,
             log_days = self.log_days,
             listener_days = self.listener_days,
+            health_days = self.health_days,
             starred_days = ?self.starred_days,
             interval_secs,
             batch_size = self.batch_size,
@@ -510,6 +530,9 @@ pub struct SweepReport {
     pub logs_pruned: u64,
     /// Listener samples pruned for being older than their own window (#62).
     pub samples_pruned: u64,
+    /// Per-frequency health rows pruned for being older than their own window
+    /// (#71).
+    pub health_pruned: u64,
     /// Objects whose delete failed. The row is already gone, so the Call is
     /// pruned as far as listeners are concerned; the object is now an orphan and
     /// a later sweep retries it. Counted rather than fatal so one unhappy object
@@ -674,6 +697,20 @@ pub async fn sweep(
         }
     }
 
+    // Per-frequency health (#71), on the same terms again — and this is the one
+    // whose window is deliberately *longer* than the Archive's, because the
+    // whole point of the rollup is to outlive the audio it was measured from.
+    if let Some(cutoff_ms) = config.health_cutoff_ms(now_ms) {
+        loop {
+            let pruned =
+                repo::delete_frequency_health_older_than(db, cutoff_ms, config.batch_size).await?;
+            if pruned == 0 {
+                break;
+            }
+            report.health_pruned += pruned;
+        }
+    }
+
     // Orphan-GC last, so it also picks up any object this sweep's own
     // row-then-object deletes failed to remove. It lists the whole store, which
     // is why it rides the retention interval rather than running more often.
@@ -796,6 +833,7 @@ fn log_sweep(outcome: &Result<SweepReport, SweepError>) {
                 bytes_freed = report.bytes_freed,
                 logs_pruned = report.logs_pruned,
                 samples_pruned = report.samples_pruned,
+                health_pruned = report.health_pruned,
                 // Not zero means audio is still on disk that nothing points at;
                 // a later sweep retries it, but an operator should know.
                 object_errors = report.object_errors,
@@ -1289,6 +1327,7 @@ mod tests {
             object_errors: 2,
             logs_pruned: 9,
             samples_pruned: 4,
+            health_pruned: 6,
         }));
 
         let logged = capture.text();
@@ -1302,6 +1341,7 @@ mod tests {
             "object_errors=2",
             "logs_pruned=9",
             "samples_pruned=4",
+            "health_pruned=6",
         ] {
             assert!(logged.contains(field), "{field} missing from:\n{logged}");
         }

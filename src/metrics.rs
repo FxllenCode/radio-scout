@@ -74,7 +74,6 @@ use std::time::Duration;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use sea_orm::sea_query::Alias;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, QueryFilter, QuerySelect,
 };
@@ -1010,7 +1009,7 @@ impl Totals {
             .select_only()
             .column_as(call::Column::Id.count(), "calls")
             .column_as(
-                call::Column::AudioSize.sum().cast_as(Alias::new("BIGINT")),
+                crate::db::sum_bigint(call::Column::AudioSize),
                 "audio_bytes",
             )
             .column_as(call::Column::CallAtMs.min(), "oldest_at_ms")

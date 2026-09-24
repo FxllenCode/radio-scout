@@ -996,6 +996,63 @@ The expensive half of the page — the archive totals and the per-system rates �
 database at most once every fifteen seconds and shared with the metrics endpoint below, so leaving
 the page open costs the same as not leaving it open. The page says how old those readings are.
 
+## What the SDRs are doing
+
+Settings → Admin → **Recorders** is the live view: one card per Trunk Recorder that has dialled
+in, refreshed every couple of seconds. It needs the status plugin on the recorder — see
+[recorders.md](recorders.md#the-live-dashboard-radio_scout_status) — and an instance nobody has
+set it up on shows an empty screen and is affected in no other way.
+
+What each card says:
+
+- **Every system it is watching**, and its **control-channel decode rate**. Zero there on a
+  trunked system is a receiver that has stopped hearing its tower, which is the clearest "this
+  is broken" signal a scanner has. A conventional system has no control channel and reads zero
+  forever, so the type is shown beside it and only the trunked ones are flagged.
+- **Every SDR**, what it is, where it is tuned, and **how many of its demodulators are free**.
+  Every one busy is not a fault — it is a receiver at capacity, and the next transmission on
+  that dongle is the one nobody gets to hear.
+- **Every call it has in hand**, and for the ones it is *not* recording, **why**: the talkgroup
+  is not in its list, it was told to ignore it, no SDR covers that frequency, no demodulator was
+  free, the channel is encrypted, it is already recording that transmission, or another call
+  superseded it. Under that, how often each reason has come up since the recorder connected —
+  counted per transmission rather than per message, so one encrypted call on a busy channel is
+  one — and a list of the last twenty transmissions it turned down, newest first, so "which
+  talkgroup keeps hitting *no demodulator free*?" has an answer on the screen.
+- **When it last said anything.** A recorder sends something every three seconds whatever is
+  happening, so a card that has gone quiet is a recorder that has stopped, and the socket being
+  open says nothing about that. One that stays quiet is dropped after thirty to forty-five
+  seconds and **stays on the screen, marked** — a row that vanished would look exactly like a
+  recorder you never set up.
+
+### Receive health
+
+The charts under that live view are a different thing, and they work whether or not the status
+plugin is installed: they are measured from the metadata your **uploads** already carry. Trunk
+Recorder writes the tuning error it had to pull, the signal and noise it measured, which SDR
+took the call, and the decode-error and spike counts, into every call's `.json` — and all of it
+reaches Radio-Scout only on the native paths, so the full picture needs the `uploadScript` or
+the first-party uploader plugin. The rdio-scanner uploader carries the error and spike counts
+and nothing else, so its Calls chart those two under their frequency, with no SDR named.
+
+One row per **frequency, per SDR**, which is the whole point: a dongle going deaf shows up as
+its own channel getting worse while the one beside it on the same frequency stays fine. Each
+one charts four things, each a quarter-hourly trace with its summary beside it: **decode
+errors** and **spikes** per minute of air — rates, not counts, because a count only says how
+busy the channel was — the **signal** level with the noise floor beside it, and the **tuning
+drift**, signed, because a receiver pulling steadily one way is the thing worth seeing. A
+quarter-hour nothing was heard in is drawn as a **gap** rather than as a perfect score, which is
+the difference between "we did not measure" and "there were no errors".
+
+Every copy of a transmission counts, including one that lost to a better copy as a duplicate:
+when two SDRs hear the same call and one decodes it badly, the bad copy is exactly the evidence,
+and it is charted whichever of the two happened to upload first.
+
+This history is kept in a rollup of its own and **outlives the audio it was measured from** —
+one row per quarter-hour per frequency per SDR, bounded by `[retention] health_days` (90 days
+by default, longer than the archive on purpose). "Was this dongle always this bad, or is it
+going?" is a question about a period whose audio went months ago.
+
 ### Prometheus
 
 ```toml

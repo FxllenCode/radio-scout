@@ -16,6 +16,7 @@ import { ApiKeysScreen } from '@/routes/admin/ApiKeysScreen'
 import { DownstreamsScreen } from '@/routes/admin/DownstreamsScreen'
 import { EventsScreen } from '@/routes/admin/EventsScreen'
 import { ListenersScreen } from '@/routes/admin/ListenersScreen'
+import { RecordersScreen } from '@/routes/admin/RecordersScreen'
 import { StatusScreen } from '@/routes/admin/StatusScreen'
 import { SharesScreen } from '@/routes/admin/SharesScreen'
 import { WebhooksScreen } from '@/routes/admin/WebhooksScreen'
@@ -81,6 +82,7 @@ export default function App() {
         {/* Is this instance healthy (#70, spec US 48) — one glance, one
             answer. Same gate, same reason. */}
         <Route path="settings/admin/status" element={<StatusScreen />} />
+        <Route path="settings/admin/recorders" element={<RecordersScreen />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

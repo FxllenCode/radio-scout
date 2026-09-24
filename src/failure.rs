@@ -151,6 +151,9 @@ stages! {
     /// because both are one aggregation and "which of the two asked" is
     /// answered by the request line beside it.
     ReadStatus => "read-status",
+    /// Reading how each frequency has been receiving (#71, spec US 51) — the
+    /// rollup behind the recorder dashboard's health charts.
+    ReadFrequencyHealth => "read-frequency-health",
     // -- The admin surface -------------------------------------------------
     /// One page of the operator log (#30).
     SearchLogs => "search-logs",
@@ -411,6 +414,19 @@ pub enum Reason {
     /// which is a thing they act on. Names its source under rule 5's
     /// authentication exemption — and never the token, presented or stored.
     InvalidMetricsToken { client_addr: IpAddr },
+    // -- The recorder dashboard (`crate::recorder`, #71) --------------------
+    /// A **Recorder** dialled the status socket with no **API key**, or one this
+    /// Instance does not know.
+    ///
+    /// Its own arm rather than [`Reason::InvalidApiKey`], which names the System
+    /// and Talkgroup an upload was for: a status connection is about no
+    /// particular channel, so that message would have to invent two numbers to
+    /// say nothing with. **WARN** for [`Reason::InvalidMetricsToken`]'s reason —
+    /// this is an Operator's own recorder silently failing to appear on their
+    /// dashboard, which is a thing they act on — and it names no source, because
+    /// the refusal it most resembles ([`Reason::InvalidApiKey`]) names none
+    /// either and this is the same credential.
+    InvalidRecorderKey,
 }
 
 /// The rdio `417` family: a body too incomplete to be a Call.
@@ -861,6 +877,12 @@ impl Reason {
                 text("invalid metrics token\n"),
             )
             .attempted_from(*client_addr),
+            Reason::InvalidRecorderKey => Refusal::new(
+                "invalid-recorder-key",
+                Level::WARN,
+                StatusCode::UNAUTHORIZED,
+                text("invalid API key\n"),
+            ),
         }
     }
 }

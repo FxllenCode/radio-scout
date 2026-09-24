@@ -940,6 +940,16 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "retention.health_days",
+        var: "RADIO_SCOUT_RETENTION_HEALTH_DAYS",
+        expected: "a number of days",
+        example: "180",
+        set: |setting, config, value| {
+            config.retention.health_days = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
         key: "retention.starred_days",
         var: "RADIO_SCOUT_RETENTION_STARRED_DAYS",
         expected: "a number of days, or 0 to keep starred Calls for good",
@@ -1783,6 +1793,13 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # sixteen bytes, and "was last winter busier than this one" is a question about
 # a period whose audio went months ago.
 # listener_days = 90
+
+# Prune per-frequency health rows — the receive conditions behind the recorder
+# dashboard's charts — older than this many days. 0 keeps them forever. A row
+# is one quarter-hour of one frequency on one SDR, so a season of them is small;
+# and outliving the audio is the whole point, since "is this dongle going?" is a
+# question you ask by comparing this month with last.
+# health_days = 90
 
 # How often the sweeper runs, how many Calls it deletes per batch (a small
 # batch keeps each write-lock short on a Pi), and how long an audio object with

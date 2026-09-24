@@ -16,6 +16,7 @@ pub mod downstream;
 pub mod downstream_delivery;
 pub mod event;
 pub mod event_call;
+pub mod frequency_health;
 pub mod group;
 pub mod listener_sample;
 pub mod log_event;

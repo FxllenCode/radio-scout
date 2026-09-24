@@ -13,6 +13,7 @@
 //! verifies, unpacks and installs is asserted as bytes on a disk, not as a
 //! string in a script.
 
+use rstest::rstest;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -436,27 +437,40 @@ fn the_trunk_recorder_upload_script_is_executable() {
     );
 }
 
-/// The Trunk Recorder plugin (#44) ships as one tarball, for the same reason
-/// the uploadScript ships as one file: the recorder is usually not the machine
-/// Radio-Scout is installed on, so its pieces have to be fetchable on their own.
+/// The two Trunk Recorder plugins (#44, #71) each ship as one tarball, for the
+/// same reason the uploadScript ships as one file: the recorder is usually not
+/// the machine Radio-Scout is installed on, so its pieces have to be fetchable
+/// on their own.
 ///
 /// It is the *directory* that is packaged rather than a list of files. A plugin
 /// missing one of its sources does not fail here or in the release — it fails on
 /// a stranger's recorder, at the end of a Trunk Recorder build, hours later.
-#[test]
-fn the_trunk_recorder_plugin_ships_with_the_release() {
-    let dir = repo().join("plugins/trunk-recorder");
+///
+/// **A table over both**, because the second one arriving is exactly when a
+/// rule written for the first stops covering everything it claims to.
+#[rstest]
+#[case("plugins/trunk-recorder", "radio-scout-tr-plugin")]
+#[case("plugins/trunk-recorder-status", "radio-scout-tr-status-plugin")]
+fn each_trunk_recorder_plugin_ships_with_the_release(
+    #[case] source_dir: &str,
+    #[case] asset: &str,
+) {
+    let dir = repo().join(source_dir);
     assert!(
         dir.join("CMakeLists.txt").is_file(),
         "a Trunk Recorder plugin is its CMakeLists — that is what the recorder globs"
     );
 
     let workflow = release_workflow();
+    // The whole path plus a trailing separator, because one plugin's directory
+    // is a *prefix* of the other's — `plugins/trunk-recorder` would happily
+    // match the status plugin's line and prove nothing about either.
+    let needle = format!("{source_dir}/.");
     let staged = workflow
         .lines()
-        .find(|line| line.contains("plugins/trunk-recorder"))
+        .find(|line| line.contains(&needle))
         .unwrap_or_else(|| {
-            panic!("the plugin is never packaged, so there is nothing to fetch onto a recorder")
+            panic!("{source_dir} is never packaged, so there is nothing to fetch onto a recorder")
         });
     assert!(
         !staged.contains(".cc") && !staged.contains(".h"),
@@ -466,16 +480,18 @@ fn the_trunk_recorder_plugin_ships_with_the_release() {
     assert!(
         workflow
             .lines()
-            .any(|line| line.contains("radio-scout-tr-plugin") && line.contains("dist")),
-        "the plugin tarball never lands in dist/, which is what gets summed and uploaded"
+            .any(|line| line.contains(asset) && line.contains("dist")),
+        "{asset} never lands in dist/, which is what gets summed and uploaded"
     );
 }
 
 /// ...and every source its CMakeLists compiles is really in that directory, so
 /// the packaged tarball is a plugin that builds rather than one that half does.
-#[test]
-fn the_plugin_packages_every_source_it_claims_to_build() {
-    let dir = repo().join("plugins/trunk-recorder");
+#[rstest]
+#[case("plugins/trunk-recorder")]
+#[case("plugins/trunk-recorder-status")]
+fn each_plugin_packages_every_source_it_claims_to_build(#[case] source_dir: &str) {
+    let dir = repo().join(source_dir);
     let cmake = std::fs::read_to_string(dir.join("CMakeLists.txt")).expect("read the CMakeLists");
 
     let sources: Vec<&str> = cmake

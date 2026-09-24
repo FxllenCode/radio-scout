@@ -4,7 +4,8 @@
 
 use radio_scout::IngestConfig;
 use radio_scout::db::entities::{
-    api_key, call, call_frequency, call_patch, call_unit, site, system, talkgroup, unit,
+    api_key, call, call_frequency, call_patch, call_unit, frequency_health, site, system,
+    talkgroup, unit,
 };
 use radio_scout::db::repo;
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
@@ -1464,6 +1465,8 @@ const TR_ENRICHED_META: &str = r#"{
   "emergency":1,"encrypted":0,"priority":3,
   "audio_type":"digital",
   "freq":774031250,
+  "freq_error":-137,"signal":-61,"noise":-94,
+  "source_num":1,"recorder_num":3,
   "freqList":[{"freq":774031250,"time":1669740338,"pos":0.25,"len":1.5,
                "error_count":2,"spike_count":1}],
   "srcList":[{"src":4424000,"time":1669740339,"pos":0.75,"emergency":1,
@@ -1540,6 +1543,190 @@ async fn trunk_recorder_per_frequency_and_per_source_detail_lands() {
     assert!(src.emergency, "this unit is the one that hit the button");
     assert_eq!(src.signal_system.as_deref(), Some("P25"));
     assert_eq!(src.at_ms, Some(1669740339000));
+}
+
+// ---------------------------------------------------------------------------
+// RF health: what the radio conditions were (#71, spec US 51)
+// ---------------------------------------------------------------------------
+
+/// **The four numbers nothing had ever read.** `create_call_json` has written
+/// `freq_error`, `signal`, `noise` and `source_num` into every Trunk Recorder
+/// call since long before Radio-Scout existed, and #42 parsed everything around
+/// them. They are what "a dying dongle announces itself" is made of.
+#[tokio::test]
+async fn trunk_recorder_meta_carries_the_radio_conditions() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_tr(CallUpload::tr(TR_ENRICHED_META)).await;
+
+    let stored = app.the_call().await;
+    assert_eq!(
+        stored.freq_error_hz,
+        Some(-137),
+        "signed: this one pulls low"
+    );
+    assert_eq!(stored.signal_dbm, Some(-61));
+    assert_eq!(stored.noise_dbm, Some(-94));
+    assert_eq!(
+        stored.source_num,
+        Some(1),
+        "the SDR, not the demodulator slot — `recorder_num` is deliberately \
+         not a column"
+    );
+}
+
+/// The rdio dialect has no field for any of them, so an SDRTrunk Call says
+/// nothing rather than saying zero — and zero dBm is a reading.
+#[tokio::test]
+async fn the_rdio_dialect_says_nothing_about_radio_conditions() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_ok(CallUpload::new()).await;
+
+    let stored = app.the_call().await;
+    assert_eq!(stored.freq_error_hz, None);
+    assert_eq!(stored.signal_dbm, None);
+    assert_eq!(stored.noise_dbm, None);
+    assert_eq!(stored.source_num, None);
+}
+
+/// **The history a chart is drawn from**, written in the transaction that stores
+/// the Call — so it outlives the Call, which is the whole point: `calls` and
+/// `call_frequencies` are bounded by **Retention** and this is bounded by a
+/// window of its own.
+#[tokio::test]
+async fn a_calls_radio_conditions_become_one_row_of_history() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_tr(CallUpload::tr(TR_ENRICHED_META)).await;
+
+    let row = frequency_health::Entity::find()
+        .one(&app.db)
+        .await
+        .unwrap()
+        .expect("one bucket of history");
+    assert_eq!(row.freq, 774031250);
+    assert_eq!(row.sdr, 1);
+    assert_eq!(
+        row.bucket_at_ms,
+        radio_scout::rf::bucket_of(1669740338000),
+        "the quarter-hour the transmission fell in"
+    );
+    assert_eq!(row.samples, 1);
+    assert_eq!(row.air_ms, 1500, "the freqList entry's own `len`");
+    assert_eq!(row.error_count, 2);
+    assert_eq!(row.spike_count, 1);
+    assert_eq!((row.signal_sum, row.signal_n), (-61, 1));
+    assert_eq!((row.noise_sum, row.noise_n), (-94, 1));
+    assert_eq!((row.drift_sum, row.drift_n), (-137, 1));
+}
+
+/// **A rollup, not a log.** Two Calls in one quarter-hour on one frequency from
+/// one SDR are *one* row whose numbers are the sum of theirs — which is what
+/// "persisted compactly" means, and what the unique index buys. Without it the
+/// upsert conflicts with nothing and the table grows a row per Call while
+/// reading exactly like one that deduplicates.
+#[tokio::test]
+async fn a_second_call_in_the_same_quarter_hour_accumulates() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_tr(CallUpload::tr(TR_ENRICHED_META)).await;
+    // Two minutes later, and far enough outside the dedup window to be its own
+    // Call rather than a **Copy** of the first.
+    app.upload_tr(CallUpload::tr(
+        &TR_ENRICHED_META
+            .replace("1669740338", "1669740458")
+            .replace("1669740339", "1669740459")
+            .replace("1669740346", "1669740466"),
+    ))
+    .await;
+
+    assert_eq!(app.count::<call::Entity>().await, 2, "two Calls");
+    let rows = frequency_health::Entity::find().all(&app.db).await.unwrap();
+    assert_eq!(rows.len(), 1, "and one row of history");
+    assert_eq!(rows[0].samples, 2);
+    assert_eq!(rows[0].error_count, 4);
+    assert_eq!(rows[0].air_ms, 3000);
+    assert_eq!((rows[0].signal_sum, rows[0].signal_n), (-122, 2));
+}
+
+/// **A Call that names no frequency costs this feature nothing** — not one
+/// statement. Asserted as the difference between two uploads rather than as a
+/// pinned number, `tests/webhook.rs`'s rule, so it survives every statement
+/// ingest gains later.
+#[tokio::test]
+async fn only_a_call_that_names_a_frequency_costs_a_statement() {
+    let app = TestApp::with_key("k").await;
+    // Warm every row the second and third uploads would otherwise create.
+    app.upload_ok(CallUpload::new().at(1_000)).await;
+    app.settle().await;
+
+    let before = app.statements_issued();
+    app.upload_ok(CallUpload::new().at(60_000)).await;
+    app.settle().await;
+    let silent = app.statements_issued() - before;
+
+    let before = app.statements_issued();
+    app.upload_ok(CallUpload::new().at(120_000).set("frequency", "851012500"))
+        .await;
+    app.settle().await;
+    let charted = app.statements_issued() - before;
+
+    assert_eq!(
+        charted,
+        silent + 1,
+        "one accumulating upsert, however many frequencies the Call touched"
+    );
+}
+
+/// **A losing Copy still counts** (#46 crossed with #71). Keep-best throws away
+/// the worse copy of a transmission, but both were *received* — and which SDR
+/// decoded which copy how badly is precisely the question US 51 asks. So the
+/// readings accumulate where the Calls do not.
+#[tokio::test]
+async fn a_replacement_adds_its_readings_beside_the_copy_it_displaced() {
+    let app = TestApp::with_key("k").await;
+
+    // The first copy: SDR 0, a rough decode.
+    app.upload_tr(CallUpload::tr(
+        &TR_ENRICHED_META
+            .replace("\"source_num\":1", "\"source_num\":0")
+            .replace("\"error_count\":2", "\"error_count\":9")
+            .replace("\"call_length_ms\":8250", "\"call_length_ms\":4000"),
+    ))
+    .await;
+    // The same transmission on SDR 1, cleaner and longer, so it wins.
+    app.upload_tr(CallUpload::tr(TR_ENRICHED_META)).await;
+
+    assert_eq!(
+        app.count::<call::Entity>().await,
+        1,
+        "one transmission is one Call"
+    );
+    let mut rows = frequency_health::Entity::find().all(&app.db).await.unwrap();
+    rows.sort_by_key(|row| row.sdr);
+    assert_eq!(rows.len(), 2, "but two receivers heard it");
+    assert_eq!((rows[0].sdr, rows[0].error_count), (0, 9));
+    assert_eq!((rows[1].sdr, rows[1].error_count), (1, 2));
+}
+
+/// Deleting a System takes its history with it — the foreign key makes
+/// forgetting fail loudly rather than leave rows nothing can reach, which is
+/// #55's lesson paid forward.
+#[tokio::test]
+async fn removing_a_system_removes_its_history() {
+    let app = TestApp::with_key("k").await;
+    app.upload_tr(CallUpload::tr(TR_ENRICHED_META)).await;
+    assert_eq!(app.count::<frequency_health::Entity>().await, 1);
+
+    let system = system::Entity::find().one(&app.db).await.unwrap().unwrap();
+    app.login().await;
+    let (status, body) = app
+        .admin_delete(&format!("/api/admin/systems/{}?force=true", system.id))
+        .await;
+    assert_eq!(status, 204, "{body:?}");
+
+    assert_eq!(app.count::<frequency_health::Entity>().await, 0);
 }
 
 // ---------------------------------------------------------------------------

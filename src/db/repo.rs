@@ -28,9 +28,9 @@ use crate::blob::StoredAudio;
 use crate::call::{CallId, Candidate, Emission, Quality};
 use crate::db::entities::{
     access_code, api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
-    downstream_delivery, event, event_call, group, listener_sample, log_event, share_link, site,
-    system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
-    webhook_delivery,
+    downstream_delivery, event, event_call, frequency_health, group, listener_sample, log_event,
+    share_link, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit,
+    unit_ref, webhook, webhook_delivery,
 };
 
 /// Default Tag label for an auto-populated Talkgroup the recorder sent no tag for
@@ -712,6 +712,14 @@ pub struct NewCall {
     pub encrypted: bool,
     pub priority: Option<i32>,
     pub audio_type: Option<String>,
+    /// What the radio conditions were (#71, spec US 51) — the tuning error the
+    /// demodulator carried, the signal and noise it measured, and which SDR it
+    /// was. Only Trunk Recorder's native meta sends any of them; see
+    /// [`crate::rf`] for what is done with them and why `999` is not a reading.
+    pub freq_error_hz: Option<i64>,
+    pub signal_dbm: Option<i64>,
+    pub noise_dbm: Option<i64>,
+    pub source_num: Option<i64>,
     /// The Site Ref the recorder named, resolved to (or created as) a `sites`
     /// row by [`insert_call`] — the auto-populate precedent (#8), because a
     /// multi-site System discovers its towers the same way it discovers its
@@ -803,6 +811,10 @@ impl NewCall {
             encrypted: false,
             priority: None,
             audio_type: None,
+            freq_error_hz: None,
+            signal_dbm: None,
+            noise_dbm: None,
+            source_num: None,
             site_ref: None,
             site_label: None,
             mined_at_ms: None,
@@ -913,6 +925,7 @@ pub async fn insert_call<C: ConnectionTrait>(
     };
     write_patches(db, stored.id, &patched).await?;
     write_signal_detail(db, stored.id, new).await?;
+    add_frequency_health(db, sys.id, new).await?;
     roster_units(db, sys.id, new, auto_populate, now_ms).await?;
 
     Ok(stored)
@@ -1026,6 +1039,12 @@ pub async fn store_replacement<C: ConnectionTrait>(
         .exec(db)
         .await?;
     write_signal_detail(db, call_id, new).await?;
+    // **Added to, never replaced** (#71). The readings the losing copy
+    // contributed stay where they are: `frequency_health` is a history of what
+    // each *receiver* heard, and a second SDR that decoded this transmission
+    // badly is exactly the evidence US 51 exists to surface. Its Call is gone;
+    // the fact that a dongle struggled with that transmission is not.
+    add_frequency_health(db, system_id, new).await?;
 
     // The patch membership does not: it is what the transmission *reached*,
     // and the surviving Call stands for every copy of it.
@@ -1090,6 +1109,15 @@ fn describe_transmission(row: &mut call::ActiveModel, new: &NewCall, audio: Opti
     row.priority = Set(new.priority);
     row.audio_type = Set(new.audio_type.clone());
     row.frequency = Set(new.frequency);
+    // What the radio conditions were (#71). A **Replacement** is a different
+    // receiver's copy of the same transmission, so these are the winner's like
+    // everything else here — and the readings the loser contributed to
+    // `frequency_health` stay, because the question there is how each *receiver*
+    // is doing rather than which copy was kept.
+    row.freq_error_hz = Set(new.freq_error_hz);
+    row.signal_dbm = Set(new.signal_dbm);
+    row.noise_dbm = Set(new.noise_dbm);
+    row.source_num = Set(new.source_num);
     // Whether this copy's audio has been looked inside (#48). A **Replacement**
     // brings a different Recorder's file with its own tag, and ingest mined it
     // in the same pass it read its duration — so the stamp travels with every
@@ -1177,6 +1205,96 @@ async fn write_signal_detail<C: ConnectionTrait>(
         .insert(db)
         .await?;
     }
+    Ok(())
+}
+
+/// Fold what a Recorder said about the radio conditions into the per-frequency
+/// history (#71, spec US 51).
+///
+/// **One statement, and only when there is something to say.** A Call that named
+/// no frequency at all writes nothing, so the rdio dialect's cheapest upload
+/// costs this feature exactly what it did before — [`crate::webhook`]'s
+/// `Marks::is_empty` rule, one table along. Everything else is a single
+/// accumulating upsert over the buckets [`crate::rf::readings`] folded, however
+/// many frequencies the Call touched.
+///
+/// **Accumulating, which is what makes it a rollup.** The unique index on
+/// (System, frequency, SDR, bucket) is what the conflict is resolved against,
+/// and both dialects spell "the row I was trying to insert" as `excluded` — so
+/// the arithmetic is one expression per column rather than a read, a fold and a
+/// write that two concurrent ingests could interleave.
+///
+/// The fold hands back **distinct** keys, which is load-bearing: Postgres
+/// refuses an `ON CONFLICT DO UPDATE` that would touch one row twice in a single
+/// statement, so two readings in one bucket have to have become one row before
+/// they reach here. They do — that is what [`crate::rf::fold`] is.
+pub async fn add_frequency_health<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    new: &NewCall,
+) -> Result<(), DbErr> {
+    let buckets = crate::rf::readings(new);
+    if buckets.is_empty() {
+        return Ok(());
+    }
+
+    /// `frequency_health.<column> + excluded.<column>`, which is how both
+    /// dialects add what is arriving to what is there. Written once because
+    /// there are ten of these and nine of them being right is not a state
+    /// anything would notice.
+    fn accumulate(
+        column: frequency_health::Column,
+    ) -> (frequency_health::Column, sea_orm::sea_query::SimpleExpr) {
+        let table = Alias::new("frequency_health");
+        let excluded = Alias::new("excluded");
+        (
+            column,
+            Expr::col((table, column)).add(Expr::col((excluded, column))),
+        )
+    }
+
+    frequency_health::Entity::insert_many(buckets.into_iter().map(|bucket| {
+        frequency_health::ActiveModel {
+            system_id: Set(system_id),
+            freq: Set(bucket.freq),
+            sdr: Set(bucket.sdr),
+            bucket_at_ms: Set(bucket.bucket_at_ms),
+            samples: Set(bucket.samples),
+            air_ms: Set(bucket.air_ms),
+            error_count: Set(bucket.error_count),
+            spike_count: Set(bucket.spike_count),
+            signal_sum: Set(bucket.signal_sum),
+            signal_n: Set(bucket.signal_n),
+            noise_sum: Set(bucket.noise_sum),
+            noise_n: Set(bucket.noise_n),
+            drift_sum: Set(bucket.drift_sum),
+            drift_n: Set(bucket.drift_n),
+            ..Default::default()
+        }
+    }))
+    .on_conflict(
+        sea_orm::sea_query::OnConflict::columns([
+            frequency_health::Column::SystemId,
+            frequency_health::Column::Freq,
+            frequency_health::Column::Sdr,
+            frequency_health::Column::BucketAtMs,
+        ])
+        .values([
+            accumulate(frequency_health::Column::Samples),
+            accumulate(frequency_health::Column::AirMs),
+            accumulate(frequency_health::Column::ErrorCount),
+            accumulate(frequency_health::Column::SpikeCount),
+            accumulate(frequency_health::Column::SignalSum),
+            accumulate(frequency_health::Column::SignalN),
+            accumulate(frequency_health::Column::NoiseSum),
+            accumulate(frequency_health::Column::NoiseN),
+            accumulate(frequency_health::Column::DriftSum),
+            accumulate(frequency_health::Column::DriftN),
+        ])
+        .to_owned(),
+    )
+    .exec(db)
+    .await?;
     Ok(())
 }
 
@@ -2362,6 +2480,20 @@ pub async fn authorize_ingest<C: ConnectionTrait>(
     ))
 }
 
+/// Whether this key may open the **Recorder** status socket (#71, spec US 50).
+///
+/// A live, non-disabled key and nothing else. The `system_ref` scope an
+/// [`api_key`] row can carry is deliberately *not* applied: a status connection
+/// is about no particular channel — one frame carries every System the recorder
+/// watches — so a scope could only be ignored or used to filter an Operator's
+/// own dashboard into uselessness. The question being asked is *is this a
+/// recorder I issued a credential to*.
+pub async fn authorize_recorder<C: ConnectionTrait>(db: &C, raw_key: &str) -> Result<bool, DbErr> {
+    Ok(find_api_key(db, raw_key)
+        .await?
+        .is_some_and(|key| !key.disabled))
+}
+
 /// Whether a key row authorizes ingesting into `system_ref` (ADR-0008:
 /// recorders always require a valid per-system key). Denied when the key is
 /// missing, disabled, or scoped to a different System.
@@ -3001,10 +3133,7 @@ pub async fn calls_due_soonest<C: ConnectionTrait>(
 pub async fn total_audio_bytes<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
     let total: Option<i64> = call::Entity::find()
         .select_only()
-        .column_as(
-            call::Column::AudioSize.sum().cast_as(Alias::new("BIGINT")),
-            "total",
-        )
+        .column_as(crate::db::sum_bigint(call::Column::AudioSize), "total")
         .into_tuple::<Option<i64>>()
         .one(db)
         .await?
@@ -3392,6 +3521,38 @@ pub async fn delete_listener_samples_older_than<C: ConnectionTrait>(
     }
     Ok(listener_sample::Entity::delete_many()
         .filter(listener_sample::Column::Id.is_in(ids))
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// Delete up to `limit` per-frequency health rows older than `cutoff_ms` (#71).
+///
+/// [`delete_listener_samples_older_than`]'s shape, and its reasons. Bounded on
+/// `bucket_at_ms`, which is the bucket's **first** instant — so a bucket is
+/// pruned once every moment it covers is past the window rather than the moment
+/// it opens.
+pub async fn delete_frequency_health_older_than<C: ConnectionTrait>(
+    db: &C,
+    cutoff_ms: i64,
+    limit: u64,
+) -> Result<u64, DbErr> {
+    let ids: Vec<i64> = frequency_health::Entity::find()
+        .select_only()
+        .column(frequency_health::Column::Id)
+        .filter(
+            frequency_health::Column::BucketAtMs.lt(cutoff_ms.saturating_sub(crate::rf::BUCKET_MS)),
+        )
+        .order_by_asc(frequency_health::Column::Id)
+        .limit(limit)
+        .into_tuple::<i64>()
+        .all(db)
+        .await?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    Ok(frequency_health::Entity::delete_many()
+        .filter(frequency_health::Column::Id.is_in(ids))
         .exec(db)
         .await?
         .rows_affected)
@@ -4600,9 +4761,7 @@ pub async fn event_totals<C: ConnectionTrait>(
         .column(event_call::Column::EventId)
         .column_as(event_call::Column::Id.count(), "calls")
         .column_as(
-            event_call::Column::AudioSize
-                .sum()
-                .cast_as(Alias::new("BIGINT")),
+            crate::db::sum_bigint(event_call::Column::AudioSize),
             "bytes",
         )
         .filter(event_call::Column::EventId.is_in(ids.iter().copied()))
@@ -4829,9 +4988,7 @@ pub async fn frozen_audio_bytes<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr
     let total: Option<i64> = event_call::Entity::find()
         .select_only()
         .column_as(
-            event_call::Column::AudioSize
-                .sum()
-                .cast_as(Alias::new("BIGINT")),
+            crate::db::sum_bigint(event_call::Column::AudioSize),
             "total",
         )
         .into_tuple::<Option<i64>>()

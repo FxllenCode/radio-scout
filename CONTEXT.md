@@ -183,6 +183,26 @@ _Avoid_: audience, traffic, users, sessions, analytics.
 A number an **Operator** scrapes, published in Prometheus' text format at one URL. The same truths the **status page** shows, rendered twice from one reading rather than aggregated twice — a second read behind the endpoint would be a second implementation of the thing it claims to describe. Every label value comes from a *closed* vocabulary — a refusal's reason, a **Stage**, an **Admission**'s ending, a **Worker**'s name — so nothing a stranger sends can grow an unbounded series, and there is deliberately no per-**Talkgroup** breakdown, for the **Listener count**'s reason. Its credential **is** its switch: an Instance given no token serves no endpoint, because these are the Operator's numbers and a surface that could be opened by accident would undo that from a sibling route.
 _Avoid_: stats, telemetry, analytics, **Activity** (how busy a stretch of Archive was, which is a **Listener**'s chart).
 
+**SDR**:
+One radio device a **Recorder** has open. Trunk Recorder calls it a *source*, which this glossary spends on nothing (the **Recorder** entry lists it among the words that entry exists to replace) — and an SDR is what an **Operator** unplugs when it dies, which is the thing every reading about one is really about. A **Demodulator** is one of the several channels a single SDR carries.
+_Avoid_: source, dongle (fine in prose, not a term), receiver (the whole **Recorder**), radio (a **Unit**).
+
+**Demodulator**:
+One of the channels a single **SDR** carries — Trunk Recorder's own `recorders` array, renamed because a **Recorder** containing *recorders* is a sentence nobody can read. What an Operator counts when they ask whether they have enough to cover a busy afternoon: every one busy is not a fault, it is a receiver at capacity, and the next transmission on that SDR is the one nobody gets to hear.
+_Avoid_: recorder (the **Recorder** is the process), slot, channel (a **Talkgroup** is what a Listener calls one).
+
+**Recorder dashboard**:
+What the **SDR**s are doing *right now*, pushed by a **Recorder** over a WebSocket it dials out to and rendered on the Operator's own screen: active calls, why any of them are not being recorded, control-channel decode rates, **Demodulator** states. Held in memory and never written down — a recorder re-sends the whole of it the moment it reconnects, so a history would be a record of something only ever interesting live. What *is* kept is the fact that a Recorder **left**, because a row that silently vanished is indistinguishable from one that was never set up.
+
+**Why-not-recorded** is the part with no equivalent anywhere else: a transmission the radio network carried and the Recorder declined — an unknown or ignored **Talkgroup**, no SDR covering the frequency, no **Demodulator** free, encrypted, already being recorded, superseded. It is a fact about the *receiver*, which is why it lives here and never becomes a **Call**.
+_Avoid_: monitor, recorder status (the plugin's own name for itself), fleet.
+
+**Receive health**:
+How well one frequency has been decoding on one **SDR**, over time — decode errors and spikes per minute of air, mean signal and noise, mean tuning **drift**. Measured from what a **Recorder** said about each **Call** rather than from the **Recorder dashboard**'s socket, which carries none of it; kept as a quarter-hourly rollup on a **Window** of its own, so it **outlives the audio it was measured from**. That is the whole point: "was this dongle always this bad, or is it going?" is a question about a period whose audio went months ago.
+
+Per SDR and not merely per frequency, because a dying dongle announces itself as *its own* channel getting worse while the one beside it on the same frequency stays fine. A quarter-hour nothing was heard in is a **gap** and never a zero — "we did not measure" and "there were no errors" are different claims, and drawing one as the other says something false about a receiver that may have been dead. A losing **Copy** counts here even though it never becomes a Call, because it was still *received* and which SDR decoded it how badly is exactly the question.
+_Avoid_: signal quality, RSSI, SNR (a specific measurement, not this), diagnostics.
+
 **DVR**:
 The archive surface that plays one talkgroup (or a **Selection**) gaplessly across a time range, scrubbable on a call-density timeline. Oldest-first by construction — a DVR that plays backwards is a search result, not a DVR.
 

@@ -17,6 +17,11 @@ const SECTIONS = [
     hint: 'is this instance healthy',
   },
   {
+    to: '/settings/admin/recorders',
+    label: 'Recorders',
+    hint: 'what the SDRs are doing, and how they are receiving',
+  },
+  {
     to: '/settings/admin/talkgroups',
     label: 'Talkgroups',
     hint: 'labels, LEDs, groups, tags, blacklists',

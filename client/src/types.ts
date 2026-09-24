@@ -972,6 +972,162 @@ export interface Unlocked {
   expiresAtMs?: number
 }
 
+// -- The recorder dashboard (#71, spec US 50–51) ------------------------------
+
+/** One SDR a **Recorder** has open — the device, which is the thing an Operator
+ *  unplugs. Trunk Recorder's `source`; this project cannot spell it that way. */
+export interface Sdr {
+  sourceNum: number
+  driver?: string
+  device?: string
+  antenna?: string
+  centerHz: number
+  rateHz: number
+  gain: number
+  /** The **configured** tuning correction. Deliberately not called drift: the
+   *  drift on the health charts is measured per Call, and confusing a setting
+   *  with a measurement is how a chart comes to say something false. */
+  errorHz: number
+  minHz: number
+  maxHz: number
+  /** How many demodulators this device carries — the number that runs out on a
+   *  busy afternoon and produces `no-recorder`. */
+  demodulators: number
+}
+
+/** One System a **Recorder** is watching. */
+export interface RecorderSystem {
+  sysNum: number
+  shortName?: string
+  systemType?: string
+  sysid?: string
+  nac?: string
+  /** Control-channel messages decoded per second. Zero is the alarm on a
+   *  trunked System and perfectly normal on a conventional one, which is why
+   *  the type rides beside it. */
+  decodeRate: number
+  controlChannels: number[]
+}
+
+/** One demodulator — one of the several channels a single SDR carries. */
+export interface Demodulator {
+  id: string
+  kind?: string
+  sourceNum: number
+  recNum: number
+  state: string
+  /** Calls taken since the Recorder started. The number worth reading: a
+   *  demodulator that has never taken one reports uninitialised memory as its
+   *  duration. */
+  calls: number
+  recordedSeconds: number
+}
+
+/** One call a **Recorder** has in hand right now. */
+export interface RecorderCall {
+  id: string
+  talkgroup: number
+  talkgroupLabel?: string
+  shortName?: string
+  freq: number
+  state: string
+  /** Why this one is **not** being recorded, or absent — which is what every
+   *  call that is being recorded carries. */
+  notRecorded?: string
+  encrypted: boolean
+  emergency: boolean
+  sourceNum: number
+  startedAtMs: number
+  elapsedSeconds: number
+}
+
+/** How often one why-not-recorded reason has come up. */
+export interface NotRecordedTally {
+  reason: string
+  count: number
+  lastAtMs: number
+  lastTalkgroup?: number
+  lastTalkgroupLabel?: string
+}
+
+/** One dialled-in **Recorder**. */
+export interface RecorderView {
+  id: number
+  name?: string
+  connected: boolean
+  connectedAtMs: number
+  /** When it last **said** anything. The socket being open proves only that
+   *  nothing has closed it. */
+  lastMessageMs: number
+  disconnectedAtMs?: number
+  captureDir?: string
+  callTimeoutSecs?: number
+  sdrs: Sdr[]
+  systems: RecorderSystem[]
+  demodulators: Demodulator[]
+  calls: RecorderCall[]
+  notRecorded: NotRecordedTally[]
+  /** The last few transmissions it turned down, newest first, each as it was
+   *  when refused — the tally says *how often*, this says *what*. */
+  refused: RecorderCall[]
+}
+
+/** `GET /api/admin/recorders` — what the SDRs are doing right now.
+ *
+ *  `atMs` is the server's own clock, and every age on this screen is measured
+ *  from it: a browser subtracting its own would report a recorder as minutes
+ *  stale on any machine whose time is a little off. */
+export interface Dashboard {
+  atMs: number
+  recorders: RecorderView[]
+}
+
+/** One frequency on one SDR, over one axis (#71, spec US 51).
+ *
+ *  Every trace is already divided — the server stores sums and counts so that
+ *  re-bucketing stays exact, and the arithmetic lives in one place. `null` is a
+ *  bucket nothing was measured in, and is **not** the same as `0`. */
+export interface ChannelHealth {
+  systemRef: number
+  systemLabel?: string
+  freq: number
+  /** Which SDR, or absent where the Recorder never said. */
+  sdr?: number
+  samples: number
+  airMs: number
+  errorCount: number
+  spikeCount: number
+  /** Decode errors per minute of air. */
+  errorRate: (number | null)[]
+  spikeRate: (number | null)[]
+  signalDbm: (number | null)[]
+  noiseDbm: (number | null)[]
+  driftHz: (number | null)[]
+}
+
+/** `GET /api/admin/recorders/health` — how each frequency has been receiving. */
+export interface HealthReport {
+  fromMs: number
+  toMs: number
+  /** The **resolved** bucket width, never the one that was asked for. */
+  bucketMs: number
+  /** How fine this report can ever be, whatever is asked. */
+  finestBucketMs: number
+  channels: ChannelHealth[]
+  /** Channels left out by the server's own cap. Never silently. */
+  omitted: number
+}
+
+/** What a health report is asked for. */
+export interface HealthQuery {
+  after?: number
+  before?: number
+  system?: number
+  freq?: number
+  sdr?: number
+  bucketMs?: number
+}
+
 // -- The status page (#70, spec US 48) ---------------------------------------
 
 /** One background **Worker**'s reading. */
