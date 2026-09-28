@@ -386,6 +386,13 @@ async fn a_refused_key_is_loud_and_still_exits_zero() {
     &[("RADIO_SCOUT_API_KEY", "k")],
     "--system needs"
 )]
+#[case::system_too_large_to_be_an_i64(
+    // i64::MAX is 9223372036854775807 (19 digits) — one more than this, which
+    // would overflow it and silently fall back to shortName if let through.
+    &["--server", "http://127.0.0.1:1", "--system", "9223372036854775808"],
+    &[("RADIO_SCOUT_API_KEY", "k")],
+    "too large"
+)]
 #[tokio::test]
 async fn a_broken_install_exits_non_zero_so_trunk_recorder_says_so(
     #[case] args: &[&str],
