@@ -113,10 +113,21 @@ one WACN/system ID arrive as two Systems. Say which Radio-Scout System they all 
 ```
 
 `411` is the **Ref** shown beside the System in Settings → Admin (the number an API key
-scoped to a System, and every rdio-scanner upload, calls `system`). The System is created under
-that Ref if it does not exist yet, named after whichever site reaches it first. A `--system`
-that is not a positive whole number stops the script at once, because a typo there would
-otherwise quietly file a day's Calls somewhere you did not mean.
+scoped to a System, and every rdio-scanner upload, calls `system`). **Reuse the Ref the site
+already has there** rather than picking a fresh one: a Ref nothing is using yet creates a
+*new*, unlabelled System (each site's `shortName` becomes that Site's name instead — Settings
+→ Admin → Systems shows both), while the site's *old* System — its curated talkgroup names,
+groups, tags, LEDs, blacklist, and any retention override — sits behind, unreachable by new
+Calls. And a Ref nothing has claimed is only ever *created* when your instance's global
+auto-populate is on (`[ingest] auto_populate`); with it off, Radio-Scout drops the Call
+instead, answering `200` as though it had taken it — see "Calls arrive with numeric names" and
+`reason=not-populated` further down.
+
+A `--system` that is not a positive whole number stops the script at once, because a typo
+there would otherwise quietly file a day's Calls somewhere you did not mean — but it is only a
+syntax check, not a check against what Refs exist: `4111` passes it exactly as readily as
+`411`, so reusing the right number, copied from Settings → Admin, is what actually protects
+you.
 
 If you would rather keep the key in your service manager than in a file, drop `--env-file` and
 set the two variables in the environment Trunk Recorder runs with —
@@ -207,8 +218,11 @@ Then the `plugins` entry in `config.json`:
 - **`systemId` is optional here.** Without it the native endpoint files a Call under the
   System whose label matches the recorder's own `shortName`, creating it if it has never been
   seen. With it, the Call goes under that Ref whatever the site is called — which is what you
-  want when several sites share one network, and the same setting as `--system` on the
-  `uploadScript`. It has to be a positive whole number; anything else is logged and ignored.
+  want when several sites share one network, and the same setting and the same rule as
+  `--system` on the `uploadScript`, above: reuse the Ref the site already has, or a fresh one
+  starts a second, unlabelled System rather than joining the one with this site's history, and
+  is only ever created at all when global auto-populate is on. It has to be a positive whole
+  number; anything else is logged and ignored.
 - **`talkgroupAllow` / `talkgroupDeny` take glob patterns** — `*` for any run of characters,
   `?` for exactly one, and every other character means itself, so `5.155` matches a talkgroup
   with a dot in it and nothing else. A non-empty allow list is exhaustive; deny then removes
