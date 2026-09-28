@@ -1660,9 +1660,15 @@ pub async fn trunk_recorder_call_upload(
     // One that is not a positive integer is ignored rather than refused — the
     // generic endpoint's own stance on a `system` it cannot read — and the label
     // decides as it always did. The shipped recorder-side paths refuse to send
-    // one at setup, which is where a typo can be told about.
+    // one at setup, which is where a typo can be told about; an Instance that
+    // still sees one arrive unusable says so, because an Operator's own setting
+    // vanishing with no trace is worse than the fallback it vanishes into.
+    let named_ref = named_system(system.as_deref());
+    if system.is_some() && named_ref.is_none() {
+        warn!(system = ?system, "unusable system part; matched on shortName");
+    }
     let short_name = clean(meta.short_name.clone());
-    let system_ref = match named_system(system.as_deref()) {
+    let system_ref = match named_ref {
         Some(system_ref) => system_ref,
         None => match &short_name {
             Some(name) => repo::system_ref_for_short_name(&state.db, name)
@@ -1675,6 +1681,7 @@ pub async fn trunk_recorder_call_upload(
     let new_call = build_tr_call(
         meta,
         system_ref,
+        named_ref.is_some(),
         short_name,
         talkgroup_ref,
         audio_name,
@@ -1824,6 +1831,7 @@ fn clean(value: Option<String>) -> Option<String> {
 fn build_tr_call(
     meta: TrMeta,
     system_ref: i64,
+    system_ref_named: bool,
     short_name: Option<String>,
     talkgroup_ref: i64,
     audio_name: Option<String>,
@@ -1864,9 +1872,21 @@ fn build_tr_call(
         .map(|p| p as i64)
         .collect();
 
+    // A recorder that named the Ref itself told us *where* the Call goes, not
+    // *what to call it there* — so the shortName is not the System's label:
+    // wearing one site's name would be wrong the moment a second site reaches
+    // the same Ref, which is the whole reason to name a Ref at all. It names
+    // the **Site** instead, since `site_of` already creates one from a name
+    // alone (#48's rule, reused rather than reinvented) — and a Call that
+    // named no Ref carries no site here either, exactly as it always has.
+    let (system_label, site_label) = match system_ref_named {
+        true => (None, short_name),
+        false => (short_name, None),
+    };
+
     NewCall {
         system_ref,
-        system_label: short_name,
+        system_label,
         talkgroup_ref,
         talkgroup_label: clean(meta.talkgroup_tag), // TR talkgroup_tag -> label
         talkgroup_name: clean(meta.talkgroup_description), // TR description -> name
@@ -1899,10 +1919,12 @@ fn build_tr_call(
         // believing one would cost.
         source_num: meta.source_num.map(|n| n as i64).filter(|n| *n >= 0),
         site_ref: meta.site.filter(|s| *s > 0),
-        // Trunk Recorder names no tower, and **Mining** (#48) fills this on the
-        // one dialect that does — inside the audio, after the parse. `enrich`
-        // stamps `mined_at_ms` for the same reason, in the same place.
-        site_label: None,
+        // Set only when the recorder named its System Ref, above. Otherwise
+        // Trunk Recorder names no tower on its own, and **Mining** (#48) fills
+        // this on the one dialect that does — inside the audio, after the
+        // parse. `enrich` stamps `mined_at_ms` for the same reason, in the
+        // same place.
+        site_label,
         mined_at_ms: None,
         patches,
         units,
