@@ -466,10 +466,12 @@ pub async fn call_upload(
         _ => return Err(Incomplete::NoAudio.into()),
     };
     // A recorder normally sends a numeric `system`; if it doesn't (or sends a
-    // non-positive value), give the new System the lowest-free Ref (#8).
-    let system_ref = match upload.system.as_deref().and_then(parse_i64) {
-        Some(system_ref) if system_ref > 0 => system_ref,
-        _ => repo::lowest_free_system_ref(&state.db)
+    // non-positive value — `named_system`'s rule, shared with the TR-native
+    // endpoint rather than restated), give the new System the lowest-free Ref
+    // (#8).
+    let system_ref = match named_system(upload.system.as_deref()) {
+        Some(system_ref) => system_ref,
+        None => repo::lowest_free_system_ref(&state.db)
             .await
             .map_err(Stage::AssignSystemRef.failed())?,
     };
