@@ -205,10 +205,18 @@ public:
       return 0;
     }
     if (result.sent) {
+      // `stat`'s return value matters: an unchecked call leaves `file_info`
+      // value-initialized on failure, and a Call whose file vanished or became
+      // unstatable between the upload and this line would then log a false
+      // "file size: 0" — a successful upload lying about what it sent. Leave the
+      // size off the line rather than print a number we did not measure.
       struct stat file_info {};
-      stat(upload.audio_path.c_str(), &file_info);
-      BOOST_LOG_TRIVIAL(info) << log_prefix(call_info) << plugin_name
-                              << " Upload Success - file size: " << file_info.st_size;
+      if (stat(upload.audio_path.c_str(), &file_info) == 0) {
+        BOOST_LOG_TRIVIAL(info) << log_prefix(call_info) << plugin_name
+                                << " Upload Success - file size: " << file_info.st_size;
+      } else {
+        BOOST_LOG_TRIVIAL(info) << log_prefix(call_info) << plugin_name << " Upload Success";
+      }
       return 0;
     }
     if (result.http_code != 0) {
