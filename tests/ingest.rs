@@ -984,11 +984,9 @@ async fn trunk_recorder_can_name_the_system_ref_itself() {
         "one Ref, one System, whatever the sites are called"
     );
     assert_eq!(systems[0].r#ref, 411);
-    assert_eq!(
-        systems[0].label.as_deref(),
-        Some("butco_north"),
-        "a System is named by whichever site reached it first, and never renamed after"
-    );
+    // What each shortName names instead — the System stays unlabelled, and each
+    // becomes a Site — is `a_named_system_ref_records_the_site_and_leaves_the_
+    // system_unlabelled`, below.
     assert!(
         app.calls()
             .await
@@ -1001,7 +999,7 @@ async fn trunk_recorder_can_name_the_system_ref_itself() {
 /// the `shortName` as its label does not pull the Call away from the Ref the
 /// recorder asked for.
 #[tokio::test]
-async fn an_explicit_system_ref_beats_a_label_match() {
+async fn trunk_recorder_an_explicit_system_ref_beats_a_label_match() {
     let app = TestApp::with_key("k").await;
     repo::resolve_or_create_system(&app.db, 7, Some("butco".into()), 0)
         .await
@@ -1018,11 +1016,98 @@ async fn an_explicit_system_ref_beats_a_label_match() {
     assert_eq!(app.system_of(&call).await.r#ref, 411);
 }
 
+/// A recorder naming the Ref does not erase *which* site heard the Call: the
+/// `shortName` becomes the Site's name, and the System created from a named
+/// Ref stays unlabelled — a fresh System with no site's name winning over the
+/// others', until an Operator names it in Admin.
+#[tokio::test]
+async fn a_named_system_ref_records_the_site_and_leaves_the_system_unlabelled() {
+    let app = TestApp::with_key("k").await;
+
+    for (short_name, talkgroup) in [("butco_north", 1), ("butco_south", 2)] {
+        let meta = format!(
+            r#"{{"short_name":"{short_name}","talkgroup":{talkgroup},"start_time":{talkgroup}}}"#
+        );
+        let (status, body) = app.upload_tr(CallUpload::tr(&meta).system(411)).await;
+        assert_eq!(status, 200, "{body:?}");
+    }
+
+    let systems = system::Entity::find().all(&app.db).await.unwrap();
+    assert_eq!(systems.len(), 1, "one Ref, one System");
+    assert_eq!(systems[0].r#ref, 411);
+    assert_eq!(
+        systems[0].label.as_deref(),
+        Some("System 411"),
+        "no site's name wins over the other's — the numbered default (#8), \
+         not either shortName, until an Operator names it in Admin"
+    );
+    assert_eq!(
+        app.site_refs(411).await,
+        vec![
+            (1, "butco_north".to_string()),
+            (2, "butco_south".to_string())
+        ],
+        "each site became a Site of its own, named from its shortName"
+    );
+}
+
+/// The System's own `shortName` still names it when nothing else is: with no
+/// `system` part, the old behavior is untouched, and no Site is recorded — a
+/// recorder that never named a Ref never named a tower either.
+#[tokio::test]
+async fn with_no_named_ref_the_short_name_still_labels_the_system_and_no_site_is_recorded() {
+    let app = TestApp::with_key("k").await;
+
+    app.upload_tr(CallUpload::tr(
+        r#"{"short_name":"butco","talkgroup":1,"start_time":1}"#,
+    ))
+    .await;
+
+    let system = system::Entity::find().one(&app.db).await.unwrap().unwrap();
+    assert_eq!(system.label.as_deref(), Some("butco"));
+    assert_eq!(app.the_call().await.site_id, None);
+}
+
+/// The keep-best replace path already carries `site_id` from whichever copy
+/// won (#46); this is that same property reached through a named Ref, where
+/// the site has no numeric identity at all — only the `shortName` it arrived
+/// on.
+#[tokio::test]
+async fn a_better_copy_from_a_different_named_site_wins_the_site_too() {
+    let app = TestApp::with_key("k").await;
+
+    let worse = r#"{"short_name":"butco_north","talkgroup":100,"start_time":1,
+        "freqList":[{"freq":770000000,"pos":0,"len":1,"error_count":40}]}"#;
+    let (status, body) = app.upload_tr(CallUpload::tr(worse).system(411)).await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let better = r#"{"short_name":"butco_south","talkgroup":100,"start_time":1,
+        "freqList":[{"freq":770000000,"pos":0,"len":1,"error_count":0}]}"#;
+    let (status, body) = app.upload_tr(CallUpload::tr(better).system(411)).await;
+    assert!(
+        body.contains("Call imported successfully."),
+        "{status} {body:?}"
+    );
+    app.settle().await;
+
+    let call = app.the_call().await;
+    let site = site::Entity::find_by_id(call.site_id.expect("a Site"))
+        .one(&app.db)
+        .await
+        .expect("read site")
+        .expect("the Site row");
+    assert_eq!(
+        site.label.as_deref(),
+        Some("butco_south"),
+        "the winner's site, not the loser's"
+    );
+}
+
 /// An API key scoped to a System is checked against the Ref the Call lands on,
 /// so a per-System key now works from a recorder whose `shortName` is not the
 /// label — the reason to name the Ref at all is that it is the thing keys speak.
 #[tokio::test]
-async fn a_key_scoped_to_the_named_system_authorizes_the_call() {
+async fn trunk_recorder_a_key_scoped_to_the_named_system_authorizes_the_call() {
     let app = TestApp::spawn().await;
     let scoped = "scoped-key";
     app.create_api_key_for_system(scoped, 411).await;
@@ -1073,7 +1158,7 @@ async fn trunk_recorder_naming_no_system_at_all_files_under_ref_zero() {
 #[case("0")]
 #[case("-3")]
 #[tokio::test]
-async fn an_unusable_system_ref_falls_back_to_the_short_name(#[case] system: &str) {
+async fn trunk_recorder_an_unusable_system_ref_falls_back_to_the_short_name(#[case] system: &str) {
     let app = TestApp::with_key("k").await;
     repo::resolve_or_create_system(&app.db, 7, Some("butco".into()), 0)
         .await
