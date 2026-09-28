@@ -111,6 +111,14 @@ while [ $# -gt 0 ]; do
 		case "$SYSTEM_REF" in
 		'' | *[!0-9]* | 0*) die "--system needs a positive whole number (a Radio-Scout System ref), got \"$SYSTEM_REF\"" ;;
 		esac
+		# A ref this large would overflow Radio-Scout's own i64 and silently fall
+		# back to matching on shortName (`named_system`'s rule) — exactly the
+		# failure this option exists to avoid a trace of. i64::MAX is nineteen
+		# digits (9223372036854775807); eighteen always fits, so the cap is a
+		# length check rather than a digit-by-digit compare against the bound.
+		if [ "${#SYSTEM_REF}" -gt 18 ]; then
+			die "--system is too large to be a System ref (18 digits at most), got \"$SYSTEM_REF\""
+		fi
 		shift 2
 		;;
 	--) # everything after this is Trunk Recorder's, whatever it looks like
