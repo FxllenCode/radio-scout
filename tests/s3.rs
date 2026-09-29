@@ -2,7 +2,7 @@
 //!
 //! `tests/blob.rs` covers the same surface offline: SigV4 is computed locally,
 //! so it runs everywhere and proves nothing about a round trip. This file is the
-//! other half — every call here reaches a real Garage/MinIO and fails if the
+//! other half — every call here reaches a real Garage/RustFS and fails if the
 //! object never lands. That backend is what a hosted or NAS-backed install runs
 //! on (ADR-0002), and range requests are the half iOS `<audio>` will not play
 //! without.

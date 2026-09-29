@@ -2,14 +2,19 @@
 #
 # Bring up an S3-compatible object store for the real-S3 suite (#35, ADR-0002).
 #
-#   .github/scripts/object-store-up.sh minio|garage
+#   .github/scripts/object-store-up.sh garage|rustfs
 #
 # Why a step and a script, when the Postgres half of the same ADR is a plain
 # `services:` block (#22): a GitHub service container cannot be given a command,
-# and neither store serves without one. MinIO needs `server /data`; Garage needs
-# a mounted config file, its single-node flags, and one `key allow` *after* it is
-# already running. A step can do all of that; a `services:` entry can do none of
-# it.
+# and Garage does not serve without one — it needs a mounted config file, its
+# single-node flags, and one `key allow` *after* it is already running. A step
+# can do all of that; a `services:` entry can do none of it. RustFS would serve
+# as a service, but one script for both is one place the handoff can go wrong.
+#
+# `rustfs` replaced `minio` in #115: MinIO's images stopped being pullable — the
+# pinned tag and `latest` alike answered `unauthorized` — and its repository was
+# archived, so the required `Backend` job failed every run in this script,
+# before a single test.
 #
 # Writes the four `TEST_S3_*` variables the harness reads (`tests/common/s3.rs`)
 # into `$GITHUB_ENV`, so the step that runs the suite needs to know nothing about
@@ -21,14 +26,14 @@ store="${1:-}"
 
 # Pinned, because an object store that silently changes version under a hard
 # gate turns an upstream release into a red build on an unrelated pull request.
-MINIO_IMAGE='quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z'
 GARAGE_IMAGE='dxflrs/garage:v2.3.0'
+RUSTFS_IMAGE='rustfs/rustfs:1.0.0'
 
 # Both stores are throwaways on the runner's loopback and die with the job, so
 # these are fixed rather than generated: there is nothing here to protect, and
 # one less moving part when a job goes red. The shapes are Garage's — `GK` plus
-# 24 hex, and 64 hex — which MinIO is happy to accept as a root user and
-# password, so one pair serves both.
+# 24 hex, and 64 hex — which RustFS is happy to accept as a root access key and
+# secret, so one pair serves both.
 ACCESS_KEY='GK00112233445566778899aabb'
 SECRET_KEY='00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
 
@@ -38,8 +43,9 @@ SECRET_KEY='00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
 # until the single-node layout is applied, which is the moment the S3 API starts
 # serving. Accepting any status would let the steps below race that — and the
 # very next thing this script does is `key allow`, and the thing after that is a
-# suite whose every test opens with `CreateBucket`. MinIO's liveness endpoint
-# answers 200 too, so one rule covers both.
+# suite whose every test opens with `CreateBucket`. RustFS's *readiness* probe
+# (not its liveness one) holds its 200 back the same way, until storage and IAM
+# are both up, so one rule covers both.
 wait_for() {
   local url="$1" name="$2" i code
   for i in $(seq 1 60); do
@@ -55,14 +61,16 @@ wait_for() {
 }
 
 case "$store" in
-  minio)
-    docker run -d --name rs-minio -p 9000:9000 \
-      -e "MINIO_ROOT_USER=$ACCESS_KEY" \
-      -e "MINIO_ROOT_PASSWORD=$SECRET_KEY" \
-      "$MINIO_IMAGE" server /data
+  rustfs)
+    # The image's own entrypoint serves `/data` and reads the root credentials
+    # from these two variables; nothing else needs saying.
+    docker run -d --name rs-rustfs -p 9000:9000 \
+      -e "RUSTFS_ACCESS_KEY=$ACCESS_KEY" \
+      -e "RUSTFS_SECRET_KEY=$SECRET_KEY" \
+      "$RUSTFS_IMAGE"
     endpoint='http://127.0.0.1:9000'
     region='us-east-1'
-    wait_for "$endpoint/minio/health/live" minio
+    wait_for "$endpoint/health/ready" rustfs
     ;;
 
   garage)
@@ -107,7 +115,7 @@ EOF
     ;;
 
   *)
-    echo "usage: ${0##*/} minio|garage" >&2
+    echo "usage: ${0##*/} garage|rustfs" >&2
     exit 2
     ;;
 esac

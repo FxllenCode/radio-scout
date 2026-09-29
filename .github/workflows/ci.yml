@@ -134,11 +134,13 @@ jobs:
 
       # The storage half of ADR-0009 (#35). Without it `tests/s3.rs` skips and
       # the S3 backend is exercised only by offline SigV4 — signatures nothing
-      # ever verifies, over objects that never land. MinIO here because it is
-      # the store every contributor already has; Garage, ADR-0002's first-class
-      # recommendation, gets a job of its own below.
+      # ever verifies, over objects that never land. Garage, ADR-0002's
+      # first-class recommendation: this is a hard gate, so it runs the store
+      # with the track record. It was MinIO until #115, when MinIO's images
+      # stopped being pullable and this step failed every run before a single
+      # test did — the second implementation is `rustfs`, below, advisory.
       - name: An object store that answers
-        run: .github/scripts/object-store-up.sh minio
+        run: .github/scripts/object-store-up.sh garage
 
       # `tests/trplugin.rs` compiles the Trunk Recorder plugin's upload core and
       # drives it (#44), so it needs libcurl's *headers*, not the `curl` binary
@@ -183,16 +185,18 @@ jobs:
         run: cargo test --doc --locked
 
   # --------------------------------------------------------------------------
-  # The *other* S3 implementation (#35).
+  # The real-S3 suite on its own, against Garage (#35).
   #
-  # `backend` runs the real-S3 suite against MinIO. ADR-0002 makes **Garage**
-  # the first-class recommendation — Rust, self-hostable, Pi-friendly — so the
-  # store the docs tell an operator to run is the one that must not be the
-  # untested one. The two differ in ways this suite can actually see: Garage
-  # checks the region a request was signed for (the bring-up leaves it at
-  # Garage's own `garage`, so `TEST_S3_REGION` is exercised rather than merely
-  # matching the default), and the S3 API surface the presigned redirect and
-  # orphan-GC lean on is independently implemented in each.
+  # ADR-0002 makes **Garage** the first-class recommendation — Rust,
+  # self-hostable, Pi-friendly — so the store the docs tell an operator to run
+  # is the one that must not be the untested one. Garage checks the region a
+  # request was signed for (the bring-up leaves it at Garage's own `garage`, so
+  # `TEST_S3_REGION` is exercised rather than merely matching the default).
+  #
+  # Since #115 `backend` runs Garage too, so this job repeats what `backend`
+  # already proved. It stays because `master` requires it by this name, and a
+  # required check that vanished would block every merge until branch
+  # protection was edited by hand.
   #
   # Deliberately only `--test s3`: everything else in the suite is
   # storage-agnostic and `backend` already ran it twice. Deliberately not
@@ -218,6 +222,43 @@ jobs:
           path: client/dist
       - name: An object store that answers
         run: .github/scripts/object-store-up.sh garage
+      - run: cargo nextest run --locked --no-fail-fast --test s3
+
+  # --------------------------------------------------------------------------
+  # The *other* S3 implementation (#35, #115).
+  #
+  # One store is one dialect of S3, and the suite can see the differences: the
+  # presigned redirect, range requests on it, and the `Last-Modified` orphan-GC
+  # reads are each implemented independently by every server. MinIO held this
+  # place until #115 — its images stopped being pullable and its repository was
+  # archived — and **RustFS** is where most of its self-hosters went: Rust,
+  # Apache-2.0, S3-compatible, arm64 images.
+  #
+  # Advisory until it has a track record here, the way the PWA specs are
+  # (ADR-0010): a store two weeks past its 1.0 must not be able to hold a merge
+  # on its own bugs. Promote it — and add it to `master`'s required checks —
+  # once it has proven not to flake.
+  # --------------------------------------------------------------------------
+  rustfs:
+    name: Object store on RustFS (advisory)
+    runs-on: ubuntu-latest
+    needs: client
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rustfs
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: actions/download-artifact@v8
+        with:
+          name: client-dist
+          path: client/dist
+      - name: An object store that answers
+        run: .github/scripts/object-store-up.sh rustfs
       - run: cargo nextest run --locked --no-fail-fast --test s3
 
   # --------------------------------------------------------------------------
@@ -329,6 +370,12 @@ jobs:
         with:
           name: client-dist
           path: client/dist
+      # The unmutated baseline is the whole suite, `tests/trplugin.rs` included,
+      # and that file compiles the plugin core against libcurl's headers. The
+      # x64 image carries them by accident of another package; this job no
+      # longer relies on that (#115).
+      - name: libcurl headers, for the recorder plugin's upload core
+        run: sudo apt-get update -qq && sudo apt-get install -y libcurl4-openssl-dev
       - name: Mutate only what this PR changed
         env:
           # Never interpolated into the shell: a branch name is attacker-
@@ -435,13 +482,18 @@ jobs:
           path: trunk-recorder
       # The recorder's own Dockerfile installs these to build itself; the SDR
       # driver packages it also installs are for hardware this never touches.
+      # `libwebsocketpp-dev` is ours, not the recorder's: the status plugin
+      # (#71) includes it and the recorder's Dockerfile installs nothing for
+      # WebSockets (#115). `tests/ci.rs` reads the plugins' includes and holds
+      # this list to them.
       - name: Install the recorder's build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install --no-install-recommends -y \
             build-essential cmake gnuradio-dev gr-osmosdr libosmosdr-dev \
             libboost-all-dev libcurl4-openssl-dev libgmp-dev liborc-0.4-dev \
-            libsndfile1-dev libssl-dev libuhd-dev libusb-1.0-0-dev pkg-config
+            libsndfile1-dev libssl-dev libuhd-dev libusb-1.0-0-dev \
+            libwebsocketpp-dev pkg-config
       # `ccache` turns the recorder's own sources — which never change between
       # runs, being pinned — into a cache hit, so this job costs roughly what
       # compiling our two files costs after the first run.

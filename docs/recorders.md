@@ -229,9 +229,12 @@ this leaves that screen empty and nothing else affected.
 > two upstream defects fixed (a member read before it is written, and a reconnect delay that
 > grows without bound).
 
-Fetch it onto the **recorder**, into the Trunk Recorder source tree you built from:
+Fetch it onto the **recorder**, into the Trunk Recorder source tree you built from. It needs one
+library a stock recorder build never asks for — the WebSocket client, websocketpp — so install
+that first (Debian, Ubuntu and Raspberry Pi OS all package it):
 
 ```bash
+sudo apt-get install libwebsocketpp-dev
 cd /path/to/trunk-recorder
 curl -fsSLO https://github.com/FxllenCode/radio-scout/releases/latest/download/radio-scout-tr-status-plugin.tar.gz
 curl -fsSL  https://github.com/FxllenCode/radio-scout/releases/latest/download/SHA256SUMS \

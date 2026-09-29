@@ -64,7 +64,7 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 **Edge cases are required and operationalized.** "Multiple tests covering edge cases" means `proptest` (property-based — parsers, dedup window, range headers, protocol framing), `rstest` parametrized case tables (multiple named cases per behavior), and `cargo-mutants` mutation testing to prove the assertions actually catch regressions. A test that runs a line without asserting behavior does not count.
 
 **The pyramid (where each layer pays off):**
-- **Backend** — unit (`#[cfg(test)] mod tests`, incl. edge-branch tables) for pure logic; **integration** (`tests/`, real HTTP/WS via the harness in `tests/common/`) for behavior + contracts. **Dual-dialect Postgres** in CI (#22: a `postgres:17` service, a database per test) and **real S3** (#35: MinIO in `Backend`, Garage in a job of its own, a bucket per test). rdio-scanner wire responses pinned with **insta** snapshots.
+- **Backend** — unit (`#[cfg(test)] mod tests`, incl. edge-branch tables) for pure logic; **integration** (`tests/`, real HTTP/WS via the harness in `tests/common/`) for behavior + contracts. **Dual-dialect Postgres** in CI (#22: a `postgres:17` service, a database per test) and **real S3** (#35: Garage in `Backend`, RustFS in an advisory job of its own since #115, a bucket per test). rdio-scanner wire responses pinned with **insta** snapshots.
 - **Frontend** — Vitest + RTL **integration is the workhorse** (network mocked with **MSW** at the boundary — never fetch/module mocking); unit for pure logic (`store/`, `lib/`, `utils/` at per-file 100%); **Vitest Browser Mode** (real browser) for audio-player + Media-Session component wiring — **wired up in #34**, `client/src/**/*.browser.test.tsx`, `npm run test:browser`; **narrow Playwright E2E** (PWA install/offline/service-worker) — **wired up in #15**, `client/e2e/`, `npm run test:e2e`.
 - **iOS background audio, lock-screen/Control-Center controls, and Add-to-Home-Screen install are a real-device MANUAL release gate.** Playwright's WebKit is not iOS Safari and cannot validate them ([ADR-0005](docs/adr/0005-client-audio-media-session-background.md)).
 
@@ -193,7 +193,7 @@ TEST_POSTGRES_URL='postgres://postgres:postgres@localhost:55432/postgres' cargo 
 docker rm -fv rs-pg         # -v, or the data outlives the server: see machine-hygiene.md
 ```
 
-`cargo-nextest`, `cargo-llvm-cov`, and `cargo-mutants` are external binaries (`cargo install …`); `proptest`/`rstest`/`insta` are dev-deps. The dual-dialect run needs only a Postgres to point `TEST_POSTGRES_URL` at ([`docs/agents/dual-dialect.md`](docs/agents/dual-dialect.md)), and the real-S3 run only a MinIO/Garage to point `TEST_S3_ENDPOINT` at ([`docs/agents/real-s3.md`](docs/agents/real-s3.md)). See [Testing & coverage policy](#testing--coverage-policy).
+`cargo-nextest`, `cargo-llvm-cov`, and `cargo-mutants` are external binaries (`cargo install …`); `proptest`/`rstest`/`insta` are dev-deps. The dual-dialect run needs only a Postgres to point `TEST_POSTGRES_URL` at ([`docs/agents/dual-dialect.md`](docs/agents/dual-dialect.md)), and the real-S3 run only a Garage/RustFS to point `TEST_S3_ENDPOINT` at ([`docs/agents/real-s3.md`](docs/agents/real-s3.md)). See [Testing & coverage policy](#testing--coverage-policy).
 
 Frontend (React + TS + Vite + Tailwind v4 + shadcn/ui + Redux Toolkit/RTK Query), in `client/` — run from inside `client/`:
 
@@ -247,7 +247,7 @@ Issues are tracked in this repo's GitHub Issues via the `gh` CLI. External PRs a
 
 ### Real-S3 testing
 
-`TEST_S3_ENDPOINT` (+ credentials) runs `tests/s3.rs` against a MinIO/Garage that answers, a bucket per test; unset, those tests skip. See `docs/agents/real-s3.md`.
+`TEST_S3_ENDPOINT` (+ credentials) runs `tests/s3.rs` against a Garage/RustFS that answers, a bucket per test; unset, those tests skip. See `docs/agents/real-s3.md`.
 
 ### Triage labels
 

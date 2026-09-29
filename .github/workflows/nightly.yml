@@ -97,6 +97,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,cargo-nextest
+      # Every shard's unmutated baseline is the whole suite, `tests/trplugin.rs`
+      # included, and that file compiles the plugin core against libcurl's
+      # headers. Without them the baseline fails and no mutant is tried; the x64
+      # image carries them by accident of another package, and this job no
+      # longer relies on that (#115).
+      - name: libcurl headers, for the recorder plugin's upload core
+        run: sudo apt-get update -qq && sudo apt-get install -y libcurl4-openssl-dev
       - name: Mutate
         run: cargo mutants --shard ${{ matrix.shard }}/16 --test-tool nextest -j 2 -- --locked
       - uses: actions/upload-artifact@v7

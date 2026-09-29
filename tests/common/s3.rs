@@ -2,7 +2,7 @@
 //! mirroring the seam #22 built for its database half.
 //!
 //! **`TEST_S3_ENDPOINT` is the whole switch.** Set it (with credentials) and
-//! `tests/s3.rs` runs against a Garage/MinIO that answers; unset — the everyday
+//! `tests/s3.rs` runs against a Garage/RustFS that answers; unset — the everyday
 //! red-green loop, and any machine without a store to hand — those tests skip,
 //! saying so on the run's own output. `docs/agents/real-s3.md` is the command
 //! that provides one.
@@ -230,7 +230,7 @@ async fn record_put(
 /// same breath, so this is a timeout, not a lifetime anyone holds.
 const CREATE_BUCKET_TTL: Duration = Duration::from_secs(60);
 
-/// The region to sign with when the run did not name one. MinIO accepts any;
+/// The region to sign with when the run did not name one — RustFS's own;
 /// Garage checks it against its own `s3_region`, which is why it is settable.
 const DEFAULT_REGION: &str = "us-east-1";
 

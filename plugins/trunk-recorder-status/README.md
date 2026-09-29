@@ -22,9 +22,12 @@ own status dialect, so an Operator running the original plugin gets the same das
 
 ## Installing it
 
-This directory goes in Trunk Recorder's `user_plugins/`, and Trunk Recorder is then rebuilt:
+This directory goes in Trunk Recorder's `user_plugins/`, and Trunk Recorder is then rebuilt. It
+needs one library a stock recorder build never asks for — the WebSocket client, websocketpp — so
+install that first (Debian, Ubuntu and Raspberry Pi OS all package it):
 
 ```bash
+sudo apt-get install libwebsocketpp-dev
 cd /path/to/trunk-recorder
 mkdir -p user_plugins
 tar -xzf radio-scout-tr-status-plugin.tar.gz -C user_plugins

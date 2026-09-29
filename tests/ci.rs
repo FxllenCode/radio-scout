@@ -336,12 +336,18 @@ fn ci_points_the_suite_at_the_postgres_it_provisions() {
 ///
 /// `tests/s3.rs` skips when `TEST_S3_ENDPOINT` is unset. That is the right
 /// answer on a laptop and a silent, permanent skip in CI: a job that stands
-/// MinIO or Garage up and never gets the endpoint to the suite pays for the
-/// store and then goes on testing offline signing, exactly as before the ticket
-/// — green, and proving nothing about a round trip.
+/// a store up and never gets the endpoint to the suite pays for the store and
+/// then goes on testing offline signing, exactly as before the ticket — green,
+/// and proving nothing about a round trip.
 ///
-/// Both stores are named because ADR-0002 ships against both: Garage is the
-/// first-class recommendation, MinIO is the one every contributor already has.
+/// Two stores, because ADR-0002 ships against S3 rather than against one
+/// server, and each implementation is a dialect of it — Garage checks the
+/// region a request was signed for, for one, where others accept any. Garage is
+/// the first-class recommendation, so it is the one the hard gates run.
+/// **RustFS** is the second (#115): MinIO held that place until its images
+/// stopped being pullable and its repository was archived, and RustFS is where
+/// most of its self-hosters went. It is advisory until it has a track record,
+/// because a store two weeks past its 1.0 must not be able to hold a merge.
 #[test]
 fn every_job_that_provisions_an_object_store_runs_the_real_s3_suite_against_it() {
     let bring_up = bring_up_command();
@@ -364,17 +370,25 @@ fn every_job_that_provisions_an_object_store_runs_the_real_s3_suite_against_it()
             "`{job}` runs the suite before the store it provisions exists, so every \
              real-S3 test skips"
         );
-        provisioned.extend(
-            ["minio", "garage"]
-                .into_iter()
-                .filter(|store| block.contains(&format!("{bring_up} {store}"))),
-        );
+        for store in ["garage", "rustfs"] {
+            if !block.contains(&format!("{bring_up} {store}")) {
+                continue;
+            }
+            provisioned.push(store);
+            assert!(
+                store == "garage" || block.contains("continue-on-error: true"),
+                "`{job}` holds a merge on {store}, which has no track record here yet — \
+                 only Garage gates"
+            );
+        }
     }
     provisioned.sort_unstable();
     assert_eq!(
         provisioned,
-        ["garage", "minio"],
-        "ADR-0002's two S3 backends are not both exercised by the pipeline"
+        ["garage", "garage", "rustfs"],
+        "the pipeline's hard gates run Garage (`Backend`, and the Garage job \
+         `master` requires by name), and RustFS runs beside them as the second \
+         implementation"
     );
 
     // Bringing the store up is only half the link. The harness reads the
@@ -390,6 +404,43 @@ fn every_job_that_provisions_an_object_store_runs_the_real_s3_suite_against_it()
             "{BRING_UP_PATH} never mentions {handoff}, so the suite is never told \
              where the store it just started is"
         );
+    }
+}
+
+/// Every job that runs the whole suite can build what the suite builds (#115).
+///
+/// `tests/trplugin.rs` compiles the Trunk Recorder plugin's upload core at run
+/// time, against libcurl's *headers*, and refuses to skip under `CI`, because a
+/// suite that skips in CI says nothing. So a job that runs every test binary
+/// without them fails in `trplugin` before it has measured anything — and in a
+/// mutation job that is the unmutated baseline, the one failure that means no
+/// mutant is ever tried.
+///
+/// Installed by name rather than trusted to the runner. The x64 `ubuntu-24.04`
+/// image happens to carry them today — not as a package it lists, but pulled in
+/// by one it does — which is why the two mutation jobs got away without the
+/// step `backend` and `arm64` have always had. The arm64 image does
+/// not, and an image bump need not either. Found while chasing #115, where the
+/// mutation job's red was blamed on this and was in fact `tests/access.rs`.
+///
+/// A job narrowed to named test binaries (`--test s3`) never builds the plugin,
+/// so it owes nothing here.
+#[test]
+fn every_job_that_runs_the_whole_suite_can_build_the_recorder_plugin() {
+    for (name, workflow) in workflows() {
+        for (job, block) in jobs(&workflow) {
+            let runs_everything = block
+                .lines()
+                .any(|line| runs_the_suite(line) && !line.contains("--test "));
+            if !runs_everything {
+                continue;
+            }
+            assert!(
+                block.contains("libcurl4-openssl-dev"),
+                "{name}: job `{job}` runs the whole suite without libcurl's headers, so \
+                 `tests/trplugin.rs` cannot compile the plugin core it drives and fails"
+            );
+        }
     }
 }
 
@@ -758,4 +809,91 @@ fn the_trunk_recorder_plugin_is_compiled_against_a_pinned_recorder() {
         sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
         "{name} pins {sha:?}, which is a branch or a tag rather than a commit"
     );
+}
+
+/// The job that compiles the shipped plugins installs every library they
+/// include (#115).
+///
+/// Trunk Recorder's own build dependencies are not a plugin's: its Dockerfile
+/// installs nothing for WebSockets, and the status plugin (#71) includes
+/// `<websocketpp/client.hpp>` — so from the day it landed the job failed in
+/// `Build them`, on a header nobody had installed, and nothing but that advisory
+/// job would ever have said so. An operator building it hits the same wall,
+/// which is why `docs/recorders.md` and the plugin's own README name the
+/// package before the build command.
+///
+/// Read from the sources rather than listed here, so the next plugin to reach
+/// for a library fails this test until someone says which package provides it.
+/// Only `<dir/header>` includes are libraries' — `<string>` is the standard
+/// library, and `<json.hpp>` is Trunk Recorder's own `lib/`.
+#[test]
+fn the_plugin_job_installs_every_library_the_plugins_include() {
+    /// What provides each directory a plugin includes from, on the job's
+    /// Ubuntu: a package to install, or `None` for the C library.
+    const PROVIDERS: [(&str, Option<&str>); 4] = [
+        ("boost", Some("libboost-all-dev")),
+        ("curl", Some("libcurl4-openssl-dev")),
+        ("sys", None),
+        ("websocketpp", Some("libwebsocketpp-dev")),
+    ];
+
+    let ci = ci_workflow();
+    let (name, block) = jobs(&ci)
+        .into_iter()
+        .find(|(_, block)| block.contains("robotastic/trunk-recorder"))
+        .expect("no job builds the Trunk Recorder plugin");
+
+    let mut sources = Vec::new();
+    let mut dirs = vec![repo_file("plugins")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read plugins/") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|ext| ["cc", "h", "hpp"].iter().any(|e| ext == *e))
+            {
+                sources.push(path);
+            }
+        }
+    }
+    assert!(!sources.is_empty(), "no plugin sources under plugins/");
+
+    for source in sources {
+        let text = std::fs::read_to_string(&source).expect("read plugin source");
+        for line in text.lines() {
+            let Some(header) = line
+                .trim()
+                .strip_prefix("#include <")
+                .and_then(|rest| rest.split_once('>'))
+                .map(|(header, _)| header)
+            else {
+                continue;
+            };
+            let Some((dir, _)) = header.split_once('/') else {
+                continue;
+            };
+            let provider = PROVIDERS
+                .iter()
+                .find(|(known, _)| *known == dir)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} includes <{header}>, from a library this test cannot place — \
+                         add which package provides `{dir}/` to PROVIDERS, and install it \
+                         in {name}",
+                        source.display()
+                    )
+                })
+                .1;
+            if let Some(package) = provider {
+                assert!(
+                    block.contains(package),
+                    "{} includes <{header}>, and {name} never installs {package}, so the \
+                     plugin cannot compile there — or on an operator's recorder",
+                    source.display()
+                );
+            }
+        }
+    }
 }

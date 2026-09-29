@@ -14,21 +14,25 @@ the everyday red-green loop, and any machine without one to hand — those tests
 the run's output**. Nothing else in the suite is affected either way.
 
 ```bash
-# A throwaway MinIO. Nothing in it is worth keeping.
-docker run -d --name rs-minio -p 9000:9000 \
-  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  quay.io/minio/minio:latest server /data
+# A throwaway RustFS. Nothing in it is worth keeping.
+docker run -d --name rs-rustfs -p 9000:9000 \
+  -e RUSTFS_ACCESS_KEY=rustfsadmin -e RUSTFS_SECRET_KEY=rustfsadmin \
+  rustfs/rustfs:latest
 
 TEST_S3_ENDPOINT=http://127.0.0.1:9000 \
-TEST_S3_ACCESS_KEY_ID=minioadmin \
-TEST_S3_SECRET_ACCESS_KEY=minioadmin \
+TEST_S3_ACCESS_KEY_ID=rustfsadmin \
+TEST_S3_SECRET_ACCESS_KEY=rustfsadmin \
   cargo nextest run --test s3
 
-docker rm -fv rs-minio
+docker rm -fv rs-rustfs
 ```
 
-`TEST_S3_REGION` is the fourth variable and defaults to `us-east-1`. MinIO accepts any region;
-**Garage checks it**, so point it at whatever that store's `s3_region` is.
+`TEST_S3_REGION` is the fourth variable and defaults to `us-east-1`, which is what RustFS answers
+to; **Garage checks it**, so point it at whatever that store's `s3_region` is.
+
+**Not MinIO** — its images stopped being pullable (the pinned tag and `latest` alike answer
+`unauthorized`) and its repository is archived, which is what took CI down in #115. RustFS
+answers the same S3 API and is where most of its self-hosters went.
 
 Setting `TEST_S3_ENDPOINT` without a credential is a **panic**, not a skip: a half-configured run
 that quietly skipped would be the exact failure this suite exists to remove — a green run that
@@ -46,7 +50,7 @@ cargo nextest run --test s3
 docker rm -fv rs-garage
 ```
 
-It also takes `minio`, which is what the `Backend` job runs.
+It also takes `rustfs`, the second implementation.
 
 ## Each test gets a bucket of its own
 
@@ -97,16 +101,24 @@ fails if the object never lands:
 `.github/workflows/ci.yml` provisions both stores with `.github/scripts/object-store-up.sh`, which
 writes the four `TEST_S3_*` variables into `$GITHUB_ENV`:
 
-- the **`Backend`** job gets **MinIO**, so the real-S3 suite runs on both database dialects and feeds
-  the one coverage profile;
-- **`Object store on Garage`** is a job of its own running `--test s3`.
+- the **`Backend`** job gets **Garage**, so the real-S3 suite runs on both database dialects and
+  feeds the one coverage profile;
+- **`Object store on Garage`** is a job of its own running `--test s3`. Since #115 it repeats what
+  `Backend` proves, and stays because `master` requires it by that name;
+- **`Object store on RustFS (advisory)`** runs `--test s3` against the second implementation.
 
 A script rather than a `services:` block — which is how Postgres is provisioned — because a GitHub
-service container cannot be given a command, and neither store serves without one.
+service container cannot be given a command, and Garage does not serve without one.
 
-Both are hard gates. `tests/ci.rs` pins the traps they could otherwise fall into: a store stood up
-whose endpoint never reaches the suite — or reaches it after the suite already ran — is a green run
-of tests that all skipped.
+**Garage gates; RustFS advises.** Only the store with a track record here may hold a merge — RustFS
+is two weeks past its 1.0, and joins `master`'s required checks once it has proven not to flake.
+`tests/ci.rs` pins that split, and the traps both could otherwise fall into: a store stood up whose
+endpoint never reaches the suite — or reaches it after the suite already ran — is a green run of
+tests that all skipped.
+
+**Until #115, `Backend` ran MinIO**, which is gone: its images stopped being pullable and its
+repository is archived. The required check then failed every run in the bring-up, before a single
+test — which reads as a red build, and hid for days that nothing had been tested at all.
 
 The image tags in `object-store-up.sh` are **pinned**, so an upstream release cannot turn an
 unrelated pull request red. The `docker run` above deliberately isn't: a store you `rm -f` five
