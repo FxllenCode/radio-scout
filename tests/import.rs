@@ -1230,12 +1230,15 @@ async fn a_units_ranges_cost_one_statement_each_to_write() {
             .map(|n| format!("{}-{}", 1000 + n * 10, 1005 + n * 10))
             .collect::<Vec<_>>()
             .join(";");
-        app.settle().await;
-        let before = app.statements_issued();
-        let report =
-            import_units_ok(app, "?system=11", &format!("ref,memberRefs\n500,{cell}\n")).await;
+        let (report, cost) = app
+            .statements_during(import_units_ok(
+                app,
+                "?system=11",
+                &format!("ref,memberRefs\n500,{cell}\n"),
+            ))
+            .await;
         assert_eq!(report["rangesAdded"], spans as u64, "{report}");
-        app.statements_issued() - before
+        cost
     }
 
     // Two apps, because a Unit that already owns spans is a different write.

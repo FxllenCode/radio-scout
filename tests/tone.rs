@@ -208,14 +208,14 @@ async fn a_call_may_page_more_than_one_profile() {
 async fn an_instance_with_no_profile_spends_nothing_per_call() {
     let app = an_instance().await;
 
-    let before = app.statements_issued();
-    upload(&app, &page_out(A_HZ, B_HZ)).await;
-    let unarmed = app.statements_issued() - before;
+    let (_, unarmed) = app
+        .statements_during(upload(&app, &page_out(A_HZ, B_HZ)))
+        .await;
 
     write_profile(&app, "Station 12", quick_call()).await;
-    let before = app.statements_issued();
-    upload(&app, &page_out(A_HZ, B_HZ)).await;
-    let armed = app.statements_issued() - before;
+    let (_, armed) = app
+        .statements_during(upload(&app, &page_out(A_HZ, B_HZ)))
+        .await;
 
     assert!(
         armed > unarmed,

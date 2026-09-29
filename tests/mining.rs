@@ -261,28 +261,26 @@ async fn mining_a_call_with_nothing_in_it_costs_no_statements_at_all() {
     // auto-populate. The radio is the one the SDRTrunk field set names.
     let bare = SdrTrunkMp3::new();
     app.upload_ok(CallUpload::sdrtrunk(&bare).at(1_000)).await;
-    app.settle().await;
 
-    let before = app.statements_issued();
-    app.upload_ok(CallUpload::sdrtrunk(&bare).at(60_000)).await;
-    app.settle().await;
-    let bare_cost = app.statements_issued() - before;
+    let (_, bare_cost) = app
+        .statements_during(app.upload_ok(CallUpload::sdrtrunk(&bare).at(60_000)))
+        .await;
 
     // A plain rdio upload naming the same radio **and the same frequency**, on
     // the same rows: what a Call costs when no container is mined at all. The
     // frequency matters since #71 — a Call that names one writes a row of
     // receive history and a Call that names none does not, and this test is
     // about the container rather than about that.
-    let before = app.statements_issued();
-    app.upload_ok(
-        CallUpload::new()
-            .set("unit", "1234567")
-            .set("frequency", "851012500")
-            .at(120_000),
-    )
-    .await;
-    app.settle().await;
-    let plain_cost = app.statements_issued() - before;
+    let (_, plain_cost) = app
+        .statements_during(
+            app.upload_ok(
+                CallUpload::new()
+                    .set("unit", "1234567")
+                    .set("frequency", "851012500")
+                    .at(120_000),
+            ),
+        )
+        .await;
 
     assert_eq!(
         bare_cost, plain_cost,
@@ -735,6 +733,11 @@ async fn mining_one_stored_call_costs_a_fixed_number_of_statements() {
     app.settle().await;
 
     // The second takes the older one, with everything it needs already there.
+    //
+    // Sampled by hand rather than through `statements_during`, because the work
+    // is a restart and a restart takes the app mutably. Settled on both sides
+    // all the same — the settle above and the one after each restart — which is
+    // the whole of what the helper would add (#115).
     let before = app.statements_issued();
     app.restart().await;
     app.settle().await;

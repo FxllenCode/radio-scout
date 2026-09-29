@@ -285,20 +285,16 @@ async fn activity_costs_the_same_however_many_talkgroups_there_are() {
         seed_call_at(&app, 100, r#ref, now - 60_000).await;
     }
 
-    let before = app.statements_issued();
-    catalog(&app).await;
-    let small = app.statements_issued() - before;
+    let (_, small) = app.statements_during(catalog(&app)).await;
 
     for r#ref in 4..=30 {
         seed_talkgroup(&app, 100, "Alpha", r#ref, "Big", "Fire", &[]).await;
         seed_call_at(&app, 100, r#ref, now - 60_000).await;
     }
 
-    let before = app.statements_issued();
-    catalog(&app).await;
+    let (_, big) = app.statements_during(catalog(&app)).await;
     assert_eq!(
-        app.statements_issued() - before,
-        small,
+        big, small,
         "ten times the Talkgroups, the same number of round trips"
     );
 }

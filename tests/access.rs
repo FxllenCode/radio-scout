@@ -97,15 +97,13 @@ async fn an_instance_that_gates_nothing_pays_nothing() {
     // *difference* a grant makes rather than the cost of a cold start.
     app.get_json("/api/calls").await;
 
-    let before = app.statements_issued();
-    app.get_json("/api/calls").await;
-    let ungated = app.statements_issued() - before;
+    let (_, ungated) = app.statements_during(app.get_json("/api/calls")).await;
 
     // ...and again with a grant in hand that this Instance has never heard of.
     // It is not looked up, because there is nothing for it to open.
-    let before = app.statements_issued();
-    app.get_json_with_grant("/api/calls", "rsg_deadbeef").await;
-    let with_a_grant = app.statements_issued() - before;
+    let (_, with_a_grant) = app
+        .statements_during(app.get_json_with_grant("/api/calls", "rsg_deadbeef"))
+        .await;
 
     assert_eq!(
         with_a_grant, ungated,

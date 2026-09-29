@@ -566,18 +566,14 @@ async fn exporting_a_big_configuration_costs_what_a_small_one_does() {
     app.seed_talkgroup(11, 100).await;
     app.seed_unit(11, 1200, "Engine 1").await;
 
-    let before = app.statements_issued();
-    export(&app).await;
-    let small = app.statements_issued() - before;
+    let (_, small) = app.statements_during(export(&app)).await;
 
     for r#ref in 200..260 {
         app.seed_talkgroup(11, r#ref).await;
         app.seed_unit(11, 4000 + r#ref, "Portable").await;
     }
 
-    let before = app.statements_issued();
-    export(&app).await;
-    let big = app.statements_issued() - before;
+    let (_, big) = app.statements_during(export(&app)).await;
 
     assert_eq!(
         small, big,

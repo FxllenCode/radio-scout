@@ -85,7 +85,7 @@ Each was paid for once, in a module whose header tells the story.
 - **A policy is written once**, whatever number of surfaces ask it (#92). A surface's *shape* may differ; the rule underneath may not.
 - **Every child table of `calls` is named in `repo::delete_calls`.** Forget one and the retention sweep fails at the oldest marked Call, forever. Each such feature carries an "a marked Call is still prunable" test.
 - **`SUM` goes through `db::sum_bigint`**, and **an aggregate groups by the output column's alias** (`activity::bucket_group`). Both are Postgres failures a SQLite run cannot see.
-- **Assert cost as a statement-count difference** (`statements_issued()` sampled either side of the work, at two sizes), not as a ceiling. It is the only way an N+1 is visible from outside.
+- **Assert cost as a statement-count difference** (`app.statements_during(work)`, at two sizes), not as a ceiling. It is the only way an N+1 is visible from outside. Never sample `statements_issued()` by hand: a Worker still running lands in the window (#115).
 - **A flattened document owns its keys.** A field beside a `#[serde(flatten)]` is named for what it is, never for a key the flattened type already spends.
 - **A cached gate is re-read on the same request that changes it** (`Tones::armed`, `Access::is_gating`). A stale "off" is a silent failure.
 - **A credential never reaches a listing row or a log line.** One that must travel in a URL rides the query string, which `http_log` never writes.

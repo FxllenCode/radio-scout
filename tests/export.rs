@@ -657,16 +657,16 @@ async fn a_page_of_an_export_costs_the_same_however_many_calls_it_holds() {
     for n in 0..5 {
         seed_audible_call(&app, 1, 1_000 + n, 1000.0, 100).await;
     }
-    let before = app.statements_issued();
-    export(&app, "?format=zip&talkgroup=1").await;
-    let five = app.statements_issued() - before;
+    let (_, five) = app
+        .statements_during(export(&app, "?format=zip&talkgroup=1"))
+        .await;
 
     for n in 0..40 {
         seed_audible_call(&app, 1, 2_000 + n, 1000.0, 100).await;
     }
-    let before = app.statements_issued();
-    export(&app, "?format=zip&talkgroup=1").await;
-    let forty_five = app.statements_issued() - before;
+    let (_, forty_five) = app
+        .statements_during(export(&app, "?format=zip&talkgroup=1"))
+        .await;
 
     assert_eq!(
         five, forty_five,

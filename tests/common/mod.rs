@@ -1472,16 +1472,43 @@ impl TestApp {
     /// its database (#86) — the same seam, counting instead of refusing.
     ///
     /// What it is for is an N+1, which is invisible from outside: the answer is
-    /// right, and only the number of round-trips behind it is wrong. Sample
-    /// either side of the work and the difference is what that work cost; run
-    /// it at two sizes and the difference between *those* is whether the cost
+    /// right, and only the number of round-trips behind it is wrong. Measure the
+    /// work with [`TestApp::statements_during`] — never by sampling this either
+    /// side of it by hand, which is a race with every Worker still running — and
+    /// run it at two sizes: the difference between *those* is whether the cost
     /// grows per Call.
     ///
     /// It counts this test's own queries too, for the same reason
-    /// [`TestApp::refuse_statements_on`] applies to them — one handle. So take
-    /// the samples around the app's work and nothing else.
+    /// [`TestApp::refuse_statements_on`] applies to them — one handle. So keep
+    /// the measured work to the app's and nothing else.
     pub fn statements_issued(&self) -> u64 {
         self.statements.issued()
+    }
+
+    /// What `work` costs, in statements — how a cost test measures (#115).
+    ///
+    /// **Settled on both sides**, which is the whole of what this adds to two
+    /// calls of [`TestApp::statements_issued`]. Before, so a **Worker** still
+    /// paying off what earlier work handed it — quiet-span scanning (#59) reads
+    /// and writes every ingested Call — is not billed to `work`. After, so what
+    /// `work` itself hands a Worker is billed to it every time, rather than only
+    /// when the scheduler happened to run that Worker before the second sample.
+    /// A window settled on one side or neither has a count that depends on a
+    /// race, and CI's runners lose races a laptop wins: `tests/access.rs` read
+    /// one page twice and counted 10 statements, then 9.
+    ///
+    /// `work` is a future, so nothing in it runs until the first settle is
+    /// done — `app.statements_during(app.get_json(…))` measures the request and
+    /// only the request.
+    pub async fn statements_during<T>(
+        &self,
+        work: impl std::future::Future<Output = T>,
+    ) -> (T, u64) {
+        self.settle().await;
+        let before = self.statements_issued();
+        let output = work.await;
+        self.settle().await;
+        (output, self.statements_issued() - before)
     }
 
     // -- Stored objects -----------------------------------------------------

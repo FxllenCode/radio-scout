@@ -651,18 +651,16 @@ async fn naming_both_bounds_saves_the_axis_query() {
         -61,
     )))
     .await;
-    // Or the quiet scanner's own reads (#59) land inside the window below and
-    // the difference measures a Worker rather than this handler.
-    app.settle().await;
 
-    let before = app.statements_issued();
-    app.admin_get("/api/admin/recorders/health").await;
-    let discovered = app.statements_issued() - before;
-
-    let before = app.statements_issued();
-    app.admin_get("/api/admin/recorders/health?after=1669737600000&before=1669741199999")
+    let (_, discovered) = app
+        .statements_during(app.admin_get("/api/admin/recorders/health"))
         .await;
-    let dated = app.statements_issued() - before;
+
+    let (_, dated) = app
+        .statements_during(
+            app.admin_get("/api/admin/recorders/health?after=1669737600000&before=1669741199999"),
+        )
+        .await;
 
     assert_eq!(
         discovered,

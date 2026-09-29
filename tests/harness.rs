@@ -646,6 +646,28 @@ async fn the_statements_an_app_issues_are_counted() {
     );
 }
 
+/// A cost window is billed for its own work and nothing else (#115).
+///
+/// Ingest answers the recorder and then hands the Call to off-path **Workers** —
+/// quiet-span scanning (#59) reads and writes every Call it is given — which go
+/// on issuing statements after the upload returned. A window opened before
+/// they finish is billed for them, by however much of their debt the scheduler
+/// happened to pay inside it: `tests/access.rs` read the same page twice and
+/// counted 10 statements, then 9, on a CI runner slower than any laptop.
+#[tokio::test]
+async fn a_cost_window_is_not_billed_for_what_a_worker_still_owes() {
+    let app = TestApp::with_key("k").await;
+    app.upload_ok(CallUpload::new()).await;
+
+    let (_, cost) = app.statements_during(app.get("/healthz")).await;
+
+    assert_eq!(
+        cost, 0,
+        "a request that reads no row was billed for the Workers still finishing \
+         the upload before it"
+    );
+}
+
 /// The dual-dialect run (#22, ADR-0003/0009) is the *whole* suite a second time,
 /// not one hand-written Postgres test: with `TEST_POSTGRES_URL` set, every
 /// `TestApp::spawn` in every binary lands on Postgres; with it unset — the

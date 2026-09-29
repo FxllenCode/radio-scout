@@ -293,19 +293,19 @@ async fn backfill_statements(calls: i64) -> u64 {
     for talkgroup in 0..calls {
         post_call(&app, 11, 100 + talkgroup).await;
     }
-    // Every Worker owes nothing (#93), so the statements counted below are the
-    // Backfill's own and not an ingest still being finished behind it.
-    app.settle().await;
 
     let mut ws = app.connect_ws().await;
-    let before = app.statements_issued();
-    subscribe(&mut ws, r#"{"t":"sub","all":true,"since":0}"#).await;
-    for _ in 0..calls {
-        received(&mut ws).await.expect("a backfilled Call");
-    }
-    // Every statement the Backfill issues precedes the first frame it sends, so
-    // by here they are all counted.
-    app.statements_issued() - before
+    let (_, cost) = app
+        .statements_during(async {
+            subscribe(&mut ws, r#"{"t":"sub","all":true,"since":0}"#).await;
+            for _ in 0..calls {
+                received(&mut ws).await.expect("a backfilled Call");
+            }
+            // Every statement the Backfill issues precedes the first frame it
+            // sends, so by here they are all counted.
+        })
+        .await;
+    cost
 }
 
 /// Every Call goes out carrying the **emission** it was sent as (#94), and the

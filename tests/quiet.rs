@@ -198,9 +198,10 @@ async fn the_window_costs_the_same_whatever_its_size() {
 
     async fn cost(app: &TestApp, ids: &[i64]) -> u64 {
         let query = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-        let before = app.statements_issued();
-        app.get_json(&format!("/api/calls/quiet?ids={query}")).await;
-        app.statements_issued() - before
+        let (_, cost) = app
+            .statements_during(app.get_json(&format!("/api/calls/quiet?ids={query}")))
+            .await;
+        cost
     }
 
     assert_eq!(cost(&app, &ids[..1]).await, cost(&app, &ids).await);

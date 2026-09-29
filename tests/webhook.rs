@@ -274,15 +274,14 @@ async fn an_ordinary_call_issues_no_webhook_statement_at_all() {
     // very first upload on a channel auto-populates a Talkgroup and costs a
     // handful of statements that have nothing to do with this feature.
     upload(&app, &ordinary_meta(54241)).await;
-    app.settle().await;
 
-    let before = app.statements_issued();
-    upload(&app, &ordinary_meta(54241)).await;
-    let ordinary = app.statements_issued() - before;
+    let (_, ordinary) = app
+        .statements_during(upload(&app, &ordinary_meta(54241)))
+        .await;
 
-    let before = app.statements_issued();
-    upload(&app, &emergency_meta(54241)).await;
-    let marked = app.statements_issued() - before;
+    let (_, marked) = app
+        .statements_during(upload(&app, &emergency_meta(54241)))
+        .await;
 
     assert!(
         marked > ordinary,

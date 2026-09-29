@@ -123,18 +123,14 @@ async fn search_statements(calls: i64) -> u64 {
         )
         .await;
     }
-    // Every Worker owes nothing (#93), so what is counted below is the read's
-    // own and not a seed still being finished behind it.
-    app.settle().await;
 
-    let before = app.statements_issued();
-    let page = app.get_json("/api/calls").await;
+    let (page, cost) = app.statements_during(app.get_json("/api/calls")).await;
     assert_eq!(
         ids_of(&page).len() as i64,
         calls,
         "the whole page came back"
     );
-    app.statements_issued() - before
+    cost
 }
 
 /// One Call read whole is the same shape of promise: opening a Call with a long
@@ -171,19 +167,17 @@ async fn detail_statements(entries: usize) -> u64 {
     );
     app.upload_tr(common::CallUpload::tr(&meta)).await;
     let id = app.the_call().await.id;
-    // Every Worker owes nothing (#93), so what is counted below is the read's
-    // own and not an ingest still being finished behind it.
-    app.settle().await;
 
-    let before = app.statements_issued();
-    let call = app.get_json(&format!("/api/call/{id}")).await;
+    let (call, cost) = app
+        .statements_during(app.get_json(&format!("/api/call/{id}")))
+        .await;
     assert_eq!(
         call["frequencies"].as_array().expect("frequencies").len(),
         entries,
         "the whole signal history came back"
     );
     assert_eq!(call["units"].as_array().expect("units").len(), entries);
-    app.statements_issued() - before
+    cost
 }
 
 // ---------------------------------------------------------------------------
@@ -947,16 +941,14 @@ async fn a_named_bucket_width_is_what_comes_back() {
 async fn a_dated_series_costs_one_statement_fewer_than_an_undated_one() {
     let app = TestApp::spawn().await;
     seed(&app).await;
-    app.settle().await;
 
-    let before = app.statements_issued();
-    app.get_json("/api/calls/activity?after=1000&before=4999")
+    let (_, dated) = app
+        .statements_during(app.get_json("/api/calls/activity?after=1000&before=4999"))
         .await;
-    let dated = app.statements_issued() - before;
 
-    let before = app.statements_issued();
-    app.get_json("/api/calls/activity").await;
-    let undated = app.statements_issued() - before;
+    let (_, undated) = app
+        .statements_during(app.get_json("/api/calls/activity"))
+        .await;
 
     assert!(dated > 0, "a series reads the archive");
     assert_eq!(
@@ -982,12 +974,12 @@ async fn density_statements(calls: i64) -> u64 {
     for n in 0..calls {
         seed_searchable_call(&app, 100, "Alpha", 1, "Fire", &["Emergency"], 1000 + n).await;
     }
-    app.settle().await;
 
-    let before = app.statements_issued();
-    let series = app.get_json("/api/calls/activity").await;
+    let (series, cost) = app
+        .statements_during(app.get_json("/api/calls/activity"))
+        .await;
     assert!(!series["values"].as_array().expect("values").is_empty());
-    app.statements_issued() - before
+    cost
 }
 
 /// An empty archive answers with an axis carrying nothing, rather than with an

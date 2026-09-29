@@ -1652,13 +1652,13 @@ async fn a_page_costs_the_same_at_any_size(#[case] path: &str) {
         .await;
     }
 
-    let before = app.statements_issued();
-    let (_, small) = app.admin_get(&format!("{path}?limit=2")).await;
-    let two = app.statements_issued() - before;
+    let ((_, small), two) = app
+        .statements_during(app.admin_get(&format!("{path}?limit=2")))
+        .await;
 
-    let before = app.statements_issued();
-    let (_, big) = app.admin_get(&format!("{path}?limit=12")).await;
-    let twelve = app.statements_issued() - before;
+    let ((_, big), twelve) = app
+        .statements_during(app.admin_get(&format!("{path}?limit=12")))
+        .await;
 
     assert_eq!(small["results"].as_array().expect("rows").len(), 2);
     assert_eq!(big["results"].as_array().expect("rows").len(), 12);
@@ -1700,21 +1700,19 @@ async fn a_bulk_action_costs_the_same_however_many_rows_it_names() {
         ids.push(created["id"].as_i64().expect("an id"));
     }
 
-    let before = app.statements_issued();
-    app.admin_post(
-        "/api/admin/talkgroups/assign",
-        json!({"ids": ids[..2], "addGroups": ["Fire"], "tag": "Dispatch"}),
-    )
-    .await;
-    let two = app.statements_issued() - before;
+    let (_, two) = app
+        .statements_during(app.admin_post(
+            "/api/admin/talkgroups/assign",
+            json!({"ids": ids[..2], "addGroups": ["Fire"], "tag": "Dispatch"}),
+        ))
+        .await;
 
-    let before = app.statements_issued();
-    app.admin_post(
-        "/api/admin/talkgroups/assign",
-        json!({"ids": ids[2..], "addGroups": ["Fire"], "tag": "Dispatch"}),
-    )
-    .await;
-    let fourteen = app.statements_issued() - before;
+    let (_, fourteen) = app
+        .statements_during(app.admin_post(
+            "/api/admin/talkgroups/assign",
+            json!({"ids": ids[2..], "addGroups": ["Fire"], "tag": "Dispatch"}),
+        ))
+        .await;
 
     assert_eq!(
         two, fourteen,

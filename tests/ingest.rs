@@ -79,12 +79,10 @@ async fn a_steady_state_call_resolves_its_channel_once() {
     // The first Call creates the System, the Talkgroup and the Unit; the second
     // is the one every later Call looks like.
     app.upload_ok(call().at(1_000)).await;
-    app.settle().await;
 
-    let before = app.statements_issued();
-    app.upload_ok(call().at(20_000)).await;
-    app.settle().await;
-    let spent = app.statements_issued() - before;
+    let (_, spent) = app
+        .statements_during(app.upload_ok(call().at(20_000)))
+        .await;
 
     // Postgres inserts with `RETURNING`, so sea-orm gets the stored row back in
     // the same statement; SQLite needs a `SELECT` after each one, and this Call
@@ -217,21 +215,17 @@ async fn a_busy_window_costs_no_more_statements_than_a_quiet_one() {
 
     // The window holds one neighbour...
     app.upload_ok(copy(1, "[900]", 0, b"neighbour")).await;
-    app.settle().await;
-    let before = app.statements_issued();
-    app.upload_ok(copy(998, "[]", 0, b"measured")).await;
-    app.settle().await;
-    let with_one = app.statements_issued() - before;
+    let (_, with_one) = app
+        .statements_during(app.upload_ok(copy(998, "[]", 0, b"measured")))
+        .await;
 
     // ...and now several.
     for (tg, patch) in [(2, "[901]"), (3, "[902]"), (4, "[903]"), (5, "[904]")] {
         app.upload_ok(copy(tg, patch, 0, b"neighbour")).await;
     }
-    app.settle().await;
-    let before = app.statements_issued();
-    app.upload_ok(copy(999, "[]", 0, b"measured")).await;
-    app.settle().await;
-    let with_several = app.statements_issued() - before;
+    let (_, with_several) = app
+        .statements_during(app.upload_ok(copy(999, "[]", 0, b"measured")))
+        .await;
 
     assert_eq!(
         with_several, with_one,
@@ -1659,18 +1653,16 @@ async fn only_a_call_that_names_a_frequency_costs_a_statement() {
     let app = TestApp::with_key("k").await;
     // Warm every row the second and third uploads would otherwise create.
     app.upload_ok(CallUpload::new().at(1_000)).await;
-    app.settle().await;
 
-    let before = app.statements_issued();
-    app.upload_ok(CallUpload::new().at(60_000)).await;
-    app.settle().await;
-    let silent = app.statements_issued() - before;
-
-    let before = app.statements_issued();
-    app.upload_ok(CallUpload::new().at(120_000).set("frequency", "851012500"))
+    let (_, silent) = app
+        .statements_during(app.upload_ok(CallUpload::new().at(60_000)))
         .await;
-    app.settle().await;
-    let charted = app.statements_issued() - before;
+
+    let (_, charted) = app
+        .statements_during(
+            app.upload_ok(CallUpload::new().at(120_000).set("frequency", "851012500")),
+        )
+        .await;
 
     assert_eq!(
         charted,

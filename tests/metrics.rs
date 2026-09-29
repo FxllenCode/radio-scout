@@ -353,19 +353,17 @@ async fn every_system_says_when_it_was_last_heard_from() {
 async fn the_database_is_read_once_however_often_the_page_is_asked() {
     let app = publishing().await;
     app.login().await;
-    // Every Worker first, so the boot sweep's own statements are behind us: the
-    // counter is the whole Instance's, and a sweeper waking between the two
-    // samples below would be read as a second gauge read.
-    app.settle().await;
 
-    let before = app.statements_issued();
-    app.get_json("/api/admin/status").await;
-    let first = app.statements_issued() - before;
+    let (_, first) = app
+        .statements_during(app.get_json("/api/admin/status"))
+        .await;
 
-    let between = app.statements_issued();
-    app.get_json("/api/admin/status").await;
-    scrape(&app, TOKEN).await;
-    let again = app.statements_issued() - between;
+    let (_, again) = app
+        .statements_during(async {
+            app.get_json("/api/admin/status").await;
+            scrape(&app, TOKEN).await;
+        })
+        .await;
 
     assert!(first > 0, "the first ask read nothing at all");
     assert_eq!(
