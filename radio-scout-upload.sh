@@ -44,7 +44,8 @@ Options:
                      0600 and readable by the user Trunk Recorder runs as; it
                      holds the key.
   --system <ref>     File this recorder system's Calls under Radio-Scout System
-                     <ref> (a positive number), instead of matching the shortName
+                     <ref> (a whole number from 1 to 999999999999999999, so at
+                     most 18 digits), instead of matching the shortName
                      Trunk Recorder writes against a System's label. Needed when
                      one network has several sites, each with its own shortName:
                      give them all the same ref. Trunk Recorder runs an
@@ -106,16 +107,19 @@ while [ $# -gt 0 ]; do
 		SYSTEM_REF="${2:-}"
 		# A setup error, so the operator finds out on the first call rather than
 		# after a day's Calls landed under a System they did not mean: `die`
-		# exits non-zero, and this is the one place a typo can be told about —
-		# Radio-Scout itself ignores a `system` it cannot read.
+		# exits non-zero, and this is the one place a typo can be told about.
+		# Radio-Scout does not refuse a `system` it cannot read — it logs a
+		# warning and matches on shortName instead, which is the fallback this
+		# check exists to keep a mistyped setting from reaching.
 		case "$SYSTEM_REF" in
 		'' | *[!0-9]* | 0*) die "--system needs a positive whole number (a Radio-Scout System ref), got \"$SYSTEM_REF\"" ;;
 		esac
-		# A ref this large would overflow Radio-Scout's own i64 and silently fall
-		# back to matching on shortName (`named_system`'s rule) — exactly the
-		# failure this option exists to avoid a trace of. i64::MAX is nineteen
+		# A ref this large would overflow Radio-Scout's own i64 and fall back to
+		# matching on shortName (`named_system`'s rule) — the fallback this
+		# option exists to keep a setting from reaching. i64::MAX is nineteen
 		# digits (9223372036854775807); eighteen always fits, so the cap is a
 		# length check rather than a digit-by-digit compare against the bound.
+		# The plugin enforces the same range (`kMaxSystemRef`).
 		if [ "${#SYSTEM_REF}" -gt 18 ]; then
 			die "--system is too large to be a System ref (18 digits at most), got \"$SYSTEM_REF\""
 		fi

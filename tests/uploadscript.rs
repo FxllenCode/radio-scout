@@ -455,6 +455,41 @@ async fn system_files_every_site_of_a_network_under_one_ref() {
     assert_eq!(app.system_of(&calls[0]).await.r#ref, 411);
 }
 
+/// **The cap is tested from both sides.** Eighteen digits always fit an i64, so
+/// the largest value the cap allows is sent and filed under exactly that Ref —
+/// and the first one past it (nineteen digits, refused above) is not.
+#[tokio::test]
+async fn system_accepts_the_largest_ref_the_cap_allows() {
+    if !curl_available() {
+        return skip("curl is not installed");
+    }
+    let app = TestApp::with_key("tr-key").await;
+    let files = CallFiles::write("butco");
+
+    let output = run_hook(
+        &["--server", &app.url(""), "--system", "999999999999999999"],
+        &[("RADIO_SCOUT_API_KEY", "tr-key")],
+        &files,
+    )
+    .await;
+
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    let call = app.the_call().await;
+    assert_eq!(app.system_of(&call).await.r#ref, 999_999_999_999_999_999);
+}
+
+/// The cap is part of what `--help` tells an operator, not something they find
+/// out by being refused.
+#[tokio::test]
+async fn help_states_the_largest_system_ref() {
+    let output = run_hook(&["--help"], &[], &CallFiles::write("butco")).await;
+
+    assert!(output.status.success());
+    let usage = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(usage.contains("--system"), "{usage}");
+    assert!(usage.contains("999999999999999999"), "{usage}");
+}
+
 /// The metadata is the one file this script cannot do without — no `.json`, no
 /// call. TR always writes one, so its absence means something is wrong with the
 /// install rather than with the recording.
