@@ -985,8 +985,8 @@ async fn trunk_recorder_can_name_the_system_ref_itself() {
     );
     assert_eq!(systems[0].r#ref, 411);
     // What each shortName names instead — the System stays unlabelled, and each
-    // becomes a Site — is `a_named_system_ref_records_the_site_and_leaves_the_
-    // system_unlabelled`, below.
+    // becomes a Site — is `trunk_recorder_a_named_system_ref_records_the_site_and_
+    // leaves_the_system_unlabelled`, below.
     assert!(
         app.calls()
             .await
@@ -1021,7 +1021,7 @@ async fn trunk_recorder_an_explicit_system_ref_beats_a_label_match() {
 /// Ref stays unlabelled — a fresh System with no site's name winning over the
 /// others', until an Operator names it in Admin.
 #[tokio::test]
-async fn a_named_system_ref_records_the_site_and_leaves_the_system_unlabelled() {
+async fn trunk_recorder_a_named_system_ref_records_the_site_and_leaves_the_system_unlabelled() {
     let app = TestApp::with_key("k").await;
 
     for (short_name, talkgroup) in [("butco_north", 1), ("butco_south", 2)] {
@@ -1055,7 +1055,8 @@ async fn a_named_system_ref_records_the_site_and_leaves_the_system_unlabelled() 
 /// `system` part, the old behavior is untouched, and no Site is recorded — a
 /// recorder that never named a Ref never named a tower either.
 #[tokio::test]
-async fn with_no_named_ref_the_short_name_still_labels_the_system_and_no_site_is_recorded() {
+async fn trunk_recorder_with_no_named_ref_the_short_name_still_labels_the_system_and_no_site_is_recorded()
+ {
     let app = TestApp::with_key("k").await;
 
     app.upload_tr(CallUpload::tr(
@@ -1073,7 +1074,7 @@ async fn with_no_named_ref_the_short_name_still_labels_the_system_and_no_site_is
 /// the site has no numeric identity at all — only the `shortName` it arrived
 /// on.
 #[tokio::test]
-async fn a_better_copy_from_a_different_named_site_wins_the_site_too() {
+async fn trunk_recorder_a_better_copy_from_a_different_named_site_wins_the_site_too() {
     let app = TestApp::with_key("k").await;
 
     let worse = r#"{"short_name":"butco_north","talkgroup":100,"start_time":1,
@@ -1101,6 +1102,61 @@ async fn a_better_copy_from_a_different_named_site_wins_the_site_too() {
         Some("butco_south"),
         "the winner's site, not the loser's"
     );
+}
+
+/// **The path the docs recommend**: name the Ref of a System that already
+/// exists and is already labelled. It keeps its label — an Operator's name is
+/// never overwritten by a recorder — and the site that heard the Call is added
+/// to it as a Site, with no second System.
+#[tokio::test]
+async fn trunk_recorder_naming_an_existing_labelled_system_keeps_its_label_and_adds_the_site() {
+    let app = TestApp::with_key("k").await;
+    repo::resolve_or_create_system(&app.db, 411, Some("Butler County".into()), 0)
+        .await
+        .expect("seed the curated System");
+
+    let (status, body) = app
+        .upload_tr(
+            CallUpload::tr(r#"{"short_name":"butco_north","talkgroup":1,"start_time":1}"#)
+                .system(411),
+        )
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let systems = system::Entity::find().all(&app.db).await.unwrap();
+    assert_eq!(systems.len(), 1, "no second System");
+    assert_eq!(systems[0].label.as_deref(), Some("Butler County"));
+    assert_eq!(
+        app.site_refs(411).await,
+        vec![(1, "butco_north".to_string())],
+        "the site that heard it is added"
+    );
+}
+
+/// How a Trunk Recorder `site` number and the new site *name* combine: the
+/// number decides which Site, the `shortName` names it — and a number that is
+/// not positive says nothing, so the name alone mints one.
+#[rstest::rstest]
+#[case::a_positive_number_is_the_sites_ref(3, vec![(3, "butco_north")])]
+#[case::zero_is_not_a_site(0, vec![(1, "butco_north")])]
+#[case::negative_is_not_a_site(-2, vec![(1, "butco_north")])]
+#[tokio::test]
+async fn trunk_recorder_a_site_number_and_a_named_ref_combine(
+    #[case] site: i64,
+    #[case] expected: Vec<(i64, &str)>,
+) {
+    let app = TestApp::with_key("k").await;
+    let meta =
+        format!(r#"{{"short_name":"butco_north","talkgroup":1,"start_time":1,"site":{site}}}"#);
+
+    let (status, body) = app.upload_tr(CallUpload::tr(&meta).system(411)).await;
+    assert_eq!(status, 200, "{body:?}");
+
+    let expected: Vec<(i64, String)> = expected
+        .into_iter()
+        .map(|(site_ref, name)| (site_ref, name.to_string()))
+        .collect();
+    assert_eq!(app.site_refs(411).await, expected);
 }
 
 /// An API key scoped to a System is checked against the Ref the Call lands on,
