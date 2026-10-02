@@ -11,6 +11,7 @@
 
 #include "radio_scout_upload.h"
 
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -46,7 +47,26 @@ int main(int argc, char *argv[]) {
     } else if (flag == "--key" && has_value) {
       upload.api_key = args[++i];
     } else if (flag == "--system" && has_value) {
-      upload.system_ref = std::stol(args[++i]);
+      // The same rule the plugin's `systemId` is held to (`usable_system_ref`),
+      // refused before anything is sent: digits only, so `-4` and `abc` never
+      // reach the parser, and a value too large for 64 bits is a refusal and not
+      // an exception.
+      const std::string &text = args[++i];
+      uint64_t value = 0;
+      bool digits = !text.empty() && text.find_first_not_of("0123456789") == std::string::npos;
+      try {
+        if (digits) {
+          value = std::stoull(text);
+        }
+      } catch (const std::exception &) {
+        digits = false;
+      }
+      if (!digits || !radio_scout::usable_system_ref(value)) {
+        std::cerr << "harness: --system needs a whole number from 1 to "
+                  << radio_scout::kMaxSystemRef << ", got \"" << text << "\"\n";
+        return 2;
+      }
+      upload.system_ref = static_cast<int64_t>(value);
     } else if (flag == "--meta" && has_value) {
       meta_path = args[++i];
     } else if (flag == "--wav" && has_value) {

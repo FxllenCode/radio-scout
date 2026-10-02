@@ -92,6 +92,10 @@ bool matches_any(const std::vector<std::string> &patterns, const std::string &te
 
 } // namespace
 
+bool usable_system_ref(uint64_t value) {
+  return value >= 1 && value <= static_cast<uint64_t>(kMaxSystemRef);
+}
+
 bool TalkgroupFilter::admits(long talkgroup) const {
   const std::string value = std::to_string(talkgroup);
   if (!allow.empty() && !matches_any(allow, value)) {
