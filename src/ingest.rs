@@ -1695,7 +1695,7 @@ pub async fn trunk_recorder_call_upload(
     let new_call = build_tr_call(
         meta,
         system_ref,
-        named_ref.is_some(),
+        named_ref,
         short_name,
         talkgroup_ref,
         audio_name,
@@ -1845,7 +1845,7 @@ fn clean(value: Option<String>) -> Option<String> {
 fn build_tr_call(
     meta: TrMeta,
     system_ref: i64,
-    system_ref_named: bool,
+    named_ref: Option<i64>,
     short_name: Option<String>,
     talkgroup_ref: i64,
     audio_name: Option<String>,
@@ -1893,9 +1893,9 @@ fn build_tr_call(
     // the **Site** instead, since `site_of` already creates one from a name
     // alone (#48's rule, reused rather than reinvented) — and a Call that
     // named no Ref carries no site here either, exactly as it always has.
-    let (system_label, site_label) = match system_ref_named {
-        true => (None, short_name),
-        false => (short_name, None),
+    let (system_label, site_label) = match named_ref {
+        Some(_) => (None, short_name),
+        None => (short_name, None),
     };
 
     NewCall {
