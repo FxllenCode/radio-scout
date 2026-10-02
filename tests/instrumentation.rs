@@ -1081,3 +1081,148 @@ async fn a_previewed_configuration_import_says_it_wrote_nothing() {
     assert!(line.contains("dry_run=true"), "{line}");
     assert!(line.contains("systems=1"), "{line}");
 }
+
+// ---- A `system` part the native endpoint cannot use (#111) ----------------
+
+/// The line the native endpoint writes when a `system` part is present and
+/// unusable. A static message, so an Operator greps for it.
+const UNUSABLE_SYSTEM: &str = "unusable system part ignored";
+
+/// The meta every case below uploads: it names a `short_name`, so a fallback
+/// has somewhere to go.
+const TR_META: &str = r#"{"short_name":"butco","talkgroup":1,"start_time":1}"#;
+
+/// **An Operator's own setting must not vanish without a trace.** A present
+/// `system` part that is not a positive integer is ignored, and the Instance
+/// says so — at WARN, once per upload, with a static message.
+#[rstest]
+#[case::empty("")]
+#[case::not_a_number("abc")]
+#[case::zero("0")]
+#[case::negative("-3")]
+#[case::one_past_i64("9223372036854775808")]
+#[tokio::test]
+async fn an_unusable_system_part_is_said_to_be_ignored(#[case] part: &str) {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+
+    let (status, body) = app
+        .upload_tr(
+            CallUpload::tr(TR_META)
+                .key(RECORDER_KEY)
+                .set("system", part),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{body:?}");
+    let line = capture.only_line_containing(UNUSABLE_SYSTEM);
+    assert!(line.contains(" WARN "), "{line}");
+    assert!(
+        line.contains(&format!("system_len={}", part.len())),
+        "{line}"
+    );
+}
+
+/// ...and says nothing when there is nothing to say: a usable value, or no part
+/// at all. The two directions are separate cases because the condition is a
+/// conjunction, and either half alone would pass one of them.
+#[rstest]
+#[case::a_usable_ref(Some("411"))]
+#[case::the_largest_the_script_accepts(Some("999999999999999999"))]
+#[case::no_part_at_all(None)]
+#[tokio::test]
+async fn a_usable_or_absent_system_part_is_not_warned_about(#[case] part: Option<&str>) {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+    let upload = CallUpload::tr(TR_META).key(RECORDER_KEY);
+    let upload = match part {
+        Some(part) => upload.set("system", part),
+        None => upload,
+    };
+
+    let (status, body) = app.upload_tr(upload).await;
+
+    assert_eq!(status, 200, "{body:?}");
+    assert!(
+        capture.lines_containing(UNUSABLE_SYSTEM).is_empty(),
+        "{}",
+        capture.text()
+    );
+}
+
+/// **The part is a stranger's text until the key has been checked**, and this
+/// line is written before that, bounded only by the body limit. So the line
+/// carries the part's length and a short escaped head of it — never the part —
+/// or an unauthenticated POST could write megabytes of its own choosing into
+/// the console and the stored operator log.
+#[tokio::test]
+async fn an_unusable_system_part_is_logged_by_length_and_a_short_head_only() {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+    let part = format!("{}{}", "a".repeat(32), "TAILTAILTAIL".repeat(500));
+
+    let (status, body) = app
+        .upload_tr(
+            CallUpload::tr(TR_META)
+                .key(RECORDER_KEY)
+                .set("system", &part),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{body:?}");
+    let line = capture.only_line_containing(UNUSABLE_SYSTEM);
+    assert!(
+        line.contains(&format!("system_len={}", part.len())),
+        "{line}"
+    );
+    assert!(line.contains(&"a".repeat(32)), "the head is kept: {line}");
+    assert!(!line.contains("TAIL"), "nothing past the head: {line}");
+    assert!(line.len() < 400, "a bounded line, not {} bytes", line.len());
+}
+
+/// ...and the head is escaped, so a part cannot forge a second log line or
+/// smuggle a control character into somebody's terminal.
+#[tokio::test]
+async fn an_unusable_system_part_cannot_forge_a_log_line() {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+
+    let (status, _) = app
+        .upload_tr(
+            CallUpload::tr(TR_META)
+                .key(RECORDER_KEY)
+                .set("system", "x\n INFO forged line\u{1b}[31m"),
+        )
+        .await;
+
+    assert_eq!(status, 200);
+    let line = capture.only_line_containing(UNUSABLE_SYSTEM);
+    assert!(line.contains("\\n"), "escaped, not raw: {line}");
+    assert!(!line.contains('\u{1b}'), "{line}");
+    assert!(
+        capture.lines_containing("forged line").len() == 1,
+        "the forgery shares the one line it was written into: {}",
+        capture.text()
+    );
+}
+
+/// The wording is true on both paths out of the branch: the part is ignored
+/// whether the Call then matches a label or, with no `short_name`, files under
+/// Ref 0 — which a message saying "matched on shortName" would get wrong.
+#[tokio::test]
+async fn the_warning_holds_when_there_is_no_short_name_to_match_on() {
+    let capture = LogCapture::start();
+    let app = recorder_app().await;
+
+    let (status, body) = app
+        .upload_tr(
+            CallUpload::tr(r#"{"talkgroup":1,"start_time":1}"#)
+                .key(RECORDER_KEY)
+                .set("system", "abc"),
+        )
+        .await;
+
+    assert_eq!(status, 200, "{body:?}");
+    let line = capture.only_line_containing(UNUSABLE_SYSTEM);
+    assert!(!line.contains("shortName"), "{line}");
+}
