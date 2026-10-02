@@ -1599,6 +1599,9 @@ fn reached_channels(canonical: i64, patched: &[i64]) -> Vec<i64> {
     talkgroups
 }
 
+/// How much of an unusable `system` part its warning quotes (characters).
+const UNUSABLE_PART_HEAD: usize = 32;
+
 /// `POST /api/trunk-recorder-call-upload` — Trunk Recorder's native
 /// `.wav`+`.json` upload: the metadata rides as a single JSON `meta` part rather
 /// than individual form fields (rdio `parsers.go` mapping).
@@ -1666,8 +1669,17 @@ pub async fn trunk_recorder_call_upload(
     // still sees one arrive unusable says so, because an Operator's own setting
     // vanishing with no trace is worse than the fallback it vanishes into.
     let named_ref = named_system(system.as_deref());
-    if system.is_some() && named_ref.is_none() {
-        warn!(system = ?system, "unusable system part; matched on shortName");
+    if let Some(raw) = system.as_deref()
+        && named_ref.is_none()
+    {
+        // **A stranger's text**: this runs before the key is checked, bounded
+        // only by the body limit, so the line carries the part's length and a
+        // short head of it — Debug-escaped, so it cannot forge a line or smuggle
+        // a control character into a terminal. And the wording is true on both
+        // paths out of here: a label match, or Ref 0 when there is no
+        // `short_name` to match.
+        let head: String = raw.chars().take(UNUSABLE_PART_HEAD).collect();
+        warn!(system_len = raw.len(), system = ?head, "unusable system part ignored");
     }
     let short_name = clean(meta.short_name.clone());
     let system_ref = match named_ref {
