@@ -873,3 +873,60 @@ async fn the_upload_script_and_the_plugin_agree_on_a_named_system_ref() {
         "a named Ref is one more thing the two recorder-side paths must agree on"
     );
 }
+
+/// **The two ways in accept the same Refs.** A feature goes into both or
+/// neither, and this is the one whose edge differs by architecture: the script
+/// is shell arithmetic-free string checking, while the plugin reads a number —
+/// and a `long` is 32 bits on 32-bit Raspberry Pi OS, so a large `systemId`
+/// would silently truncate there. Both take 1 through 999999999999999999 (18
+/// digits always fit an i64) and refuse anything else before sending a thing.
+#[rstest::rstest]
+#[case::smallest("1", true)]
+#[case::ordinary("411", true)]
+#[case::largest_that_fits_32_bits("2147483647", true)]
+#[case::first_past_32_bits("2147483648", true)]
+#[case::largest_accepted("999999999999999999", true)]
+#[case::first_refused("1000000000000000000", false)]
+#[case::past_i64("9223372036854775808", false)]
+#[case::far_past_i64("99999999999999999999999", false)]
+#[case::zero("0", false)]
+#[case::negative("-4", false)]
+#[case::not_a_number("butco", false)]
+#[tokio::test]
+async fn the_upload_script_and_the_plugin_accept_the_same_system_refs(
+    #[case] value: &str,
+    #[case] accepted: bool,
+) {
+    needs_toolchain!();
+    if !curl_available() {
+        return skip("curl is not installed, so the uploadScript cannot run");
+    }
+    let files = CallFiles::write(&tr_meta("fulton"));
+
+    let by_script = TestApp::with_key("k").await;
+    let script = run_upload_script(&by_script, "k", &files, &["--system", value]).await;
+    let by_plugin = TestApp::with_key("k").await;
+    let plugin = run_upload(&by_plugin, "k", &files, &["--system", value]).await;
+
+    assert_eq!(
+        script.status.success(),
+        accepted,
+        "the script on {value:?}: {}",
+        String::from_utf8_lossy(&script.stderr)
+    );
+    assert_eq!(
+        plugin.status.success(),
+        accepted,
+        "the plugin on {value:?}: {}",
+        stdout_of(&plugin)
+    );
+    assert_eq!(by_script.calls().await.len(), usize::from(accepted));
+    assert_eq!(by_plugin.calls().await.len(), usize::from(accepted));
+    if accepted {
+        let wanted: i64 = value.parse().expect("an accepted value is a number");
+        for app in [&by_script, &by_plugin] {
+            let call = app.the_call().await;
+            assert_eq!(app.system_of(&call).await.r#ref, wanted);
+        }
+    }
+}

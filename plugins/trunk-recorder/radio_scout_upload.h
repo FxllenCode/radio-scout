@@ -12,6 +12,7 @@
 #ifndef RADIO_SCOUT_UPLOAD_H
 #define RADIO_SCOUT_UPLOAD_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,19 @@ namespace radio_scout {
 // `timeoutSecs` setting falls back to. Named once so the header, the plugin and
 // the guide cannot each carry their own number.
 constexpr long kDefaultTimeoutSecs = 60;
+
+// The largest System Ref an operator may name: eighteen digits, which always fit
+// Radio-Scout's i64 whatever the leading digit. `radio-scout-upload.sh` caps
+// `--system` at the same eighteen digits, and the two ways in carry a feature
+// together or not at all — `tests/trplugin.rs` runs both on the same values.
+constexpr int64_t kMaxSystemRef = 999999999999999999;
+
+// Is this a System Ref Radio-Scout will file a Call under: 1 through
+// `kMaxSystemRef`. Taken as unsigned so that a value too large for a signed
+// 64-bit is *refused* here rather than wrapping negative on its way in — and as
+// a fixed-width type because `long` is 32 bits on 32-bit Raspberry Pi OS, where
+// a large `systemId` would otherwise truncate to a different, valid-looking Ref.
+bool usable_system_ref(uint64_t value);
 
 // Which talkgroups this system sends, as the glob patterns an operator writes
 // in `talkgroupAllow` / `talkgroupDeny` — the same spelling the
@@ -54,7 +68,7 @@ struct Upload {
   // no second definition of it to drift, and a Ref is the operator's word about
   // where it goes — not something the recorder knows. It exists because two
   // sites of one network carry two `shortName`s and one identity.
-  long system_ref = 0;
+  int64_t system_ref = 0;
   // Trunk Recorder's own call JSON, verbatim — `Call_Data_t::call_json`, the
   // object `create_call_json` just wrote beside the audio. Sending it
   // unmodified is why there is no field mapping here to drift from the parser.

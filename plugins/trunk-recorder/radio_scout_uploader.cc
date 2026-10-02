@@ -37,7 +37,7 @@ struct Configured_System {
   std::string short_name;
   // The Radio-Scout System Ref this recorder system files under, or 0 to let
   // Radio-Scout match `short_name` against a System's label.
-  long system_ref = 0;
+  int64_t system_ref = 0;
   std::string api_key;
   radio_scout::TalkgroupFilter filter;
 };
@@ -143,12 +143,17 @@ public:
         // silently filing under the wrong System is worse than a log line.
         if (entry.contains("systemId")) {
           const json &id = entry.at("systemId");
-          if (id.is_number_integer() && id.get<long>() > 0) {
-            system.system_ref = id.get<long>();
+          // Read as unsigned: a non-negative integer is stored that way, so a
+          // value too large for a signed 64-bit is *refused* by the range check
+          // rather than wrapping negative, and a negative one is not unsigned
+          // at all. A `long` would truncate on 32-bit Raspberry Pi OS.
+          if (id.is_number_unsigned() && radio_scout::usable_system_ref(id.get<uint64_t>())) {
+            system.system_ref = static_cast<int64_t>(id.get<uint64_t>());
           } else {
             BOOST_LOG_TRIVIAL(error)
                 << "\t[" << plugin_name << "]\t" << system.short_name
-                << ": \"systemId\" must be a positive whole number — ignoring it, so this "
+                << ": \"systemId\" must be a whole number from 1 to "
+                << radio_scout::kMaxSystemRef << " — ignoring it, so this "
                    "system is matched on its shortName";
           }
         }
