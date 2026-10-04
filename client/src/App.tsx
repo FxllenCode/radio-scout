@@ -13,6 +13,7 @@ import { AdminScreen } from '@/routes/admin/AdminScreen'
 import { AdminTalkgroupsScreen } from '@/routes/admin/AdminTalkgroupsScreen'
 import { AccessCodesScreen } from '@/routes/admin/AccessCodesScreen'
 import { ApiKeysScreen } from '@/routes/admin/ApiKeysScreen'
+import { DirwatchesScreen } from '@/routes/admin/DirwatchesScreen'
 import { DownstreamsScreen } from '@/routes/admin/DownstreamsScreen'
 import { EventsScreen } from '@/routes/admin/EventsScreen'
 import { ListenersScreen } from '@/routes/admin/ListenersScreen'
@@ -71,6 +72,8 @@ export default function App() {
           element={<DownstreamsScreen />}
         />
         <Route path="settings/admin/webhooks" element={<WebhooksScreen />} />
+        {/* Folders a Recorder drops Calls into (#72, spec US 14). */}
+        <Route path="settings/admin/dirwatch" element={<DirwatchesScreen />} />
         <Route path="settings/admin/shares" element={<SharesScreen />} />
         {/* Incidents frozen against Retention (#67, spec US 38). Behind the
             same gate: freezing copies audio no policy can reclaim, which is

@@ -12,6 +12,7 @@ import type {
   AdminAccessCode,
   AdminApiKey,
   AdminAssignment,
+  AdminDirwatch,
   AdminDownstream,
   AdminEvent,
   AdminEventDetail,
@@ -46,6 +47,8 @@ import type {
   MemberRef,
   MergeReport,
   NewAccessCode,
+  DirwatchListing,
+  NewDirwatch,
   NewDownstream,
   NewEvent,
   NewToneProfile,
@@ -125,6 +128,7 @@ export const api = createApi({
     'Unit',
     'ApiKey',
     'Downstream',
+    'Dirwatch',
     'Webhook',
     'ToneProfile',
     'ShareLink',
@@ -674,6 +678,38 @@ export const api = createApi({
       invalidatesTags: ['Downstream'],
     }),
 
+    /** **Dirwatch** (#72): every watched folder with its health, and the roots
+     *  a watch may be inside — which the TOML sets and this never writes. */
+    getDirwatches: builder.query<DirwatchListing, void>({
+      query: () => ({ url: 'api/admin/dirwatches' }),
+      providesTags: ['Dirwatch'],
+    }),
+    createDirwatch: builder.mutation<AdminDirwatch, NewDirwatch>({
+      query: (body) => ({ url: 'api/admin/dirwatches', method: 'POST', body }),
+      invalidatesTags: ['Dirwatch'],
+    }),
+    updateDirwatch: builder.mutation<
+      AdminDirwatch,
+      { id: number; patch: Partial<NewDirwatch> }
+    >({
+      query: ({ id, patch }) => ({
+        url: `api/admin/dirwatches/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['Dirwatch'],
+    }),
+    deleteDirwatch: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/dirwatches/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Dirwatch'],
+    }),
+    /** "Scan now": look in the folder without waiting to be told. A file
+     *  refused this run is looked at again only if it has changed. */
+    scanDirwatch: builder.mutation<AdminDirwatch, number>({
+      query: (id) => ({ url: `api/admin/dirwatches/${id}/scan`, method: 'POST' }),
+      invalidatesTags: ['Dirwatch'],
+    }),
+
     /** **Webhooks** (#54), with their health beside them, on the Downstream
      *  listing's terms. The URL never comes back — see [`AdminWebhook`]. */
     getWebhooks: builder.query<Listing<AdminWebhook>, void>({
@@ -847,6 +883,7 @@ export const {
   useAssignTalkgroupsMutation,
   useCreateAccessCodeMutation,
   useCreateApiKeyMutation,
+  useCreateDirwatchMutation,
   useCreateDownstreamMutation,
   useCreateEventMutation,
   useCreateToneProfileMutation,
@@ -858,6 +895,7 @@ export const {
   useCreateUnitMutation,
   useDeleteAccessCodeMutation,
   useDeleteApiKeyMutation,
+  useDeleteDirwatchMutation,
   useDeleteDownstreamMutation,
   useDeleteEventMutation,
   useDeleteToneProfileMutation,
@@ -883,6 +921,7 @@ export const {
   useGetRecordersQuery,
   useGetQuietSpansQuery,
   useSetStarMutation,
+  useGetDirwatchesQuery,
   useGetDownstreamsQuery,
   useGetEventQuery,
   useGetEventsQuery,
@@ -910,6 +949,8 @@ export const {
   useUnlockMutation,
   useUpdateAccessCodeMutation,
   useUpdateApiKeyMutation,
+  useScanDirwatchMutation,
+  useUpdateDirwatchMutation,
   useUpdateDownstreamMutation,
   useUpdateEventMutation,
   useUpdateToneProfileMutation,

@@ -533,6 +533,73 @@ export interface AdminDownstream {
   createdAtMs: number
 }
 
+/** Which Recorder's folder a **Dirwatch** reads (#72). */
+export type DirwatchFormat = 'trunk-recorder' | 'sdrtrunk' | 'dsdplus' | 'mask'
+
+/** Whether a watch is running, and if not, the one thing to fix. */
+export type DirwatchStatus =
+  | 'starting'
+  | 'watching'
+  | 'disabled'
+  | 'outside-roots'
+  | 'no-such-directory'
+  | 'cannot-watch'
+  | 'unreadable'
+
+/** What one watch is doing — counters since the server last started. */
+export interface DirwatchHealth {
+  status: DirwatchStatus
+  ingested: number
+  refused: number
+  lastIngestMs?: number | null
+  /** `<reason> <file name>` — `no-match 0412_dispatch.wav`. */
+  lastRefusal?: string | null
+}
+
+/** One **Dirwatch** (#72): a folder a Recorder drops Calls into. */
+export interface AdminDirwatch {
+  id: number
+  label?: string | null
+  /** Where it really is — symlinks and `..` already resolved by the server. */
+  directory: string
+  format: DirwatchFormat
+  /** `null` reads the format's own default. */
+  extension?: string | null
+  mask?: string | null
+  systemRef?: number | null
+  talkgroupRef?: number | null
+  frequency?: number | null
+  delayMs: number
+  deleteAfter: boolean
+  poll: boolean
+  disabled: boolean
+  createdAtMs: number
+  health: DirwatchHealth
+}
+
+/** Every watch, and where a watch may be. `roots` empty means Dirwatch is off
+ *  on this Instance — `[dirwatch] roots` is set in the TOML, never here. */
+export interface DirwatchListing {
+  results: AdminDirwatch[]
+  roots: string[]
+}
+
+/** What a new watch needs. */
+export interface NewDirwatch {
+  label?: string | null
+  directory: string
+  format: DirwatchFormat
+  extension?: string | null
+  mask?: string | null
+  systemRef?: number | null
+  talkgroupRef?: number | null
+  frequency?: number | null
+  delayMs?: number
+  deleteAfter?: boolean
+  poll?: boolean
+  disabled?: boolean
+}
+
 /** What a new peer needs. `apiKey` is write-only: it goes up and never comes
  *  back, and a `PATCH` that omits it leaves the stored one alone — which is what
  *  makes re-scoping a peer possible without re-typing a credential the screen

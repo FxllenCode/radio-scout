@@ -7,6 +7,7 @@ import type {
   EventMember,
   FreezeReport,
   AdminShareLink,
+  AdminDirwatch,
   AdminDownstream,
   AdminWebhook,
   AdminLabel,
@@ -48,6 +49,10 @@ export class FakeInstance {
    *  that read one back would read `undefined` here too. */
   codes: AdminAccessCode[] = []
   downstreams: AdminDownstream[] = []
+  /** **Dirwatch** (#72), and the roots the TOML allows — which no request here
+   *  can change, as no request to the real one can. */
+  dirwatches: AdminDirwatch[] = []
+  dirwatchRoots: string[] = ['/srv/recorders']
   webhooks: AdminWebhook[] = []
   shares: AdminShareLink[] = []
   /** Events (#67), with their frozen members beside them for `members`' reason:
@@ -166,6 +171,29 @@ export class FakeInstance {
       ...row,
     }
     this.downstreams.push(created)
+    return created
+  }
+
+  dirwatch(row: Partial<AdminDirwatch> = {}): AdminDirwatch {
+    const created: AdminDirwatch = {
+      id: this.id(),
+      label: null,
+      directory: '/srv/recorders/trunk-recorder',
+      format: 'trunk-recorder',
+      extension: null,
+      mask: null,
+      systemRef: null,
+      talkgroupRef: null,
+      frequency: null,
+      delayMs: 2000,
+      deleteAfter: false,
+      poll: false,
+      disabled: false,
+      createdAtMs: 1_700_000_000_000,
+      health: { status: 'watching', ingested: 0, refused: 0 },
+      ...row,
+    }
+    this.dirwatches.push(created)
     return created
   }
 
@@ -815,6 +843,61 @@ export function curationHandlers(instance: FakeInstance) {
         body: undefined,
       })
       instance.downstreams = instance.downstreams.filter(
+        (it) => String(it.id) !== params.id,
+      )
+      return new HttpResponse(null, { status: 204 })
+    }),
+
+    // **Dirwatch** (#72). The refusal modelled is the one the form most needs
+    // to render beside its input: a folder outside the roots.
+    http.get(`${ORIGIN}/api/admin/dirwatches`, () =>
+      HttpResponse.json({
+        results: instance.dirwatches,
+        roots: instance.dirwatchRoots,
+      }),
+    ),
+    http.post(`${ORIGIN}/api/admin/dirwatches`, async ({ request }) => {
+      const body = await record('POST', request, '/api/admin/dirwatches')
+      const directory = String(body.directory ?? '')
+      if (!instance.dirwatchRoots.some((root) => directory.startsWith(root))) {
+        return refusal(
+          400,
+          'outside-roots',
+          `"${directory}" is not inside a folder this instance allows watching (see [dirwatch] roots)`,
+        )
+      }
+      const row = instance.dirwatch({
+        ...(body as Partial<AdminDirwatch>),
+        health: { status: 'starting', ingested: 0, refused: 0 },
+      })
+      return HttpResponse.json(row, { status: 201 })
+    }),
+    http.patch(`${ORIGIN}/api/admin/dirwatches/:id`, async ({ request, params }) => {
+      const body = await record('PATCH', request, `/api/admin/dirwatches/${params.id}`)
+      const row = instance.dirwatches.find((it) => String(it.id) === params.id)
+      if (!row) return refusal(404, 'dirwatch-not-found', 'no such dirwatch')
+      Object.assign(row, body)
+      if (row.disabled) row.health = { ...row.health, status: 'disabled' }
+      return HttpResponse.json(row)
+    }),
+    http.post(`${ORIGIN}/api/admin/dirwatches/:id/scan`, ({ params }) => {
+      instance.wrote.push({
+        method: 'POST',
+        path: `/api/admin/dirwatches/${params.id}/scan`,
+        body: undefined,
+      })
+      const row = instance.dirwatches.find((it) => String(it.id) === params.id)
+      return row
+        ? HttpResponse.json(row)
+        : refusal(404, 'dirwatch-not-found', 'no such dirwatch')
+    }),
+    http.delete(`${ORIGIN}/api/admin/dirwatches/:id`, ({ params }) => {
+      instance.wrote.push({
+        method: 'DELETE',
+        path: `/api/admin/dirwatches/${params.id}`,
+        body: undefined,
+      })
+      instance.dirwatches = instance.dirwatches.filter(
         (it) => String(it.id) !== params.id,
       )
       return new HttpResponse(null, { status: 204 })

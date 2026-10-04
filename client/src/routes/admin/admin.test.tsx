@@ -116,6 +116,7 @@ describe('the admin gate', () => {
       '/settings/admin/tags',
       '/settings/admin/api-keys',
       '/settings/admin/codes',
+      '/settings/admin/dirwatch',
       '/settings/admin/downstreams',
       '/settings/admin/webhooks',
       '/settings/admin/shares',

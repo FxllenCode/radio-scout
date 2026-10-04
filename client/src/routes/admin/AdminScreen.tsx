@@ -49,6 +49,11 @@ const SECTIONS = [
     hint: 'what listeners unlock restricted channels with',
   },
   {
+    to: '/settings/admin/dirwatch',
+    label: 'Dirwatch',
+    hint: 'folders a recorder drops calls into',
+  },
+  {
     to: '/settings/admin/downstreams',
     label: 'Downstreams',
     hint: 'instances you forward calls to',
