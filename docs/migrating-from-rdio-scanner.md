@@ -37,12 +37,20 @@ If your history matters, the realistic options are to keep the old instance runn
 for as long as you need it, or to accept the gap. Running both in parallel (below) means the
 gap is only ever "everything before the day you switched".
 
-**The admin web UI.** Configuration is a TOML file, environment variables and flags rather than
-a settings interface. The admin surface today is login and talkgroup CSV import.
+**rdio's admin page, as one page.** The machine — ports, storage, retention, and the folders a
+dirwatch may read — is configured in a TOML file, environment variables and flags. Everything
+else is edited in the browser under Settings → Admin, one screen per kind of thing rather than
+rdio's single page saved as a whole.
 
 **`/rdio-scanner`.** The legacy app is not hosted.
 
-**Downstream forwarding, the broadcast delayer, and dirwatch ingest.** Not built.
+**The broadcast delayer.** Not built yet (#73).
+
+**Your dirwatches, as rows.** Dirwatch is here — Trunk Recorder, SDRTrunk, DSDPlus and filename
+masks, with rdio's mask tokens unchanged — but the watches are re-created by hand under
+Settings → Admin → Dirwatch, and only inside the folders `[dirwatch] roots` allows. rdio lets
+its admin page point a watch anywhere the server can read and delete; here that is the
+configuration file's decision ([docs/recorders.md](recorders.md#dirwatch-a-recorder-that-only-writes-files)).
 
 ## Running both at once
 

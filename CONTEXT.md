@@ -280,7 +280,9 @@ An **Operator**-configured URL that receives the **Calls** they asked to hear ab
 _Avoid_: integration, callback, alert, notification.
 
 **Dirwatch**:
-Ingesting **Calls** from a watched directory instead of an HTTP upload — recorder drop folders, DSDPlus, filename masks.
+Ingesting **Calls** from a watched directory instead of an HTTP upload — recorder drop folders, DSDPlus, filename masks. Each watch is a row an **Operator** curates in the browser, but **where a watch may be is infrastructure**: `[dirwatch] roots`, in the TOML ([ADR-0021](docs/adr/0021-dirwatch-roots-are-infrastructure.md)), because a watch reads and can delete the files it is pointed at. A dropped file goes through the very pipeline an upload does and is decided as an **Admission**; one that cannot be a Call is *refused*, logged, and left where it is.
+
+A watch that keeps its files carries a **watermark** — every file written at or before it has been handled — which is how a restart backfills exactly what arrived while the Instance was down. A watch that deletes as it goes needs none: whatever is still in the folder is still owed.
 _Avoid_: file ingest, folder watch, hot folder.
 
 **Delay**:

@@ -174,6 +174,12 @@ consistent loudness instead of swinging between painful and inaudible — voice 
 EBU R128 normalization, with optional RNNoise suppression. It never runs on the ingest path:
 a recorder's upload is answered before any of it starts.
 
+**Dirwatch** *(off until you name a folder)*. For a recorder that only writes files — DSDPlus
+Fast Lane, a Trunk Recorder with no network path, anything whose file names describe the call —
+Radio-Scout watches the folder and ingests each Call exactly as an upload, rdio's filename masks
+included. It waits for a file to finish, never deletes one it failed to store, and picks up what
+arrived while it was down.
+
 **Retention.** Prune by age, by total size, or both. A sweeper ages Calls out, enforces the
 cap, and reclaims audio no Call points at.
 
@@ -202,9 +208,10 @@ after switching:
   Archive from empty. Run both side by side during cutover — recorders happily upload to two
   servers at once.
 - **The machine is still configured in a file.** Ports, storage, retention and the database
-  live in `radio-scout.toml`, environment variables and flags. Everything *else* — systems,
-  talkgroups, groups, tags, units, API keys, downstream peers, tone profiles and webhooks — is
-  edited in the browser under Settings → Admin.
+  live in `radio-scout.toml`, environment variables and flags — and so do the folders a
+  dirwatch may read. Everything *else* — systems, talkgroups, groups, tags, units, API keys,
+  downstream peers, dirwatches, tone profiles and webhooks — is edited in the browser under
+  Settings → Admin.
 - **`/rdio-scanner` is not served.** Radio-Scout does not host the legacy app.
 - **A different UI.** It is a replacement, not a reskin — the screens are not where rdio put
   them.

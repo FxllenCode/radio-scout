@@ -173,6 +173,22 @@ Simpler for a container: set them yourself, and nothing is generated.
 -e RADIO_SCOUT_API_KEY=… -e RADIO_SCOUT_ADMIN_PASSWORD=…
 ```
 
+**Watching a recorder's folder from a container** ([Dirwatch](recorders.md#dirwatch-a-recorder-that-only-writes-files))
+needs that folder mounted in and named as a root — and, since the image carries no zone
+database, the host's zone mounted too, for the recorders that write local times:
+
+```sh
+docker run -d -p 3000:3000 \
+  -v radio-scout-data:/data \
+  -v /srv/trunk-recorder:/recordings \
+  -v /etc/localtime:/etc/localtime:ro \
+  -e RADIO_SCOUT_DIRWATCH_ROOTS=/recordings \
+  ghcr.io/fxllencode/radio-scout:latest
+```
+
+The container's user (below) has to be able to read the folder, and to write it if the watch
+deletes as it goes.
+
 **One gotcha, and it is Docker's:** the image runs as uid `65532`, not root. A
 *named* volume (`-v radio-scout-data:/data`, above) inherits the right ownership
 when Docker creates it. A *bind mount* (`-v ./data:/data`) does not — the host

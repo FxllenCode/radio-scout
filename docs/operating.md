@@ -364,6 +364,19 @@ theirs. The address counted is the TCP peer's unless you named that peer in
 There is no on/off switch for the feature, because a code is a row and a gate is a column: with
 nothing marked restricted, none of this runs.
 
+## Watching recorder folders
+
+**Dirwatch** ingests the files a recorder drops into a folder, with no upload configured — the
+how-to for each recorder is in [docs/recorders.md](recorders.md#dirwatch-a-recorder-that-only-writes-files).
+You want it for DSDPlus Fast Lane, for a recorder with no network path to this machine, or for
+any folder of audio whose file names describe the call.
+
+The one setting is `[dirwatch] roots`: the folders a watch may be created inside. It is off
+until you name one, and it lives in the file rather than the browser on purpose — a watch reads
+every file in its folder and can delete them, and that is not something a browser session
+should be able to point at the rest of the machine. Keep the roots as narrow as the recorders'
+own folders. A root removed later stops any watch inside it, and the watch's row says why.
+
 ## Forwarding to other instances
 
 **Settings → Admin → Downstreams.** Each peer is an address, the API key *that peer* issued you,

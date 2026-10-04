@@ -7,7 +7,8 @@ URL.
 
 Trunk Recorder can do better than that dialect, though, and the recommended setup below uses a
 small shipped script to send everything it knows. There is a first-party plugin that sends the
-same thing, for installs that would rather load one. SDRTrunk has one way in, and it is the URL.
+same thing, for installs that would rather load one. SDRTrunk has one way in, and it is the URL. For a recorder that only writes files — or one
+with no network path to the instance — there is [Dirwatch](#dirwatch-a-recorder-that-only-writes-files).
 
 Every claim here about a recorder was read out of that recorder's source, not its docs, with
 line references so it can be re-checked when those projects move.
@@ -409,6 +410,115 @@ configured in SDRTrunk reach Radio-Scout on their own**, even though its upload 
 for either: SDRTrunk writes them into the ID3 tag of every MP3 it uploads, and Radio-Scout reads
 them as each Call arrives. It also goes back over Calls you uploaded before. See
 [Names SDRTrunk was already sending you](operating.md#names-sdrtrunk-was-already-sending-you).
+
+---
+
+## Dirwatch: a recorder that only writes files
+
+Everything above is an upload. **Dirwatch** is the other way in: Radio-Scout watches a folder
+the recorder already writes to, and ingests each Call it finds there through the same pipeline
+an upload takes — deduplication, auto-populate, merges, unit names, all of it. Reach for it when
+there is no network path from the recorder to the instance, for **DSDPlus Fast Lane** (which
+has no upload at all), or for anything else that writes audio files with the call's details in
+their names.
+
+### Turning it on
+
+A watch reads every matching file in its folder and can delete them afterwards, so **where a
+watch may be is set in the configuration, not in the browser** — the browser only chooses
+inside the folders you allow:
+
+```toml
+[dirwatch]
+roots = ["/srv/trunk-recorder", "/home/pi/SDRTrunk/recordings"]
+```
+
+(or `RADIO_SCOUT_DIRWATCH_ROOTS=/srv/trunk-recorder:/home/pi/SDRTrunk/recordings`, separated as
+`PATH` is), then restart. With no roots, Dirwatch is off and the screen says so. Then add a watch
+under **Settings → Admin → Dirwatch**: the folder, which recorder writes it, and whether to
+delete each file once it is ingested. Radio-Scout's service user needs to be able to read the
+folder — and to write it, for delete-after.
+
+### Trunk Recorder
+
+Point the watch at TR's `captureDir` — the whole of it; the `shortName/YYYY/M/D` folders under
+it are watched as they appear. TR has to **keep** its files for there to be anything to read, so
+leave `audioArchive` and `callLog` at their default `true`. Each Call is its `.json` and the
+audio beside it: `wav` by default, or set the watch's extension to `m4a` if `compressWav` is on
+and you would rather store the smaller copy.
+
+TR writes the `.json` *before* it renders the audio, so for a moment every Call is a `.json`
+alone. A watch waits for the audio to arrive rather than dropping the Call, which is what
+rdio-scanner does; a `.json` still alone after a minute is refused `no-audio`.
+
+The `.json` is the same document the native upload sends, read by the same parser, so a Call
+that arrives this way is identical to one that arrived by `uploadScript`. Its System is the one
+whose label matches the `short_name`, exactly as on an upload — or set **System ref** on the
+watch to file everything under a Ref of your choosing.
+
+### SDRTrunk
+
+Set SDRTrunk's audio recording format to **MP3** and point the watch at its recordings folder.
+Everything comes from the ID3 tag SDRTrunk writes into each file: the talkgroup and its alias,
+the radio, the System by name, the tower, and when it was recorded. Set **System ref** on the
+watch if you would rather file it under a Ref than by SDRTrunk's System name.
+
+The tag's date is written in the recorder machine's local time with no zone, and Radio-Scout
+reads it in **its own** — see [Times with no zone](#times-with-no-zone).
+
+### DSDPlus Fast Lane
+
+Point the watch at the `Record`, `1R-Record` or `VC-Record` folder. DSDPlus writes nothing but
+the path — the folder is the date, the file name the time, the network, the talkgroup and the
+radio (`20220809/153120_001_DMR(BS)_1-899_DCC2_Slot1_GC_750[Ram_Muni]_52.mp3`) — and the
+System Ref is read from the network field where the protocol carries one (DMR and Connect Plus
+base stations, P25's SYSID, NXDN's site or RAN). Where it does not, set **System ref** on the
+watch, or the file is refused `no-system`.
+
+### Anything else: a filename mask
+
+A mask describes a file name with tokens: `cymx_#TG_#DATE_#TIME_#HZ` reads
+`cymx_1457_20201231_083439_119100000.wav` as talkgroup 1457 at 08:34:39 on 119.1 MHz. The tokens
+are rdio-scanner's — `#TG`, `#TGAFS`, `#TGHZ`, `#TGKHZ`, `#TGMHZ`, `#TGLBL`, `#SYS`, `#SYSLBL`,
+`#SITE`, `#SITELBL`, `#UNIT`, `#UNITLBL`, `#DATE`, `#TIME`, `#ZTIME`, `#HZ`, `#KHZ`, `#MHZ`,
+`#GROUP`, `#TAG` — so a mask that worked there works here, matched anywhere in the name as
+rdio does. A watch has to know which talkgroup and which System every file is: from a token,
+or from the watch's own **Talkgroup ref** and **System ref**.
+
+The differences from rdio are all fixes: the text between tokens is matched literally (in
+rdio a `.` matches anything and a bracket crashes the server), a mask is checked when you save
+it rather than at the first file, `#UNITLBL` works, `#MHZ` rounds rather than truncating, and
+`#DATE` without a time no longer reads the date as a count of seconds since 1970.
+
+### What a watch does with a file
+
+- **It waits until the file has been left alone** for the watch's delay (2 seconds by default),
+  so a file still being written is never read half-done. A recorder that writes to a temporary
+  name and renames it into place can use a delay of 0.
+- **Every file gets an answer, and the answer is logged.** A Call stored or replaced, a
+  duplicate, a blacklisted talkgroup — those are answers, and with delete-after the file is
+  removed. A file that cannot be a Call is refused with a line naming why
+  (`file refused reason=no-match file=…`), counted on the watch, and **left where it is** even
+  with delete-after; it is not refused again until it changes. A file whose ingest *failed* —
+  the disk full, the database unreachable — is **never** deleted, and is tried again.
+- **A restart loses nothing.** A watch that deletes as it goes picks up whatever is still in its
+  folder. A watch that keeps its files remembers how far it has read, so it picks up exactly the
+  files that arrived while Radio-Scout was down — and a new watch pointed at a folder full of
+  history does not import it.
+- **When a file does not say when it was recorded,** its modification time does, rather than the
+  moment Radio-Scout noticed it — so a backfill after downtime files every Call at its real time.
+
+### Network shares
+
+A share mounted over NFS or SMB sends no notice of new files, so turn on **Look every few
+seconds** for a watch on one. Everything else is the same.
+
+### Times with no zone
+
+DSDPlus names, a mask's `#TIME`, and SDRTrunk's tag carry a wall-clock time with no zone, and
+Radio-Scout reads them in its own. That is right when it runs on the recorder's machine or in
+the same zone. In the Docker image, which has no zone database, mount the host's:
+`-v /etc/localtime:/etc/localtime:ro`. A mask's `#ZTIME` is UTC and needs neither.
 
 ---
 
