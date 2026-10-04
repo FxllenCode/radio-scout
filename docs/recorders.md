@@ -119,8 +119,7 @@ key scoped to a System, and every rdio-scanner upload, calls `system`).
   `shortName`, and gets a System of its own.
 - **Reuse the Ref the site already has**, rather than picking a fresh one. Naming the Ref of an
   existing System files the site's Calls under it, leaves its label alone, and records the
-  `shortName` as the **Site** that heard each Call — shown on the Call itself; Admin has no
-  Sites view.
+  `shortName` as the **Site** that heard each Call, shown on the Call itself.
 - **A fresh Ref starts a second System** instead, created as `System 411` (the default every
   auto-created System gets) and left that way until you rename it in Settings → Admin → Systems.
   What the site's old System carries stays behind on it: its talkgroup names, groups, tags,
@@ -129,8 +128,8 @@ key scoped to a System, and every rdio-scanner upload, calls `system`).
   published openly until someone restricts the new System.
 - **A Ref nothing has claimed is only created when global auto-populate is on**
   (`[ingest] auto_populate`). With it off, Radio-Scout drops the Call instead, answering `200`
-  as though it had taken it — see "Calls arrive with numeric names" and `reason=not-populated`
-  further down.
+  as though it had taken it, and says why in its own log as `reason=not-populated` — see
+  "`Upload Success` means Radio-Scout accepted the request" further down.
 
 A `--system` that is not a whole number from 1 to 999999999999999999 (so at most 18 digits)
 stops the script at once, because a typo there would otherwise quietly file a day's Calls
@@ -231,8 +230,9 @@ Then the `plugins` entry in `config.json`:
   one network. It is the same setting and the same rules as `--system` on the `uploadScript`,
   above — reuse the Ref the site already has, give every site of the network the setting, and
   a fresh Ref starts a second System labelled `System <ref>`. It has to be a whole number from
-  1 to 999999999999999999, the same range the script takes; anything else is logged and
-  ignored.
+  1 to 999999999999999999, the same range the script takes, and anything else is refused the
+  way a bad `--system` stops the script: nothing from that system is uploaded, and every Call
+  it refuses says so in Trunk Recorder's log, until the setting is fixed.
 - **`talkgroupAllow` / `talkgroupDeny` take glob patterns** — `*` for any run of characters,
   `?` for exactly one, and every other character means itself, so `5.155` matches a talkgroup
   with a dot in it and nothing else. A non-empty allow list is exhaustive; deny then removes

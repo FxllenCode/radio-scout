@@ -11,9 +11,11 @@
 
 #include "radio_scout_upload.h"
 
+#include <cstdint>
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -27,6 +29,24 @@ std::string read_file(const std::string &path) {
   return contents.str();
 }
 
+// `--system`, read the way the plugin's `systemId` can be written: as a JSON
+// number. JSON's grammar is the only one a `systemId` has, so a leading zero is
+// not a number here either (`0411` is invalid JSON), nor is a sign, a fraction
+// or a value too large for 64 bits. Whether what is left is a Ref is the core's
+// call, not this reader's.
+std::optional<uint64_t> as_json_whole_number(const std::string &text) {
+  const bool digits =
+      !text.empty() && text.find_first_not_of("0123456789") == std::string::npos;
+  if (!digits || (text.size() > 1 && text[0] == '0')) {
+    return std::nullopt;
+  }
+  try {
+    return std::stoull(text);
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -37,6 +57,7 @@ int main(int argc, char *argv[]) {
   bool compress_wav = false;
   radio_scout::TalkgroupFilter filter;
   long talkgroup = 0;
+  std::string system_text;
 
   const std::vector<std::string> args(argv + 1, argv + argc);
   for (size_t i = 0; i < args.size(); ++i) {
@@ -47,26 +68,10 @@ int main(int argc, char *argv[]) {
     } else if (flag == "--key" && has_value) {
       upload.api_key = args[++i];
     } else if (flag == "--system" && has_value) {
-      // The same rule the plugin's `systemId` is held to (`usable_system_ref`),
-      // refused before anything is sent: digits only, so `-4` and `abc` never
-      // reach the parser, and a value too large for 64 bits is a refusal and not
-      // an exception.
-      const std::string &text = args[++i];
-      uint64_t value = 0;
-      bool digits = !text.empty() && text.find_first_not_of("0123456789") == std::string::npos;
-      try {
-        if (digits) {
-          value = std::stoull(text);
-        }
-      } catch (const std::exception &) {
-        digits = false;
-      }
-      if (!digits || !radio_scout::usable_system_ref(value)) {
-        std::cerr << "harness: --system needs a whole number from 1 to "
-                  << radio_scout::kMaxSystemRef << ", got \"" << text << "\"\n";
-        return 2;
-      }
-      upload.system_ref = static_cast<int64_t>(value);
+      // Handed to the same `read_system_ref` the plugin's `systemId` is, and
+      // refused — or not — by `send`, exactly as the plugin's would be.
+      system_text = args[++i];
+      upload.system_ref = radio_scout::read_system_ref(as_json_whole_number(system_text));
     } else if (flag == "--meta" && has_value) {
       meta_path = args[++i];
     } else if (flag == "--wav" && has_value) {
@@ -101,6 +106,12 @@ int main(int argc, char *argv[]) {
   if (result.unconfigured) {
     std::cout << "not configured: "
               << (upload.server.empty() ? "no server" : "no apiKey") << "\n";
+    return 0;
+  }
+  if (result.unusable_system_ref) {
+    std::cout << "not uploaded: --system \"" << system_text
+              << "\" is not a System Ref (a whole number from 1 to "
+              << radio_scout::kMaxSystemRef << ")\n";
     return 0;
   }
   if (result.sent) {

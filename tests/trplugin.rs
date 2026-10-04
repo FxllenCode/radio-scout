@@ -874,13 +874,26 @@ async fn the_upload_script_and_the_plugin_agree_on_a_named_system_ref() {
     );
 }
 
-/// **The two ways in accept the same Refs.** A feature goes into both or
-/// neither, and this is the one whose edge differs by architecture: the script
-/// is shell arithmetic-free string checking, while the plugin reads a number —
-/// and a `long` is 32 bits on 32-bit Raspberry Pi OS, so a large `systemId`
-/// would silently truncate there. Both take 1 through 999999999999999999 (18
-/// digits always fit an i64) and refuse anything else before sending a thing.
-#[rstest::rstest]
+/// **The two ways in accept the same Refs, and refuse the rest the same way.**
+/// A feature goes into both or neither, and this one's edge differs by
+/// architecture: the script checks the text it was given, with no shell
+/// arithmetic to overflow, while the plugin reads a number — and a `long` is 32
+/// bits on 32-bit Raspberry Pi OS, so a large `systemId` would silently truncate
+/// there. Both take 1 through 999999999999999999 (18 digits always fit an i64).
+///
+/// **Anything else is refused on every Call, and nothing is sent** (#111).
+/// Falling back to the `shortName` would file a typo's Calls under whatever
+/// System that name matches, behind one startup line nobody reads. Each way in
+/// says so the way its host listens: the script exits non-zero, which Trunk
+/// Recorder logs as a failed upload; the plugin logs an ERROR and answers 0,
+/// because a retry cannot fix a setting. That difference in exit status is the
+/// two hosts', not the rule's.
+///
+/// The plugin's half runs through the harness, which reads `--system` with
+/// JSON's grammar — the only one a `systemId` can be written in, so `0411` is
+/// no more a number to it than to the script — and hands the result to the
+/// same core the shipped plugin does.
+#[rstest]
 #[case::smallest("1", true)]
 #[case::ordinary("411", true)]
 #[case::largest_that_fits_32_bits("2147483647", true)]
@@ -890,6 +903,7 @@ async fn the_upload_script_and_the_plugin_agree_on_a_named_system_ref() {
 #[case::past_i64("9223372036854775808", false)]
 #[case::far_past_i64("99999999999999999999999", false)]
 #[case::zero("0", false)]
+#[case::leading_zero("0411", false)]
 #[case::negative("-4", false)]
 #[case::not_a_number("butco", false)]
 #[tokio::test]
@@ -914,12 +928,18 @@ async fn the_upload_script_and_the_plugin_accept_the_same_system_refs(
         "the script on {value:?}: {}",
         String::from_utf8_lossy(&script.stderr)
     );
-    assert_eq!(
+    assert!(
         plugin.status.success(),
-        accepted,
-        "the plugin on {value:?}: {}",
+        "the plugin answers 0 on {value:?} — a retry cannot fix a setting: {}",
         stdout_of(&plugin)
     );
+    if !accepted {
+        assert!(
+            stdout_of(&plugin).contains("not uploaded"),
+            "the plugin says on every Call that it refused {value:?}: {}",
+            stdout_of(&plugin)
+        );
+    }
     assert_eq!(by_script.calls().await.len(), usize::from(accepted));
     assert_eq!(by_plugin.calls().await.len(), usize::from(accepted));
     if accepted {

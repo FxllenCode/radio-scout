@@ -112,7 +112,7 @@ while [ $# -gt 0 ]; do
 		# warning and matches on shortName instead, which is the fallback this
 		# check exists to keep a mistyped setting from reaching.
 		case "$SYSTEM_REF" in
-		'' | *[!0-9]* | 0*) die "--system needs a positive whole number (a Radio-Scout System ref), got \"$SYSTEM_REF\"" ;;
+		'' | *[!0-9]* | 0*) die "--system needs a whole number from 1 to 999999999999999999 (a Radio-Scout System ref), got \"$SYSTEM_REF\"" ;;
 		esac
 		# A ref this large would overflow Radio-Scout's own i64 and fall back to
 		# matching on shortName (`named_system`'s rule) — the fallback this

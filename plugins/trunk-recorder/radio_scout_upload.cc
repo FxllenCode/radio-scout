@@ -92,8 +92,15 @@ bool matches_any(const std::vector<std::string> &patterns, const std::string &te
 
 } // namespace
 
-bool usable_system_ref(uint64_t value) {
-  return value >= 1 && value <= static_cast<uint64_t>(kMaxSystemRef);
+SystemRef read_system_ref(std::optional<uint64_t> written) {
+  SystemRef read;
+  if (written.has_value() && *written >= 1 && *written <= static_cast<uint64_t>(kMaxSystemRef)) {
+    read.kind = SystemRef::Kind::Named;
+    read.value = static_cast<int64_t>(*written);
+  } else {
+    read.kind = SystemRef::Kind::Unusable;
+  }
+  return read;
 }
 
 bool TalkgroupFilter::admits(long talkgroup) const {
@@ -116,6 +123,10 @@ Result send(const Upload &upload) {
     result.unconfigured = true;
     return result;
   }
+  if (upload.system_ref.kind == SystemRef::Kind::Unusable) {
+    result.unusable_system_ref = true;
+    return result;
+  }
 
   // Trunk Recorder concludes each Call on a worker thread of its own, so the
   // first `curl_easy_init` can happen on several at once. libcurl's implicit
@@ -136,8 +147,8 @@ Result send(const Upload &upload) {
   curl_mime_name(part, "key");
   curl_mime_data(part, upload.api_key.c_str(), upload.api_key.size());
 
-  if (upload.system_ref > 0) {
-    const std::string system_ref = std::to_string(upload.system_ref);
+  if (upload.system_ref.kind == SystemRef::Kind::Named) {
+    const std::string system_ref = std::to_string(upload.system_ref.value);
     part = curl_mime_addpart(mime);
     curl_mime_name(part, "system");
     curl_mime_data(part, system_ref.c_str(), system_ref.size());

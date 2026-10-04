@@ -1679,23 +1679,22 @@ pub async fn trunk_recorder_call_upload(
         // paths out of here: a label match, or Ref 0 when there is no
         // `short_name` to match.
         let head: String = raw.chars().take(UNUSABLE_PART_HEAD).collect();
-        warn!(system_len = raw.len(), system = ?head, "unusable system part ignored");
+        warn!(system_len = raw.len(), system_head = ?head, "unusable system part ignored");
     }
     let short_name = clean(meta.short_name.clone());
-    let system_ref = match named_ref {
-        Some(system_ref) => system_ref,
-        None => match &short_name {
+    let system = match named_ref {
+        Some(system_ref) => TrSystem::Named(system_ref),
+        None => TrSystem::Matched(match &short_name {
             Some(name) => repo::system_ref_for_short_name(&state.db, name)
                 .await
                 .map_err(Stage::ResolveSystem.failed())?,
             None => 0,
-        },
+        }),
     };
 
     let new_call = build_tr_call(
         meta,
-        system_ref,
-        named_ref,
+        system,
         short_name,
         talkgroup_ref,
         audio_name,
@@ -1842,10 +1841,18 @@ fn clean(value: Option<String>) -> Option<String> {
     value.filter(|v| !is_placeholder(v))
 }
 
+/// Which System a Trunk Recorder Call files under, and how that was decided —
+/// one value, so the Ref and the way it was found cannot disagree.
+enum TrSystem {
+    /// The recorder named the Ref itself, in a `system` part (#111).
+    Named(i64),
+    /// Resolved from the `short_name`'s label — or 0, when there is none.
+    Matched(i64),
+}
+
 fn build_tr_call(
     meta: TrMeta,
-    system_ref: i64,
-    named_ref: Option<i64>,
+    system: TrSystem,
     short_name: Option<String>,
     talkgroup_ref: i64,
     audio_name: Option<String>,
@@ -1893,9 +1900,9 @@ fn build_tr_call(
     // the **Site** instead, since `site_of` already creates one from a name
     // alone (#48's rule, reused rather than reinvented) — and a Call that
     // named no Ref carries no site here either, exactly as it always has.
-    let (system_label, site_label) = match named_ref {
-        Some(_) => (None, short_name),
-        None => (short_name, None),
+    let (system_ref, system_label, site_label) = match system {
+        TrSystem::Named(system_ref) => (system_ref, None, short_name),
+        TrSystem::Matched(system_ref) => (system_ref, short_name, None),
     };
 
     NewCall {

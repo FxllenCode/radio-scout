@@ -1175,7 +1175,10 @@ async fn an_unusable_system_part_is_logged_by_length_and_a_short_head_only() {
         line.contains(&format!("system_len={}", part.len())),
         "{line}"
     );
-    assert!(line.contains(&"a".repeat(32)), "the head is kept: {line}");
+    assert!(
+        line.contains(&format!("system_head=\"{}\"", "a".repeat(32))),
+        "the head is kept, under a name that says it is only the head: {line}"
+    );
     assert!(!line.contains("TAIL"), "nothing past the head: {line}");
     assert!(line.len() < 400, "a bounded line, not {} bytes", line.len());
 }

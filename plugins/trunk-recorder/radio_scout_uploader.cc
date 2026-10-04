@@ -26,6 +26,8 @@
 
 #include <sys/stat.h>
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,9 +37,10 @@ namespace {
 // uploads with, and which of its talkgroups leave the box.
 struct Configured_System {
   std::string short_name;
-  // The Radio-Scout System Ref this recorder system files under, or 0 to let
-  // Radio-Scout match `short_name` against a System's label.
-  int64_t system_ref = 0;
+  // The Radio-Scout System Ref this recorder system files under — unset to let
+  // Radio-Scout match `short_name` against a System's label, or unusable, in
+  // which case `send` refuses every Call it has.
+  radio_scout::SystemRef system_ref;
   std::string api_key;
   radio_scout::TalkgroupFilter filter;
 };
@@ -138,23 +141,24 @@ public:
         // the normal case and a per-system one is the exception.
         system.api_key = entry.value("apiKey", api_key);
         // `systemId`, the rdio uploader's own key for this, so an entry moving
-        // across keeps it. Anything but a positive whole number is refused
-        // loudly and ignored, which falls back to matching on `shortName` —
-        // silently filing under the wrong System is worse than a log line.
+        // across keeps it. Whether it is a Ref is `read_system_ref`'s call —
+        // the same one `--system` gets in the harness — and one that is not
+        // stops this system's uploads rather than falling back to `shortName`,
+        // which would file a typo's Calls under whatever that name matches
+        // (#111). Said here once, and by `call_end` on every Call it refuses.
         if (entry.contains("systemId")) {
           const json &id = entry.at("systemId");
-          // Read as unsigned: a non-negative integer is stored that way, so a
-          // value too large for a signed 64-bit is *refused* by the range check
-          // rather than wrapping negative, and a negative one is not unsigned
-          // at all. A `long` would truncate on 32-bit Raspberry Pi OS.
-          if (id.is_number_unsigned() && radio_scout::usable_system_ref(id.get<uint64_t>())) {
-            system.system_ref = static_cast<int64_t>(id.get<uint64_t>());
-          } else {
+          // A non-negative JSON integer is stored unsigned, so a negative one is
+          // not unsigned at all, and one too large for 64 bits is a float.
+          system.system_ref = radio_scout::read_system_ref(
+              id.is_number_unsigned() ? std::optional<uint64_t>(id.get<uint64_t>())
+                                      : std::nullopt);
+          if (system.system_ref.kind == radio_scout::SystemRef::Kind::Unusable) {
             BOOST_LOG_TRIVIAL(error)
                 << "\t[" << plugin_name << "]\t" << system.short_name
                 << ": \"systemId\" must be a whole number from 1 to "
-                << radio_scout::kMaxSystemRef << " — ignoring it, so this "
-                   "system is matched on its shortName";
+                << radio_scout::kMaxSystemRef
+                << " — nothing from this system will be uploaded until it is";
           }
         }
         system.filter.allow = read_globs(entry, "talkgroupAllow", system.short_name);
@@ -191,7 +195,7 @@ public:
     radio_scout::Upload upload;
     upload.server = server;
     upload.api_key = system != nullptr ? system->api_key : api_key;
-    upload.system_ref = system != nullptr ? system->system_ref : 0;
+    upload.system_ref = system != nullptr ? system->system_ref : radio_scout::SystemRef{};
     // Trunk Recorder's own call JSON, exactly as `create_call_json` built it a
     // moment ago (`call_concluder.cc`) — nothing here re-serialises it, so
     // there is no second definition of the payload to drift from the parser.
@@ -207,6 +211,15 @@ public:
       // this once at startup, and a line per Call would bury it.
       BOOST_LOG_TRIVIAL(debug) << log_prefix(call_info) << plugin_name
                                << " not uploaded: not configured";
+      return 0;
+    }
+    if (result.unusable_system_ref) {
+      // ERROR on every Call, unlike the line above: this one is the operator's
+      // own setting refusing their Calls, and the script answers a bad
+      // `--system` the same way, once per Call. 0 rather than a retry, because
+      // no retry can fix a setting (#111).
+      BOOST_LOG_TRIVIAL(error) << log_prefix(call_info) << plugin_name
+                               << " not uploaded: \"systemId\" is not a System Ref";
       return 0;
     }
     if (result.sent) {

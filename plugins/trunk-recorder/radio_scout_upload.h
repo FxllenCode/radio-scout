@@ -13,6 +13,7 @@
 #define RADIO_SCOUT_UPLOAD_H
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,12 +30,38 @@ constexpr long kDefaultTimeoutSecs = 60;
 // together or not at all — `tests/trplugin.rs` runs both on the same values.
 constexpr int64_t kMaxSystemRef = 999999999999999999;
 
-// Is this a System Ref Radio-Scout will file a Call under: 1 through
-// `kMaxSystemRef`. Taken as unsigned so that a value too large for a signed
-// 64-bit is *refused* here rather than wrapping negative on its way in — and as
-// a fixed-width type because `long` is 32 bits on 32-bit Raspberry Pi OS, where
-// a large `systemId` would otherwise truncate to a different, valid-looking Ref.
-bool usable_system_ref(uint64_t value);
+// What an operator's System Ref setting says, once read: nothing named, a Ref
+// to file this system's Calls under, or something that is not a Ref at all.
+//
+// Three answers rather than a number with 0 for "none", because the third is
+// not the first: a setting the operator wrote and got wrong must not quietly
+// become the `shortName` match they were trying to replace (#111).
+struct SystemRef {
+  enum class Kind {
+    // Nothing named: Radio-Scout matches the metadata's `short_name`.
+    Unset,
+    // File under `value`.
+    Named,
+    // Named, and not a Ref: nothing is sent while it stays that way.
+    Unusable,
+  };
+  Kind kind = Kind::Unset;
+  // Meaningful only when `kind` is `Named`. Fixed-width because `long` is 32
+  // bits on 32-bit Raspberry Pi OS, where a large `systemId` would otherwise
+  // truncate to a different, valid-looking Ref.
+  int64_t value = 0;
+};
+
+// Read what an operator wrote, through the one rule both ways in share: a Ref
+// is 1 through `kMaxSystemRef`.
+//
+// `written` is the value when it was written as a non-negative whole number,
+// and `std::nullopt` for anything else — negative, fractional, text, or too
+// large for 64 bits. Taken unsigned so that a value too large for a signed
+// 64-bit is *refused* here rather than wrapping negative on its way in. Each
+// caller reads its own spelling (the plugin a JSON number, the harness text in
+// JSON's grammar); what counts as a Ref is decided here.
+SystemRef read_system_ref(std::optional<uint64_t> written);
 
 // Which talkgroups this system sends, as the glob patterns an operator writes
 // in `talkgroupAllow` / `talkgroupDeny` — the same spelling the
@@ -60,15 +87,15 @@ struct Upload {
   // configures the same bare URL the rdio-scanner uploader takes.
   std::string server;
   std::string api_key;
-  // The Radio-Scout System Ref to file this Call under, or 0 to let Radio-Scout
-  // match the `short_name` in the metadata against a System's label.
+  // The Radio-Scout System Ref to file this Call under — or none, to let
+  // Radio-Scout match the `short_name` in the metadata against a System's label.
   //
   // Sent as its own `system` part beside the metadata rather than written into
   // it: the JSON is Trunk Recorder's, forwarded verbatim precisely so there is
   // no second definition of it to drift, and a Ref is the operator's word about
   // where it goes — not something the recorder knows. It exists because two
   // sites of one network carry two `shortName`s and one identity.
-  int64_t system_ref = 0;
+  SystemRef system_ref;
   // Trunk Recorder's own call JSON, verbatim — `Call_Data_t::call_json`, the
   // object `create_call_json` just wrote beside the audio. Sending it
   // unmodified is why there is no field mapping here to drift from the parser.
@@ -99,6 +126,14 @@ struct Result {
   // recorder its full retry budget, on every Call, for as long as the typo
   // lasted.
   bool unconfigured = false;
+  // Nothing was attempted: the operator named a System Ref, and it is not one.
+  //
+  // Refused on every Call rather than sent by `short_name`, which is the same
+  // answer `radio-scout-upload.sh` gives a bad `--system` (#111): falling back
+  // would file a typo's Calls under whatever System that name matches, behind
+  // one startup line. A retry cannot fix a setting, so this is not a failure
+  // either.
+  bool unusable_system_ref = false;
   // The status, when there was one. Zero means nobody answered.
   long http_code = 0;
   // The server's own words, which are the rdio-compatible response strings.
