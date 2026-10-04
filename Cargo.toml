@@ -85,6 +85,20 @@ realfft = "3.5.0"
 # builds it with no C toolchain and nothing new to audit. `default-features =
 # false` drops the file-locking half, which nothing here uses.
 fs4 = { version = "1.1.0", default-features = false }
+# **Dirwatch** (#72): being told a Recorder dropped a file, rather than walking
+# its folder on a timer. inotify on Linux, FSEvents on macOS,
+# ReadDirectoryChangesW on Windows — the OS's own mechanism on every release
+# target, so a Pi with nothing arriving spends nothing — and `PollWatcher` for
+# the network share that has no events to give. CC0.
+notify = "8.2"
+# Named directly for Dirwatch (#72), and **already in the tree** with these very
+# features — object_store and sea-orm both pull them — so neither adds a crate.
+# `chrono::Local` is the one thread-safe way to read a recorder's zone-less
+# wall-clock time in this Instance's zone (the `time` crate refuses to on a
+# multi-threaded Unix process), and `regex` is what an rdio filename mask has
+# always been compiled into.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+regex = "1"
 
 # What ships (#23, ADR-0007). Nothing had ever been built in release mode
 # before this ticket, so every value here is a deliberate choice rather than an

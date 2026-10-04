@@ -125,6 +125,7 @@ use serde::{Deserialize, Serialize};
 use crate::access::AccessConfig;
 use crate::admin::AdminConfig;
 use crate::blob::{Backend, Storage, StorageConfig};
+use crate::dirwatch::DirwatchConfig;
 use crate::downstream::DownstreamConfig;
 use crate::enhance::{EnhancementConfig, Output};
 use crate::export::ExportConfig;
@@ -472,6 +473,7 @@ pub struct Config {
     pub storage: Storage,
     pub retention: RetentionConfig,
     pub ingest: IngestConfig,
+    pub dirwatch: DirwatchConfig,
     pub admin: AdminConfig,
     pub enhancement: EnhancementConfig,
     pub mining: MiningConfig,
@@ -1101,6 +1103,25 @@ pub const SETTINGS: &[Setting] = &[
         example: "false",
         set: |setting, config, value| {
             config.ingest.auto_populate = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "dirwatch.roots",
+        var: "RADIO_SCOUT_DIRWATCH_ROOTS",
+        expected: crate::dirwatch::EXPECTED_ROOT,
+        // The platform's own path-list separator — `:` here, `;` on Windows —
+        // because a list of paths is what `PATH` already taught every Operator
+        // to write, and a comma is a character a folder name may contain.
+        example: "/srv/trunk-recorder:/srv/sdrtrunk",
+        set: |setting, config, value| {
+            config.dirwatch.roots = std::env::split_paths(value)
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(|path| {
+                    let text = path.to_string_lossy();
+                    text.parse().map_err(|_| setting.invalid(&text))
+                })
+                .collect::<Result<_, _>>()?;
             Ok(())
         },
     },
@@ -1904,6 +1925,16 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # Create Systems, Talkgroups and Units the first time a recorder mentions them.
 # With this off, only Systems you have already defined are accepted.
 # auto_populate = true
+
+[dirwatch]
+# Dirwatch (#72): ingesting the files a recorder drops into a folder — Trunk
+# Recorder's captureDir, SDRTrunk's recordings, DSDPlus's record folders — with
+# no upload configured at all. The watches themselves are made in the browser
+# (Settings -> Dirwatch); this is where they are ALLOWED to be. A watch reads
+# every file it is pointed at and can delete them afterwards, so a browser may
+# only point one inside a folder named here. Empty, Dirwatch is off.
+#   roots = ["/srv/trunk-recorder", "/home/pi/SDRTrunk/recordings"]
+# roots = []
 
 [admin]
 # The admin password itself is NOT here: first run writes it, so it lives in
@@ -3662,6 +3693,59 @@ mod tests {
             message.contains("CIDR"),
             "the message must say what was expected: {message}"
         );
+    }
+
+    /// A **Dirwatch** root bounds what a browser may make this Instance read
+    /// and delete (#72, ADR-0021), so one that is not an absolute path stops the
+    /// boot rather than being resolved against whichever directory the service
+    /// manager happened to start in.
+    #[rstest]
+    #[case::file_relative(&[], Some("[dirwatch]\nroots = [\"recordings\"]\n"), "recordings")]
+    #[case::env_relative(&[("RADIO_SCOUT_DIRWATCH_ROOTS", "/srv/ok:recordings")], None, "recordings")]
+    fn a_relative_dirwatch_root_refuses_to_boot(
+        #[case] vars: &[(&str, &str)],
+        #[case] text: Option<&str>,
+        #[case] offender: &str,
+    ) {
+        let file = text.map(file);
+        let message = resolve(&cli(&[]), env(vars), file.as_ref())
+            .expect_err("a relative root")
+            .to_string();
+
+        assert!(message.contains(offender), "{message}");
+        assert!(message.contains("absolute"), "{message}");
+    }
+
+    /// Both spellings reach the same list, and an empty entry in the variable —
+    /// a trailing separator — is nothing rather than a refusal.
+    #[test]
+    fn dirwatch_roots_come_from_the_file_and_the_environment() {
+        let from_file = resolve(
+            &cli(&[]),
+            no_env,
+            Some(&file("[dirwatch]\nroots = [\"/srv/a\", \"/srv/b\"]\n")),
+        )
+        .expect("resolve");
+        let from_env = resolve(
+            &cli(&[]),
+            env(&[("RADIO_SCOUT_DIRWATCH_ROOTS", "/srv/a:/srv/b:")]),
+            None,
+        )
+        .expect("resolve");
+
+        let roots = |config: &Config| -> Vec<PathBuf> {
+            config
+                .dirwatch
+                .roots
+                .iter()
+                .map(|root| root.path().to_path_buf())
+                .collect()
+        };
+        assert_eq!(
+            roots(&from_file),
+            [PathBuf::from("/srv/a"), PathBuf::from("/srv/b")]
+        );
+        assert_eq!(roots(&from_env), roots(&from_file));
     }
 
     /// Which address is the client's, given who the packet came from and what

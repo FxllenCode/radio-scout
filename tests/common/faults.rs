@@ -72,7 +72,25 @@ struct Rule {
     /// binds `?`), which is why what a rule matches is an identifier and never
     /// a whole statement.
     table: String,
-    updates_only: bool,
+    kind: Kind,
+}
+
+/// Which of the statements naming a table a [`Rule`] refuses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Every,
+    Updates,
+    Reads,
+}
+
+impl Kind {
+    fn covers(self, sql: &str) -> bool {
+        match self {
+            Kind::Every => true,
+            Kind::Updates => is_an_update(sql),
+            Kind::Reads => sql.trim_start().starts_with("SELECT"),
+        }
+    }
 }
 
 impl Ledger {
@@ -94,7 +112,7 @@ impl Ledger {
             .lock()
             .expect("the refusal list")
             .iter()
-            .any(|rule| sql.contains(&rule.table) && (!rule.updates_only || is_an_update(sql)));
+            .any(|rule| sql.contains(&rule.table) && rule.kind.covers(sql));
         match refused {
             true => Err(DbErr::Custom(REFUSED.to_string())),
             false => Ok(()),
@@ -123,13 +141,20 @@ pub struct Statements(Arc<Ledger>);
 impl Statements {
     /// Refuse every statement naming `table`, from now on.
     pub fn refuse(&self, table: &str) {
-        self.add(table, false);
+        self.add(table, Kind::Every);
     }
 
     /// Refuse every statement naming `table` that updates a row, leaving reads
     /// and inserts — the arrangement an update arm needs — alone.
     pub fn refuse_updates(&self, table: &str) {
-        self.add(table, true);
+        self.add(table, Kind::Updates);
+    }
+
+    /// Refuse every **read** of `table`, leaving writes alone — the arm a
+    /// Worker reaches when a write it was told about cannot be read back (#72:
+    /// a curation delete re-arms the Dirwatch Worker, which reads the roster).
+    pub fn refuse_reads(&self, table: &str) {
+        self.add(table, Kind::Reads);
     }
 
     /// How many statements have gone through this handle since the app opened
@@ -142,12 +167,12 @@ impl Statements {
         self.0.issued.load(Ordering::SeqCst)
     }
 
-    fn add(&self, table: &str, updates_only: bool) {
+    fn add(&self, table: &str, kind: Kind) {
         self.0.rules.lock().expect("the refusal list").push(Rule {
             // Quoted the way sea-orm writes an identifier, so `calls` cannot
             // match a column called `calls_id` or a table called `call_patches`.
             table: format!("\"{table}\""),
-            updates_only,
+            kind,
         });
     }
 }
@@ -278,6 +303,13 @@ impl Faults {
     /// refusing writes.
     pub fn fail_puts(&self) {
         self.0.fail_puts.store(true, Ordering::SeqCst);
+    }
+
+    /// Take writes again — the disk an Operator cleared, the node that came
+    /// back. What a test needs to show that something which failed was kept and
+    /// tried again, rather than only that it failed.
+    pub fn allow_puts(&self) {
+        self.0.fail_puts.store(false, Ordering::SeqCst);
     }
 
     /// Refuse every delete from now on — a bucket whose credentials lost their

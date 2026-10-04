@@ -598,6 +598,29 @@ async fn a_table_can_be_told_to_refuse_its_updates() {
     );
 }
 
+/// ...and its mirror: refusing a table's **reads** while its writes still land
+/// (#72), for the Worker that is told about a write and then cannot read it
+/// back.
+#[tokio::test]
+async fn a_table_can_be_told_to_refuse_its_reads() {
+    let app = TestApp::with_key("k").await;
+    app.refuse_reads_of("api_keys");
+
+    // Writes are untouched — the roster can still be emptied...
+    use sea_orm::EntityTrait;
+    radio_scout::db::entities::api_key::Entity::delete_many()
+        .exec(&app.db)
+        .await
+        .expect("a write still lands");
+
+    // ...and reading it back is what fails.
+    let refused = radio_scout::db::repo::count_api_keys(&app.db)
+        .await
+        .expect_err("a read must be refused")
+        .to_string();
+    assert!(refused.contains(common::REFUSED), "{refused}");
+}
+
 /// **Counting statements** (#86), the other half of the same seam: the decorator
 /// that can refuse a statement is also the one thing that sees every statement,
 /// so it is what can say how many there have been.
@@ -902,8 +925,8 @@ async fn a_restart_leaves_the_operator_log_still_being_written() {
 
 /// **Every Worker is named on the registry**, because a status surface (#70)
 /// reads it through `AppState` and can never see the `Instance` that owns the
-/// handles. An Instance with enhancement off runs four; turning it on is what
-/// adds the fifth — a surface must show what is running, not a row of zeroes
+/// handles. An Instance with enhancement off runs nine; turning it on is what
+/// adds the tenth — a surface must show what is running, not a row of zeroes
 /// for what is not.
 #[tokio::test]
 async fn the_registry_names_the_workers_this_instance_is_running() {
@@ -942,6 +965,10 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // a roster: it looks at every Call, so what starts it is
             // `[quiet] enabled`, and it ships on.
             radio_scout::quiet::WORKER,
+            // ...and **Dirwatch** (#72), a roster again: a watch is a row, so
+            // this starts whatever the roster says — nothing, until
+            // `[dirwatch] roots` allows a watch and an Operator makes one.
+            radio_scout::dirwatch::worker::WORKER,
             // ...and listener counting (#62), the one that reads nothing an
             // ingest produced. Like quiet-span scanning it is a switch rather
             // than a roster, and it ships on: history cannot be recovered
@@ -949,7 +976,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // already lost what happened before they found it.
             radio_scout::listeners::WORKER,
         ],
-        "the shipped default runs eight: enhancement is off, the rest are on"
+        "the shipped default runs nine: enhancement is off, the rest are on"
     );
 
     let mut app = app;
@@ -971,6 +998,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::webhook::WORKER,
             radio_scout::tone::WORKER,
             radio_scout::quiet::WORKER,
+            radio_scout::dirwatch::worker::WORKER,
             radio_scout::listeners::WORKER,
         ],
     );

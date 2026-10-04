@@ -17,6 +17,7 @@ pub mod config;
 pub mod curate;
 pub mod db;
 pub mod delivery;
+pub mod dirwatch;
 pub mod downstream;
 pub mod enhance;
 pub mod event;
@@ -150,6 +151,10 @@ pub struct AppState {
     /// token, which is the switch that decides whether the second one is served
     /// at all.
     pub metrics: crate::metrics::Metrics,
+    /// Ingesting what Recorders drop into folders (#72) — the Worker's inbox,
+    /// the roots every watch is bounded by, and what each watch is doing. A
+    /// watch is a **row**, so an Instance with none has an empty roster.
+    pub dirwatch: crate::dirwatch::Dirwatch,
 }
 
 impl AppState {
@@ -179,6 +184,7 @@ impl AppState {
             workers: crate::worker::Workers::default(),
             recorders: crate::recorder::Recorders::default(),
             metrics: crate::metrics::Metrics::default(),
+            dirwatch: crate::dirwatch::Dirwatch::default(),
         }
     }
 

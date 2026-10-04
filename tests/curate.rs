@@ -77,6 +77,11 @@ async fn no_session_reaches_no_curation_route() {
         "/api/admin/events/1/calls/2",
         "/api/admin/events/1/calls/2/audio",
         "/api/admin/events/1/export",
+        // #72's **Dirwatch**: a watch reads, and can delete, files on this
+        // machine, so every one of its routes is the gate's.
+        "/api/admin/dirwatches",
+        "/api/admin/dirwatches/1",
+        "/api/admin/dirwatches/1/scan",
     ] {
         let response = app.get(path).await;
         assert_eq!(response.status(), 401, "GET {path}");

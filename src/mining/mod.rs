@@ -143,9 +143,9 @@ impl MiningConfig {
 /// The ID3 frame naming the program that wrote the file.
 const COMPOSER: &str = "TCOM";
 /// The ID3 frame holding the FROM radio and its configured aliases.
-const ARTIST: &str = "TPE1";
+pub(crate) const ARTIST: &str = "TPE1";
 /// The ID3 frame holding SDRTrunk's `Key:Value;` run.
-const COMMENT: &str = "COMM";
+pub(crate) const COMMENT: &str = "COMM";
 
 /// How SDRTrunk names itself in [`COMPOSER`].
 ///
@@ -252,6 +252,19 @@ pub fn mine(facts: &AudioFacts) -> Option<Mined> {
 /// in because there was no radio at all — yields nothing, because there is no
 /// honest Ref to hang the name on and a leading-digits guess would invent one.
 fn mine_unit(artist: &str) -> Option<MinedUnit> {
+    let (unit_ref, rest) = radio(artist)?;
+    (!rest.is_empty()).then(|| MinedUnit {
+        unit_ref,
+        label: rest.to_string(),
+    })
+}
+
+/// The radio `TPE1` names, and whatever SDRTrunk wrote after it — the half of
+/// [`mine_unit`] that **Dirwatch** (#72) needs on its own, because a dropped
+/// SDRTrunk file has no wire field naming the radio at all and the tag is the
+/// only place its Ref exists. One reading, so the two cannot disagree about
+/// which token is a radio.
+pub(crate) fn radio(artist: &str) -> Option<(i64, &str)> {
     let (token, rest) = match artist.trim().split_once(char::is_whitespace) {
         Some((token, rest)) => (token, rest.trim()),
         None => (artist.trim(), ""),
@@ -270,10 +283,7 @@ fn mine_unit(artist: &str) -> Option<MinedUnit> {
         None => token,
     };
     let unit_ref: i64 = digits.parse().ok().filter(|value| *value > 0)?;
-    (!rest.is_empty()).then(|| MinedUnit {
-        unit_ref,
-        label: rest.to_string(),
-    })
+    Some((unit_ref, rest))
 }
 
 /// The value SDRTrunk wrote for `key` in its comment run.
@@ -285,7 +295,7 @@ fn mine_unit(artist: &str) -> Option<MinedUnit> {
 /// A value containing a `;` is truncated at it, and deliberately not worked
 /// around: SDRTrunk escapes nothing, so the separator genuinely is ambiguous in
 /// its own format, and a parser that guessed would be guessing.
-fn comment_value<'a>(comment: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn comment_value<'a>(comment: &'a str, key: &str) -> Option<&'a str> {
     comment
         .split(';')
         .filter_map(|entry| entry.split_once(':'))

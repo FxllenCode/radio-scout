@@ -1027,6 +1027,41 @@ impl Failure {
             origin: Span::current(),
         }
     }
+
+    /// **Write it down with nobody to answer** — a Worker's failure, where there
+    /// is no response for the request middleware to redact (#72's Dirwatch).
+    ///
+    /// The same two lines a request would have left, in the span the failure
+    /// was built in: a break is the ERROR [`redact`] writes for a 5xx, through
+    /// the one function that spells it, and a refusal is its own
+    /// [`Reason::record`]. So an Operator greps one message for "the server
+    /// broke" whether or not a request was waiting on it.
+    pub(crate) fn record(&self) {
+        let _entered = self.origin.enter();
+        match &self.kind {
+            Kind::Refused(reason) => reason.record(),
+            Kind::Broke { stage, cause } => broke_line(*stage, cause),
+        }
+    }
+}
+
+impl Failure {
+    /// Count this failure the way the request middleware counts one it finds
+    /// on a response — for [`crate::metrics::Metrics::fail`], whose caller has
+    /// no response to carry it.
+    pub(crate) fn count(&self, metrics: &crate::metrics::Metrics) {
+        match &self.kind {
+            Kind::Refused(reason) => metrics.refused(reason.slug()),
+            Kind::Broke { stage, .. } => metrics.broke(stage.slug()),
+        }
+    }
+}
+
+/// **The one line** a break leaves, wherever it is noticed.
+fn broke_line(stage: Stage, cause: &str) {
+    // `%stage`, not the default: `stage=dedup` greps and `stage="dedup"` does
+    // not (as with the request log's path).
+    error!(stage = %stage.slug(), cause = %cause, "server error");
 }
 
 impl From<Reason> for Failure {
@@ -1109,11 +1144,9 @@ pub(crate) fn redact(response: Response, request_id: &RequestId) -> Response {
         // Written where it happened, not where it was noticed: re-entering the
         // handler's span puts the upload's System and Talkgroup back on the line
         // (and the request id with them, since that span is a child of this one).
-        // `%stage`, not the default: `stage=dedup` greps and `stage="dedup"`
-        // does not (as with the request log's path).
         Some(broke) => broke
             .origin
-            .in_scope(|| error!(stage = %broke.stage.slug(), cause = %broke.cause, "server error")),
+            .in_scope(|| broke_line(broke.stage, &broke.cause)),
         // Not reachable from our own handlers, and deliberately loud if it ever
         // is: a 500 with no recorded cause is the 2026-07-25 failure mode.
         None => error!("server error with no recorded cause"),

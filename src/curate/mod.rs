@@ -75,6 +75,7 @@
 //!   made "revoke" mean "until the next restart".
 
 pub mod codes;
+pub mod dirwatches;
 pub mod document;
 pub mod downstreams;
 pub mod events;
@@ -220,6 +221,18 @@ pub fn routes() -> Router<AppState> {
             "/api/admin/codes/{id}",
             patch(codes::update).delete(codes::remove),
         )
+        // **Dirwatch** (#72, spec US 14) — folders a Recorder drops Calls into.
+        // Bounded by `[dirwatch] roots`, which this surface can read and never
+        // write (ADR-0021).
+        .route(
+            "/api/admin/dirwatches",
+            get(dirwatches::list).post(dirwatches::create),
+        )
+        .route(
+            "/api/admin/dirwatches/{id}",
+            patch(dirwatches::update).delete(dirwatches::remove),
+        )
+        .route("/api/admin/dirwatches/{id}/scan", post(dirwatches::scan))
         .route("/api/admin/api-keys", get(keys::list).post(keys::create))
         .route(
             "/api/admin/api-keys/{id}",
@@ -250,6 +263,7 @@ pub enum What {
     /// One **Call** frozen into an Event — addressed by the member's own id,
     /// never the Call's, because the Call may be long gone (#67).
     EventCall,
+    Dirwatch,
 }
 
 impl What {
@@ -269,6 +283,7 @@ impl What {
             What::ShareLink => "share link",
             What::Event => "event",
             What::EventCall => "call in this event",
+            What::Dirwatch => "dirwatch",
         }
     }
 
@@ -290,6 +305,7 @@ impl What {
             What::ShareLink => "share-link-not-found",
             What::Event => "event-not-found",
             What::EventCall => "event-call-not-found",
+            What::Dirwatch => "dirwatch-not-found",
         }
     }
 
@@ -310,7 +326,8 @@ impl What {
             | What::AccessCode
             | What::ShareLink
             | What::Event
-            | What::EventCall => "ref-taken",
+            | What::EventCall
+            | What::Dirwatch => "ref-taken",
         }
     }
 
@@ -329,7 +346,8 @@ impl What {
             | What::Webhook
             | What::ShareLink
             | What::Event
-            | What::EventCall => "has-calls",
+            | What::EventCall
+            | What::Dirwatch => "has-calls",
         }
     }
 }
@@ -447,6 +465,33 @@ pub enum Rejected {
     /// many, rather than quietly becoming a second half-built deleter. `?force=true`
     /// is the Operator saying it out loud.
     HasCalls { what: What, calls: u64 },
+    /// **Dirwatch** is off on this Instance: `[dirwatch] roots` names nowhere a
+    /// watch may be (#72, ADR-0021). Names the setting, because it is the one
+    /// thing that cannot be fixed from this screen.
+    DirwatchUnavailable,
+    /// A folder that is not inside any root.
+    OutsideRoots { directory: String },
+    /// A folder that does not exist, or is not a folder.
+    NoSuchDirectory { directory: String },
+    /// A folder another watch already reads — or one inside it, or one holding
+    /// it. Two watches on one file would race each other's delete-after.
+    DirwatchOverlaps { directory: String },
+    /// A Dirwatch format this release does not read.
+    UnknownDirwatchFormat { format: String },
+    /// An extension that is not audio a watch may read.
+    NotAudio { extension: String },
+    /// A filename mask that could never work — [`crate::dirwatch::mask::MaskError`]'s
+    /// own sentence.
+    UnusableMask { detail: String },
+    /// A watch whose files nothing would route: neither the watch nor what its
+    /// format can read names a `field` (`talkgroup`, `system`).
+    Unroutable { field: &'static str },
+    /// A number outside what it can mean.
+    OutOfRange {
+        field: &'static str,
+        least: i64,
+        most: i64,
+    },
 }
 
 impl Rejected {
@@ -469,6 +514,15 @@ impl Rejected {
             Rejected::UnusableToneProfile { .. } => "unusable-tone-profile",
             Rejected::TooManyCalls { .. } => "too-many-calls",
             Rejected::HasCalls { what, .. } => what.has_calls(),
+            Rejected::DirwatchUnavailable => "dirwatch-unavailable",
+            Rejected::OutsideRoots { .. } => "outside-roots",
+            Rejected::NoSuchDirectory { .. } => "no-such-directory",
+            Rejected::DirwatchOverlaps { .. } => "dirwatch-overlaps",
+            Rejected::UnknownDirwatchFormat { .. } => "unknown-dirwatch-format",
+            Rejected::NotAudio { .. } => "not-audio",
+            Rejected::UnusableMask { .. } => "unusable-mask",
+            Rejected::Unroutable { .. } => "unroutable",
+            Rejected::OutOfRange { .. } => "out-of-range",
         }
     }
 
@@ -484,12 +538,21 @@ impl Rejected {
             | Rejected::UnknownFormat { .. }
             | Rejected::UnknownMark { .. }
             | Rejected::UnusableToneProfile { .. }
-            | Rejected::ShortAccessCode { .. } => StatusCode::BAD_REQUEST,
+            | Rejected::ShortAccessCode { .. }
+            | Rejected::DirwatchUnavailable
+            | Rejected::OutsideRoots { .. }
+            | Rejected::NoSuchDirectory { .. }
+            | Rejected::UnknownDirwatchFormat { .. }
+            | Rejected::NotAudio { .. }
+            | Rejected::UnusableMask { .. }
+            | Rejected::Unroutable { .. }
+            | Rejected::OutOfRange { .. } => StatusCode::BAD_REQUEST,
             Rejected::NotFound(_) => StatusCode::NOT_FOUND,
             Rejected::TooManyCalls { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Rejected::NameTaken { .. }
             | Rejected::RefTaken { .. }
             | Rejected::RangeOverlaps { .. }
+            | Rejected::DirwatchOverlaps { .. }
             | Rejected::HasCalls { .. } => StatusCode::CONFLICT,
         }
     }
@@ -503,7 +566,10 @@ impl Rejected {
             "error": self.slug(),
             "detail": self.to_string(),
         });
-        if let Rejected::Blank { field } = self {
+        if let Rejected::Blank { field }
+        | Rejected::Unroutable { field }
+        | Rejected::OutOfRange { field, .. } = self
+        {
             body["field"] = serde_json::Value::from(*field);
         }
         if let Rejected::HasCalls { calls, .. } = self {
@@ -578,6 +644,44 @@ impl std::fmt::Display for Rejected {
                  delete them with it by asking for force, or wait for retention",
                 what.noun()
             ),
+            Rejected::DirwatchUnavailable => f.write_str(
+                "dirwatch is off on this instance: name the folders a watch may be in \
+                 under [dirwatch] roots in radio-scout.toml (or RADIO_SCOUT_DIRWATCH_ROOTS) \
+                 and restart",
+            ),
+            Rejected::OutsideRoots { directory } => write!(
+                f,
+                "{directory:?} is not inside a folder this instance allows watching \
+                 (see [dirwatch] roots)"
+            ),
+            Rejected::NoSuchDirectory { directory } => {
+                write!(f, "{directory:?} is not a folder on this machine")
+            }
+            Rejected::DirwatchOverlaps { directory } => write!(
+                f,
+                "another dirwatch already reads {directory:?}, or a folder inside or around it"
+            ),
+            Rejected::UnknownDirwatchFormat { format } => write!(
+                f,
+                "{format:?} is not a dirwatch format: choose one of {}",
+                crate::dirwatch::Format::ALL
+                    .map(crate::dirwatch::Format::slug)
+                    .join(", ")
+            ),
+            Rejected::NotAudio { extension } => write!(
+                f,
+                "{extension:?} is not an audio extension a dirwatch reads: choose one of {}",
+                crate::dirwatch::AUDIO.map(|(extension, _)| extension).join(", ")
+            ),
+            Rejected::UnusableMask { detail } => write!(f, "{detail}"),
+            Rejected::Unroutable { field } => write!(
+                f,
+                "nothing would say which {field} these files are: name one here, \
+                 or read it from the filename"
+            ),
+            Rejected::OutOfRange { field, least, most } => {
+                write!(f, "{field} has to be between {least} and {most}")
+            }
         }
     }
 }

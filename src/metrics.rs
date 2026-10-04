@@ -352,6 +352,17 @@ impl Metrics {
         reason.record();
         self.refused(reason.slug());
     }
+
+    /// **Write a failure down and count it**, for a surface that answers
+    /// nobody — [`Metrics::refuse`]'s sibling for a whole [`crate::failure::Failure`].
+    ///
+    /// A **Dirwatch** ingest (#72) that breaks has no response for the request
+    /// middleware to count, so an Instance fed only by dropped files would
+    /// otherwise report a healthy zero while its store refused every write.
+    pub fn fail(&self, failure: &crate::failure::Failure) {
+        failure.record();
+        failure.count(self);
+    }
 }
 
 /// A counter per label value, bounded by the closed vocabulary that supplies it.
@@ -1546,5 +1557,31 @@ mod tests {
                 .any(|line| line == r#"radio_scout_system_calls{system="11"} 42"#),
             "{text}"
         );
+    }
+
+    /// **A failure nobody answers is still written down and counted** (#72) —
+    /// a break under its stage and a refusal under its slug, exactly as the
+    /// request middleware would have counted either off a response.
+    #[test]
+    fn a_failure_with_nobody_to_answer_is_written_down_and_counted() {
+        let logs = crate::testing::LogCapture::start();
+        let metrics = Metrics::default();
+
+        metrics.fail(&crate::failure::Failure::broke(
+            crate::failure::Stage::Curate,
+            "the roster would not read",
+        ));
+        metrics.fail(&crate::failure::Failure::from(
+            crate::failure::Reason::NotPopulated,
+        ));
+
+        assert_eq!(metrics.0.broke.read().get("curate"), Some(&1));
+        assert_eq!(metrics.0.refused.read().get("not-populated"), Some(&1));
+        let logged = logs.text();
+        assert!(
+            logged.contains("stage=curate") && logged.contains("the roster would not read"),
+            "{logged}"
+        );
+        assert!(logged.contains("reason=not-populated"), "{logged}");
     }
 }

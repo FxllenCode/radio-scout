@@ -7,10 +7,10 @@ use sea_orm::Schema;
 use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
-    access_code, api_key, call, call_frequency, call_patch, call_tone, call_unit, downstream,
-    downstream_delivery, event, event_call, group, listener_sample, log_event, share_link, site,
-    system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit, unit_ref, webhook,
-    webhook_delivery,
+    access_code, api_key, call, call_frequency, call_patch, call_tone, call_unit, dirwatch,
+    downstream, downstream_delivery, event, event_call, group, listener_sample, log_event,
+    share_link, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit,
+    unit_ref, webhook, webhook_delivery,
 };
 
 pub struct Migrator;
@@ -44,6 +44,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0023_access_codes::Migration),
             Box::new(m0024_retention_overrides::Migration),
             Box::new(m0025_rf_health::Migration),
+            Box::new(m0026_dirwatches::Migration),
         ]
     }
 }
@@ -2357,6 +2358,41 @@ mod m0025_rf_health {
                     .await?;
             }
             Ok(())
+        }
+    }
+}
+
+/// **Dirwatch** (#72): the watches an Operator curates. One table and no index —
+/// the roster is read whole, at boot and after every write, and is a handful of
+/// rows on any Instance there will ever be. Guarded, as m0015 guards its tables,
+/// so a database that already has it is left alone.
+mod m0026_dirwatches {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0026_dirwatches"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_table("dirwatches").await? {
+                return Ok(());
+            }
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(dirwatch::Entity))
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(dirwatch::Entity).to_owned())
+                .await
         }
     }
 }

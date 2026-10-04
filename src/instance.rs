@@ -623,6 +623,9 @@ async fn assemble(
     // the same request.
     state.access.rearm(&db).await;
     state.clock = parts.clock;
+    // **Dirwatch** (#72): the roots every watch is bounded by. The Worker is
+    // started below with the rest.
+    state.dirwatch = crate::dirwatch::Dirwatch::new(config.dirwatch.clone());
     // What this Instance has been doing (#70). Wired here rather than
     // constructed in `AppState::new` because two of the three things it needs
     // are configuration: `[metrics]`' own token, which is the switch that
@@ -681,6 +684,12 @@ async fn assemble(
     // their hardware does not do this, and nothing can change it without a
     // restart.
     running.extend(crate::quiet::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
+    // Ingesting what Recorders drop into folders (#72), on the senders' terms
+    // and for their reason: a watch is a row, so this starts whatever the
+    // roster says, and with none it sleeps on its inbox. First it looks in
+    // every watch's folder for what arrived while the Instance was down.
+    running
+        .extend(crate::dirwatch::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     // Listener counts (#62), the only Worker here that reads nothing an ingest
     // produced: it writes down how many people were connected, so an Operator
     // can be shown peaks with timestamps rather than asked to guess. Counts and

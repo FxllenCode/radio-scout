@@ -12,6 +12,7 @@ pub mod call_frequency;
 pub mod call_patch;
 pub mod call_tone;
 pub mod call_unit;
+pub mod dirwatch;
 pub mod downstream;
 pub mod downstream_delivery;
 pub mod event;

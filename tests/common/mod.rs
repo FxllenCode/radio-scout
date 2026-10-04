@@ -116,6 +116,10 @@ use sea_orm::{
     QueryOrder, Set,
 };
 
+/// The folder under each app's temp directory that its `[dirwatch] roots`
+/// names (#72).
+const DROPS: &str = "drops";
+
 /// A seeded Call's row pointing at `key` — what ingest would have left behind
 /// after writing the object there.
 ///
@@ -247,6 +251,58 @@ impl TestApp {
         self.db = self.instance.db.clone();
         self.store = self.instance.store.clone();
         *self.session.lock().expect("session") = None;
+    }
+
+    /// The folder this app's `[dirwatch] roots` allows (#72) — where a test's
+    /// Recorder drops its files.
+    pub fn drops(&self) -> std::path::PathBuf {
+        self.tmp.path().join(DROPS)
+    }
+
+    /// Watch a folder, through the admin surface an Operator uses, and wait
+    /// until the Worker has started it and looked in it once. The body is the
+    /// form's JSON; `directory` defaults to [`TestApp::drops`]. Hands back the
+    /// new watch's id.
+    pub async fn add_dirwatch(&self, mut body: serde_json::Value) -> i64 {
+        if self.session.lock().expect("session").is_none() {
+            self.login().await;
+        }
+        if body.get("directory").is_none() {
+            body["directory"] = serde_json::Value::from(self.drops().display().to_string());
+        }
+        let (status, created) = self.admin_post("/api/admin/dirwatches", body).await;
+        assert_eq!(status, 201, "the watch was refused: {created}");
+        self.settle().await;
+        created["id"].as_i64().expect("an id")
+    }
+
+    /// Put a file where a Recorder would — **atomically**, written beside the
+    /// folder and renamed in, as a well-behaved Recorder does, so the watch is
+    /// never shown half of it. `relative` is under [`TestApp::drops`], and any
+    /// folders it names are created.
+    pub fn drop_file(&self, relative: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let target = self.drops().join(relative);
+        std::fs::create_dir_all(target.parent().expect("a parent")).expect("folders");
+        let staging = self
+            .tmp
+            .path()
+            .join(format!("staging-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&staging, bytes).expect("staged");
+        std::fs::rename(&staging, &target).expect("dropped");
+        target
+    }
+
+    /// Ask watch `id` to look in its folder now, and wait until it has
+    /// answered everything it found.
+    pub async fn scan_dirwatch(&self, id: i64) {
+        let (status, body) = self
+            .admin_post(
+                &format!("/api/admin/dirwatches/{id}/scan"),
+                serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(status, 200, "scan refused: {body}");
+        self.settle().await;
     }
 
     /// What this app's own env file pins `var` to — the only copy of a
@@ -1468,6 +1524,12 @@ impl TestApp {
         self.statements.refuse_updates(table);
     }
 
+    /// Refuse every statement that **reads** `table`, leaving writes working
+    /// (#72) — [`TestApp::refuse_updates_to`]'s mirror.
+    pub fn refuse_reads_of(&self, table: &str) {
+        self.statements.refuse_reads(table);
+    }
+
     /// How many database statements this Instance has issued since it opened
     /// its database (#86) — the same seam, counting instead of refusing.
     ///
@@ -1803,6 +1865,18 @@ impl TestAppBuilder {
             None => baseline_config(),
         };
         config.server.base_dir = tmp.path().to_path_buf();
+        // Every app may watch one folder of its own (#72) — the temp-directory
+        // Dirwatch driver. Set before the edits, so a test that wants Dirwatch
+        // off clears it like any other setting.
+        let drops = tmp.path().join(DROPS);
+        std::fs::create_dir_all(&drops).expect("a drops folder");
+        config.dirwatch.roots = vec![
+            drops
+                .display()
+                .to_string()
+                .parse()
+                .expect("an absolute root"),
+        ];
         config.database.url = Some(match postgres_server() {
             Some(server) => create_test_database(&server).await,
             None => format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display()),

@@ -515,7 +515,7 @@ pub async fn call_upload(
         ..NewCall::new(system_ref, talkgroup_ref, call_at_ms)
     };
 
-    ingest_call(&state, &key, new_call, audio).await
+    ingest_call(&state, Authority::Key(&key), new_call, audio).await
 }
 
 /// The shared ingest pipeline used by both upload endpoints — resolve, decide,
@@ -539,7 +539,7 @@ pub async fn call_upload(
 /// and no request to answer, and needs exactly this and nothing above it.
 pub async fn ingest_call(
     state: &AppState,
-    key: &str,
+    authority: Authority<'_>,
     new_call: NewCall,
     audio: Vec<u8>,
 ) -> Result<Recorded, Failure> {
@@ -551,18 +551,31 @@ pub async fn ingest_call(
         // Recorded once the row exists; absent, not `None`, until then.
         call_id = field::Empty,
     );
-    run_pipeline(state, key, new_call, audio)
+    run_pipeline(state, authority, new_call, audio)
         .instrument(span)
         .await
 }
 
+/// What entitles a Call to be ingested at all (ADR-0008).
+#[derive(Debug, Clone, Copy)]
+pub enum Authority<'a> {
+    /// An upload's API key, checked against the System the Call names. The key
+    /// itself is never logged, at any level, in any form (rule 2).
+    Key(&'a str),
+    /// A **Dirwatch** an Operator configured (#72). Authorized by construction:
+    /// the watch was created behind the admin session, inside a root only the
+    /// TOML can name (ADR-0021), so there is no credential for a file to
+    /// present and nothing a key's scope could add.
+    Dirwatch,
+}
+
 async fn run_pipeline(
     state: &AppState,
-    key: &str,
+    authority: Authority<'_>,
     mut new_call: NewCall,
     audio: Vec<u8>,
 ) -> Result<Recorded, Failure> {
-    let facts = resolve(state, key, &new_call).await?;
+    let facts = resolve(state, authority, &new_call).await?;
 
     // The *playing* length, so a one-second kerchunk and a forty-second
     // dispatch are distinguishable everywhere (#42, spec US 8). The recorder's
@@ -716,11 +729,18 @@ struct Facts {
 ///
 /// The key itself is never logged, at any level, in any form (rule 2) — and an
 /// unknown key has no row to name it by anyway.
-async fn resolve(state: &AppState, key: &str, new_call: &NewCall) -> Result<Facts, Failure> {
-    if !repo::authorize_ingest(&state.db, key, new_call.system_ref)
-        .await
-        .map_err(Stage::Auth.failed())?
-    {
+async fn resolve(
+    state: &AppState,
+    authority: Authority<'_>,
+    new_call: &NewCall,
+) -> Result<Facts, Failure> {
+    let authorized = match authority {
+        Authority::Key(key) => repo::authorize_ingest(&state.db, key, new_call.system_ref)
+            .await
+            .map_err(Stage::Auth.failed())?,
+        Authority::Dirwatch => true,
+    };
+    if !authorized {
         return Ok(Facts::default());
     }
 
@@ -1640,14 +1660,7 @@ pub async fn trunk_recorder_call_upload(
     }
 
     let meta_json = meta_json.ok_or(Incomplete::NoMeta)?;
-    // TR's own dialect has its own wire string; unlike the `Incomplete` family
-    // it is not "Incomplete call data: …", so it is a `Reason` of its own.
-    let meta: TrMeta = serde_json::from_str(&meta_json).map_err(|_| Reason::InvalidMeta)?;
-
-    let talkgroup_ref = meta
-        .talkgroup
-        .filter(|tg| *tg > 0)
-        .ok_or(Incomplete::NoTalkgroup)?;
+    let tr_call = read_tr_meta(&meta_json)?;
     let audio = match audio {
         Some(audio) if !audio.is_empty() => audio,
         _ => return Err(Incomplete::NoAudio.into()),
@@ -1681,6 +1694,69 @@ pub async fn trunk_recorder_call_upload(
         let head: String = raw.chars().take(UNUSABLE_PART_HEAD).collect();
         warn!(system_len = raw.len(), system_head = ?head, "unusable system part ignored");
     }
+    let new_call = tr_new_call(&state, tr_call, named_ref, audio_name, audio_mime).await?;
+    ingest_call(&state, Authority::Key(&key), new_call, audio).await
+}
+
+/// A Trunk Recorder call `.json` that names a Talkgroup — the half of its
+/// reading that needs nothing but the document.
+///
+/// Shared by the native upload endpoint and **Dirwatch** (#72), whose Trunk
+/// Recorder format reads the very same file off the disk TR wrote it to — so a
+/// field added to [`TrMeta`] reaches both, the way #44 holds the upload script
+/// and the plugin to one parser.
+pub(crate) struct TrCall {
+    meta: TrMeta,
+    talkgroup_ref: i64,
+}
+
+/// Why a Trunk Recorder `.json` is not a Call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrMetaRefused {
+    /// Not JSON, or not the shape `create_call_json` writes.
+    Invalid,
+    /// No positive `talkgroup`.
+    NoTalkgroup,
+}
+
+impl From<TrMetaRefused> for Failure {
+    fn from(refused: TrMetaRefused) -> Self {
+        match refused {
+            // TR's own dialect has its own wire string; unlike the `Incomplete`
+            // family it is not "Incomplete call data: …", so it is a `Reason`
+            // of its own.
+            TrMetaRefused::Invalid => Reason::InvalidMeta.into(),
+            TrMetaRefused::NoTalkgroup => Incomplete::NoTalkgroup.into(),
+        }
+    }
+}
+
+/// Read a Trunk Recorder call `.json`, or say what is wrong with it.
+pub(crate) fn read_tr_meta(json: &str) -> Result<TrCall, TrMetaRefused> {
+    let meta: TrMeta = serde_json::from_str(json).map_err(|_| TrMetaRefused::Invalid)?;
+    let talkgroup_ref = meta
+        .talkgroup
+        .filter(|tg| *tg > 0)
+        .ok_or(TrMetaRefused::NoTalkgroup)?;
+    Ok(TrCall {
+        meta,
+        talkgroup_ref,
+    })
+}
+
+/// The Call a Trunk Recorder `.json` describes, filed under the System its
+/// Recorder named (`named_ref`, #111) or else the one its `short_name` matches.
+pub(crate) async fn tr_new_call(
+    state: &AppState,
+    call: TrCall,
+    named_ref: Option<i64>,
+    audio_name: Option<String>,
+    audio_mime: Option<String>,
+) -> Result<NewCall, Failure> {
+    let TrCall {
+        meta,
+        talkgroup_ref,
+    } = call;
     let short_name = clean(meta.short_name.clone());
     let system = match named_ref {
         Some(system_ref) => TrSystem::Named(system_ref),
@@ -1691,16 +1767,14 @@ pub async fn trunk_recorder_call_upload(
             None => 0,
         }),
     };
-
-    let new_call = build_tr_call(
+    Ok(build_tr_call(
         meta,
         system,
         short_name,
         talkgroup_ref,
         audio_name,
         audio_mime,
-    );
-    ingest_call(&state, &key, new_call, audio).await
+    ))
 }
 
 /// Trunk Recorder's call `.json` metadata.
