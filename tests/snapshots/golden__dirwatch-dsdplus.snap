@@ -1,0 +1,12 @@
+---
+source: tests/golden.rs
+expression: "landed(&app, wall_clock).await"
+---
+system: 1 Some("System 1")
+talkgroup: 750 label=Some("Ram_Muni") name=Some("Talkgroup 750")
+at: 2022-08-09 15:31:20
+frequency: None
+audio: Some("audio/mpeg") Some("153120_001_DMR(BS)_1-899_DCC2_Slot1_GC_750[Ram_Muni]_52.mp3") Some(16680) bytes, Some(1044) ms
+emergency=false encrypted=false priority=None type=None
+patches: []
+unit: 52 None None

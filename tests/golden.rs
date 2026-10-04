@@ -446,3 +446,104 @@ async fn golden_generic_upload_drops_empty_and_dash_talkgroup_fields() {
         "\"-\" group -> Unknown"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Dirwatch format fixtures (#72)
+// ---------------------------------------------------------------------------
+
+/// Copy the fixture tree `tests/fixtures/dirwatch/<format>/` into `into`.
+fn copy_tree(from: &Path, into: &Path) {
+    for entry in std::fs::read_dir(from).expect("a fixture folder") {
+        let entry = entry.expect("an entry");
+        let target = into.join(entry.file_name());
+        if entry.file_type().expect("a type").is_dir() {
+            std::fs::create_dir_all(&target).expect("a folder");
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("a copy");
+        }
+    }
+}
+
+/// The one Call, rendered whole and **zone-independently**: an instant the
+/// file carried is rendered in UTC, and a wall-clock time the file carried
+/// with no zone is rendered as that wall-clock time — what the file said,
+/// whatever zone the machine running this happens to be in.
+async fn landed(app: &TestApp, wall_clock: bool) -> String {
+    use chrono::TimeZone;
+    let call = app.the_call().await;
+    let system = app.system_of(&call).await;
+    let talkgroup = app.talkgroup_of(&call).await;
+    let at = match wall_clock {
+        true => chrono::Local
+            .timestamp_millis_opt(call.call_at_ms)
+            .unwrap()
+            .naive_local()
+            .to_string(),
+        false => chrono::Utc
+            .timestamp_millis_opt(call.call_at_ms)
+            .unwrap()
+            .to_rfc3339(),
+    };
+    let mut out = format!(
+        "system: {} {:?}\ntalkgroup: {} label={:?} name={:?}\nat: {at}\nfrequency: {:?}\n\
+         audio: {:?} {:?} {:?} bytes, {:?} ms\nemergency={} encrypted={} priority={:?} type={:?}\n\
+         patches: {:?}\n",
+        system.r#ref,
+        system.label,
+        talkgroup.r#ref,
+        talkgroup.label,
+        talkgroup.name,
+        call.frequency,
+        call.audio_mime,
+        call.audio_name,
+        call.audio_size,
+        call.duration_ms,
+        call.emergency,
+        call.encrypted,
+        call.priority,
+        call.audio_type,
+        app.patch_refs(call.id).await,
+    );
+    for (unit_ref, label, offset) in app.units_of(call.id).await {
+        out += &format!("unit: {unit_ref} {label:?} {offset:?}\n");
+    }
+    out
+}
+
+/// **Every Dirwatch format, pinned**: a fixture of what each recorder leaves
+/// on disk — reconstructed from its source, as the multipart fixtures above
+/// are (`tests/fixtures/README.md`) — dropped into a watch, ingested through
+/// the whole pipeline, and the Call it became snapshotted whole. A change to
+/// how any format is read shows up here as a diff of what a Listener sees.
+#[rstest::rstest]
+#[case::trunk_recorder("trunk-recorder", serde_json::json!({ "format": "trunk-recorder" }), false)]
+#[case::sdrtrunk("sdrtrunk", serde_json::json!({ "format": "sdrtrunk" }), true)]
+#[case::dsdplus("dsdplus", serde_json::json!({ "format": "dsdplus" }), true)]
+#[case::mask(
+    "mask",
+    serde_json::json!({ "format": "mask", "mask": "cymx_#TG_#DATE_#ZTIME_#HZ", "systemRef": 11 }),
+    false
+)]
+#[tokio::test]
+async fn a_dirwatch_fixture_lands_as_the_call_it_describes(
+    #[case] format: &str,
+    #[case] mut watch: serde_json::Value,
+    #[case] wall_clock: bool,
+) {
+    let app = TestApp::spawn().await;
+    copy_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/dirwatch")
+            .join(format),
+        &app.drops(),
+    );
+    // Deleting, so what is already in the folder is owed — and the floor of
+    // the delay, so the test waits as little as a watch may.
+    watch["deleteAfter"] = serde_json::json!(true);
+    watch["delayMs"] = serde_json::json!(500);
+    let id = app.add_dirwatch(watch).await;
+    app.scan_dirwatch(id).await;
+
+    insta::assert_snapshot!(format!("dirwatch-{format}"), landed(&app, wall_clock).await);
+}

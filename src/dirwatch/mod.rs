@@ -309,9 +309,10 @@ pub(crate) enum Command {
     /// match. Sent by every curation write, on the same request (the
     /// `Tones::rearm` rule — a stale roster is a watch that silently is not).
     Rearm,
-    /// Look in one watch's folder now, as though it had just started — the
-    /// admin screen's "scan now", and the only way to have a file refused this
-    /// run looked at again without touching it.
+    /// Look in one watch's folder now, a little behind its watermark — the
+    /// admin screen's "scan now", for a share that sends no events or an
+    /// Operator who wants to be sure. A file refused this run is **not** read
+    /// again unless it has changed: the same bytes get the same answer.
     Scan(i64),
 }
 
@@ -490,11 +491,19 @@ pub fn new_call(
         (None, Some(Named::Label(label))) => (0, Some(label)),
         (None, None) => return Err(Unreadable::NoSystem),
     };
+    // A watch that routes these files to another Talkgroup than the one a
+    // file names is saying where the Call goes, not what that channel is
+    // called — so the file's names for its own Talkgroup are not kept, as a
+    // file's System label is not when the watch names the System.
+    let rerouted = described
+        .talkgroup_ref
+        .is_some_and(|named| named != talkgroup_ref);
+    let named = |name: Option<String>| name.filter(|_| !rerouted);
     Ok(NewCall {
         system_label,
-        talkgroup_label: described.talkgroup_label,
-        talkgroup_tag: described.talkgroup_tag,
-        talkgroup_groups: described.talkgroup_group.into_iter().collect(),
+        talkgroup_label: named(described.talkgroup_label),
+        talkgroup_tag: named(described.talkgroup_tag),
+        talkgroup_groups: named(described.talkgroup_group).into_iter().collect(),
         frequency: described.frequency.or(routing.frequency),
         site_ref: described.site_ref,
         site_label: described.site_label,
@@ -616,23 +625,6 @@ mod tests {
         assert_eq!(call.frequency, frequency);
     }
 
-    #[test]
-    fn a_watch_frequency_is_used_where_the_file_has_none() {
-        let call = new_call(
-            described(),
-            &Routing {
-                frequency: Some(155_000_000),
-                ..Routing::default()
-            },
-            0,
-            "a.wav",
-            "audio/wav",
-        )
-        .expect("a call");
-
-        assert_eq!(call.frequency, Some(155_000_000));
-    }
-
     /// A System named by label is looked up by the Instance; one named by a
     /// watch drops the file's label, which would otherwise rename it.
     #[rstest]
@@ -691,6 +683,61 @@ mod tests {
             assert!(audio_mime(format.default_extension()).is_some());
         }
         assert_eq!(Format::from_slug("default"), None);
+    }
+
+    /// The conditions a file and an upload share are refused under **one
+    /// spelling**, so one grep finds a Call refused either way — held here,
+    /// because the two vocabularies are two enums.
+    #[rstest]
+    #[case(
+        Unreadable::NoTalkgroup,
+        crate::failure::Reason::Incomplete(crate::failure::Incomplete::NoTalkgroup)
+    )]
+    #[case(
+        Unreadable::NoAudio,
+        crate::failure::Reason::Incomplete(crate::failure::Incomplete::NoAudio)
+    )]
+    #[case(Unreadable::InvalidMeta, crate::failure::Reason::InvalidMeta)]
+    fn a_refusal_an_upload_shares_is_spelled_as_the_upload_spells_it(
+        #[case] file: Unreadable,
+        #[case] upload: crate::failure::Reason,
+    ) {
+        assert_eq!(file.slug(), upload.slug());
+    }
+
+    /// A watch that routes a file to another Talkgroup drops the file's names
+    /// for its own — and keeps a name the file gives with no Ref of its own,
+    /// which can only be the routed channel's.
+    #[rstest]
+    #[case::rerouted(Some(54241), None)]
+    #[case::same_channel(Some(5), Some("Fire"))]
+    #[case::name_with_no_ref(None, Some("Fire"))]
+    fn a_rerouted_file_does_not_rename_the_channel_it_is_routed_to(
+        #[case] named: Option<i64>,
+        #[case] kept: Option<&str>,
+    ) {
+        let call = new_call(
+            Described {
+                talkgroup_ref: named,
+                talkgroup_label: Some("Fire".into()),
+                talkgroup_tag: Some("Fire".into()),
+                talkgroup_group: Some("Fire".into()),
+                ..described()
+            },
+            &Routing {
+                talkgroup_ref: Some(5),
+                ..Routing::default()
+            },
+            0,
+            "a.wav",
+            "audio/wav",
+        )
+        .expect("a call");
+
+        assert_eq!(call.talkgroup_ref, 5);
+        assert_eq!(call.talkgroup_label.as_deref(), kept);
+        assert_eq!(call.talkgroup_tag.as_deref(), kept);
+        assert_eq!(call.talkgroup_groups.len(), usize::from(kept.is_some()));
     }
 
     #[test]

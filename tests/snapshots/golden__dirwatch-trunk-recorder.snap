@@ -1,0 +1,12 @@
+---
+source: tests/golden.rs
+expression: "landed(&app, wall_clock).await"
+---
+system: 1 Some("fulton")
+talkgroup: 54155 label=Some("EMS DISP") name=Some("EMS Dispatch")
+at: 2022-11-29T16:45:38+00:00
+frequency: Some(771093750)
+audio: Some("audio/wav") Some("54155-1669740338_771093750.wav") Some(4044) bytes, Some(5760) ms
+emergency=true encrypted=false priority=Some(2) type=Some("digital")
+patches: [54155]
+unit: 1610092 Some("EMS 1") Some(0)

@@ -492,9 +492,10 @@ it rather than at the first file, `#UNITLBL` works, `#MHZ` rounds rather than tr
 
 ### What a watch does with a file
 
-- **It waits until the file has been left alone** for the watch's delay (2 seconds by default),
-  so a file still being written is never read half-done. A recorder that writes to a temporary
-  name and renames it into place can use a delay of 0.
+- **It waits until the file has been left alone** for the watch's delay (2 seconds by default,
+  half a second at the least), so a file still being written is never read half-done. A Trunk
+  Recorder Call is both of its files, so audio still growing after the `.json` was read is read
+  again.
 - **Every file gets an answer, and the answer is logged.** A Call stored or replaced, a
   duplicate, a blacklisted talkgroup — those are answers, and with delete-after the file is
   removed. A file that cannot be a Call is refused with a line naming why

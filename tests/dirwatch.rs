@@ -10,6 +10,13 @@
 //! operating system will get round to telling anybody; the ones about the
 //! operating system telling us wait for the Call on the live feed instead.
 //!
+//! Those last ones wait with `frame_within`, and it is not a sleep in
+//! disguise: it ends the moment the Call arrives, and nothing is asserted on
+//! its *not* arriving. `settle()` cannot cover them, because the operating
+//! system's latency is before the ticket — a Worker owes nothing until it has
+//! been told — so "settled" is true, and says nothing, in the moment between
+//! the rename and the event.
+//!
 //! The pure halves — masks, DSDPlus names, SDRTrunk tags, the routing rule —
 //! are unit-tested in `src/dirwatch/`.
 
@@ -147,7 +154,7 @@ fn age(path: &std::path::Path, ago: Duration) {
 async fn a_dropped_trunk_recorder_call_lands_exactly_as_an_uploaded_one() {
     let dropped = TestApp::spawn().await;
     let id = dropped
-        .add_dirwatch(json!({ "format": "trunk-recorder", "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "trunk-recorder", "delayMs": 500 }))
         .await;
     drop_tr_call(&dropped, TR_STEM, &tr_meta("fulton"));
     dropped.scan_dirwatch(id).await;
@@ -176,7 +183,7 @@ async fn a_dropped_trunk_recorder_call_lands_exactly_as_an_uploaded_one() {
 async fn a_dropped_sdrtrunk_recording_is_read_from_its_tag() {
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "sdrtrunk", "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "sdrtrunk", "delayMs": 500 }))
         .await;
     let mp3 = SdrTrunkMp3::new()
         .frame("TIT2", "54241\"Fire Dispatch\"")
@@ -225,7 +232,7 @@ async fn an_sdrtrunk_system_name_finds_the_system_already_known_by_it() {
         .await;
     assert_eq!(status, 201, "{body}");
     let id = app
-        .add_dirwatch(json!({ "format": "sdrtrunk", "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "sdrtrunk", "delayMs": 500 }))
         .await;
     let mp3 = SdrTrunkMp3::new()
         .frame("TIT2", "54241")
@@ -244,7 +251,7 @@ async fn an_sdrtrunk_system_name_finds_the_system_already_known_by_it() {
 async fn a_dropped_dsdplus_recording_is_read_from_its_path() {
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "dsdplus", "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "dsdplus", "delayMs": 500 }))
         .await;
     let audio = SdrTrunkMp3::new().anonymous().bytes();
     app.drop_file(
@@ -277,7 +284,7 @@ async fn a_masked_drop_is_read_from_its_name() {
             "format": "mask",
             "mask": "cymx_#TG_#DATE_#ZTIME_#HZ",
             "systemRef": 11,
-            "delayMs": 0,
+            "delayMs": 500,
         }))
         .await;
     app.drop_file("cymx_1457_20201231_083439_119100000.wav", &silence_ms(500));
@@ -311,7 +318,7 @@ async fn a_file_that_does_not_say_when_is_filed_at_when_it_was_written() {
             "format": "mask",
             "mask": "#TG",
             "systemRef": 11,
-            "delayMs": 0,
+            "delayMs": 500,
             "deleteAfter": true,
         }))
         .await;
@@ -339,7 +346,7 @@ async fn a_file_that_does_not_say_when_is_filed_at_when_it_was_written() {
 async fn a_watchs_system_outranks_the_one_the_file_names() {
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "trunk-recorder", "systemRef": 411, "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "trunk-recorder", "systemRef": 411, "delayMs": 500 }))
         .await;
     drop_tr_call(&app, TR_STEM, &tr_meta("fulton"));
     app.scan_dirwatch(id).await;
@@ -361,7 +368,7 @@ async fn a_dropped_file_reaches_a_listener_without_anyone_asking() {
         "format": "mask",
         "mask": "#TG",
         "systemRef": 11,
-        "delayMs": 50,
+        "delayMs": 500,
     }))
     .await;
     let mut ws = app.connect_ws().await;
@@ -383,7 +390,7 @@ async fn a_polling_watch_finds_a_file_no_event_announced() {
     let app = TestApp::spawn().await;
     let id = app
         .add_dirwatch(json!({
-            "format": "mask", "mask": "#TG", "systemRef": 11, "delayMs": 0, "poll": true,
+            "format": "mask", "mask": "#TG", "systemRef": 11, "delayMs": 500, "poll": true,
         }))
         .await;
     assert_eq!(listed(&app, id).await["health"]["status"], "watching");
@@ -404,7 +411,7 @@ async fn a_polling_watch_finds_a_file_no_event_announced() {
 #[tokio::test]
 async fn a_call_written_into_a_folder_that_did_not_exist_is_not_lost() {
     let app = TestApp::spawn().await;
-    app.add_dirwatch(json!({ "format": "trunk-recorder", "delayMs": 0 }))
+    app.add_dirwatch(json!({ "format": "trunk-recorder", "delayMs": 500 }))
         .await;
     let mut ws = app.connect_ws().await;
     subscribe(&mut ws, r#"{"t":"sub","all":true}"#).await;
@@ -460,7 +467,7 @@ async fn a_file_that_cannot_be_a_call_is_refused_by_name_and_left_alone(
 ) {
     let logs = LogCapture::start();
     let app = TestApp::spawn().await;
-    watch["delayMs"] = json!(0);
+    watch["delayMs"] = json!(500);
     watch["deleteAfter"] = json!(true);
     let id = app.add_dirwatch(watch).await;
     let dropped: Vec<_> = files
@@ -506,7 +513,7 @@ async fn a_trunk_recorder_json_waits_for_its_audio_and_is_refused_only_when_it_n
     // Deleting, so a `.json` left over from before is still owed whatever its
     // age, the way a Recorder's leftovers are.
     let id = app
-        .add_dirwatch(json!({ "format": "trunk-recorder", "delayMs": 0, "deleteAfter": true }))
+        .add_dirwatch(json!({ "format": "trunk-recorder", "delayMs": 500, "deleteAfter": true }))
         .await;
 
     // Fresh: it waits, owing nothing, refused for nothing.
@@ -544,7 +551,7 @@ async fn a_file_too_large_to_be_a_call_is_refused_without_being_read() {
     let logs = LogCapture::start();
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500 }))
         .await;
     let staged = app.path().join("huge");
     std::fs::File::create(&staged)
@@ -568,7 +575,7 @@ async fn files_a_watch_does_not_read_are_left_entirely_alone() {
     let app = TestApp::spawn().await;
     let id = app
         .add_dirwatch(json!({
-            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0, "deleteAfter": true,
+            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500, "deleteAfter": true,
         }))
         .await;
     let other = app.drop_file("5.mp3", &silence_ms(100));
@@ -602,7 +609,7 @@ async fn files_a_watch_does_not_read_are_left_entirely_alone() {
 async fn delete_after_removes_a_file_once_it_is_answered() {
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "trunk-recorder", "delayMs": 0, "deleteAfter": true }))
+        .add_dirwatch(json!({ "format": "trunk-recorder", "delayMs": 500, "deleteAfter": true }))
         .await;
     drop_tr_call(&app, TR_STEM, &tr_meta("fulton"));
     let m4a = app.drop_file(&format!("{TR_STEM}.m4a"), b"m4a bytes");
@@ -634,7 +641,7 @@ async fn a_file_the_store_refused_is_kept_and_taken_once_the_store_recovers() {
     let app = TestApp::builder().store(store).spawn().await;
     let id = app
         .add_dirwatch(json!({
-            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0, "deleteAfter": true,
+            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500, "deleteAfter": true,
         }))
         .await;
     faults.fail_puts();
@@ -689,7 +696,7 @@ async fn set_disabled(app: &TestApp, id: i64, disabled: bool) {
 /// baseline silently, so these hold on every operating system and test exactly
 /// the claim they name.
 const SCANNED: &str =
-    r##"{ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0, "poll": true }"##;
+    r##"{ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500, "poll": true }"##;
 
 /// A mask watch reading `#TG` into System 1, polled — see [`SCANNED`].
 fn scanned() -> Value {
@@ -740,7 +747,7 @@ async fn a_deleting_watch_backfills_everything_left_in_its_folder() {
     let mut app = TestApp::spawn().await;
     let id = app
         .add_dirwatch(json!({
-            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0, "deleteAfter": true,
+            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500, "deleteAfter": true,
         }))
         .await;
     set_disabled(&app, id, true).await;
@@ -774,7 +781,7 @@ async fn a_new_watch_does_not_import_the_history_already_in_its_folder() {
 async fn a_watch_is_still_watching_after_a_restart() {
     let mut app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500 }))
         .await;
     app.restart().await;
     app.settle().await;
@@ -799,7 +806,7 @@ async fn a_watch_whose_root_was_removed_stops_and_says_why() {
     let logs = LogCapture::start();
     let mut app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500 }))
         .await;
     let elsewhere = app.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
@@ -830,7 +837,7 @@ async fn the_listing_carries_the_roots_and_each_watchs_health() {
     let app = TestApp::spawn().await;
     let id = app
         .add_dirwatch(json!({
-            "label": "Fulton TR", "format": "trunk-recorder", "delayMs": 0,
+            "label": "Fulton TR", "format": "trunk-recorder", "delayMs": 500,
         }))
         .await;
     drop_tr_call(&app, TR_STEM, &tr_meta("fulton"));
@@ -843,7 +850,7 @@ async fn the_listing_carries_the_roots_and_each_watchs_health() {
     let row = listed(&app, id).await;
     assert_eq!(row["label"], "Fulton TR");
     assert_eq!(row["format"], "trunk-recorder");
-    assert_eq!(row["delayMs"], 0);
+    assert_eq!(row["delayMs"], 500);
     assert_eq!(row["health"]["status"], "watching");
     assert_eq!(row["health"]["ingested"], 1);
     assert!(row["health"]["lastIngestMs"].is_i64(), "{row}");
@@ -855,7 +862,7 @@ async fn the_listing_carries_the_roots_and_each_watchs_health() {
 async fn a_disabled_watch_reads_nothing_and_catches_up_when_enabled() {
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500 }))
         .await;
     let (status, row) = app
         .admin_patch(
@@ -886,7 +893,7 @@ async fn a_disabled_watch_reads_nothing_and_catches_up_when_enabled() {
 async fn deleting_a_watch_stops_it_and_keeps_everything_it_ingested() {
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500 }))
         .await;
     app.drop_file("1.wav", &silence_ms(500));
     app.scan_dirwatch(id).await;
@@ -930,6 +937,7 @@ async fn deleting_a_watch_stops_it_and_keeps_everything_it_ingested() {
 #[case::unroutable_talkgroup(json!({ "format": "mask", "mask": "#UNIT", "systemRef": 1 }), 400, "unroutable")]
 #[case::unroutable_system(json!({ "format": "mask", "mask": "#TG" }), 400, "unroutable")]
 #[case::negative_delay(json!({ "format": "sdrtrunk", "delayMs": -1 }), 400, "out-of-range")]
+#[case::no_delay_at_all(json!({ "format": "trunk-recorder", "delayMs": 0 }), 400, "out-of-range")]
 #[case::zero_system(json!({ "format": "sdrtrunk", "systemRef": 0 }), 400, "out-of-range")]
 #[case::unknown_field(json!({ "format": "sdrtrunk", "type": "default" }), 422, "")]
 #[tokio::test]
@@ -1092,7 +1100,7 @@ async fn a_system_that_cannot_be_looked_up_breaks_only_that_file(#[case] format:
     let logs = LogCapture::start();
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": format, "delayMs": 0, "deleteAfter": true }))
+        .add_dirwatch(json!({ "format": format, "delayMs": 500, "deleteAfter": true }))
         .await;
     app.refuse_statements_on("systems");
     let kept = match format {
@@ -1129,7 +1137,7 @@ async fn a_watermark_that_cannot_be_written_costs_a_line_and_not_a_call() {
     let logs = LogCapture::start();
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0 }))
+        .add_dirwatch(json!({ "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500 }))
         .await;
     app.refuse_updates_to("dirwatches");
     app.drop_file("1457.wav", &silence_ms(500));
@@ -1137,7 +1145,7 @@ async fn a_watermark_that_cannot_be_written_costs_a_line_and_not_a_call() {
 
     assert_eq!(app.count::<call::Entity>().await, 1);
     let line = logs.only_line_containing("server error");
-    assert!(line.contains("stage=curate"), "{line}");
+    assert!(line.contains("stage=dirwatch"), "{line}");
 }
 
 /// A roster that cannot be read leaves the watches it had running as they
@@ -1155,9 +1163,9 @@ async fn a_roster_that_cannot_be_read_is_a_server_error() {
     app.settle().await;
 
     let line = logs.only_line_containing("server error");
-    assert!(line.contains("stage=curate"), "{line}");
+    assert!(line.contains("stage=dirwatch"), "{line}");
     let status = app.get_json("/api/admin/status").await;
-    assert_eq!(status["errors"]["curate"], 1, "{status}");
+    assert_eq!(status["errors"]["dirwatch"], 1, "{status}");
 }
 
 /// A file delete-after cannot remove — a folder the service user may read but
@@ -1170,7 +1178,7 @@ async fn a_file_that_cannot_be_deleted_is_ingested_once_and_said_so() {
     let app = TestApp::spawn().await;
     let id = app
         .add_dirwatch(json!({
-            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0, "deleteAfter": true,
+            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500, "deleteAfter": true,
         }))
         .await;
     let file = app.drop_file("locked/1457.wav", &silence_ms(500));
@@ -1205,7 +1213,7 @@ async fn an_edit_to_one_watch_leaves_the_others_running_untouched() {
     let a = app
         .add_dirwatch(json!({
             "directory": app.drops().join("a").display().to_string(),
-            "format": "mask", "mask": "x_#TG", "systemRef": 1, "delayMs": 0,
+            "format": "mask", "mask": "x_#TG", "systemRef": 1, "delayMs": 500,
         }))
         .await;
     let b = app
@@ -1222,7 +1230,7 @@ async fn an_edit_to_one_watch_leaves_the_others_running_untouched() {
     let (status, body) = app
         .admin_patch(
             &format!("/api/admin/dirwatches/{b}"),
-            json!({ "delayMs": 100 }),
+            json!({ "delayMs": 600 }),
         )
         .await;
     assert_eq!(status, 200, "{body}");
@@ -1255,7 +1263,7 @@ async fn moving_a_watch_does_not_import_the_new_folders_history() {
     let id = app
         .add_dirwatch(json!({
             "directory": app.drops().join("old").display().to_string(),
-            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 0, "poll": true,
+            "format": "mask", "mask": "#TG", "systemRef": 1, "delayMs": 500, "poll": true,
         }))
         .await;
     // Older than the move, but newer than the watch — only a watermark reset
@@ -1285,7 +1293,9 @@ async fn moving_a_watch_does_not_import_the_new_folders_history() {
 async fn a_watch_frequency_fills_a_trunk_recorder_call_that_names_none() {
     let app = TestApp::spawn().await;
     let id = app
-        .add_dirwatch(json!({ "format": "trunk-recorder", "frequency": 155_000_000, "delayMs": 0 }))
+        .add_dirwatch(
+            json!({ "format": "trunk-recorder", "frequency": 155_000_000, "delayMs": 500 }),
+        )
         .await;
     drop_tr_call(
         &app,
@@ -1295,4 +1305,96 @@ async fn a_watch_frequency_fills_a_trunk_recorder_call_that_names_none() {
     app.scan_dirwatch(id).await;
 
     assert_eq!(app.the_call().await.frequency, Some(155_000_000));
+}
+
+/// **A Trunk Recorder Call is as new as its newest half.** TR writes the
+/// `.json` and then renders the audio, so the audio is always the newer file —
+/// and a watch that kept its files must not read its newest Call again at every
+/// boot because the scan judged the pair by one half and the watermark by the
+/// other.
+#[tokio::test]
+async fn a_trunk_recorder_call_is_not_read_again_at_the_next_boot() {
+    let logs = LogCapture::start();
+    let mut app = TestApp::spawn().await;
+    let id = app
+        .add_dirwatch(json!({
+            "format": "trunk-recorder", "delayMs": 500, "poll": true, "disabled": true,
+        }))
+        .await;
+    // Started an hour ago, so a Call written seconds ago is new to it.
+    let mut row = dirwatch::Entity::find_by_id(id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_active_model();
+    row.seen_through_ms = Set(row.seen_through_ms.unwrap() - 3_600_000);
+    row.update(&app.db).await.unwrap();
+    let (status, body) = app
+        .admin_patch(
+            &format!("/api/admin/dirwatches/{id}"),
+            json!({ "disabled": false }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    app.settle().await;
+    drop_tr_call(&app, TR_STEM, &tr_meta("fulton"));
+    // The render finishes a second after the `.json` was written.
+    let json = app.drops().join(format!("{TR_STEM}.json"));
+    let wav = app.drops().join(format!("{TR_STEM}.wav"));
+    age(&json, Duration::from_secs(3));
+    age(&wav, Duration::from_secs(2));
+    app.scan_dirwatch(id).await;
+    assert_eq!(app.count::<call::Entity>().await, 1);
+
+    app.restart().await;
+    app.settle().await;
+
+    assert_eq!(app.count::<call::Entity>().await, 1);
+    assert!(
+        logs.lines_containing("reason=duplicate").is_empty(),
+        "{}",
+        logs.text()
+    );
+}
+
+/// The watch's frequency fills in for a file that names none — and a tag that
+/// names one is believed over it.
+#[tokio::test]
+async fn an_sdrtrunk_tags_frequency_outranks_the_watchs_fallback() {
+    let app = TestApp::spawn().await;
+    let id = app
+        .add_dirwatch(json!({ "format": "sdrtrunk", "frequency": 155_000_000, "delayMs": 500 }))
+        .await;
+    app.drop_file(
+        "a.mp3",
+        &SdrTrunkMp3::new()
+            .frame("TIT2", "54241")
+            .comment("System:Fulton;Frequency:851012500;")
+            .bytes(),
+    );
+    app.scan_dirwatch(id).await;
+
+    assert_eq!(app.the_call().await.frequency, Some(851_012_500));
+}
+
+/// A Trunk Recorder watch that names a Talkgroup files every Call there, as
+/// every format's watch does — and the `.json`'s names for its own Talkgroup do
+/// not rename the one it was routed to.
+#[tokio::test]
+async fn a_trunk_recorder_watchs_talkgroup_outranks_the_json() {
+    let app = TestApp::spawn().await;
+    let id = app
+        .add_dirwatch(json!({ "format": "trunk-recorder", "talkgroupRef": 77, "delayMs": 500 }))
+        .await;
+    drop_tr_call(&app, TR_STEM, &tr_meta("fulton"));
+    app.scan_dirwatch(id).await;
+
+    let talkgroup = app.talkgroup_of(&app.the_call().await).await;
+    assert_eq!(talkgroup.r#ref, 77);
+    assert_ne!(
+        talkgroup.label.as_deref(),
+        Some("EMS DISP"),
+        "not the json's"
+    );
 }

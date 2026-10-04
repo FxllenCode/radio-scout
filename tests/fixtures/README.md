@@ -91,3 +91,24 @@ Byte layout and values are produced by `gen_fixtures.py` in this directory
 (`python3 tests/fixtures/gen_fixtures.py`) — it documents each field's source
 line. To swap in a real capture, replace the `.multipart` file and update the
 matching `Content-Type` constant + expected-row assertions in `tests/golden.rs`.
+
+## `dirwatch/` → **Dirwatch** (#72)
+
+What each recorder leaves **on disk**, one tree per format, which
+`tests/golden.rs::a_dirwatch_fixture_lands_as_the_call_it_describes` copies into a
+watched folder and pins the resulting Call of with an insta snapshot
+(`tests/snapshots/golden__dirwatch-*.snap`). Reconstructed from source like the
+uploads above, and generated once by hand — the audio is silence, because nothing
+here decodes a sample:
+
+- `trunk-recorder/fulton/2022/11/29/54155-1669740338_771093750.{json,wav}` — the
+  `captureDir/shortName/YYYY/M/D/TG-START_FREQ` layout, and the `.json` is the
+  shape of `create_call_json` (`trunk-recorder/trunk-recorder/call_concluder/call_concluder.cc`).
+- `sdrtrunk/…_TO_54241_FROM_1234567.mp3` — the filename
+  `AudioRecordingManager.getAudioRecordingPath` builds, and the ID3v2.4 frames
+  `AudioMetadataUtils.getMetadataMap` + `getMP3ID3` write, ahead of 40 MPEG frames.
+- `dsdplus/1R-Record/20220809/153120_001_DMR(BS)_1-899_DCC2_Slot1_GC_750[Ram_Muni]_52.mp3`
+  — a real DSDPlus Fast Lane name from rdio-scanner discussion #244, in its date
+  folder.
+- `mask/cymx_1457_20201231_083439_119100000.wav` — rdio-scanner's own documented
+  mask example (`cymx_#TG_#DATE_#TIME_#HZ`, read here with `#ZTIME`).

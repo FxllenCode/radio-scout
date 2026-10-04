@@ -10,7 +10,7 @@
 //! | --- | --- | --- |
 //! | `TIT2` | the TO identifier, then its aliases quoted: `54241"Fire Dispatch"`, or `P:1234 [54241, 54242]` for a patch | Talkgroup Ref, label, **Patches** |
 //! | `TPE1` | the FROM radio, then its aliases | the radio's Ref (its name is Mining's, applied at ingest as for every SDRTrunk Call) |
-//! | `COMM` | `Date:…;System:…;Site:…;Frequency:…;` | when, and which System by name |
+//! | `COMM` | `Date:…;System:…;Site:…;Frequency:…;` | when, the frequency, and which System by name |
 //! | `TIT1` | the System's name again | the System, when `COMM` has none |
 //!
 //! **When is the tag's `Date:` minus the Call's length.** SDRTrunk stamps the
@@ -45,6 +45,12 @@ pub fn read<Tz: TimeZone>(facts: &AudioFacts, zone: &Tz) -> Described {
             .field(ARTIST)
             .and_then(radio)
             .map(|(unit_ref, _)| (unit_ref, None)),
+        // Read here as well as by Mining, because a watch's own frequency
+        // fills in for a file that names none — and would get there first.
+        // `0` is SDRTrunk's "no frequency", as Mining reads it.
+        frequency: comment_value(comment, "Frequency")
+            .and_then(|hz| hz.parse().ok())
+            .filter(|hz: &i64| *hz > 0),
         system: comment_value(comment, "System")
             .or_else(|| facts.field(GROUPING).map(str::trim))
             .filter(|label| !label.is_empty())
@@ -127,6 +133,7 @@ mod tests {
         assert_eq!(described.talkgroup_label.as_deref(), Some("Fire Dispatch"));
         assert_eq!(described.unit, Some((1_234_567, None)));
         assert_eq!(described.system, Some(Named::Label("Fulton".into())));
+        assert_eq!(described.frequency, Some(851_012_500));
         assert_eq!(
             described.call_at_ms,
             Some(
@@ -188,6 +195,15 @@ mod tests {
             read(&facts(entries), &eastern()).system,
             expected.map(|label| Named::Label(label.into()))
         );
+    }
+
+    #[rstest]
+    #[case::none("System:Fulton;", None)]
+    #[case::zero("Frequency:0;", None)]
+    #[case::not_a_number("Frequency:851.0125 MHz;", None)]
+    #[case::hertz("Frequency:851012500;", Some(851_012_500))]
+    fn the_tag_names_the_frequency_in_hertz(#[case] comment: &str, #[case] hz: Option<i64>) {
+        assert_eq!(read(&facts(&[("COMM", comment)]), &eastern()).frequency, hz);
     }
 
     #[rstest]

@@ -1,0 +1,12 @@
+---
+source: tests/golden.rs
+expression: "landed(&app, wall_clock).await"
+---
+system: 1 Some("Fulton")
+talkgroup: 54241 label=Some("Fire Dispatch") name=Some("Talkgroup 54241")
+at: 2026-08-11 09:00:08.956
+frequency: Some(851012500)
+audio: Some("audio/mpeg") Some("20260811_090010Fulton_Downtown_Control 1__TO_54241_FROM_1234567.mp3") Some(17011) bytes, Some(1044) ms
+emergency=false encrypted=false priority=None type=Some("P25 Phase 1")
+patches: []
+unit: 1234567 Some("Engine 1") None

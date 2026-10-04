@@ -166,6 +166,10 @@ stages! {
     /// beside it already names the method and the path, so `stage=curate` plus
     /// `PATCH /api/admin/talkgroups/12` says everything a finer split would.
     Curate => "curate",
+    /// The **Dirwatch** Worker's own reads and writes (#72) — its roster and
+    /// its watermark. Not `curate`, which would send an Operator to the admin
+    /// surface for a failure no request made.
+    Dirwatch => "dirwatch",
     /// Deleting the Calls a force-deleted System or Talkgroup still held (#49) —
     /// its own stage because it is the only curation path that touches the
     /// **object store**, and "the database refused" and "the bucket refused"

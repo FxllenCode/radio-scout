@@ -310,10 +310,14 @@ fn scaled(value: &str, unit: f64) -> Option<i64> {
 }
 
 /// A conventional channel named by its frequency: the frequency in hertz, and
-/// the Talkgroup Ref rdio derives from it — the frequency in kilohertz.
+/// the Talkgroup Ref rdio derives from it — the **whole** kilohertz, truncated
+/// as rdio truncates, so a 12.5 kHz channel (155.0125 MHz → 155012) is the
+/// Talkgroup an Operator migrating from rdio already has. From the hertz,
+/// which are exact, rather than from rdio's float product, which turns 119.1
+/// MHz into 119099.
 fn channel(value: &str, unit: f64) -> Option<(i64, i64)> {
     let hz = scaled(value, unit)?;
-    let talkgroup = (hz as f64 / 1e3).round() as i64;
+    let talkgroup = hz / 1_000;
     (talkgroup > 0).then_some((hz, talkgroup))
 }
 
@@ -437,6 +441,9 @@ mod tests {
     #[case::tg_hz("#TGHZ", "119100000", |d: &Described| d.talkgroup_ref == Some(119_100) && d.frequency == Some(119_100_000))]
     #[case::tg_khz("#TGKHZ", "119100.000", |d: &Described| d.talkgroup_ref == Some(119_100) && d.frequency == Some(119_100_000))]
     #[case::tg_mhz("#TGMHZ", "119.1", |d: &Described| d.talkgroup_ref == Some(119_100) && d.frequency == Some(119_100_000))]
+    #[case::tg_mhz_half_kilohertz("#TGMHZ", "155.0125", |d: &Described| d.talkgroup_ref == Some(155_012) && d.frequency == Some(155_012_500))]
+    #[case::tg_khz_half_kilohertz("#TGKHZ", "155012.5", |d: &Described| d.talkgroup_ref == Some(155_012) && d.frequency == Some(155_012_500))]
+    #[case::tg_hz_half_kilohertz("#TGHZ", "155012500", |d: &Described| d.talkgroup_ref == Some(155_012) && d.frequency == Some(155_012_500))]
     fn every_token_lands_where_it_says(
         #[case] mask: &str,
         #[case] stem: &str,

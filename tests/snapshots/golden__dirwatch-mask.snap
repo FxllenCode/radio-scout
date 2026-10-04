@@ -1,0 +1,11 @@
+---
+source: tests/golden.rs
+expression: "landed(&app, wall_clock).await"
+---
+system: 11 Some("System 11")
+talkgroup: 1457 label=Some("1457") name=Some("Talkgroup 1457")
+at: 2020-12-31T08:34:39+00:00
+frequency: Some(119100000)
+audio: Some("audio/wav") Some("cymx_1457_20201231_083439_119100000.wav") Some(4044) bytes, Some(250) ms
+emergency=false encrypted=false priority=None type=None
+patches: []

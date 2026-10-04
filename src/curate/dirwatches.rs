@@ -44,8 +44,15 @@ use crate::dirwatch::mask::{Mask, Token};
 use crate::dirwatch::{Bound, Format, Health, audio_mime, within_roots};
 use crate::failure::{Failure, Stage};
 
-/// The delay a watch waits when the form names none — rdio's floor.
+/// The delay a watch waits when the form names none — rdio's default, and
+/// what it clamps every watch up to.
 const DEFAULT_DELAY_MS: i64 = 2_000;
+
+/// The shortest delay a watch may have. Below rdio's two seconds, which a
+/// recorder that writes steadily does not need — and not zero, which reads a
+/// Trunk Recorder Call's audio while it is still being rendered and, under
+/// delete-after, deletes it from under the renderer.
+const MIN_DELAY_MS: i64 = 500;
 
 /// The longest delay worth having: past ten minutes a Recorder is not still
 /// writing, it has stopped.
@@ -295,9 +302,11 @@ pub async fn remove(
     Ok(Removed)
 }
 
-/// `POST /api/admin/dirwatches/{id}/scan` — look in the folder now, including
-/// at files refused this run: what an Operator does after fixing whatever got
-/// them refused.
+/// `POST /api/admin/dirwatches/{id}/scan` — look in the folder now, for a
+/// share that sends no events or an Operator who wants to be sure. A file
+/// refused this run is read again only once it has changed; editing the watch
+/// starts it afresh, which is what a watch that deletes as it goes needs to
+/// retry everything still in its folder.
 pub async fn scan(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -384,10 +393,10 @@ fn checked(
             });
         }
     }
-    if !(0..=MAX_DELAY_MS).contains(&draft.delay_ms) {
+    if !(MIN_DELAY_MS..=MAX_DELAY_MS).contains(&draft.delay_ms) {
         return Err(Rejected::OutOfRange {
             field: "delayMs",
-            least: 0,
+            least: MIN_DELAY_MS,
             most: MAX_DELAY_MS,
         });
     }

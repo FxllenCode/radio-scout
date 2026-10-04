@@ -215,7 +215,7 @@ impl Watches {
             Err(cause) => {
                 self.state
                     .metrics
-                    .fail(&Failure::broke(Stage::Curate, cause));
+                    .fail(&Failure::broke(Stage::Dirwatch, cause));
                 return;
             }
         };
@@ -440,6 +440,20 @@ struct Stamp {
     bytes: u64,
 }
 
+impl Stamp {
+    /// Two files that are one Call, as one stamp: written when the later was,
+    /// and as big as both. So a Trunk Recorder Call changes when *either* half
+    /// does — its audio still growing after the `.json` was read is a reason
+    /// to read it again — and it is as new as its newest half, which is the
+    /// half its watermark has to have passed.
+    fn with(self, other: Stamp) -> Stamp {
+        Stamp {
+            written_ms: self.written_ms.max(other.written_ms),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
+}
+
 /// How far a scan looks back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope {
@@ -492,9 +506,7 @@ impl Watch {
                 .max(self.started_through_ms),
         };
         for (path, stamp) in walked(&self.directory).await {
-            if stamp.written_ms > floor {
-                self.enqueue(&path, Some(stamp), meter);
-            }
+            self.enqueue(&path, Some(stamp), floor, meter);
         }
     }
 
@@ -532,7 +544,7 @@ impl Watch {
                     match path.is_dir() {
                         // A folder renamed into place, files and all.
                         true => self.scan_folder(path, meter).await,
-                        false => self.enqueue(path, None, meter),
+                        false => self.enqueue(path, None, i64::MIN, meter),
                     }
                 }
             }
@@ -542,24 +554,28 @@ impl Watch {
 
     async fn scan_folder(&mut self, folder: &Path, meter: &Arc<Meter>) {
         for (path, stamp) in walked(folder).await {
-            self.enqueue(&path, Some(stamp), meter);
+            self.enqueue(&path, Some(stamp), i64::MIN, meter);
         }
     }
 
     /// Owe an answer about `path` — the file it stands for, once it has been
-    /// left alone for the watch's delay.
-    fn enqueue(&mut self, path: &Path, stamp: Option<Stamp>, meter: &Arc<Meter>) {
+    /// left alone for the watch's delay — unless what it stands for was written
+    /// at or before `floor`.
+    ///
+    /// `walked` is the stamp a scan already read for `path`, spared a second
+    /// look where `path` is the whole of what it stands for.
+    fn enqueue(&mut self, path: &Path, walked: Option<Stamp>, floor: i64, meter: &Arc<Meter>) {
         let Some(subject) = self.subject(path) else {
             return;
         };
-        // The stamp of the file the answer is *about*: a scan hands over the
-        // stamp of what it walked past, and for a Trunk Recorder audio file
-        // that is not the `.json` its Call is keyed on.
-        let stamp = match subject == path {
-            true => stamp.or_else(|| stamp_of(&subject)),
-            false => stamp_of(&subject),
+        // The stamp of the Call the answer is *about*, which for Trunk
+        // Recorder is both halves of a pair, whichever half was walked past —
+        // so the floor is judged against the same stamp the watermark was.
+        let stamp = match self.reader {
+            Reader::TrunkRecorder => self.pair_stamp(&subject),
+            _ => walked.or_else(|| stamp_of(&subject)),
         };
-        let Some(stamp) = stamp else {
+        let Some(stamp) = stamp.filter(|stamp| stamp.written_ms > floor) else {
             return;
         };
         if self.seen.get(&subject) == Some(&stamp) {
@@ -577,6 +593,16 @@ impl Watch {
         pending.due = due;
         pending.written_ms = pending.written_ms.min(stamp.written_ms);
         pending.ticket.get_or_insert_with(|| meter.admit());
+    }
+
+    /// A Trunk Recorder `.json` and its audio, as one [`Stamp`] — the `.json`
+    /// alone while its audio has not arrived.
+    fn pair_stamp(&self, json: &Path) -> Option<Stamp> {
+        let json_stamp = stamp_of(json)?;
+        Some(match stamp_of(&json.with_extension(&self.extension)) {
+            Some(audio) => json_stamp.with(audio),
+            None => json_stamp,
+        })
     }
 
     /// The file `path` stands for in this watch, or `None` for one it ignores.
@@ -655,15 +681,16 @@ impl Watch {
         if let Some(wait) = self.still_being_written(audio_stamp) {
             return wait;
         }
+        let pair = json_stamp.with(audio_stamp);
         if json_stamp.bytes > MAX_FILE_BYTES || audio_stamp.bytes > MAX_FILE_BYTES {
-            return refused(Unreadable::TooLarge, json_stamp);
+            return refused(Unreadable::TooLarge, pair);
         }
         let (Ok(meta), Ok(bytes)) = (tokio::fs::read(json).await, tokio::fs::read(&audio).await)
         else {
-            return refused(Unreadable::CouldNotRead, json_stamp);
+            return refused(Unreadable::CouldNotRead, pair);
         };
         if bytes.is_empty() {
-            return refused(Unreadable::NoAudio, json_stamp);
+            return refused(Unreadable::NoAudio, pair);
         }
         let tr_call = match String::from_utf8(meta)
             .map_err(|_| ingest::TrMetaRefused::Invalid)
@@ -671,10 +698,10 @@ impl Watch {
         {
             Ok(tr_call) => tr_call,
             Err(ingest::TrMetaRefused::Invalid) => {
-                return refused(Unreadable::InvalidMeta, json_stamp);
+                return refused(Unreadable::InvalidMeta, pair);
             }
             Err(ingest::TrMetaRefused::NoTalkgroup) => {
-                return refused(Unreadable::NoTalkgroup, json_stamp);
+                return refused(Unreadable::NoTalkgroup, pair);
             }
         };
         let mut new_call = match ingest::tr_new_call(
@@ -690,6 +717,21 @@ impl Watch {
             Err(failure) => return Outcome::Broke(failure),
         };
         new_call.frequency = new_call.frequency.or(self.routing.frequency);
+        // The watch's Talkgroup outranks the file's, as it does for every
+        // format — and the file's names for its *own* Talkgroup go with it,
+        // or they would rename the channel the watch routes to.
+        if let Some(talkgroup_ref) = self.routing.talkgroup_ref
+            && talkgroup_ref != new_call.talkgroup_ref
+        {
+            new_call = NewCall {
+                talkgroup_label: None,
+                talkgroup_name: None,
+                talkgroup_tag: None,
+                talkgroup_groups: Vec::new(),
+                talkgroup_ref,
+                ..new_call
+            };
+        }
         // The Call's whole file set: the `.json`, and every audio rendering of
         // it TR left — a `compressWav` Call has both a `.wav` and an `.m4a`.
         let mut files = vec![json.to_path_buf()];
@@ -699,7 +741,7 @@ impl Watch {
                 .map(|(extension, _)| json.with_extension(extension))
                 .filter(|sibling| sibling.exists()),
         );
-        ingested(state, new_call, bytes, json_stamp, files).await
+        ingested(state, new_call, bytes, pair, files).await
     }
 
     /// Any other format: the audio file alone, described by `describe` from its
@@ -840,7 +882,7 @@ impl Watch {
                 .exec(&state.db)
                 .await
             {
-                state.metrics.fail(&Failure::broke(Stage::Curate, cause));
+                state.metrics.fail(&Failure::broke(Stage::Dirwatch, cause));
             }
             // **Forgotten once no scan can reach it**: a rescan never looks
             // further back than [`LOOKBACK_MS`] behind the watermark, so a
