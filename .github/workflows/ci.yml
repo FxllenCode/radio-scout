@@ -109,7 +109,12 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
         ports: ['5432:5432']
+        # `--shm-size` for the reason the local container needs it
+        # (docs/agents/dual-dialect.md): Docker's 64 MB of /dev/shm ran out
+        # part-way through the suite once #72 grew it, failing a random
+        # handful of tests with "could not resize shared memory segment".
         options: >-
+          --shm-size=1g
           --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s

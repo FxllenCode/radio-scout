@@ -35,8 +35,9 @@ No space left on device
 and everything behind them times out. It reads exactly like a flaky suite or a genuine
 dialect-specific bug, it lands on different tests every run, and it has nothing to do with the code
 under test. It cost real time during #52 to tell it apart from two real Postgres-only defects the
-same run was hiding. CI's service container is not affected — it runs one job's worth of
-parallelism, not a developer machine's eighteen cores.
+same run was hiding. CI's service container needs it too: it was believed safe on one job's worth of
+parallelism until #72 grew the suite past 64 MB on a 4-core runner, and `Backend` went red the same
+way. `tests/ci.rs` now pins the flag on the service.
 
 ## Each test gets a database of its own
 

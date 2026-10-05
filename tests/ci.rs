@@ -331,6 +331,28 @@ fn ci_points_the_suite_at_the_postgres_it_provisions() {
     );
 }
 
+/// **The Postgres service is given room for the suite's shared memory.**
+///
+/// Docker's default `/dev/shm` is 64 MB, and the suite outgrew it on a 4-core
+/// runner with #72: a random handful of tests failed with `could not resize
+/// shared memory segment … No space left on device`, on different tests every
+/// run, which reads as a flaky suite and is not one (`docs/agents/dual-dialect.md`).
+/// The local container has always needed `--shm-size`; CI was believed to run
+/// too little in parallel to, until it did.
+#[test]
+fn the_postgres_service_has_room_for_the_suites_shared_memory() {
+    let backend = jobs(&ci_workflow())
+        .into_iter()
+        .find(|(name, _)| name == "backend")
+        .map(|(_, body)| body)
+        .expect("a backend job");
+
+    assert!(
+        backend.contains("--shm-size"),
+        "the Postgres service must set --shm-size: {backend}"
+    );
+}
+
 /// The real-S3 run is a real run (#35) — ADR-0009's storage half, and the same
 /// trap as the Postgres one above wearing a different hat.
 ///
