@@ -255,6 +255,114 @@ impl Drop for Departed {
     }
 }
 
+/// What a Worker that **catches up** owes, and the wake-up that hands it more —
+/// the **Downstream** and **Webhook** senders (#52, #54) and the **Delay**'s
+/// release (#73).
+///
+/// Lifted out of `crate::delivery::Dispatcher` when the third arrived, because
+/// the two races it encodes took three wrong answers to get right and a copy is
+/// a second chance to get one of them wrong in only one place.
+///
+/// **One unit of work is "the Worker has caught up with what was handed to
+/// it"** — not one item, and not one attempt. Both obvious alternatives hang
+/// `settle()`: one admission per delivery settled when it lands never settles
+/// while a sink is down, and one settled when it is attempted leaves every Call
+/// queued behind a stuck head owed forever. For the release Worker the same is
+/// true one step earlier: a Call waiting out ten minutes is owed by nobody, and
+/// a Worker non-idle for those ten minutes would hang every test that stored
+/// one. So an admission means "there is something new for you to look at", and
+/// the Worker discharges it by *looking*.
+pub struct WakeUp {
+    meter: Arc<Meter>,
+    /// `notify_one` **stores a permit** when nobody is waiting, so work handed
+    /// over while the Worker is mid-pass still earns the next pass rather than
+    /// waiting for a timer that may be minutes away.
+    wake: tokio::sync::Notify,
+    /// The right to be the Worker, taken once by its `spawn` (#93) — the owning
+    /// type is `Clone` and hangs off `AppState`, so `self`-by-value cannot be
+    /// the guard.
+    start: Handoff<()>,
+}
+
+impl Default for WakeUp {
+    fn default() -> Self {
+        WakeUp {
+            meter: Meter::new(),
+            wake: tokio::sync::Notify::new(),
+            start: Handoff::new(()),
+        }
+    }
+}
+
+impl WakeUp {
+    /// What the Worker owes, for the envelope and the status registry.
+    pub fn meter(&self) -> Arc<Meter> {
+        self.meter.clone()
+    }
+
+    /// Claim the right to be the Worker. `None` means one is already running.
+    pub fn claim(&self) -> Option<()> {
+        self.start.take()
+    }
+
+    /// Resolves the next time something is handed over.
+    pub async fn woken(&self) {
+        self.wake.notified().await;
+    }
+
+    /// Note that `count` things have been handed over, and wake the Worker.
+    ///
+    /// Called **after** whatever handed them over has committed, never inside
+    /// it: an admission for work that then rolled back would be a debt nothing
+    /// could ever settle, and every later `settle()` in the process would wait
+    /// on it forever.
+    pub fn owes(&self, count: usize) {
+        for _ in 0..count {
+            self.meter.admit_untracked();
+        }
+        if count > 0 {
+            self.wake.notify_one();
+        }
+    }
+
+    /// Take on the Worker's **first pass**, before its task is spawned.
+    ///
+    /// Without this a freshly started Instance reads idle before the Worker has
+    /// looked at anything — a meter that has admitted nothing is idle by
+    /// definition — so `settle()` would return with the first read still to
+    /// come, and any statement-count assertion anywhere in the suite would race
+    /// it (`tests/mining.rs::mining_one_stored_call_costs_a_fixed_number_of_statements`
+    /// is how that was found, on Postgres and not on SQLite). It wakes nothing:
+    /// the loop takes its first pass anyway, and a stored permit would buy a
+    /// second pass nobody owed, landing in whatever a caller was measuring.
+    pub fn owes_a_first_pass(&self) {
+        self.meter.admit_untracked();
+    }
+
+    /// What the Worker is owed **right now** — read at the top of a pass, before
+    /// it looks at anything.
+    pub fn outstanding(&self) -> u64 {
+        self.meter.load().depth
+    }
+
+    /// Discharge the `owed` items the Worker had been handed *before* it looked.
+    ///
+    /// **The count has to be the one read before the pass, and that is the whole
+    /// of this method's correctness.** Settling the depth as it stands *after* a
+    /// pass discharges anything admitted while the pass was running — an upload
+    /// that committed a microsecond after the read — so `settle()` returns
+    /// having promised work was considered when it was not. It is a
+    /// check-then-act race and it reads as a flake: it failed
+    /// `tests/downstream.rs::re_scoping_a_peer_keeps_the_key_it_already_had` on
+    /// Postgres in CI and never once locally on SQLite, because the window is
+    /// exactly as wide as a database round trip. Work admitted *during* a pass
+    /// is simply left outstanding — the wake-up that came with it guarantees
+    /// another pass, which will discharge it.
+    pub fn caught_up(&self, owed: u64) {
+        self.meter.settle_n(owed);
+    }
+}
+
 /// One Worker's reading, as a status surface names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamedLoad {

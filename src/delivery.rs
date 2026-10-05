@@ -52,7 +52,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::call::CallId;
-use crate::worker::{Meter, Worker};
+use crate::worker::{Meter, WakeUp, Worker};
 
 /// Why one of an [`Outbox`]'s answers could not be given.
 ///
@@ -477,17 +477,21 @@ async fn sleep_until(at_ms: Option<i64>) {
 /// The accounting and the wake-up every outbound sink subsystem holds.
 ///
 /// [`crate::downstream::Downstreams`] and [`crate::webhook::Webhooks`] are each
-/// a configuration section wrapped around one of these. Splitting it out is not
-/// tidiness: [`Dispatcher::owes`] and [`Dispatcher::caught_up`] between them
-/// encode two races that took three wrong answers to get right, and a second
-/// copy would be a second chance to get one of them wrong in only one direction.
+/// a configuration section wrapped around one of these. The two races that
+/// took three wrong answers to get right — what one unit of this Worker's work
+/// is, and reading what is owed *before* a pass — live in
+/// [`crate::worker::WakeUp`] since #73, because a **Delay**'s release Worker
+/// owes exactly the same thing ("I have caught up") and a second copy would be
+/// a second chance to get one of them wrong. What is left here is the sinks'
+/// own: the HTTP client, and the count of deliveries that have left the queue.
 pub struct Dispatcher {
-    /// Attempts owed — see [`Dispatcher::owes`] for what one unit of this
-    /// Worker's work is.
-    meter: Arc<Meter>,
-    /// Poked when something is enqueued, so a Call goes out the moment it is
-    /// stored rather than on the next timer.
-    wake: tokio::sync::Notify,
+    /// What the sender owes, its wake-up, and the right to be the sender —
+    /// see [`crate::worker::WakeUp`].
+    ///
+    /// The right to drain matters more here than merely being wasteful: two
+    /// senders would each attempt the same head, so a sink would receive one
+    /// Call twice and the in-order promise would stop being one.
+    wake_up: WakeUp,
     /// One client for the life of the Instance, so a sink's TLS session and
     /// connection are reused across deliveries rather than renegotiated per
     /// Call — which on a Pi taking a Call a second is most of the cost.
@@ -495,16 +499,6 @@ pub struct Dispatcher {
     /// Deliveries that have left the queue since this Instance started — see
     /// [`Dispatcher::deliveries_settled`].
     settled: tokio::sync::watch::Sender<u64>,
-    /// The right to be the sender, taken once by the subsystem's `spawn` (#93).
-    ///
-    /// The owning type is `Clone` and hangs off `AppState`, so `self`-by-value
-    /// cannot be the guard here the way it is for `retention::Sweeper`. What
-    /// this holds is the right to *drain*, and two holders would be worse than
-    /// merely wasteful: they would each attempt the same head, so a sink would
-    /// receive one Call twice and the in-order promise would stop being one —
-    /// and [`Dispatcher::woken`] is a `notify_one`, so a wake-up would go to one
-    /// of them rather than to both.
-    start: crate::worker::Handoff<()>,
 }
 
 impl Dispatcher {
@@ -518,22 +512,20 @@ impl Dispatcher {
             // or a malformed proxy setting, and this configures neither.
             .expect("an HTTP client with only a timeout configured");
         Arc::new(Dispatcher {
-            meter: Meter::new(),
-            wake: tokio::sync::Notify::new(),
+            wake_up: WakeUp::default(),
             client,
             settled: tokio::sync::watch::Sender::new(0),
-            start: crate::worker::Handoff::new(()),
         })
     }
 
     /// What the sender owes, for the Worker envelope and the status registry.
     pub fn meter(&self) -> Arc<Meter> {
-        self.meter.clone()
+        self.wake_up.meter()
     }
 
     /// Claim the right to be the sender. `None` means one is already running.
     pub fn claim(&self) -> Option<()> {
-        self.start.take()
+        self.wake_up.claim()
     }
 
     /// The client every delivery is sent with.
@@ -541,104 +533,39 @@ impl Dispatcher {
         &self.client
     }
 
-    /// Resolves the next time something is queued.
-    ///
-    /// `notify_one` **stores a permit** when nobody is waiting, so a Call queued
-    /// while the sender was mid-attempt still wakes it on the next pass rather
-    /// than waiting for a backoff that may be minutes away. That is the whole
-    /// reason this is a `Notify` and not a channel the sender might have been
-    /// looking away from.
+    /// Resolves the next time something is queued — [`WakeUp::woken`].
     pub async fn woken(&self) {
-        self.wake.notified().await;
+        self.wake_up.woken().await;
     }
 
-    /// Note that `count` deliveries have been queued, and wake the sender.
+    /// Note that `count` deliveries have been queued, and wake the sender —
+    /// [`WakeUp::owes`], whose doc is the argument for what an admission means
+    /// to a sender.
     ///
-    /// **One unit of this Worker's work is "the sender has caught up with what
-    /// was handed to it"** — not one delivery, and not one attempt. Getting this
-    /// right took two wrong answers, and both are worth writing down because
-    /// both look obviously correct:
-    ///
-    /// - *One admission per delivery, settled when it lands.* A sink that is
-    ///   down never lands anything, so the Worker never goes idle and
-    ///   `app.settle()` (#93) hangs for **every** test in the suite the moment
-    ///   one sink is unreachable.
-    /// - *One admission per delivery, settled when it has been attempted.* Only
-    ///   the **head** of a sink's queue is ever attempted — that is what makes
-    ///   in-order draining true — so three queued Calls behind a stuck head hold
-    ///   two admissions that nothing will ever settle. Same hang, harder to see.
-    ///
-    /// So an admission means "there is something new for you to look at", and
-    /// the sender discharges it by *looking*: [`run`] settles everything
-    /// outstanding at the end of any pass that leaves nothing in flight. On a
-    /// working sink that is after the queue has drained, because a pass with an
-    /// attempt running never settles; on a sink that is down it is after one
-    /// attempt has failed, which is exactly the honest answer — the sender has
-    /// caught up, and what it caught up to is a backlog.
-    ///
-    /// A **retry** is therefore deliberately outside this accounting: nobody
-    /// handed it over, and counting it is the first wrong answer above. What a
-    /// test waits on to watch a recovery is
-    /// [`Dispatcher::deliveries_settled`].
-    ///
-    /// The Operator-facing **queue depth** is a different number entirely:
-    /// `COUNT(*)` on the queue table, per sink, which is what the admin screen
-    /// shows and what survives a restart.
-    ///
-    /// Called **after** the storing transaction has committed, never inside it:
-    /// an admission for a delivery that then rolled back would be a debt nothing
-    /// could ever settle, and every later `settle()` in the process would wait
-    /// on it forever.
+    /// A **retry** is deliberately outside this accounting: nobody handed it
+    /// over. What a test waits on to watch a recovery is
+    /// [`Dispatcher::deliveries_settled`]. And the Operator-facing **queue
+    /// depth** is a different number entirely: `COUNT(*)` on the queue table,
+    /// per sink, which is what the admin screen shows and what survives a
+    /// restart.
     pub fn owes(&self, count: usize) {
-        for _ in 0..count {
-            self.meter.admit_untracked();
-        }
-        if count > 0 {
-            self.wake.notify_one();
-        }
+        self.wake_up.owes(count);
     }
 
-    /// Take on the sender's **first pass**, before its task is spawned.
-    ///
-    /// Without this a freshly started Instance reads idle before the sender has
-    /// looked at anything, because a meter that has admitted nothing is idle by
-    /// definition — so `settle()` would return while the roster read was still
-    /// to come, and *any* statement-count assertion anywhere in the suite would
-    /// be a race with it. That is not hypothetical: it is how
-    /// `tests/mining.rs::mining_one_stored_call_costs_a_fixed_number_of_statements`
-    /// began failing on Postgres and not on SQLite, which is the worst way to
-    /// find out.
-    ///
-    /// It is also just the #93 rule applied honestly — work is owed from where
-    /// it is handed over, and a boot hands the sender a pass.
+    /// Take on the sender's **first pass**, before its task is spawned —
+    /// [`WakeUp::owes_a_first_pass`].
     pub fn owes_a_first_pass(&self) {
-        self.meter.admit_untracked();
+        self.wake_up.owes_a_first_pass();
     }
 
-    /// What the sender is owed **right now** — read at the top of a pass, before
-    /// it looks at anything.
+    /// What the sender is owed right now — [`WakeUp::outstanding`].
     fn outstanding(&self) -> u64 {
-        self.meter.load().depth
+        self.wake_up.outstanding()
     }
 
-    /// Discharge the `owed` items the sender had been handed *before* it looked.
-    ///
-    /// **The count has to be the one read before the pass, and that is the whole
-    /// of this method's correctness.** Settling the depth as it stands *after* a
-    /// pass discharges anything admitted while the pass was running — an upload
-    /// that committed its delivery row a microsecond after the queue was read —
-    /// so `settle()` returns having promised that a Call was considered when it
-    /// was not, and the delivery goes out some time later.
-    ///
-    /// It is a check-then-act race and it reads as a flake: it failed
-    /// `tests/downstream.rs::re_scoping_a_peer_keeps_the_key_it_already_had` on
-    /// Postgres in CI and never once locally on SQLite, because the window is
-    /// exactly as wide as a database round trip.
-    ///
-    /// Work admitted *during* a pass is simply left outstanding — the wake-up
-    /// that came with it guarantees another pass, which will discharge it.
+    /// Discharge what was owed before the pass looked — [`WakeUp::caught_up`].
     fn caught_up(&self, owed: u64) {
-        self.meter.settle_n(owed);
+        self.wake_up.caught_up(owed);
     }
 
     /// Note that one delivery has left the queue — taken by the sink, or
