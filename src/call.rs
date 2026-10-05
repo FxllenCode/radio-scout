@@ -389,6 +389,28 @@ pub struct StoredCall {
     /// (`crate::star`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub starred: bool,
+    /// A **Delay** kept this Call back before it was published (#73, spec
+    /// US 62) — omitted when none did, [`StoredCall::emergency`]'s rule: almost
+    /// no Call carries it, and every live frame pays for a key that is present.
+    ///
+    /// The Listener's answer to "why is this ten minutes old?" — a Call that
+    /// arrives on the live feed long after its `timestamp` is either a recorder
+    /// that uploaded late or an Operator's policy, and only this says which.
+    /// It is on every surface the Call is, not only the live frame (rdio sets
+    /// it on the in-memory Call alone, so its Archive forgets), because the
+    /// question is the same one asked a week later of a search result.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub delayed: bool,
+    /// This Call is still waiting out its **Delay** (#73) — stored, and
+    /// reachable by nobody until it goes out. Internal; never serialized, so it
+    /// cannot reach a Listener, and `false` by default, so a frozen **Event**
+    /// snapshot read back is never mistaken for a Call being kept back.
+    ///
+    /// Carried so a read that already holds the view answers the one-Call gate
+    /// for no statement ([`crate::archive::reachable`]), the way
+    /// [`StoredCall::restricted`] does for the Access gate.
+    #[serde(skip)]
+    pub waiting: bool,
     /// The Site Ref this Call was heard on, for multi-site Systems (spec
     /// US 11). Absent unless a recorder named one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -810,6 +832,8 @@ mod tests {
             tones: Vec::new(),
             quiet: Vec::new(),
             starred: false,
+            delayed: false,
+            waiting: false,
             site_ref: Some(3),
             site_label: Some("Downtown".into()),
             object_key: "ab/secret-internal-key.m4a".into(),
@@ -872,6 +896,8 @@ mod tests {
             tones: Vec::new(),
             quiet: Vec::new(),
             starred: false,
+            delayed: false,
+            waiting: false,
             site_ref: None,
             site_label: None,
             object_key: "internal".into(),

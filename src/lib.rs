@@ -16,6 +16,7 @@ pub mod catalog;
 pub mod config;
 pub mod curate;
 pub mod db;
+pub mod delay;
 pub mod delivery;
 pub mod dirwatch;
 pub mod downstream;
@@ -155,6 +156,11 @@ pub struct AppState {
     /// the roots every watch is bounded by, and what each watch is doing. A
     /// watch is a **row**, so an Instance with none has an empty roster.
     pub dirwatch: crate::dirwatch::Dirwatch,
+    /// Publishing a Call late, on purpose (#73, spec US 62) — whether anything
+    /// is delayed at all, and the release Worker's wake-up. A Delay is a
+    /// **column**, so an Instance with none has nothing switched off and pays
+    /// nothing.
+    pub delays: crate::delay::Delays,
 }
 
 impl AppState {
@@ -185,7 +191,25 @@ impl AppState {
             recorders: crate::recorder::Recorders::default(),
             metrics: crate::metrics::Metrics::default(),
             dirwatch: crate::dirwatch::Dirwatch::default(),
+            delays: crate::delay::Delays::default(),
         }
+    }
+
+    /// **Something about a channel changed**: re-read whether anything is
+    /// gated (#68) and whether anything is delayed (#73), on the request that
+    /// changed it, and move the Calls already waiting onto the Delay now in
+    /// force.
+    ///
+    /// One call for every curation write that can touch either — a System or a
+    /// Talkgroup created, edited or removed, a configuration document restored,
+    /// a channel folded — rather than two calls repeated beside each of them,
+    /// because a site that remembered one and not the other would be a gate or
+    /// a Delay that applies from the next restart instead of the next request.
+    /// Both bits are cached on the same terms: stale-`true` costs a clause,
+    /// stale-`false` is a leak, so neither may wait for a timer.
+    pub async fn channels_changed(&self) {
+        self.access.rearm(&self.db).await;
+        self.delays.reconsider(&self.db).await;
     }
 
     /// **Emit** a stored Call: give it its place in the emission sequence,
@@ -194,11 +218,13 @@ impl AppState {
     ///
     /// One method rather than a bare `live.publish`, because this is where a
     /// Call stops being merely *stored* and becomes
-    /// *emitted* (#94). Ingest reaches here a breath after the insert; a
-    /// **Delay** (#73) will reach here whenever its policy releases the Call.
-    /// Either way the emission is allocated and written down at the moment the
-    /// Call goes out, which is what makes a **Backfill** replayable in the order
-    /// Listeners actually heard things.
+    /// *emitted* (#94). Ingest reaches here a breath after the insert. A
+    /// **Delay**ed Call (#73) does not: its emission *is* its release, so it is
+    /// written in the transaction that owes it to every sink
+    /// (`crate::delay::worker`), where a failed stamp must keep the Call back
+    /// rather than let it out unrecorded. Either way the emission is allocated
+    /// and written down at the moment the Call goes out, which is what makes a
+    /// **Backfill** replayable in the order Listeners actually heard things.
     ///
     /// A failed stamp **degrades rather than fails**: everyone connected still
     /// hears the Call, and the row keeps `emitted_seq = NULL`, which reads as
@@ -397,12 +423,32 @@ pub fn now_ms() -> i64 {
 /// "this Call is one hour old" is a fact a test can arrange, where "this Call
 /// is one hour old *right now*" is a sleep.
 ///
-/// A moment stopped at is all this offers. Moving a frozen clock forward is
-/// what a test proving a *timeout* would want, and nothing needs one yet —
-/// #93's idle signals and #94's reaping table are where that question actually
-/// arises, so the knob belongs with whichever of them turns out to need it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Clock(Option<i64>);
+/// # A clock that stands still until it is moved (#73)
+///
+/// [`Clock::frozen`] stops time; [`Clock::advance`] passes it. The **Delay**
+/// policy is the first thing whose subject *is* time passing — a Call that must
+/// not be published now and must be published ten minutes from now — so it is
+/// the first thing that needed both halves, and #90's note that the knob
+/// "belongs with whichever of them turns out to need it" is answered here.
+///
+/// Moving a clock is only half of what a Worker waiting on one needs: it also
+/// has to *wake up*. [`Clock::sleep_until`] is that half, and it is the reason
+/// the frozen arm holds a `watch` rather than a number — a Worker asleep on a
+/// frozen clock is woken by the advance itself, the same instant every reader
+/// of [`Clock::now_ms`] sees the new time. Every clone shares the one instant,
+/// which is what lets the Instance, its Workers and a test all agree on it
+/// across a restart.
+#[derive(Clone, Debug, Default)]
+pub struct Clock(Option<Arc<tokio::sync::watch::Sender<i64>>>);
+
+/// The longest [`Clock::sleep_until`] sleeps on the machine's clock before
+/// returning to let its caller look again.
+///
+/// The sleep is monotonic and the instant it is aiming for is wall-clock, and
+/// the two part company whenever NTP steps the wall clock. Waking at least this
+/// often bounds how wrong a long sleep can be to one nap — a **Delay** released
+/// a minute late at worst, never early.
+const LONGEST_NAP: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Clock {
     /// The machine's clock.
@@ -410,20 +456,49 @@ impl Clock {
         Clock(None)
     }
 
-    /// A clock stopped at `at_ms`.
+    /// A clock stopped at `at_ms`, until [`Clock::advance`] moves it.
     pub fn frozen(at_ms: i64) -> Self {
-        Clock(Some(at_ms))
+        Clock(Some(Arc::new(tokio::sync::watch::Sender::new(at_ms))))
     }
 
     /// What time it is, in unix milliseconds.
     pub fn now_ms(&self) -> i64 {
-        self.0.unwrap_or_else(now_ms)
+        match &self.0 {
+            Some(stopped) => *stopped.borrow(),
+            None => now_ms(),
+        }
     }
-}
 
-impl Default for Clock {
-    fn default() -> Self {
-        Clock::system()
+    /// Move a frozen clock forward by `by`, waking anything asleep on it.
+    ///
+    /// The machine's clock is not this process's to move, so on that one this
+    /// does nothing — and a test that called it would see nothing happen, which
+    /// is the honest failure.
+    pub fn advance(&self, by: std::time::Duration) {
+        if let Some(stopped) = &self.0 {
+            let by_ms = i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
+            stopped.send_modify(|now| *now = now.saturating_add(by_ms));
+        }
+    }
+
+    /// Resolve no later than `at_ms` on this clock — and possibly earlier, so a
+    /// caller looks at the time again rather than trusting it has come.
+    ///
+    /// On the machine's clock that is a monotonic sleep of at most
+    /// [`LONGEST_NAP`]; on a frozen one it is the moment [`Clock::advance`]
+    /// reaches `at_ms`, and never otherwise.
+    pub async fn sleep_until(&self, at_ms: i64) {
+        match &self.0 {
+            Some(stopped) => {
+                // `Err` is a dropped sender, which cannot happen: it lives in
+                // the `Arc` this borrow is holding.
+                let _ = stopped.subscribe().wait_for(|now| *now >= at_ms).await;
+            }
+            None => {
+                let wait = u64::try_from(at_ms.saturating_sub(now_ms())).unwrap_or(0);
+                tokio::time::sleep(std::time::Duration::from_millis(wait).min(LONGEST_NAP)).await;
+            }
+        }
     }
 }
 
@@ -441,5 +516,64 @@ mod tests {
         let real = Clock::default().now_ms();
 
         assert!(real > 1_700_000_000_000, "that is not a real wall clock");
+    }
+
+    /// Advancing passes time for **every** clone at once — the Instance, its
+    /// Workers and the test that moved it all read one instant (#73).
+    #[test]
+    fn advancing_a_frozen_clock_moves_every_clone_of_it() {
+        let clock = Clock::frozen(1_000);
+        let held_elsewhere = clock.clone();
+
+        clock.advance(std::time::Duration::from_millis(250));
+
+        assert_eq!(clock.now_ms(), 1_250);
+        assert_eq!(held_elsewhere.now_ms(), 1_250);
+    }
+
+    /// ...and the machine's clock is not this process's to move: advancing it
+    /// does nothing, which is the honest failure for a test that tried.
+    #[test]
+    fn the_machines_clock_does_not_advance() {
+        let clock = Clock::system();
+
+        clock.advance(std::time::Duration::from_secs(24 * 60 * 60));
+
+        assert!(
+            clock.now_ms() < now_ms() + 60 * 60 * 1000,
+            "a day did not pass"
+        );
+    }
+
+    /// A sleep on a frozen clock ends when an advance reaches its instant — not
+    /// before, and not only on an exact hit.
+    #[tokio::test]
+    async fn a_sleep_on_a_frozen_clock_ends_when_time_reaches_it() {
+        let clock = Clock::frozen(1_000);
+        let mut sleeping = Box::pin(clock.sleep_until(2_000));
+
+        clock.advance(std::time::Duration::from_millis(999));
+        assert!(
+            futures_util::poll!(sleeping.as_mut()).is_pending(),
+            "one millisecond short is still asleep"
+        );
+
+        clock.advance(std::time::Duration::from_millis(5));
+        tokio::time::timeout(std::time::Duration::from_secs(5), sleeping)
+            .await
+            .expect("an advance past the instant ends the sleep");
+    }
+
+    /// The machine's clock sleeps for what is left, capped at one nap — an
+    /// instant already past ends the sleep at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_sleep_on_the_machines_clock_is_at_most_one_nap() {
+        let started = tokio::time::Instant::now();
+        Clock::system().sleep_until(now_ms() - 1_000).await;
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO, "already due");
+
+        let started = tokio::time::Instant::now();
+        Clock::system().sleep_until(i64::MAX).await;
+        assert_eq!(started.elapsed(), LONGEST_NAP, "never longer than a nap");
     }
 }

@@ -447,7 +447,7 @@ async fn dialect_sensitive_queries_on_postgres_when_available() {
 ///
 /// Reads the dataset [`run_search_suite`] seeded, before retention adds its own.
 async fn run_catalog_suite(db: &Db) {
-    let catalog = radio_scout::catalog::read(db, 0, &radio_scout::access::AccessScope::All)
+    let catalog = radio_scout::catalog::read(db, 0, &radio_scout::access::AccessScope::All, false)
         .await
         .unwrap();
 

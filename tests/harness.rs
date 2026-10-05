@@ -969,6 +969,11 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // this starts whatever the roster says — nothing, until
             // `[dirwatch] roots` allows a watch and an Operator makes one.
             radio_scout::dirwatch::worker::WORKER,
+            // ...and the **Delay**'s release (#73), a column rather than a
+            // row but the same answer: a Delay set from the browser must be
+            // honoured without a restart, so it always starts, and sleeps while
+            // nothing waits.
+            radio_scout::delay::worker::WORKER,
             // ...and listener counting (#62), the one that reads nothing an
             // ingest produced. Like quiet-span scanning it is a switch rather
             // than a roster, and it ships on: history cannot be recovered
@@ -976,7 +981,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             // already lost what happened before they found it.
             radio_scout::listeners::WORKER,
         ],
-        "the shipped default runs nine: enhancement is off, the rest are on"
+        "the shipped default runs ten: enhancement is off, the rest are on"
     );
 
     let mut app = app;
@@ -999,6 +1004,7 @@ async fn the_registry_names_the_workers_this_instance_is_running() {
             radio_scout::tone::WORKER,
             radio_scout::quiet::WORKER,
             radio_scout::dirwatch::worker::WORKER,
+            radio_scout::delay::worker::WORKER,
             radio_scout::listeners::WORKER,
         ],
     );

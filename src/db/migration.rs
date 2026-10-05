@@ -45,6 +45,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0024_retention_overrides::Migration),
             Box::new(m0025_rf_health::Migration),
             Box::new(m0026_dirwatches::Migration),
+            Box::new(m0027_delay::Migration),
         ]
     }
 }
@@ -2392,6 +2393,132 @@ mod m0026_dirwatches {
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
                 .drop_table(Table::drop().table(dirwatch::Entity).to_owned())
+                .await
+        }
+    }
+}
+
+/// **The Delay policy** (#73, spec US 62): a Delay per System and per
+/// Talkgroup, and the instant each Delayed Call is due.
+///
+/// `systems.delay_minutes` and `talkgroups.delay_minutes` are m0024's shape —
+/// nullable, `NULL` inheriting the level above, the most specific row winning —
+/// so every row already written is undelayed and an upgraded Instance publishes
+/// exactly as it did. `calls.delayed_until_ms` is `NULL` on every Call there has
+/// ever been, which is the honest reading: none of them was delayed.
+///
+/// **The index is the release Worker's**, and it leads with `emitted_seq`
+/// because that is what makes it small in practice: "due and not yet out" is
+/// `emitted_seq IS NULL AND delayed_until_ms <= now`, and with the emission
+/// leading, every Call that has gone out — delayed or not, which is the whole
+/// Archive — sits outside the range the Worker reads. Indexing the instant alone
+/// would put every Delayed Call ever released inside it, and the Worker's read
+/// would grow with the Archive.
+mod m0027_delay {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0027_delay"
+        }
+    }
+
+    const INDEX: &str = "idx_calls_delayed_due";
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // Guarded one by one for m0003's reason: `m0001_init` generates its
+            // DDL from the *live* entities, so a fresh database already has
+            // every column by the time this runs.
+            if !manager.has_column("systems", "delay_minutes").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(system::Entity)
+                            .add_column(
+                                ColumnDef::new(system::Column::DelayMinutes)
+                                    .big_integer()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_column("talkgroups", "delay_minutes").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(talkgroup::Entity)
+                            .add_column(
+                                ColumnDef::new(talkgroup::Column::DelayMinutes)
+                                    .big_integer()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_column("calls", "delayed_until_ms").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(call::Entity)
+                            .add_column(
+                                ColumnDef::new(call::Column::DelayedUntilMs)
+                                    .big_integer()
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_index("calls", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(call::Entity)
+                            .col(call::Column::EmittedSeq)
+                            .col(call::Column::DelayedUntilMs)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // The index first: SQLite refuses to drop a column an index still
+            // names (m0010's lesson).
+            manager
+                .drop_index(Index::drop().name(INDEX).table(call::Entity).to_owned())
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(call::Entity)
+                        .drop_column(call::Column::DelayedUntilMs)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(talkgroup::Entity)
+                        .drop_column(talkgroup::Column::DelayMinutes)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(system::Entity)
+                        .drop_column(system::Column::DelayMinutes)
+                        .to_owned(),
+                )
                 .await
         }
     }

@@ -71,6 +71,10 @@ pub struct SystemRow {
     /// owes an Operator is whatever the column actually says, and what a form may
     /// put there is only a window that means something.
     pub retention_days: Option<i64>,
+    /// How many minutes Calls here wait before they are published (#73, spec
+    /// US 62). `null` and `0` both mean *no Delay* — there is no Instance-wide
+    /// one to inherit — and a Talkgroup may override it either way.
+    pub delay_minutes: Option<i64>,
     pub talkgroups: u64,
     pub units: u64,
     /// Calls in the Archive under this System — what a delete would take.
@@ -98,6 +102,9 @@ pub struct NewSystem {
     pub restricted: bool,
     /// Days to keep Calls here, or absent to inherit `[retention] days` (#69).
     pub retention_days: Option<u32>,
+    /// Minutes Calls here wait before they are published, or absent for none
+    /// (#73).
+    pub delay_minutes: Option<u32>,
 }
 
 /// What an edit carries. Absent means **leave alone**; `null` on a nullable
@@ -115,6 +122,8 @@ pub struct SystemPatch {
     pub restricted: Option<bool>,
     #[serde(default, deserialize_with = "nullable")]
     pub retention_days: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub delay_minutes: Option<Option<u32>>,
 }
 
 /// `GET /api/admin/systems` — every System, with what hangs off it.
@@ -149,6 +158,8 @@ pub async fn create(
         .into());
     }
 
+    super::delay_within_bounds(body.delay_minutes)?;
+
     let now_ms = state.clock.now_ms();
     let row = system::ActiveModel {
         r#ref: Set(r#ref),
@@ -158,6 +169,7 @@ pub async fn create(
         enhancement: Set(body.enhancement),
         restricted: Set(body.restricted),
         retention_days: Set(body.retention_days.map(i64::from)),
+        delay_minutes: Set(body.delay_minutes.map(i64::from)),
         created_at_ms: Set(now_ms),
         ..Default::default()
     }
@@ -165,11 +177,11 @@ pub async fn create(
     .await
     .map_err(Stage::Curate.failed())?;
 
-    // Re-read whether anything is gated, on the request that could have changed
-    // it (#68) — [`crate::tone::Tones::rearm`]'s rule, with a sharper
-    // consequence: a stale `true` buys a join on every search, and a stale
-    // `false` leaves a restricted channel open to everybody.
-    state.access.rearm(&state.db).await;
+    // Re-read whether anything is gated (#68) or delayed (#73), on the request
+    // that could have changed it — [`crate::tone::Tones::rearm`]'s rule, with a
+    // sharper consequence: a stale `false` leaves a restricted channel open, or
+    // a waiting Call readable, to everybody.
+    state.channels_changed().await;
 
     Ok(Created(SystemRow {
         id: row.id,
@@ -180,6 +192,7 @@ pub async fn create(
         enhancement: row.enhancement,
         restricted: row.restricted,
         retention_days: row.retention_days,
+        delay_minutes: row.delay_minutes,
         talkgroups: 0,
         units: 0,
         calls: 0,
@@ -217,6 +230,10 @@ pub async fn update(
         .into());
     }
 
+    if let Some(delay_minutes) = body.delay_minutes {
+        super::delay_within_bounds(delay_minutes)?;
+    }
+
     let mut row = existing.into_active_model();
     if let Some(wanted) = body.r#ref {
         row.r#ref = Set(wanted);
@@ -239,12 +256,14 @@ pub async fn update(
     if let Some(retention_days) = body.retention_days {
         row.retention_days = Set(retention_days.map(i64::from));
     }
+    if let Some(delay_minutes) = body.delay_minutes {
+        row.delay_minutes = Set(delay_minutes.map(i64::from));
+    }
     row.update(db).await.map_err(Stage::Curate.failed())?;
-    // Re-read whether anything is gated, on the request that could have changed
-    // it (#68) — [`crate::tone::Tones::rearm`]'s rule, with a sharper
-    // consequence: a stale `true` buys a join on every search, and a stale
-    // `false` leaves a restricted channel open to everybody.
-    state.access.rearm(&state.db).await;
+    // Re-read the gates and the Delays on the request that could have changed
+    // them — see `create`. The policy in force decides (#73), so the Calls
+    // already waiting move onto whatever schedule this edit gives them.
+    state.channels_changed().await;
 
     one(db, id).await.map_err(Stage::Curate.failed())
 }
@@ -336,9 +355,9 @@ pub async fn remove(
         result.map_err(Stage::Curate.failed())?;
     }
     txn.commit().await.map_err(Stage::Curate.failed())?;
-    // Re-read whether anything is gated, on the request that could have changed
-    // it (#68) — see `curate::systems::create`.
-    state.access.rearm(&state.db).await;
+    // Re-read the gates and the Delays on the request that could have changed
+    // them — see `create`.
+    state.channels_changed().await;
 
     Ok(Removed)
 }
@@ -369,6 +388,7 @@ pub async fn read_all<C: ConnectionTrait>(db: &C) -> Result<Vec<SystemRow>, DbEr
             enhancement: row.enhancement,
             restricted: row.restricted,
             retention_days: row.retention_days,
+            delay_minutes: row.delay_minutes,
             created_at_ms: row.created_at_ms,
         })
         .collect();

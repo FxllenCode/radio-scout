@@ -521,6 +521,7 @@ mod tests {
             emitted_seq: None,
             mined_at_ms: None,
             starred_at_ms: None,
+            delayed_until_ms: None,
             created_at_ms: 0,
         }
     }

@@ -202,6 +202,26 @@ pub struct Model {
     /// the same question as "starred when", which an Operator wondering what is
     /// pinning their archive open would like an answer to.
     pub starred_at_ms: Option<i64>,
+    /// When this Call is due to go out, if a **Delay** applied to it (#73, spec
+    /// US 62) — `NULL` for every Call published the moment it arrived, which is
+    /// nearly all of them.
+    ///
+    /// Two facts in one column, and they are read together on purpose:
+    ///
+    /// - **Set at all** is the *flag*: this Call was published late, by policy,
+    ///   and a Listener is shown that ([`crate::call::StoredCall::delayed`]). It
+    ///   is never cleared, so a Call in the Archive still says so a year on.
+    /// - **Set and not yet emitted** is a Call being kept back
+    ///   ([`Model::is_published`]): stored, and reachable by nobody until the
+    ///   Delay's Worker emits it. Emission is the release, so "published" and
+    ///   "went out on the live feed" are one fact written in one transaction.
+    ///
+    /// Measured from **arrival** (`created_at_ms`), never from the recorder's
+    /// `call_at_ms`: a recorder whose clock runs slow must not be able to
+    /// shorten an officer-safety Delay by being wrong about the time. A change
+    /// of policy reschedules the Calls still waiting (`crate::delay`), so this
+    /// is the schedule *in force*, not the one a Call arrived with.
+    pub delayed_until_ms: Option<i64>,
     pub created_at_ms: i64,
 }
 
@@ -218,6 +238,26 @@ impl Model {
     pub fn has_audio(&self) -> bool {
         !self.object_key.is_empty()
     }
+
+    /// May a **Listener** reach this Call yet (#73)?
+    ///
+    /// Everything that never had a **Delay** is published the moment it is
+    /// stored; a Delayed Call is published by its emission. The Rust half of
+    /// `crate::archive`'s `published` clause — the two are one rule, and
+    /// `tests/delay.rs` holds them together across every surface.
+    pub fn is_published(&self) -> bool {
+        !waiting(self.delayed_until_ms, self.emitted_seq)
+    }
+}
+
+/// Whether a Call with these two columns is **waiting out a Delay** (#73) —
+/// scheduled, and not yet emitted.
+///
+/// The one Rust spelling of the rule, over the columns rather than a row,
+/// because two reads carry them without a whole Call (`repo::ChannelOf`); the
+/// SQL spelling is `repo::waiting`.
+pub fn waiting(delayed_until_ms: Option<i64>, emitted_seq: Option<i64>) -> bool {
+    delayed_until_ms.is_some() && emitted_seq.is_none()
 }
 
 /// The states a Call moves through as it is enhanced.

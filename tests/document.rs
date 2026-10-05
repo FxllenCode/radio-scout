@@ -69,6 +69,9 @@ async fn a_curated_instance() -> TestApp {
                 "groups": ["Fire", "Dispatch"],
                 "led": "red",
                 "retentionDays": 14,
+                // A channel undelayed on a delayed System (#73): `0` is a value
+                // and not an absence, so a restore has to carry it as one.
+                "delayMinutes": 0,
             }),
         )
         .await;
@@ -82,7 +85,7 @@ async fn a_curated_instance() -> TestApp {
     let (status, patched) = app
         .admin_patch(
             &format!("/api/admin/systems/{id}"),
-            json!({"retentionDays": 90}),
+            json!({"retentionDays": 90, "delayMinutes": 10}),
         )
         .await;
     assert_eq!(status, 200, "{patched}");
@@ -138,6 +141,10 @@ async fn the_document_carries_every_curated_entity_under_its_system() {
     assert_eq!(system["autoPopulate"], true);
     assert_eq!(system["blacklist"], json!([9999]));
     assert_eq!(system["retentionDays"], 90, "the System's own window (#69)");
+    assert_eq!(
+        system["delayMinutes"], 10,
+        "a restore that dropped a Delay would publish at once (#73)"
+    );
 
     let talkgroup = &system["talkgroups"][0];
     assert_eq!(talkgroup["ref"], 100);
@@ -149,6 +156,10 @@ async fn the_document_carries_every_curated_entity_under_its_system() {
     assert_eq!(
         talkgroup["retentionDays"], 14,
         "a channel bounded inside a System kept longer (#69)"
+    );
+    assert_eq!(
+        talkgroup["delayMinutes"], 0,
+        "an undelayed channel on a delayed System (#73)"
     );
     assert_eq!(
         talkgroup["memberRefs"],
@@ -445,6 +456,53 @@ async fn a_bad_entry_is_rejected_by_path_and_the_rest_applies() {
         "{rejected}"
     );
     assert_eq!(report["talkgroups"]["created"], 1, "the good row applied");
+}
+
+/// **A Delay no Operator could have meant is refused by path, not shortened**
+/// (#73). Clamping a hand-edited `5000` down to a day would quietly change an
+/// officer-safety value; refusing the entry says which one, and the rest of the
+/// document applies. A System refused takes its channels with it — they have
+/// nowhere to be filed.
+#[tokio::test]
+async fn a_delay_out_of_range_is_refused_by_path_and_the_rest_applies() {
+    let app = curating_app().await;
+
+    let report = import(
+        &app,
+        &json!({
+            "version": 1,
+            "systems": [
+                {
+                    "ref": 11,
+                    "talkgroups": [
+                        {"ref": 100, "delayMinutes": 5000},
+                        {"ref": 200, "delayMinutes": 1440},
+                    ],
+                },
+                {"ref": 22, "delayMinutes": 1441, "talkgroups": [{"ref": 300}]},
+            ],
+        }),
+    )
+    .await;
+
+    let rejected = report["rejected"].as_array().expect("refusals");
+    let at: Vec<&str> = rejected
+        .iter()
+        .map(|refusal| refusal["at"].as_str().expect("a path"))
+        .collect();
+    assert_eq!(
+        at,
+        vec!["systems[0].talkgroups[0]", "systems[1]"],
+        "{report}"
+    );
+    assert!(
+        rejected
+            .iter()
+            .all(|refusal| refusal["reason"] == "out-of-range"),
+        "{report}"
+    );
+    assert_eq!(report["systems"]["created"], 1, "{report}");
+    assert_eq!(report["talkgroups"]["created"], 1, "a day exactly is fine");
 }
 
 /// A document from a version this Instance does not understand is refused whole,
@@ -824,6 +882,7 @@ fn a_full_document() -> Value {
             "blacklist": [9999],
             "enhancement": true,
             "retentionDays": 90,
+            "delayMinutes": 10,
             "talkgroups": [{
                 "ref": 100,
                 "label": "Fire Dispatch",
@@ -833,6 +892,7 @@ fn a_full_document() -> Value {
                 "led": "red",
                 "enhancement": false,
                 "retentionDays": 14,
+                "delayMinutes": 30,
             }],
             "units": [{
                 "ref": 1200,
@@ -865,6 +925,7 @@ fn changed(at: &str, field: &str, value: Value) -> Value {
 #[case::system_blacklist("system", "blacklist", json!([1234]), "systems")]
 #[case::system_enhancement("system", "enhancement", json!(false), "systems")]
 #[case::system_retention_days("system", "retentionDays", json!(30), "systems")]
+#[case::system_delay_minutes("system", "delayMinutes", json!(5), "systems")]
 #[case::talkgroup_label("talkgroup", "label", json!("Renamed"), "talkgroups")]
 #[case::talkgroup_name("talkgroup", "name", json!("Renamed"), "talkgroups")]
 #[case::talkgroup_tag("talkgroup", "tag", json!("Law"), "talkgroups")]
@@ -872,6 +933,7 @@ fn changed(at: &str, field: &str, value: Value) -> Value {
 #[case::talkgroup_led("talkgroup", "led", json!("blue"), "talkgroups")]
 #[case::talkgroup_enhancement("talkgroup", "enhancement", json!(true), "talkgroups")]
 #[case::talkgroup_retention_days("talkgroup", "retentionDays", json!(7), "talkgroups")]
+#[case::talkgroup_delay_minutes("talkgroup", "delayMinutes", json!(0), "talkgroups")]
 #[case::unit_label("unit", "label", json!("Renamed"), "units")]
 #[case::unit_ranges("unit", "ranges", json!([{"from": 1201, "to": 1250}]), "units")]
 #[tokio::test]

@@ -370,7 +370,7 @@ pub async fn create(
     // ADR-0008's own argument for why this write may be unauthenticated at all.
     // The Operator keeps both levers they already had: `[share] enabled`, and
     // revoking the individual link.
-    if !crate::access::reaches_call(&state.db, &viewer.scope, id)
+    if !crate::access::reaches_call(&state.db, &viewer, id)
         .await
         .map_err(Stage::MintShare.failed())?
     {

@@ -614,15 +614,34 @@ async fn run_pipeline(
         enrich(&mut new_call, &audio, state.clock.now_ms());
     }
 
-    let admission = match admit(&facts, &new_call, &state.ingest, state.clock.now_ms()) {
+    let now_ms = state.clock.now_ms();
+    let due_at_ms = delayed_until(&facts, now_ms);
+    let admission = match admit(&facts, &new_call, &state.ingest, now_ms) {
         Decision::Admit { auto_populate } => {
-            perform(state, new_call, audio, &facts.resolved, auto_populate).await?
+            perform(
+                state,
+                new_call,
+                audio,
+                &facts.resolved,
+                auto_populate,
+                due_at_ms,
+            )
+            .await?
         }
         // The same transmission, arrived better (#46). The stored Call keeps
         // its id and every routing fact a Listener may already be holding; what
         // it gains is this copy's audio and what the recorder said about it.
         Decision::Replace { of, auto_populate } => {
-            replace(state, of, new_call, audio, &facts.resolved, auto_populate).await?
+            replace(
+                state,
+                of,
+                new_call,
+                audio,
+                &facts.resolved,
+                auto_populate,
+                due_at_ms,
+            )
+            .await?
         }
         // Nothing is performed for a Call that is not stored, so a refusal is
         // already the whole Admission — save one thing about a duplicate.
@@ -722,6 +741,11 @@ struct Facts {
     resolved: repo::Resolved,
     /// The Calls already stored on this **System** inside the dedup window.
     candidates: Vec<Candidate>,
+    /// The **Delay** of every channel this Call's `patches` array resolved to,
+    /// in that order (#73) — read only while something on this Instance is
+    /// delayed, and only for a Call that names a patch, so an ordinary upload
+    /// on an Instance that delays nothing reads nothing for it.
+    patch_delays: Vec<Option<i64>>,
 }
 
 /// Read what the decision needs (ADR-0008's authorization first, so a recorder
@@ -769,11 +793,49 @@ async fn resolve(
     .await
     .map_err(Stage::Dedup.failed())?;
 
+    // The Delays a **Patch** reaches (#73). The Call's own channel and its
+    // System are already in hand; the channels it is patched to are not.
+    let patch_delays = match (&resolved.system, &resolved.patches) {
+        (Some(system), Some(patches)) if state.delays.is_armed() => {
+            repo::channel_delays(&state.db, system.id, patches)
+                .await
+                .map_err(Stage::ResolveRefs.failed())?
+        }
+        _ => Vec::new(),
+    };
+
     Ok(Facts {
         authorized: true,
         resolved,
         candidates,
+        patch_delays,
     })
+}
+
+/// When this Call is due to go out, if a **Delay** applies to it (#73) — the
+/// decision, apart from storing it.
+///
+/// Pure, [`admit`]'s terms: the roster arrived in [`Facts`], and the arrival is
+/// `now_ms`. Measured from **arrival**, never from the recorder's `call_at_ms`
+/// (see `crate::delay`): a recorder whose clock runs slow must not be able to
+/// shorten a Delay. A Talkgroup auto-populated by this very Call has no row yet
+/// and inherits its System, and a System it creates has no Delay at all — which
+/// is exactly what those rows will say once they exist.
+fn delayed_until(facts: &Facts, now_ms: i64) -> Option<i64> {
+    let system = facts
+        .resolved
+        .system
+        .as_ref()
+        .and_then(|sys| sys.delay_minutes);
+    let own = facts
+        .resolved
+        .talkgroup
+        .as_ref()
+        .and_then(|tg| tg.delay_minutes);
+    crate::delay::due(
+        now_ms,
+        crate::delay::effective(system, own, &facts.patch_delays),
+    )
 }
 
 /// Whether this Call is admitted — **the decision, and nothing else** (#96).
@@ -972,6 +1034,7 @@ async fn replace(
     audio: Vec<u8>,
     resolved: &repo::Resolved,
     auto_populate: bool,
+    due_at_ms: Option<i64>,
 ) -> Result<Admission, Failure> {
     // There is always an object here in practice — [`replaces`] refuses to let a
     // copy with no audio displace one that plays — but the shape is shared with
@@ -984,7 +1047,10 @@ async fn replace(
         .begin()
         .await
         .map_err(Stage::ReplaceCall.failed())?;
-    let replacement = repo::store_replacement(
+    if due_at_ms.is_some() {
+        state.delays.set_armed(true);
+    }
+    let mut replacement = repo::store_replacement(
         &txn,
         of,
         &new_call,
@@ -995,6 +1061,19 @@ async fn replace(
     )
     .await
     .map_err(Stage::ReplaceCall.failed())?;
+    // A copy that became a Call of its own — the one it was better than is gone
+    // — is a Call arriving now, and a **Delay** applies to it as to any other
+    // (#73). A copy that replaced one keeps that Call's schedule, whatever it
+    // is: the Call a Listener may already be holding is the one being improved.
+    if let (repo::Replacement::Stored(call), Some(due_at_ms)) = (&mut replacement, due_at_ms) {
+        repo::delay_call(&txn, call.id, due_at_ms)
+            .await
+            .map_err(Stage::ReplaceCall.failed())?;
+        call.delayed_until_ms = Some(due_at_ms);
+    }
+    // ...and a Call still waiting is owed to no sink yet: its release queues it
+    // for every one it reaches, carrying whichever copy won by then.
+    let waiting = !replacement.call().is_published();
     // **A replacement is forwarded again** (#52). The peer is holding the copy
     // this Instance has just decided was the worse one — which for an
     // encrypted-versus-decoded pair means it is holding no audio where we have
@@ -1002,15 +1081,18 @@ async fn replace(
     // an rdio peer answers `duplicate call rejected` and keeps what it had, so
     // the cost of asking is one refused upload on a path that only fires inside
     // the replace window.
-    let forwarding = enqueue_forwarding(
-        &txn,
-        &new_call,
-        resolved,
-        replacement.call().id,
-        state.clock.now_ms(),
-    )
-    .await
-    .map_err(Stage::ReplaceCall.failed())?;
+    let forwarding = match waiting {
+        false => enqueue_forwarding(
+            &txn,
+            &new_call,
+            resolved,
+            replacement.call().id,
+            state.clock.now_ms(),
+        )
+        .await
+        .map_err(Stage::ReplaceCall.failed())?,
+        true => 0,
+    };
     // **And posted again** (#54), for a different reason than the forward: a
     // **Replacement** can turn an encrypted Call into a decoded one, or a
     // truncated copy into a whole one, and a webhook that fired on the worse
@@ -1018,20 +1100,36 @@ async fn replace(
     // improved on. The unique index means the *usual* case — a replacement
     // arriving before the first copy was sent — is a no-op rather than a second
     // message.
-    let posting = enqueue_webhooks(
-        &txn,
-        &new_call,
-        resolved,
-        replacement.call().id,
-        state.clock.now_ms(),
-    )
-    .await
-    .map_err(Stage::ReplaceCall.failed())?;
+    let posting = match waiting {
+        false => enqueue_webhooks(
+            &txn,
+            &new_call,
+            resolved,
+            replacement.call().id,
+            state.clock.now_ms(),
+        )
+        .await
+        .map_err(Stage::ReplaceCall.failed())?,
+        true => 0,
+    };
     txn.commit().await.map_err(Stage::ReplaceCall.failed())?;
-    state.downstreams.owes(forwarding);
-    state.webhooks.owes(posting);
+    Owed {
+        forwarding,
+        posting,
+    }
+    .hand_over(state);
 
     let call = match replacement {
+        // **A waiting Call that took a better copy is decided again** (#73). The
+        // copy's patches were unioned onto it, and one may be a channel whose
+        // Delay is longer than the schedule the Call arrived with — "the longest
+        // it reaches" must be the same answer whichever copy came first, so the
+        // policy in force re-decides it, as it would after any write that could
+        // move it. Only while it waits: a Call already out stays out.
+        repo::Replacement::Replaced(call) if waiting => {
+            state.delays.reconsider(&state.db).await;
+            call
+        }
         repo::Replacement::Replaced(call) => call,
         // The Call this was a better copy of is gone — retention is entitled to
         // prune one between the decision and this write. So the copy became a
@@ -1039,7 +1137,7 @@ async fn replace(
         // nobody has heard this transmission at all.
         repo::Replacement::Stored(call) => {
             Span::current().record("call_id", call.id);
-            publish(state, &call).await?;
+            go_out(state, &call).await?;
             offer_off_path(state, &call).await;
             return Ok(Admission::Stored {
                 call_id: call.id,
@@ -1068,23 +1166,28 @@ async fn perform(
     audio: Vec<u8>,
     resolved: &repo::Resolved,
     auto_populate: bool,
+    due_at_ms: Option<i64>,
 ) -> Result<Admission, Failure> {
     let stored = store_audio(state, &new_call, audio).await?;
     let audio_bytes = stored.as_ref().map(|a| a.bytes()).unwrap_or_default();
 
+    // **Armed before the row exists** (#73): from the moment a waiting Call is
+    // in the Archive, every Listener-facing read has to be leaving it out, and
+    // the bit is what tells them to.
+    if due_at_ms.is_some() {
+        state.delays.set_armed(true);
+    }
+
     // Insert the row (+ children) atomically, into the channel already resolved
     // for this Call rather than one looked up a second time (#96) — and, in the
     // same transaction, queue it for every **Downstream** it reaches (#52).
-    let Stored {
-        call,
-        forwarding,
-        posting,
-    } = insert_in_txn(
+    let Stored { call, owed } = insert_in_txn(
         &state.db,
         &new_call,
         stored,
         resolved,
         auto_populate,
+        due_at_ms,
         state.clock.now_ms(),
     )
     .await
@@ -1093,10 +1196,9 @@ async fn perform(
     Span::current().record("call_id", call.id);
     // After the commit, never inside it: an attempt admitted for a delivery
     // that then rolled back would be a debt nothing could settle.
-    state.downstreams.owes(forwarding);
-    state.webhooks.owes(posting);
+    owed.hand_over(state);
 
-    publish(state, &call).await?;
+    go_out(state, &call).await?;
     offer_off_path(state, &call).await;
 
     Ok(Admission::Stored {
@@ -1106,12 +1208,17 @@ async fn perform(
 }
 
 /// Emit a newly stored Call to the live feed, denormalizing the row already in
-/// hand rather than re-fetching it by id (#86).
+/// hand rather than re-fetching it by id (#86) — or, for a Call a **Delay**
+/// keeps back (#73), wake the Worker that will emit it when it is due.
 ///
 /// Iterated rather than unwrapped: one row in gives one view out, so an `if let
 /// Some` here would be a branch whose empty arm no test can reach — the same
 /// case `archive::detail` resolves with a `.map` for the same reason.
-async fn publish(state: &AppState, call: &call::Model) -> Result<(), Failure> {
+async fn go_out(state: &AppState, call: &call::Model) -> Result<(), Failure> {
+    if !call.is_published() {
+        state.delays.wake();
+        return Ok(());
+    }
     for view in archive::stored_calls(&state.db, std::slice::from_ref(call))
         .await
         .map_err(Stage::BuildCallView.failed())?
@@ -1243,15 +1350,24 @@ async fn queue_tone_deliveries(
     let Some(reach) = repo::stored_reach(&state.db, call_id).await? else {
         return Ok(0);
     };
+    // **A Call still waiting out a Delay is owed to nobody yet** (#73): its
+    // release posts every mark it carries by then, this page included. Read
+    // after the page was recorded, which is the half of the race this side
+    // holds — a release that took the row first is visible here, and one that
+    // comes after sees the page (`crate::delay::worker`).
+    if !reach.published {
+        return Ok(0);
+    }
     let talkgroups = reached_channels(reach.talkgroup_ref, &reach.patches);
-    let roster = repo::delivering_webhooks(&state.db).await?;
-    let owed = crate::webhook::routed_to(
-        &roster,
+    owe_webhooks(
+        &state.db,
         &crate::webhook::Marks::just(crate::webhook::Mark::Tone),
         reach.system_ref,
         &talkgroups,
-    );
-    repo::queue_webhook_deliveries(&state.db, call_id, &owed, now_ms).await
+        call_id,
+        now_ms,
+    )
+    .await
 }
 
 /// **What Ingest decided about one Call** (CONTEXT.md's *Admission*).
@@ -1488,18 +1604,28 @@ async fn insert_in_txn(
     audio: Option<crate::blob::StoredAudio>,
     resolved: &repo::Resolved,
     auto_populate: bool,
+    due_at_ms: Option<i64>,
     now_ms: i64,
 ) -> Result<Stored, sea_orm::DbErr> {
     let txn = db.begin().await?;
-    let call = repo::insert_call(&txn, new_call, audio, resolved, auto_populate, now_ms).await?;
-    let forwarding = enqueue_forwarding(&txn, new_call, resolved, call.id, now_ms).await?;
-    let posting = enqueue_webhooks(&txn, new_call, resolved, call.id, now_ms).await?;
+    let mut call =
+        repo::insert_call(&txn, new_call, audio, resolved, auto_populate, now_ms).await?;
+    // A **Delay** is owed nothing yet (#73): its sinks are queued when it is
+    // released, in the release's own transaction, so a peer or a webhook never
+    // hears a Call before a Listener may.
+    let owed = match due_at_ms {
+        Some(due_at_ms) => {
+            repo::delay_call(&txn, call.id, due_at_ms).await?;
+            call.delayed_until_ms = Some(due_at_ms);
+            Owed::default()
+        }
+        None => Owed {
+            forwarding: enqueue_forwarding(&txn, new_call, resolved, call.id, now_ms).await?,
+            posting: enqueue_webhooks(&txn, new_call, resolved, call.id, now_ms).await?,
+        },
+    };
     txn.commit().await?;
-    Ok(Stored {
-        call,
-        forwarding,
-        posting,
-    })
+    Ok(Stored { call, owed })
 }
 
 /// A Call that is now a row, and how many outbound sinks are owed it.
@@ -1510,8 +1636,7 @@ async fn insert_in_txn(
 /// they cannot be admitted inside.
 struct Stored {
     call: crate::db::entities::call::Model,
-    forwarding: usize,
-    posting: usize,
+    owed: Owed,
 }
 
 /// Queue this Call for every **Downstream** whose scope it reaches (#52).
@@ -1537,15 +1662,38 @@ async fn enqueue_forwarding<C: sea_orm::ConnectionTrait>(
     call_id: CallId,
     now_ms: i64,
 ) -> Result<usize, sea_orm::DbErr> {
-    if new_call.encrypted {
-        return Ok(0);
-    }
     let talkgroups = reached_channels(
         resolved.talkgroup_ref().unwrap_or(new_call.talkgroup_ref),
         resolved.patches.as_deref().unwrap_or_default(),
     );
+    owe_forwarding(
+        db,
+        new_call.encrypted,
+        new_call.system_ref,
+        &talkgroups,
+        call_id,
+        now_ms,
+    )
+    .await
+}
+
+/// Queue a Call for every **Downstream** whose scope reaches `talkgroups` —
+/// [`enqueue_forwarding`]'s rule, written once for its two callers: an upload,
+/// which has the Recorder's facts in hand, and a **Delay**'s release
+/// ([`owed_on_release`]), which has the stored row.
+async fn owe_forwarding<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    encrypted: bool,
+    system_ref: i64,
+    talkgroups: &[i64],
+    call_id: CallId,
+    now_ms: i64,
+) -> Result<usize, sea_orm::DbErr> {
+    if encrypted {
+        return Ok(0);
+    }
     let roster = repo::forwarding_downstreams(db).await?;
-    let owed = crate::downstream::routed_to(&roster, new_call.system_ref, &talkgroups);
+    let owed = crate::downstream::routed_to(&roster, system_ref, talkgroups);
     repo::queue_deliveries(db, call_id, &owed, now_ms).await
 }
 
@@ -1578,16 +1726,94 @@ async fn enqueue_webhooks<C: sea_orm::ConnectionTrait>(
     // looked at (#55). A page found later queues its own deliveries through
     // [`enqueue_tone_webhooks`], on the worker that found it.
     let marks = crate::webhook::Marks::on_call(new_call.emergency, false);
-    if marks.is_empty() {
-        return Ok(0);
-    }
     let talkgroups = reached_channels(
         resolved.talkgroup_ref().unwrap_or(new_call.talkgroup_ref),
         resolved.patches.as_deref().unwrap_or_default(),
     );
+    owe_webhooks(
+        db,
+        &marks,
+        new_call.system_ref,
+        &talkgroups,
+        call_id,
+        now_ms,
+    )
+    .await
+}
+
+/// Queue a Call for every **Webhook** that asked for one of `marks` and whose
+/// scope reaches `talkgroups` — [`enqueue_webhooks`]' rule, written once for
+/// the three moments a Call can become owed to one: at upload, at a **Delay**'s
+/// release, and when a page is found in its audio.
+///
+/// A Call carrying no mark reaches no Webhook, so it costs no statement — the
+/// roster read is behind the check, which is what keeps an ordinary Call free.
+async fn owe_webhooks<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    marks: &crate::webhook::Marks,
+    system_ref: i64,
+    talkgroups: &[i64],
+    call_id: CallId,
+    now_ms: i64,
+) -> Result<usize, sea_orm::DbErr> {
+    if marks.is_empty() {
+        return Ok(0);
+    }
     let roster = repo::delivering_webhooks(db).await?;
-    let owed = crate::webhook::routed_to(&roster, &marks, new_call.system_ref, &talkgroups);
+    let owed = crate::webhook::routed_to(&roster, marks, system_ref, talkgroups);
     repo::queue_webhook_deliveries(db, call_id, &owed, now_ms).await
+}
+
+/// How many deliveries a Call became owed, to each kind of sink — facts from
+/// the transaction that queued them, carried out of it so they can be handed to
+/// the senders once it has committed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Owed {
+    pub forwarding: usize,
+    pub posting: usize,
+}
+
+impl Owed {
+    /// Hand both counts to their senders' wake-ups — after the commit, never
+    /// inside it ([`crate::worker::WakeUp::owes`]).
+    pub(crate) fn hand_over(self, state: &AppState) {
+        state.downstreams.owes(self.forwarding);
+        state.webhooks.owes(self.posting);
+    }
+}
+
+/// Queue a **Delay**ed Call for every sink it reaches, now that it is being
+/// released (#73) — inside the release's own transaction, so "this Call went
+/// out" and "these sinks are owed it" are one fact a crash cannot separate.
+///
+/// What it is owed is read off the row **as it stands at release**: a better
+/// copy that replaced it while it waited is the one forwarded, and a page found
+/// in its audio meanwhile is posted with it — the reason neither sink's queue
+/// stores a rendered payload, applied one moment earlier.
+pub(crate) async fn owed_on_release<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    call: &call::Model,
+    now_ms: i64,
+) -> Result<Owed, sea_orm::DbErr> {
+    // A Call whose channel has gone is scoped to nobody — `queue_tone_deliveries`'
+    // reasoning: guessing a Ref would be a delivery to the wrong Operator.
+    let Some(reach) = repo::stored_reach(db, call.id).await? else {
+        return Ok(Owed::default());
+    };
+    let talkgroups = reached_channels(reach.talkgroup_ref, &reach.patches);
+    let marks = crate::webhook::Marks::on_call(call.emergency, call.tone_matched());
+    Ok(Owed {
+        forwarding: owe_forwarding(
+            db,
+            call.encrypted,
+            reach.system_ref,
+            &talkgroups,
+            call.id,
+            now_ms,
+        )
+        .await?,
+        posting: owe_webhooks(db, &marks, reach.system_ref, &talkgroups, call.id, now_ms).await?,
+    })
 }
 
 /// Every Talkgroup a Call reaches: the channel it is on, then everything it is
@@ -2892,6 +3118,7 @@ mod tests {
         crate::db::entities::system::Model {
             restricted: false,
             retention_days: None,
+            delay_minutes: None,
             id: 1,
             r#ref: 11,
             label: None,
@@ -2906,6 +3133,7 @@ mod tests {
         crate::db::entities::talkgroup::Model {
             restricted: None,
             retention_days: None,
+            delay_minutes: None,
             id: 7,
             system_id: 1,
             r#ref: 54241,
@@ -2933,6 +3161,7 @@ mod tests {
                 patches: Some(Vec::new()),
             },
             candidates,
+            patch_delays: Vec::new(),
         }
     }
 
@@ -3246,6 +3475,7 @@ mod tests {
             b"the-better-copy".to_vec(),
             &repo::Resolved::unresolved(),
             true,
+            None,
         )
         .await
         .expect("a replacement whose Call is gone still stores the copy");
@@ -3263,6 +3493,72 @@ mod tests {
             1,
             "...and it is really in the Archive"
         );
+    }
+
+    /// ...and when that copy arrives under a **Delay** (#73), the Call it
+    /// becomes waits it out like any other arriving Call: kept back, and owed to
+    /// no sink until its release.
+    #[tokio::test]
+    async fn a_better_copy_that_became_a_call_waits_out_its_delay() {
+        let (state, call_id, _tmp) = one_stored_call().await;
+        repo::delete_calls(&state.db, &[call_id])
+            .await
+            .expect("prune the Call out from under the replacement");
+        let mut live = state.live.subscribe();
+
+        let admission = replace(
+            &state,
+            call_id,
+            NewCall::new(11, 54241, 1_000),
+            b"the-better-copy".to_vec(),
+            &repo::Resolved::unresolved(),
+            true,
+            Some(600_000),
+        )
+        .await
+        .expect("a replacement whose Call is gone still stores the copy");
+
+        assert!(
+            matches!(admission, Admission::Stored { .. }),
+            "the copy became a Call of its own: {admission:?}"
+        );
+        use sea_orm::EntityTrait;
+        // The only Call there is: the one it was a copy of has been pruned.
+        let stored = call::Entity::find()
+            .one(&state.db)
+            .await
+            .expect("read the Call")
+            .expect("the Call");
+        assert_eq!(stored.delayed_until_ms, Some(600_000), "on the schedule");
+        assert!(!stored.is_published(), "and kept back");
+        assert!(
+            live.try_recv().is_err(),
+            "nothing went out on the live feed"
+        );
+        assert!(state.delays.is_armed(), "and every read now leaves it out");
+    }
+
+    /// **A released Call whose channel has gone is owed to nobody** (#73) — the
+    /// tone-out path's rule (`queue_tone_deliveries`): a delivery scoped by a
+    /// Ref that is not there would be guessing at whose it was.
+    #[tokio::test]
+    async fn a_call_that_is_not_there_is_owed_to_no_sink() {
+        let (state, call_id, _tmp) = one_stored_call().await;
+        use sea_orm::EntityTrait;
+        let row = call::Entity::find_by_id(call_id)
+            .one(&state.db)
+            .await
+            .expect("read the Call")
+            .expect("the Call");
+        repo::delete_calls(&state.db, &[call_id])
+            .await
+            .expect("Retention takes it");
+
+        let owed = owed_on_release(&state.db, &row, 0)
+            .await
+            .expect("a read that found nothing");
+
+        assert_eq!(owed, Owed::default());
     }
 
     /// This instance does not enhance at all — the shipped default — and finding

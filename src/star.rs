@@ -150,7 +150,7 @@ async fn set(
     // a Call they could have heard (#68). Without this, a gated Call is
     // unreachable and still starrable, and "Starred" would be a list holding
     // rows that answer nothing when opened.
-    if !crate::access::reaches_call(&state.db, &viewer.scope, id)
+    if !crate::access::reaches_call(&state.db, viewer, id)
         .await
         .map_err(Stage::SetStar.failed())?
     {

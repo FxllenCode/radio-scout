@@ -287,7 +287,9 @@ _Avoid_: file ingest, folder watch, hot folder.
 
 **Delay**:
 Per-System/Talkgroup policy that publishes a **Call** to **Listeners** only after a configured interval — stored on arrival, emitted late, flagged as delayed, surviving restarts. Officer-safety policy, not a buffer.
-_Avoid_: delayer (rdio's noun for the mechanism), embargo, hold-back.
+
+**A Delayed Call is published by its emission.** Until then it is *waiting*, and waiting answers exactly like not there — to every Listener-facing read, and to a **Downstream** and a **Webhook** too, which are owed it only from its release. Measured from **arrival**, never the recorder's timestamp, so a slow clock cannot shorten it; the **longest** Delay a Call reaches across a **Patch**; and the policy **in force** decides, so a Delay changed mid-wait reschedules what is waiting. `NULL` on a Talkgroup inherits its System, and `0` is none — the thing rdio's `0`-inherits cannot say. The flag stays on the Call.
+_Avoid_: delayer (rdio's noun for the mechanism), embargo, hold-back, held (a **Hold** is a Listener's), pending (an **Enhancement** and a delivery are pending; a Delayed Call is *waiting*).
 
 **Restricted**:
 A **Talkgroup** or **System** only a **Listener** holding an **Access code** scoped to it may hear. The property of the *channel*, and deliberately not derived from the code roster: a channel can be marked sensitive before any code exists for it, which is the state an **Operator** is in halfway through setting this up and must be silent rather than open. `NULL` on a Talkgroup **inherits its System**, so a Ref auto-populated onto a gated System arrives gated.

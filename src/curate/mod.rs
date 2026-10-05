@@ -494,6 +494,20 @@ pub enum Rejected {
     },
 }
 
+/// Refuse a **Delay** no Operator could have meant (#73): a day is the longest
+/// there is ([`crate::delay::MAX_MINUTES`]). Absent passes — it means *none* on a
+/// System and *inherit* on a Talkgroup, and neither is a number to bound.
+pub fn delay_within_bounds(minutes: Option<u32>) -> Result<(), Rejected> {
+    match minutes {
+        Some(minutes) if minutes > crate::delay::MAX_MINUTES => Err(Rejected::OutOfRange {
+            field: "delayMinutes",
+            least: 0,
+            most: i64::from(crate::delay::MAX_MINUTES),
+        }),
+        _ => Ok(()),
+    }
+}
+
 impl Rejected {
     /// The slug an Operator greps: `reason=talkgroup-has-calls`.
     pub fn slug(&self) -> &'static str {

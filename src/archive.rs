@@ -238,6 +238,14 @@ pub struct CallSearch {
     /// every worker read the Archive — none of which is a Listener, and all of
     /// which must see every Call there is.
     pub scope: AccessScope,
+    /// Leave out every Call still waiting out a **Delay** (#73, spec US 62).
+    ///
+    /// [`CallSearch::scope`]'s shape: nobody types this, [`parse_search`] sets
+    /// it from the [`Viewer`], and a hand-built search — a **Worker**'s — sees
+    /// everything. `false` on a Listener's search only where nothing can be
+    /// waiting, which is what keeps the clause off an Instance that delays
+    /// nothing.
+    pub published_only: bool,
     pub sort: CallSort,
     pub limit: u64,
     pub offset: u64,
@@ -269,6 +277,7 @@ impl Default for CallSearch {
             starred: false,
             with_audio: false,
             scope: AccessScope::All,
+            published_only: false,
             sort: CallSort::Newest,
             limit: 0,
             offset: 0,
@@ -483,6 +492,12 @@ impl CallQuery {
         if let Some(permitted) = gate(&search.scope) {
             self = self.join_system().join_talkgroup().and_where(permitted);
         }
+        // ...and beside it, what nobody may have *yet* (#73). A column pair on
+        // the Call row, so a clause and never a join — and no clause at all on
+        // an Instance with nothing waiting.
+        if search.published_only {
+            self = self.and_where(published());
+        }
         self
     }
 
@@ -526,6 +541,13 @@ impl CallQuery {
     fn grouped(self) -> Select<call::Entity> {
         self.select.select_only()
     }
+}
+
+/// The Calls a **Listener** may reach yet (#73): everything not waiting out a
+/// **Delay** — [`crate::db::repo::waiting`] negated, rather than the rule
+/// written a second time.
+pub(crate) fn published() -> sea_orm::Condition {
+    crate::db::repo::waiting().not()
 }
 
 /// The Calls carrying one **Mark** (#42, #55).
@@ -1753,6 +1775,8 @@ pub async fn stored_calls<C: ConnectionTrait>(
                 // column, which is what keeps it out of `delete_calls`'
                 // reckoning and off this page's statement count (#66).
                 starred: call.starred_at_ms.is_some(),
+                delayed: call.delayed_until_ms.is_some(),
+                waiting: !call.is_published(),
                 site_ref: call
                     .site_id
                     .and_then(|id| sites.get(&id))
@@ -1941,7 +1965,7 @@ pub async fn unit_history<C: ConnectionTrait>(
     db: &C,
     system_ref: i64,
     unit_ref: i64,
-    scope: &AccessScope,
+    viewer: &Viewer,
 ) -> Result<Option<crate::call::UnitHistory>, DbErr> {
     use crate::call::{RefSpan, UnitHistory, UnitTalkgroup};
 
@@ -1963,8 +1987,13 @@ pub async fn unit_history<C: ConnectionTrait>(
     // Without it a gated channel is absent from `?unit=`'s Calls and present in
     // the tally above them — a number that says a radio was somewhere its
     // Calls do not appear, which is worse than either answer alone.
-    if let Some(permitted) = gate(scope) {
+    if let Some(permitted) = gate(&viewer.scope) {
         query = query.join_system().and_where(permitted);
+    }
+    // ...and for the same reason, nothing still waiting out a **Delay** (#73):
+    // "this radio was last heard two minutes ago" is the news the Delay holds.
+    if viewer.delaying {
+        query = query.and_where(published());
     }
     let mut rows = query
         .grouped()
@@ -2125,6 +2154,9 @@ pub(crate) fn parse_search(
         // ...nor this one, and it is not even the caller's to choose: it is
         // whatever the grant this request arrived with opens (#68).
         scope: viewer.scope.clone(),
+        // ...nor this: a Listener reaches no Call still waiting out a Delay
+        // (#73), and the viewer knows whether there can be one.
+        published_only: viewer.delaying,
         // Nobody types this one: it is the **stitched export**'s (#65), set by
         // the one caller that needs it.
         with_audio: false,
@@ -2283,8 +2315,12 @@ pub async fn detail(
 /// id at a time, exactly what an Operator gated the channel to keep quiet — and
 /// a `403` on a hand-typed id is a working oracle. The log tells the two apart,
 /// which is where the Operator looks.
+///
+/// It is also the single-Call form of [`published`] (#73): a Call still waiting
+/// out a **Delay** is out of everybody's scope, whatever code they hold, and is
+/// answered for exactly like one that is not there.
 pub(crate) fn reachable(scope: &AccessScope, call: &StoredCall) -> bool {
-    scope.permits(call.system_ref, call.talkgroup_ref, call.restricted)
+    !call.waiting && scope.permits(call.system_ref, call.talkgroup_ref, call.restricted)
 }
 
 /// `GET /api/unit/{system}/{ref}` — one radio's history (#47, spec US 44).
@@ -2298,7 +2334,7 @@ pub async fn unit(
     Path((system_ref, unit_ref)): Path<(i64, i64)>,
     viewer: Viewer,
 ) -> Result<crate::call::UnitHistory, Failure> {
-    unit_history(&state.db, system_ref, unit_ref, &viewer.scope)
+    unit_history(&state.db, system_ref, unit_ref, &viewer)
         .await
         .map_err(Stage::LoadUnitHistory.failed())?
         .ok_or(Reason::UnitNotFound.into())
@@ -2317,7 +2353,7 @@ pub async fn download(
     Path(id): Path<CallId>,
     viewer: Viewer,
 ) -> Result<Attachment, Failure> {
-    if !crate::access::reaches_call(&state.db, &viewer.scope, id)
+    if !crate::access::reaches_call(&state.db, &viewer, id)
         .await
         .map_err(Stage::Access.failed())?
     {
@@ -2816,6 +2852,8 @@ mod tests {
             tones: Vec::new(),
             quiet: Vec::new(),
             starred: false,
+            delayed: false,
+            waiting: false,
             site_ref: None,
             site_label: None,
             object_key: "ab/opaque-key.m4a".into(),

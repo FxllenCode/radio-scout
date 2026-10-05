@@ -316,6 +316,17 @@ pub struct CodeHeld {
 pub struct Viewer {
     pub scope: AccessScope,
     pub held: Held,
+    /// Whether this Instance may be keeping a Call back under a **Delay** right
+    /// now (#73) — and so whether this viewer's reads have to leave the waiting
+    /// ones out.
+    ///
+    /// Nobody may reach a waiting Call, whatever code they hold; this is only
+    /// whether there can *be* one, which is the cost question
+    /// [`AccessScope::All`] answers for the gate. `true` everywhere a `Viewer`
+    /// is assembled here — a clause paid for nothing is the cheap way to be
+    /// wrong — and the extractor replaces it with the Instance's own bit, so an
+    /// Instance that delays nothing pays nothing.
+    pub delaying: bool,
 }
 
 impl Viewer {
@@ -324,6 +335,7 @@ impl Viewer {
         Viewer {
             scope: AccessScope::All,
             held: Held::Nothing,
+            delaying: true,
         }
     }
 
@@ -343,10 +355,12 @@ impl FromRequestParts<AppState> for Viewer {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        state
+        let mut viewer = state
             .access
             .viewer(&state.db, presented(parts).as_deref(), state.clock.now_ms())
-            .await
+            .await?;
+        viewer.delaying = state.delays.is_armed();
+        Ok(viewer)
     }
 }
 
@@ -512,6 +526,7 @@ impl Access {
             return Ok(Viewer {
                 scope: AccessScope::open(),
                 held: Held::Nothing,
+                delaying: true,
             });
         };
         let found = crate::db::repo::code_by_grant(db, grant)
@@ -521,10 +536,12 @@ impl Access {
             None => Viewer {
                 scope: AccessScope::open(),
                 held: Held::Stale(Stale::Unknown),
+                delaying: true,
             },
             Some(row) if expired(&row, now_ms) => Viewer {
                 scope: AccessScope::open(),
                 held: Held::Stale(Stale::Expired),
+                delaying: true,
             },
             Some(row) => Viewer {
                 scope: AccessScope::granting(scope_of(&row)),
@@ -534,6 +551,7 @@ impl Access {
                     expires_at_ms: row.expires_at_ms,
                     max_connections: row.max_connections,
                 }),
+                delaying: true,
             },
         })
     }
@@ -803,17 +821,27 @@ fn scope_of(row: &access_code::Model) -> Selection {
 /// to write: [`crate::failure::Reason::CallNotFound`], which is also the right
 /// answer for one that is there and out of scope — see
 /// [`crate::archive::reachable`].
+///
+/// A Call still waiting out a **Delay** (#73) is out of every viewer's scope,
+/// so this is the one place both gates are asked of one Call — and the
+/// statement is skipped only when *neither* can refuse it: nothing gated, and
+/// nothing that can be waiting.
 pub async fn reaches_call<C: sea_orm::ConnectionTrait>(
     db: &C,
-    scope: &AccessScope,
+    viewer: &Viewer,
     id: crate::call::CallId,
 ) -> Result<bool, sea_orm::DbErr> {
-    if scope.reaches_everything() {
+    if viewer.scope.reaches_everything() && !viewer.delaying {
         return Ok(true);
     }
     Ok(crate::db::repo::call_channel(db, id)
         .await?
-        .is_some_and(|on| scope.permits(on.system_ref, on.talkgroup_ref, on.restricted)))
+        .is_some_and(|on| {
+            on.is_published()
+                && viewer
+                    .scope
+                    .permits(on.system_ref, on.talkgroup_ref, on.restricted)
+        }))
 }
 
 // ---------------------------------------------------------------------------

@@ -299,7 +299,7 @@ pub async fn audio(
     // Call, which is strictly less than the Archive route it deliberately does
     // not inherit. Putting the check here is what keeps that true — a code-holder
     // who shares a gated Call gives away that Call and not the channel.
-    if !crate::access::reaches_call(&state.db, &viewer.scope, id)
+    if !crate::access::reaches_call(&state.db, &viewer, id)
         .await
         .map_err(Stage::Access.failed())?
     {

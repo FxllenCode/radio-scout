@@ -210,6 +210,22 @@ impl TestApp {
         self.workers().idle().await;
     }
 
+    /// Let `by` pass on this Instance's clock, and settle everything that time
+    /// made due (#73).
+    ///
+    /// The clock has to have been built with `Clock::frozen` — the machine's
+    /// is not a test's to move. Moving it wakes anything asleep on it; what this
+    /// adds is the **admission**: the release Worker is handed "time passed" the
+    /// way ingest hands it a Call, so the `settle()` after it waits for a pass
+    /// that started after the clock moved rather than returning before the
+    /// Worker has woken (#93's rule — work is owed from where it is handed
+    /// over).
+    pub async fn advance(&self, by: std::time::Duration) {
+        self.clock.advance(by);
+        self.instance.state.delays.wake();
+        self.settle().await;
+    }
+
     /// Stop this Instance and start it again on the same configuration, the
     /// same database and the same store (#90).
     ///
@@ -225,6 +241,19 @@ impl TestApp {
     /// being modelled.
     pub async fn restart(&mut self) {
         self.restart_onto(None, |_| {}).await;
+    }
+
+    /// [`TestApp::restart`], with `by` passing on this Instance's clock while it
+    /// is down (#73) — so whatever came due in the gap is the next boot's to
+    /// deal with, and nothing running could have dealt with it first.
+    pub async fn restart_after(&mut self, by: std::time::Duration) {
+        let config = self.instance.config().clone();
+        let clock = self.clock.clone();
+        self.instance
+            .restart_across(config, None, move || clock.advance(by))
+            .await
+            .expect("restart");
+        self.reattach();
     }
 
     /// [`TestApp::restart`], with the configuration the next boot will have —
@@ -247,6 +276,13 @@ impl TestApp {
             .restart_with(config, store)
             .await
             .expect("restart");
+        self.reattach();
+    }
+
+    /// Point this handle at the run a restart just started: its port, its
+    /// database and its store are new, and a session the old run held is not
+    /// one the new run knows.
+    fn reattach(&mut self) {
         self.addr = loopback(&self.instance);
         self.db = self.instance.db.clone();
         self.store = self.instance.store.clone();
@@ -1930,7 +1966,7 @@ impl TestAppBuilder {
         if let Some(store) = self.store {
             wiring = wiring.store(store);
         }
-        if let Some(clock) = self.clock {
+        if let Some(clock) = self.clock.clone() {
             wiring = wiring.clock(clock);
         }
 

@@ -2355,6 +2355,222 @@ pub async fn latest_emission<C: ConnectionTrait>(db: &C) -> Result<Emission, DbE
         .unwrap_or(0))
 }
 
+// -- The Delay (#73) ---------------------------------------------------------
+
+/// A Call that is waiting out a **Delay**: one with a schedule and no emission.
+///
+/// **The SQL definition of waiting, and the only one** — the Worker's read, the
+/// reschedule and the armed bit use it, and [`crate::archive::published`] is
+/// its negation rather than a second spelling. The Rust half is
+/// [`call::waiting`], and the two are one rule in two languages.
+pub(crate) fn waiting() -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(call::Column::EmittedSeq.is_null())
+        .add(call::Column::DelayedUntilMs.is_not_null())
+}
+
+/// Put a Call on a Delay's schedule — or move it to a new one (#73).
+///
+/// Ingest calls it inside the transaction that stores the Call; the reschedule
+/// calls it for a Call already waiting. Guarded on the Call still waiting, so a
+/// reschedule racing a release cannot put a schedule back on a Call that has
+/// already gone out.
+pub async fn delay_call<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+    due_at_ms: i64,
+) -> Result<(), DbErr> {
+    call::Entity::update_many()
+        .col_expr(call::Column::DelayedUntilMs, Expr::value(due_at_ms))
+        .filter(call::Column::Id.eq(call_id))
+        .filter(call::Column::EmittedSeq.is_null())
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// The waiting Calls that are due by `now_ms`, soonest first and then in the
+/// order they arrived — at most `limit` of them.
+pub async fn due_calls<C: ConnectionTrait>(
+    db: &C,
+    now_ms: i64,
+    limit: u64,
+) -> Result<Vec<CallId>, DbErr> {
+    call::Entity::find()
+        .select_only()
+        .column(call::Column::Id)
+        .filter(waiting())
+        .filter(call::Column::DelayedUntilMs.lte(now_ms))
+        .order_by_asc(call::Column::DelayedUntilMs)
+        .order_by_asc(call::Column::Id)
+        .limit(limit)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// When the next waiting Call is due, or `None` when nothing is waiting.
+pub async fn next_due<C: ConnectionTrait>(db: &C) -> Result<Option<i64>, DbErr> {
+    call::Entity::find()
+        .select_only()
+        .column(call::Column::DelayedUntilMs)
+        .filter(waiting())
+        .order_by_asc(call::Column::DelayedUntilMs)
+        .into_tuple::<Option<i64>>()
+        .one(db)
+        .await
+        .map(Option::flatten)
+}
+
+/// **Take** a waiting Call for release, and hand back its row — or `None` when
+/// it is no longer waiting.
+///
+/// A write that changes nothing (`delayed_until_ms = delayed_until_ms`), for
+/// what a write does that a read does not: it takes the row. That is the
+/// release's first statement on purpose (`crate::delay::worker`): a tone-out
+/// recorded on this Call either committed before it — and the row read back
+/// carries the page — or waits behind it and sees the Call released. Guarded on
+/// the Call still waiting, so two passes cannot both take it, and a Call
+/// Retention took meanwhile is simply not there.
+pub async fn take_waiting_call<C: ConnectionTrait>(
+    db: &C,
+    call_id: CallId,
+) -> Result<Option<call::Model>, DbErr> {
+    let taken = call::Entity::update_many()
+        .col_expr(
+            call::Column::DelayedUntilMs,
+            Expr::col(call::Column::DelayedUntilMs).into(),
+        )
+        .filter(call::Column::Id.eq(call_id))
+        .filter(waiting())
+        .exec(db)
+        .await?;
+    if taken.rows_affected == 0 {
+        return Ok(None);
+    }
+    call::Entity::find_by_id(call_id).one(db).await
+}
+
+/// Every Call waiting out a Delay — what a reschedule re-decides.
+///
+/// Bounded by how much traffic a Delay keeps waiting, never by the Archive.
+pub async fn waiting_calls<C: ConnectionTrait>(db: &C) -> Result<Vec<call::Model>, DbErr> {
+    call::Entity::find().filter(waiting()).all(db).await
+}
+
+/// The Talkgroup Refs each of `ids` is patched to, as `(call, ref)` pairs.
+pub async fn patches_of<C: ConnectionTrait>(
+    db: &C,
+    ids: &[CallId],
+) -> Result<Vec<(CallId, i64)>, DbErr> {
+    call_patch::Entity::find()
+        .select_only()
+        .column(call_patch::Column::CallId)
+        .column(call_patch::Column::TalkgroupRef)
+        .filter(call_patch::Column::CallId.is_in(ids.iter().copied()))
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// Every Delay an Operator has written down (#73) — see [`crate::delay::Roster`].
+pub async fn delay_roster<C: ConnectionTrait>(db: &C) -> Result<crate::delay::Roster, DbErr> {
+    let systems = system::Entity::find()
+        .select_only()
+        .column(system::Column::Id)
+        .column(system::Column::DelayMinutes)
+        .into_tuple::<(i64, Option<i64>)>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect();
+    let mut roster = crate::delay::Roster {
+        systems,
+        ..Default::default()
+    };
+    for (id, system_id, r#ref, minutes) in talkgroup::Entity::find()
+        .select_only()
+        .column(talkgroup::Column::Id)
+        .column(talkgroup::Column::SystemId)
+        .column(talkgroup::Column::Ref)
+        .column(talkgroup::Column::DelayMinutes)
+        .filter(talkgroup::Column::DelayMinutes.is_not_null())
+        .into_tuple::<(i64, i64, i64, i64)>()
+        .all(db)
+        .await?
+    {
+        roster.talkgroups.insert(id, minutes);
+        roster.refs.insert((system_id, r#ref), minutes);
+    }
+    Ok(roster)
+}
+
+/// The Delays of the channels `refs` name on one System — what an arriving
+/// Call's **Patch** reaches (#73). `None` for a channel that inherits its
+/// System, in the order the Refs were asked for.
+///
+/// One statement, and ingest asks it only while something is delayed and only
+/// for a Call that names a patch at all.
+pub async fn channel_delays<C: ConnectionTrait>(
+    db: &C,
+    system_id: i64,
+    refs: &[i64],
+) -> Result<Vec<Option<i64>>, DbErr> {
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let found: HashMap<i64, Option<i64>> = talkgroup::Entity::find()
+        .select_only()
+        .column(talkgroup::Column::Ref)
+        .column(talkgroup::Column::DelayMinutes)
+        .filter(talkgroup::Column::SystemId.eq(system_id))
+        .filter(talkgroup::Column::Ref.is_in(refs.iter().copied()))
+        .into_tuple::<(i64, Option<i64>)>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(refs
+        .iter()
+        .map(|r#ref| found.get(r#ref).copied().flatten())
+        .collect())
+}
+
+/// Is anything on this Instance delayed — a Delay configured anywhere, or a Call
+/// still waiting out one that has since been lifted?
+///
+/// [`crate::delay::Delays::rearm`]'s question. Three statements, each bounded to
+/// one row, the [`anything_restricted`] shape. A Talkgroup's `0` is not a Delay:
+/// only a positive one counts.
+pub async fn anything_delayed<C: ConnectionTrait>(db: &C) -> Result<bool, DbErr> {
+    if system::Entity::find()
+        .filter(system::Column::DelayMinutes.gt(0))
+        .limit(1)
+        .one(db)
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    if talkgroup::Entity::find()
+        .filter(talkgroup::Column::DelayMinutes.gt(0))
+        .limit(1)
+        .one(db)
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    Ok(call::Entity::find()
+        .select_only()
+        .column(call::Column::Id)
+        .filter(waiting())
+        .into_tuple::<i64>()
+        .one(db)
+        .await?
+        .is_some())
+}
+
 /// Calls that reach `talkgroup_ref` via a patch (full patch resolution for the
 /// live feed is #9; this is the archive-side helper).
 pub async fn calls_patched_to<C: ConnectionTrait>(
@@ -4184,17 +4400,30 @@ pub async fn call_channel<C: ConnectionTrait>(
             ])),
             "restricted",
         )
+        .column(call::Column::DelayedUntilMs)
+        .column(call::Column::EmittedSeq)
         .into_model::<ChannelOf>()
         .one(db)
         .await
 }
 
-/// Where one Call sits, for the access gate.
+/// Where one Call sits, for the access gate — and whether it has gone out yet,
+/// for the **Delay**'s (#73).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sea_orm::FromQueryResult)]
 pub struct ChannelOf {
     pub system_ref: i64,
     pub talkgroup_ref: i64,
     pub restricted: bool,
+    pub delayed_until_ms: Option<i64>,
+    pub emitted_seq: Option<i64>,
+}
+
+impl ChannelOf {
+    /// May a Listener reach this Call yet — [`call::waiting`], over the two
+    /// columns this read carries.
+    pub fn is_published(&self) -> bool {
+        !call::waiting(self.delayed_until_ms, self.emitted_seq)
+    }
 }
 
 /// Is **any** channel on this Instance restricted?
@@ -4476,6 +4705,10 @@ pub async fn quiet_spans_for<C: ConnectionTrait>(
         .all(db)
         .await?
         .into_iter()
+        // A Call still waiting out a **Delay** (#73) is answered for to nobody.
+        // The rows are in hand, so this costs nothing — and a Catch-up window
+        // never asks about one anyway, since no Listener has been sent it.
+        .filter(call::Model::is_published)
         .filter_map(|call| {
             let spans = crate::quiet::unpack(call.quiet.as_deref()?);
             (!spans.is_empty()).then_some((call.id, spans))
@@ -4513,6 +4746,7 @@ pub async fn stored_reach<C: ConnectionTrait>(db: &C, id: CallId) -> Result<Opti
         return Ok(None);
     };
     Ok(Some(Reach {
+        published: call.is_published(),
         system_ref: system.r#ref,
         talkgroup_ref: talkgroup.r#ref,
         patches: call_patch::Entity::find()
@@ -4529,6 +4763,9 @@ pub async fn stored_reach<C: ConnectionTrait>(db: &C, id: CallId) -> Result<Opti
 /// Talkgroup it is patched to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reach {
+    /// Whether a **Listener** may reach this Call yet (#73) — a Call still
+    /// waiting out a **Delay** is owed to no sink until its release queues it.
+    pub published: bool,
     pub system_ref: i64,
     pub talkgroup_ref: i64,
     pub patches: Vec<i64>,
@@ -5358,6 +5595,7 @@ mod tests {
         system::Model {
             restricted: false,
             retention_days: None,
+            delay_minutes: None,
             id: 1,
             r#ref: 11,
             label: None,
@@ -5372,6 +5610,7 @@ mod tests {
         talkgroup::Model {
             restricted: None,
             retention_days: None,
+            delay_minutes: None,
             id: 7,
             system_id: 1,
             r#ref: primary_ref,

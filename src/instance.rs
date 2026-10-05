@@ -443,7 +443,25 @@ impl Instance {
         config: Config,
         store: Option<Arc<dyn AudioStore>>,
     ) -> Result<(), StartError> {
+        self.restart_across(config, store, || {}).await
+    }
+
+    /// [`Instance::restart_with`], doing `while_down` in the gap — after this
+    /// run has stopped and before the next one starts.
+    ///
+    /// The gap is where an Instance is not watching anything, which is a state
+    /// a test cannot otherwise reach: a **Delay** (#73) that comes due while
+    /// the process is down must go out on the next boot, and moving a clock
+    /// while the release Worker is still running would let *it* do the release
+    /// instead, and prove nothing about the boot.
+    pub async fn restart_across(
+        &mut self,
+        config: Config,
+        store: Option<Arc<dyn AudioStore>>,
+        while_down: impl FnOnce(),
+    ) -> Result<(), StartError> {
         self.stop_run().await;
+        while_down();
         let store = store.unwrap_or_else(|| self.store.clone());
         // A fresh registry: the run's three Workers are new, with new meters,
         // and carrying the old readings over would be a status page reporting a
@@ -569,9 +587,12 @@ async fn assemble(
     let retention = config.retention.clone();
     retention.log();
     let mut running =
-        vec![workers.adopt(
-            retention::Sweeper::new(db.clone(), audio.clone(), retention, parts.clock).start(),
-        )];
+        vec![
+            workers.adopt(
+                retention::Sweeper::new(db.clone(), audio.clone(), retention, parts.clock.clone())
+                    .start(),
+            ),
+        ];
 
     let mut state = AppState::new(audio.clone(), db.clone(), config.ingest.clone());
     state.workers = workers.clone();
@@ -622,7 +643,13 @@ async fn assemble(
     // leaves a gate open. Every surface that writes the column re-reads it on
     // the same request.
     state.access.rearm(&db).await;
-    state.clock = parts.clock;
+    // ...and whether anything is **delayed** (#73), on `access`'s terms and with
+    // its consequence: stale-`true` buys a clause, stale-`false` would let a
+    // waiting Call be read. A Call left waiting by the last process counts, so
+    // an Operator who lifted every Delay before a restart still has the Calls
+    // they had kept back kept back until the Worker below releases them.
+    state.delays.rearm(&db).await;
+    state.clock = parts.clock.clone();
     // **Dirwatch** (#72): the roots every watch is bounded by. The Worker is
     // started below with the rest.
     state.dirwatch = crate::dirwatch::Dirwatch::new(config.dirwatch.clone());
@@ -690,6 +717,12 @@ async fn assemble(
     // every watch's folder for what arrived while the Instance was down.
     running
         .extend(crate::dirwatch::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
+    // Releasing **Delay**ed Calls when they are due (#73), on the senders'
+    // terms: a Delay is a column, so this always starts and sleeps on its
+    // wake-up while nothing waits. Started after the two senders it hands work
+    // to, so it stops before them. Its first pass releases whatever came due
+    // while the Instance was down.
+    running.extend(crate::delay::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     // Listener counts (#62), the only Worker here that reads nothing an ingest
     // produced: it writes down how many people were connected, so an Operator
     // can be shown peaks with timestamps rather than asked to guess. Counts and
@@ -700,7 +733,7 @@ async fn assemble(
             db.clone(),
             state.listeners.clone(),
             config.listeners.clone(),
-            parts.clock,
+            parts.clock.clone(),
         )
         .start()
         .map(|worker| workers.adopt(worker)),

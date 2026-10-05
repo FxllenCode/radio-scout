@@ -510,6 +510,8 @@ mod tests {
             tones: Vec::new(),
             quiet: Vec::new(),
             starred: false,
+            delayed: false,
+            waiting: false,
             site_ref: Some(3),
             site_label: Some(String::from("North Tower")),
             object_key: String::from("calls/42.wav"),

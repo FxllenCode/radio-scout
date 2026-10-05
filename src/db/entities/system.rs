@@ -36,6 +36,12 @@ pub struct Model {
     /// window in that section has. Nullable for [`Model::enhancement`]'s reason —
     /// a plain number has no way to say "follow the instance".
     pub retention_days: Option<i64>,
+    /// How many minutes Calls on this System wait before they are published
+    /// to Listeners — the **Delay** (#73, spec US 62). `NULL` inherits the
+    /// Instance, which delays nothing; `0` says the same thing out loud.
+    /// Nullable for [`Model::retention_days`]' reason, and so that a System an
+    /// upload discovered arrives undelayed without anybody having to say so.
+    pub delay_minutes: Option<i64>,
     pub created_at_ms: i64,
 }
 

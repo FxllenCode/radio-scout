@@ -470,6 +470,8 @@ mod tests {
             tones: Vec::new(),
             quiet: Vec::new(),
             starred: false,
+            delayed: false,
+            waiting: false,
             site_ref: None,
             site_label: None,
             object_key: String::from("calls/101.wav"),

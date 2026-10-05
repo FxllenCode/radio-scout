@@ -294,6 +294,7 @@ pub async fn catalog(
         &state.db,
         state.clock.now_ms() - ACTIVITY_WINDOW_MS,
         &viewer.scope,
+        viewer.delaying,
     )
     .await
     .map_err(Stage::LoadCatalog.failed())?;
@@ -327,20 +328,30 @@ struct Activity {
 /// affordable on a Pi with a few hundred Talkgroups, and it keeps the
 /// dialect-divergent list aggregation out of SQL (ADR-0003), like the archive
 /// search.
+///
+/// `published_only` leaves out the Calls still waiting out a **Delay** (#73):
+/// a channel's count ticking up is an announcement that it just spoke, which is
+/// what the Delay exists to withhold. The viewer's bit, so an Instance that
+/// delays nothing adds no clause.
 pub async fn read<C: ConnectionTrait>(
     db: &C,
     since_ms: i64,
     scope: &crate::access::AccessScope,
+    published_only: bool,
 ) -> Result<Catalog, DbErr> {
     // One grouped query for the whole panel, not one per row (#86): a county
     // catalog is 400+ Talkgroups, and an N+1 here would be invisible from
     // outside because every answer it gave would be correct.
-    let mut activity: std::collections::HashMap<i64, Activity> = call::Entity::find()
+    let mut heard = call::Entity::find()
         .select_only()
         .column(call::Column::TalkgroupId)
         .column_as(call::Column::Id.count(), "recent_calls")
         .column_as(call::Column::CallAtMs.max(), "last_call_at_ms")
-        .filter(call::Column::CallAtMs.gte(since_ms))
+        .filter(call::Column::CallAtMs.gte(since_ms));
+    if published_only {
+        heard = heard.filter(crate::archive::published());
+    }
+    let mut activity: std::collections::HashMap<i64, Activity> = heard
         .group_by(call::Column::TalkgroupId)
         .into_model::<Activity>()
         .all(db)

@@ -366,7 +366,10 @@ pub async fn freeze(
             added = added.and(Froze::AlreadyHeld);
             continue;
         }
-        let Some(call) = views.get(&id) else {
+        // A Call still waiting out a **Delay** (#73) is not there yet as far as
+        // anybody outside is concerned, and an Event is public by its link —
+        // so it answers as missing rather than being published on the page.
+        let Some(call) = views.get(&id).filter(|call| !call.waiting) else {
             added = added.and(Froze::Missing);
             continue;
         };

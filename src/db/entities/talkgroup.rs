@@ -32,6 +32,13 @@ pub struct Model {
     /// be bounded inside a System kept for good, and one channel kept for good
     /// inside a System that is not.
     pub retention_days: Option<i64>,
+    /// How many minutes Calls on this channel wait before they are published —
+    /// the **Delay** (#73). `NULL` inherits the System, which is what a channel
+    /// auto-populated onto a delayed System carries, so a Ref a recorder
+    /// discovers there arrives delayed rather than opening a hole. `0` is *no
+    /// Delay* on a System that has one — the thing rdio-scanner cannot say,
+    /// because there `0` is how a Talkgroup inherits.
+    pub delay_minutes: Option<i64>,
     pub created_at_ms: i64,
 }
 

@@ -283,6 +283,12 @@ pub async fn fold(
     .map_err(Stage::Curate.failed())?;
 
     change.record(owner.id, owner.r#ref, dry_run);
+    // A fold re-files Calls onto the owner, and a waiting one is now under the
+    // owner's **Delay** (#73) — the policy in force for the channel it is on
+    // decides, as for any other edit that could move it.
+    if !dry_run {
+        state.channels_changed().await;
+    }
 
     Ok(MergeReport {
         dry_run,

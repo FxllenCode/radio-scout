@@ -174,6 +174,15 @@ pub struct SystemEntry {
     /// along.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_days: Option<u32>,
+    /// How many minutes Calls here wait before they are published (#73) —
+    /// `null`/absent is none.
+    ///
+    /// Carried for `restricted`'s reason, and it is the sharpest case of it: a
+    /// restore that dropped a Delay would publish the next Call on that System
+    /// the moment it arrived — the one direction an officer-safety policy must
+    /// never fail in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_minutes: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub talkgroups: Vec<TalkgroupEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -203,6 +212,10 @@ pub struct TalkgroupEntry {
     /// `null`/absent inherits the System, which inherits `[retention] days` (#69).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_days: Option<u32>,
+    /// `null`/absent inherits the System's Delay; `0` is none, which is a value
+    /// and travels as one (#73).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_minutes: Option<u32>,
     /// The other Refs this channel answers to (#45) — a merge is configuration,
     /// so a restore that dropped it would re-flood the panel with the churn the
     /// Operator folded away.
@@ -396,11 +409,12 @@ pub async fn import(
     // After the commit, and skipped on a dry run, because nothing was written.
     if !dry_run {
         state.tones.rearm(&state.db).await;
-        // ...and its first **restricted** channel (#68), which is the same
-        // cached-bit problem with the opposite failure: a document that gates a
-        // channel and is not re-read leaves that channel open to everybody
-        // until the next restart.
-        state.access.rearm(&state.db).await;
+        // ...and its first **restricted** channel (#68) or **Delay** (#73),
+        // which is the same cached-bit problem with the opposite failure: not
+        // re-read, a gated channel stays open — or a delayed channel's next
+        // Call readable — until the next restart. A Delay a restore changed
+        // also reschedules the Calls already waiting.
+        state.channels_changed().await;
     }
 
     // Built before the macro rather than inside it, for the reason
@@ -579,6 +593,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
                         enhancement: channel.enhancement,
                         restricted: channel.restricted,
                         retention_days: window_of(channel.retention_days),
+                        delay_minutes: window_of(channel.delay_minutes),
                         member_refs: members.into_iter().map(|(_, r#ref)| r#ref).collect(),
                         tones,
                     }
@@ -614,6 +629,7 @@ pub async fn read<C: ConnectionTrait>(db: &C) -> Result<Document, DbErr> {
                 enhancement: row.enhancement,
                 restricted: row.restricted,
                 retention_days: window_of(row.retention_days),
+                delay_minutes: window_of(row.delay_minutes),
                 talkgroups: channels,
                 units: apparatus,
             }
@@ -782,6 +798,14 @@ async fn apply_system<C: ConnectionTrait>(
     let blacklist = blacklist_text(&entry.blacklist);
     let label = optional_text(entry.label.clone());
     let retention_days = entry.retention_days.map(i64::from);
+    // Refused rather than clamped (#73): shortening a Delay an Operator typed is
+    // changing an officer-safety value behind their back. The System's channels
+    // go with it, having nowhere to be filed.
+    if let Err(rejected) = super::delay_within_bounds(entry.delay_minutes) {
+        report.rejected.push(refused(at, &rejected));
+        return Ok(());
+    }
+    let delay_minutes = entry.delay_minutes.map(i64::from);
 
     let system = match existing {
         None => {
@@ -794,6 +818,7 @@ async fn apply_system<C: ConnectionTrait>(
                 enhancement: Set(entry.enhancement),
                 restricted: Set(entry.restricted),
                 retention_days: Set(retention_days),
+                delay_minutes: Set(delay_minutes),
                 created_at_ms: Set(now_ms),
                 ..Default::default()
             }
@@ -806,7 +831,8 @@ async fn apply_system<C: ConnectionTrait>(
                 && found.blacklist == blacklist
                 && found.enhancement == entry.enhancement
                 && found.restricted == entry.restricted
-                && found.retention_days == retention_days;
+                && found.retention_days == retention_days
+                && found.delay_minutes == delay_minutes;
             match same {
                 true => {
                     report.systems.unchanged += 1;
@@ -821,6 +847,7 @@ async fn apply_system<C: ConnectionTrait>(
                     row.enhancement = Set(entry.enhancement);
                     row.restricted = Set(entry.restricted);
                     row.retention_days = Set(retention_days);
+                    row.delay_minutes = Set(delay_minutes);
                     row.update(db).await?
                 }
             }
@@ -876,6 +903,11 @@ async fn apply_talkgroup<C: ConnectionTrait>(
             return Ok(None);
         }
     };
+    if let Err(rejected) = super::delay_within_bounds(entry.delay_minutes) {
+        report.rejected.push(refused(at, &rejected));
+        return Ok(None);
+    }
+    let delay_minutes = entry.delay_minutes.map(i64::from);
     let label = optional_text(entry.label.clone());
     let name = optional_text(entry.name.clone());
     let retention_days = entry.retention_days.map(i64::from);
@@ -911,6 +943,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                 enhancement: Set(entry.enhancement),
                 restricted: Set(entry.restricted),
                 retention_days: Set(retention_days),
+                delay_minutes: Set(delay_minutes),
                 created_at_ms: Set(now_ms),
                 ..Default::default()
             }
@@ -925,6 +958,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                 && found.enhancement == entry.enhancement
                 && found.restricted == entry.restricted
                 && found.retention_days == retention_days
+                && found.delay_minutes == delay_minutes
                 && stored_groups(db, found.id).await? == sorted(&groups);
             match same {
                 true => {
@@ -941,6 +975,7 @@ async fn apply_talkgroup<C: ConnectionTrait>(
                     row.enhancement = Set(entry.enhancement);
                     row.restricted = Set(entry.restricted);
                     row.retention_days = Set(retention_days);
+                    row.delay_minutes = Set(delay_minutes);
                     row.update(db).await?
                 }
             }
@@ -1260,6 +1295,7 @@ mod tests {
             systems: vec![SystemEntry {
                 restricted: false,
                 retention_days: Some(90),
+                delay_minutes: Some(10),
                 r#ref: 11,
                 label: Some(String::from("Fulton")),
                 auto_populate: true,
@@ -1268,6 +1304,7 @@ mod tests {
                 talkgroups: vec![TalkgroupEntry {
                     restricted: None,
                     retention_days: Some(14),
+                    delay_minutes: Some(0),
                     r#ref: 100,
                     label: Some(String::from("Fire Dispatch")),
                     name: None,

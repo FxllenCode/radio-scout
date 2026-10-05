@@ -1233,6 +1233,9 @@ mod tests {
             // what a Listener was *allowed* to reach is not a description of
             // the range they asked for (#68).
             scope: _,
+            // ...nor this: what nobody may reach *yet* (#73) is the Instance's
+            // state, not the range.
+            published_only: _,
             sort: _,
             limit: _,
             offset: _,
