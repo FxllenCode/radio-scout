@@ -44,7 +44,12 @@ rdio's single page saved as a whole.
 
 **`/rdio-scanner`.** The legacy app is not hosted.
 
-**The broadcast delayer.** Not built yet (#73).
+**The broadcast delayer, re-entered by hand.** Delays are here, in minutes like rdio's, on the
+System and Talkgroup forms under Settings → Admin ([docs/operating.md](operating.md#delaying-what-listeners-hear)).
+Two things behave differently, both on purpose: a talkgroup's `0` means *no delay* rather than
+*follow the system* (leave it on **Follow the system** for that), and the wait is measured from
+when a call **arrived** rather than from the recorder's timestamp. Downstream peers wait along with
+your listeners, as they did in rdio, and so do webhooks.
 
 **Your dirwatches, as rows.** Dirwatch is here — Trunk Recorder, SDRTrunk, DSDPlus and filename
 masks, with rdio's mask tokens unchanged — but the watches are re-created by hand under

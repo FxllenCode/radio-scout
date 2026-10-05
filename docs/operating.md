@@ -364,6 +364,65 @@ theirs. The address counted is the TCP peer's unless you named that peer in
 There is no on/off switch for the feature, because a code is a row and a gate is a column: with
 nothing marked restricted, none of this runs.
 
+## Delaying what listeners hear
+
+Some agencies ask that tactical traffic is not heard live. A **delay** on a system or a talkgroup
+makes every call on it wait a number of minutes before anybody outside the instance can reach
+it. The call is recorded and stored the moment it arrives, so the archive is always complete —
+what changes is *when* it is published. *Settings → Admin → Systems → Edit → Delay publishing*,
+or the same control on a talkgroup.
+
+A talkgroup's delay has **three** settings, like its access:
+
+| | |
+| --- | --- |
+| **Follow the system** | the default, and what a channel a recorder discovered carries — so a new TGID appearing on a delayed system arrives **delayed** |
+| **Publish calls at once** | no delay on this channel, even on a delayed system |
+| **After a number of minutes** | its own delay, longer or shorter than the system's |
+
+The longest delay is a day (1440 minutes).
+
+### What waits
+
+Until a call's delay has passed, it is not there for anybody: not on the live feed, not in
+search, not in the filter options or the activity charts, not in an export, not as audio, and
+not in the Talkgroups panel's activity counts. Asking for it by its id answers *not found*, the
+same as a call that does not exist. Then it goes out — on the live feed, to anyone reconnecting,
+and everywhere else at once — marked **Delayed**, so listeners know why it is minutes old. That
+mark stays on the call in the archive.
+
+Your **downstream peers** and **webhooks** wait too. They are sent a delayed call when listeners
+can hear it, and not before — a peer would otherwise publish it immediately, and a webhook
+usually posts to a channel other people read. A call that is still waiting cannot be added to
+an **event**, because an event's page is public.
+
+### How the wait is measured
+
+- **From when the call arrived**, never from the time the recorder stamped on it. A recorder
+  whose clock runs slow cannot shorten a delay by being wrong about the time, and a backlog
+  uploaded late still waits its full delay.
+- **The longest delay the call reaches.** A call patched onto a delayed channel waits that
+  channel's delay, whichever channel it was filed under.
+- **The setting in force decides.** Raising a delay during an incident holds the calls already
+  waiting for longer; lowering it, or switching it off, releases them on the new schedule. Calls
+  that went out are not affected.
+- **A restart changes nothing.** The schedule is stored with each call, so calls that came due
+  while the instance was down go out as soon as it is back — late, never lost, and never early.
+
+### What it does not do
+
+- **It does not hide that a channel exists.** A talkgroup a recorder discovers is listed in the
+  Talkgroups panel as soon as its first call arrives, with no activity counts until a call goes
+  out — the same boundary as [gating](#gating-sensitive-channels): the row is listed, its traffic
+  is not. If even the appearance of a new channel would tell somebody too much, add it yourself
+  beforehand; a radio is the same, under *Units*.
+- **It does not delay what is already out.** Raising a delay holds the calls still waiting, not
+  ones listeners have already heard.
+
+As with access codes there is no on/off switch: with no delay set anywhere, none of this runs
+and nothing costs anything extra. Once you have set one and taken it away again, the instance
+goes back to costing nothing from the next restart.
+
 ## Watching recorder folders
 
 **Dirwatch** ingests the files a recorder drops into a folder, with no upload configured — the

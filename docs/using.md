@@ -42,10 +42,12 @@ Badges appear beside a Talkgroup's name when there is something to say about the
 | 📡 **Tone-out** | A station was paged on this Call — your operator wrote down its paging tones, and they were heard in the audio. The badge names it: *Tone-out: Station 12*. |
 | 🔒 **Encrypted** | The Talkgroup is encrypted, so there is no audio to hear. |
 | 🔗 **Patched** | A dispatcher patched this Talkgroup to others, so the transmission went out on all of them at once. The badge names the channels: *Patched to 54242, 54255*. |
+| ⏳ **Delayed** | Your operator delays this channel, so the Call was published some minutes after it was transmitted — on purpose, usually at an agency's request. It is why the Call's time can be well before now. |
 
-The first three are things *about the transmission*; the last is about how it was carried, and it
-is the one rdio-scanner throws away — it routes patched traffic correctly and then never tells you
-a Call arrived that way.
+The first three are things *about the transmission*. **Patched** is about how it was carried, and
+it is the one rdio-scanner throws away — it routes patched traffic correctly and then never tells
+you a Call arrived that way. **Delayed** is about when it was published, which is why a Call can
+arrive on your live feed with a time well in the past.
 
 None of these notifies anybody. Radio-Scout does not send push notifications and never will —
 a badge is something you find, not something that wakes your phone.
