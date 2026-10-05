@@ -3,7 +3,12 @@ import { useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { signInMessage } from '@/lib/adminError'
 import { curateFailure, refusedForCalls } from '@/lib/curateError'
-import { keepWindow, type KeepMode } from '@/lib/curate'
+import {
+  MAX_DELAY_MINUTES,
+  keepWindow,
+  type DelayMode,
+  type KeepMode,
+} from '@/lib/curate'
 import {
   useAdminLoginMutation,
   useAdminLogoutMutation,
@@ -310,6 +315,79 @@ export function RetentionField({
         // disabled button, which is the one thing they own.
         <p role="alert" className="col-span-2 font-mono text-xs text-red-400">
           Give a whole number of days, or choose one of the other two options.
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * How long a System's or a channel's Calls wait before they are published — the
+ * **Delay** (#73, spec US 62), officer-safety policy rather than a buffer.
+ *
+ * [`RetentionField`]'s shape, one setting along: options and a number box
+ * rather than a box alone, because the wire spends `0` on *none* — which on a
+ * channel overrides a delayed System — and a box where `0` meant "publish at
+ * once" would be indistinguishable from one left blank.
+ *
+ * `inheritsFrom` is the option a Talkgroup has and a System does not: there is
+ * no Instance-wide Delay, so a System's form offers only *none* and *minutes*.
+ */
+export function DelayField({
+  id,
+  mode,
+  minutes,
+  onMode,
+  onMinutes,
+  inheritsFrom,
+  refused,
+}: {
+  /** Unique per mounted form, so two rows open at once do not share input ids. */
+  id: string
+  mode: DelayMode
+  /** The raw text of the minutes box — text, for `RetentionField`'s reason:
+   *  re-rendering a field from its parsed value fights the typing. */
+  minutes: string
+  onMode: (mode: DelayMode) => void
+  onMinutes: (minutes: string) => void
+  /** What the *follow* option says — "Follow the system" on a Talkgroup —
+   *  or absent on a System, which has nothing above it to follow. */
+  inheritsFrom?: string
+  /** The box holds no Delay. Decided by [`useDelay`] from the value the form
+   *  would send, so the refusal shown and the Save button cannot disagree. */
+  refused: boolean
+}) {
+  return (
+    <div className="grid grid-cols-[1fr_6rem] gap-2">
+      <Field label="Delay publishing" htmlFor={`${id}-delay`}>
+        <select
+          id={`${id}-delay`}
+          className={controlClass}
+          value={mode}
+          onChange={(event) => onMode(event.target.value as DelayMode)}
+        >
+          {inheritsFrom !== undefined && (
+            <option value="inherit">{inheritsFrom}</option>
+          )}
+          <option value="none">Publish calls at once</option>
+          <option value="minutes">After a number of minutes</option>
+        </select>
+      </Field>
+      <Field label="Minutes" htmlFor={`${id}-delay-minutes`}>
+        <input
+          id={`${id}-delay-minutes`}
+          className={controlClass}
+          inputMode="numeric"
+          disabled={mode !== 'minutes'}
+          value={minutes}
+          onChange={(event) => onMinutes(event.target.value)}
+        />
+      </Field>
+      {refused && (
+        // The blacklist field's rule, as `RetentionField` keeps it: refused
+        // under the input, before the request.
+        <p role="alert" className="col-span-2 font-mono text-xs text-red-400">
+          Give a whole number of minutes, up to a day ({MAX_DELAY_MINUTES}).
         </p>
       )}
     </div>

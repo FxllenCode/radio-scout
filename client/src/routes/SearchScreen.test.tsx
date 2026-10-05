@@ -1073,6 +1073,28 @@ describe('SearchScreen — what the recorder knew (#42)', () => {
     expect(within(rows[1]).queryByTitle(/^Tone-out/)).toBeNull()
   })
 
+  /** **A Delayed Call is flagged in the Archive too** (#73) — the question
+   *  "why did this go out ten minutes late?" is the same one asked of a search
+   *  result a week on, which is why the flag is the Call's and not the live
+   *  frame's. */
+  it('badges a call that was delayed', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) =>
+        HttpResponse.json(
+          archivePage(new URL(request.url), [
+            { ...ARCHIVE[0], id: 94, delayed: true },
+            { ...ARCHIVE[0], id: 95 },
+          ]),
+        ),
+      ),
+    )
+    renderApp('/search')
+    const rows = await resultRows()
+
+    expect(within(rows[0]).getByTitle('Delayed')).toBeInTheDocument()
+    expect(within(rows[1]).queryByTitle('Delayed')).toBeNull()
+  })
+
   /** A Call marked by a profile whose pages could not be read back still says a
    *  page happened, which is the true half of what is known. */
   it('badges a page it cannot name', async () => {

@@ -866,6 +866,31 @@ describe('LiveScreen — what the recorder knew (#42)', () => {
     expect(within(display()).queryByTitle(/^Patched/)).toBeNull()
   })
 
+  /**
+   * **A Delayed Call says so** (#73, spec US 62). It arrives on the live feed
+   * minutes after its timestamp, and only the badge tells a Listener whether
+   * that is a recorder uploading late or an Operator's officer-safety policy.
+   * rdio-scanner lit a `DELAYED` lamp on the display and nowhere else; this is
+   * the same badge strip as every other fact about a Call, so RECENT carries it
+   * too.
+   */
+  it('badges a delayed call on the display and in RECENT alike', async () => {
+    const user = userEvent.setup()
+    listening(call({ delayed: true }))
+
+    expect(within(display()).getByTitle('Delayed')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+    const recent = screen.getByRole('list', { name: 'Recent calls' })
+    expect(within(recent).getByTitle('Delayed')).toBeInTheDocument()
+  })
+
+  it('leaves a call published on arrival unadorned', () => {
+    listening(call())
+
+    expect(within(display()).queryByTitle('Delayed')).toBeNull()
+  })
+
   it('badges an encrypted call in RECENT while another one plays', () => {
     const { audioUrl: _none, ...metadataOnly } = call({ id: 7 })
     listening(call({ id: 1 }), { ...metadataOnly, encrypted: true })

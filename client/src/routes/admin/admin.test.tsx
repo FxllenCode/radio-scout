@@ -376,6 +376,9 @@ describe('systems', () => {
         // omitted key could not: the form is rendered from the row, so it always
         // has an answer to give.
         retentionDays: null,
+        // No Delay, which on a System is the `null` there is nothing above it
+        // to inherit from (#73).
+        delayMinutes: null,
       },
     })
   })
@@ -605,6 +608,77 @@ describe('systems', () => {
 
     await userEvent.clear(editor.getByLabelText('Days'))
     await userEvent.type(editor.getByLabelText('Days'), '14')
+    expect(editor.queryByRole('alert')).not.toBeInTheDocument()
+    expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled()
+    expect(wrote()).toEqual([])
+  })
+
+  /** **The Delay policy** (#73, spec US 62) — Calls on this System are
+   *  published to Listeners only once the Delay has passed. Two options and a
+   *  number: a System has nothing above it to inherit from, so *none* is the
+   *  `null` the wire spends on it. */
+  it('delays one system\'s calls', async () => {
+    const system = instance.system({ label: 'Fulton' })
+    signedIn(<SystemsScreen />)
+    await screen.findByRole('list', { name: 'Systems' })
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const editor = within(screen.getByRole('form', { name: 'Edit Fulton' }))
+
+    expect(editor.getByLabelText('Delay publishing')).toHaveValue('none')
+    expect(
+      within(editor.getByLabelText('Delay publishing')).queryByRole('option', {
+        name: /^Follow/,
+      }),
+    ).toBeNull()
+    await userEvent.selectOptions(editor.getByLabelText('Delay publishing'), 'minutes')
+    await userEvent.type(editor.getByLabelText('Minutes'), '10')
+    await userEvent.click(editor.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0]).toMatchObject({
+      path: `/api/admin/systems/${system.id}`,
+      body: { delayMinutes: 10 },
+    })
+  })
+
+  /** It opens on what the row says, and lifting it sends the `null` that says
+   *  *none* — which releases whatever was waiting, on the server's side. */
+  it('lifts a system\'s delay', async () => {
+    instance.system({ label: 'Fulton', delayMinutes: 10 })
+    signedIn(<SystemsScreen />)
+    await screen.findByRole('list', { name: 'Systems' })
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const editor = within(screen.getByRole('form', { name: 'Edit Fulton' }))
+
+    expect(editor.getByLabelText('Delay publishing')).toHaveValue('minutes')
+    expect(editor.getByLabelText('Minutes')).toHaveValue('10')
+    await userEvent.selectOptions(editor.getByLabelText('Delay publishing'), 'none')
+    await userEvent.click(editor.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].body).toMatchObject({ delayMinutes: null })
+  })
+
+  /** A day is the longest Delay there is, and the server refuses past it — so
+   *  the form does too, under the input, before anything is sent. */
+  it('refuses a delay that is not a whole number of minutes up to a day', async () => {
+    instance.system({ label: 'Fulton' })
+    signedIn(<SystemsScreen />)
+    await screen.findByRole('list', { name: 'Systems' })
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const editor = within(screen.getByRole('form', { name: 'Edit Fulton' }))
+
+    await userEvent.selectOptions(editor.getByLabelText('Delay publishing'), 'minutes')
+    expect(await editor.findByRole('alert')).toHaveTextContent(
+      'whole number of minutes',
+    )
+    expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    await userEvent.type(editor.getByLabelText('Minutes'), '1441')
+    expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    await userEvent.clear(editor.getByLabelText('Minutes'))
+    await userEvent.type(editor.getByLabelText('Minutes'), '1440')
     expect(editor.queryByRole('alert')).not.toBeInTheDocument()
     expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled()
     expect(wrote()).toEqual([])
@@ -859,6 +933,9 @@ describe('talkgroups', () => {
       restricted: null,
       // The retention window reads the same way, one setting along (#69).
       retentionDays: null,
+      // ...and the Delay, which a channel nobody has decided about inherits
+      // from its System (#73).
+      delayMinutes: null,
       blacklisted: false,
     })
   })
@@ -980,6 +1057,31 @@ describe('talkgroups', () => {
 
     await waitFor(() => expect(wrote()).toHaveLength(1))
     expect(wrote()[0].body).toMatchObject({ retentionDays: 14 })
+  })
+
+  /** **One channel undelayed on a delayed System** (#73) — `0`, which is a
+   *  value and not an absence, and the thing rdio-scanner cannot say because
+   *  there `0` is how a channel inherits. *Follow the system* is the `null`. */
+  it('publishes one channel at once on a delayed system', async () => {
+    county()
+    signedIn(<AdminTalkgroupsScreen />)
+    await screen.findByRole('list', { name: 'Talkgroups' })
+    await userEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0])
+    const editor = within(
+      await screen.findByRole('form', { name: 'Edit Fire Dispatch' }),
+    )
+
+    expect(editor.getByLabelText('Delay publishing')).toHaveValue('inherit')
+    expect(
+      within(editor.getByLabelText('Delay publishing')).getByRole('option', {
+        name: 'Follow the system',
+      }),
+    ).toBeInTheDocument()
+    await userEvent.selectOptions(editor.getByLabelText('Delay publishing'), 'none')
+    await userEvent.click(editor.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(wrote()).toHaveLength(1))
+    expect(wrote()[0].body).toMatchObject({ delayMinutes: 0 })
   })
 
   /** A tag typed into the bulk box is sent as a *set*, where the sentinel that
@@ -1699,6 +1801,7 @@ describe('creating and paging', () => {
         restricted: false,
         blacklist: [],
         retentionDays: null,
+        delayMinutes: null,
       },
     })
   })

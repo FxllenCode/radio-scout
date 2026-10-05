@@ -4,6 +4,7 @@ import {
   AdminGate,
   FailureNote,
   Field,
+  DelayField,
   Placeholder,
   RetentionField,
   RowCard,
@@ -15,6 +16,7 @@ import { Screen } from '@/components/layout/Screen'
 import { useAdminSession } from '@/hooks/useAdminSession'
 import { Button } from '@/components/ui/button'
 import { inherit, parseRefs } from '@/lib/curate'
+import { useDelay } from '@/hooks/useDelay'
 import { useRetentionWindow } from '@/hooks/useRetentionWindow'
 import {
   useCreateSystemMutation,
@@ -173,6 +175,8 @@ function SystemForm({
   const [ref, setRef] = useState(String(row.ref))
   const refs = parseRefs(blacklist)
   const retention = useRetentionWindow(row.retentionDays)
+  // The **Delay** (#73): no Instance-wide one to follow, so two options.
+  const delay = useDelay(row.delayMinutes)
 
   return (
     <form
@@ -197,6 +201,7 @@ function SystemForm({
               restricted,
               blacklist: refs ?? [],
               retentionDays: retention.value,
+              delayMinutes: delay.value,
             },
           }).unwrap()
           onSaved()
@@ -264,6 +269,11 @@ function SystemForm({
         {...retention.field}
         inheritsFrom="Follow the instance setting"
       />
+      {/* **Delay** (#73, spec US 62) — officer-safety policy: every Call here
+          is stored on arrival and reaches Listeners, peers and webhooks only
+          once this has passed. Changing it reschedules the Calls already
+          waiting. */}
+      <DelayField id={`system-${row.id}`} {...delay.field} />
       <Field
         label="Blacklisted talkgroup refs"
         htmlFor={`system-blacklist-${row.id}`}
@@ -295,7 +305,11 @@ function SystemForm({
       <Button
         type="submit"
         size="sm"
-        disabled={refs === undefined || retention.value === undefined}
+        disabled={
+          refs === undefined ||
+          retention.value === undefined ||
+          delay.value === undefined
+        }
       >
         Save
       </Button>

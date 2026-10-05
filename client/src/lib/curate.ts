@@ -83,7 +83,58 @@ export function keepWindow(
 ): number | null | undefined {
   if (mode === 'inherit') return null
   if (mode === 'forever') return 0
-  const days = Number(raw.trim())
-  const given = raw.trim() !== '' && Number.isInteger(days)
-  return given && days > 0 && days <= MAX_DAYS ? days : undefined
+  return wholeNumberUpTo(raw, MAX_DAYS)
+}
+
+/** A whole number from 1 to `most` typed into a box, or `undefined` for
+ *  anything else — blank, a fraction, `0`, a negative, or past what the server
+ *  takes. The one parse both number-and-options controls share ([`keepWindow`],
+ *  [`delayValue`]), so they cannot disagree about what a number *is*. `0` is
+ *  never one: both controls spend it on an option of its own. */
+function wholeNumberUpTo(raw: string, most: number): number | undefined {
+  const value = Number(raw.trim())
+  const given = raw.trim() !== '' && Number.isInteger(value)
+  return given && value > 0 && value <= most ? value : undefined
+}
+
+/** Which of the things a **Delay** is currently saying (#73, spec US 62). A
+ *  Talkgroup has three — *follow the System*, *none*, *this many minutes* — and a
+ *  System two, having nothing above it to follow. */
+export type DelayMode = 'inherit' | 'none' | 'minutes'
+
+/** The longest Delay the server takes: a day (`crate::delay::MAX_MINUTES`).
+ *  Refused here too, `MAX_DAYS`' rule — a form must not accept what the server
+ *  will refuse, or the value goes up and comes straight back. */
+export const MAX_DELAY_MINUTES = 24 * 60
+
+/** What a stored Delay means, as the mode a form shows it in.
+ *
+ *  `inherits` is whether there is a level above to follow: on a Talkgroup
+ *  `null` is *follow the System* and `0` is *none* — a value, and the one
+ *  rdio-scanner cannot express — while on a System both are *none*. */
+export function delayMode(
+  minutes: number | null | undefined,
+  inherits: boolean,
+): DelayMode {
+  if (minutes === null || minutes === undefined) {
+    return inherits ? 'inherit' : 'none'
+  }
+  return minutes === 0 ? 'none' : 'minutes'
+}
+
+/** What a form sends for a Delay, or `undefined` when the box does not hold
+ *  one — [`keepWindow`]'s *refuse to submit*, one setting along.
+ *
+ *  *None* is `0` where there is something to override and `null` where there is
+ *  not, so a System never stores a `0` that says the same thing as nothing. A
+ *  blank box, a fraction, `0` and anything past a day under *minutes* are not a
+ *  Delay: `0` is what *none* is for. */
+export function delayValue(
+  mode: DelayMode,
+  raw: string,
+  inherits: boolean,
+): number | null | undefined {
+  if (mode === 'inherit') return null
+  if (mode === 'none') return inherits ? 0 : null
+  return wholeNumberUpTo(raw, MAX_DELAY_MINUTES)
 }

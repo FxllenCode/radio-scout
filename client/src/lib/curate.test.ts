@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { keepMode, keepWindow, parseRefs, splitList } from './curate'
+import {
+  delayMode,
+  delayValue,
+  keepMode,
+  keepWindow,
+  parseRefs,
+  splitList,
+} from './curate'
 
 describe('splitList', () => {
   /** An empty box is the **empty set**, not "leave it alone" — `groups`
@@ -81,6 +88,45 @@ describe('keepWindow', () => {
   it('refuses anything that is not a window', () => {
     for (const raw of ['', '   ', '0', '-5', '7.5', 'ninety', '9e9']) {
       expect(keepWindow('days', raw)).toBeUndefined()
+    }
+  })
+})
+
+describe('delayMode', () => {
+  /** A Talkgroup has something to follow, so `null` is *inherit* and `0` is a
+   *  value — *none* on a System that delays (#73). */
+  it('reads the three states a channel has', () => {
+    expect(delayMode(undefined, true)).toBe('inherit')
+    expect(delayMode(null, true)).toBe('inherit')
+    expect(delayMode(0, true)).toBe('none')
+    expect(delayMode(10, true)).toBe('minutes')
+  })
+
+  /** ...and a System has nothing above it, so its `null` is *none* too. */
+  it('reads the two a system has', () => {
+    expect(delayMode(null, false)).toBe('none')
+    expect(delayMode(0, false)).toBe('none')
+    expect(delayMode(10, false)).toBe('minutes')
+  })
+})
+
+describe('delayValue', () => {
+  it('sends null to follow, and none as 0 only where there is something to override', () => {
+    expect(delayValue('inherit', '10', true)).toBeNull()
+    expect(delayValue('none', '10', true)).toBe(0)
+    expect(delayValue('none', '', false)).toBeNull()
+  })
+
+  it('takes a whole number of minutes up to a day', () => {
+    expect(delayValue('minutes', '10', true)).toBe(10)
+    expect(delayValue('minutes', ' 1440 ', false)).toBe(1440)
+  })
+
+  /** Refused before it is sent: `0` is what *none* is for, and a day is the
+   *  longest Delay the server takes. */
+  it('refuses anything that is not a delay', () => {
+    for (const raw of ['', '  ', '0', '-5', '2.5', 'ten', '1441', '9e9']) {
+      expect(delayValue('minutes', raw, true)).toBeUndefined()
     }
   })
 })

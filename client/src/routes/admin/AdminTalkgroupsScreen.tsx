@@ -4,6 +4,7 @@ import {
   AdminGate,
   FailureNote,
   Field,
+  DelayField,
   Placeholder,
   RetentionField,
   RowCard,
@@ -22,6 +23,7 @@ import { useMerge } from '@/hooks/useMerge'
 import { Button } from '@/components/ui/button'
 import { pageSummary } from '@/lib/archive'
 import { inherit, splitList } from '@/lib/curate'
+import { useDelay } from '@/hooks/useDelay'
 import { useRetentionWindow } from '@/hooks/useRetentionWindow'
 import { LED_ORDER } from '@/lib/led'
 import {
@@ -622,6 +624,9 @@ function TalkgroupForm({
   // The System form's own control (#69), one entity down — where *inherit*
   // follows the System rather than the Instance.
   const retention = useRetentionWindow(row.retentionDays)
+  // ...and the **Delay** (#73), where *inherit* follows the System and *none*
+  // is a `0` that overrides one.
+  const delay = useDelay(row.delayMinutes, 'Follow the system')
 
   return (
     <form
@@ -640,6 +645,7 @@ function TalkgroupForm({
               led: led === '' ? null : led,
               restricted: restricted === '' ? null : restricted === 'on',
               retentionDays: retention.value,
+              delayMinutes: delay.value,
               blacklisted,
             },
           }).unwrap()
@@ -726,6 +732,9 @@ function TalkgroupForm({
         {...retention.field}
         inheritsFrom="Follow the system"
       />
+      {/* **Delay** (#73) — longer than its System for a tactical channel, or
+          none at all for one that may be heard live on a delayed System. */}
+      <DelayField id={`tg-${row.id}`} {...delay.field} />
       <label className="flex items-center gap-2 font-mono text-xs">
         <input
           type="checkbox"
@@ -735,7 +744,11 @@ function TalkgroupForm({
         Never ingest calls on this talkgroup
       </label>
       {updating.error != null && <FailureNote error={updating.error} />}
-      <Button type="submit" size="sm" disabled={retention.value === undefined}>
+      <Button
+        type="submit"
+        size="sm"
+        disabled={retention.value === undefined || delay.value === undefined}
+      >
         Save
       </Button>
     </form>

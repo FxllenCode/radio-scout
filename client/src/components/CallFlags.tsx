@@ -1,15 +1,16 @@
-import { Lock, RadioTower, TriangleAlert, Waypoints } from 'lucide-react'
+import { Hourglass, Lock, RadioTower, TriangleAlert, Waypoints } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 import type { Call } from '@/types'
 
 /**
- * The four things known about a transmission that change how a listener should
+ * The five things known about a transmission that change how a listener should
  * read it: the **Emergency** bit the radio set (#42, spec US 5), that the
  * talkgroup was encrypted (spec US 9), that a **Tone profile** on this channel
- * was paged in the audio (#55, spec US 20), and that it arrived on a **Patch**
- * (#56, spec US 54).
+ * was paged in the audio (#55, spec US 20), that it arrived on a **Patch**
+ * (#56, spec US 54), and that a **Delay** kept it back before it was published
+ * (#73, spec US 62).
  *
  * The first and the third are **Marks** (CONTEXT.md) and are shown identically
  * here on purpose — one is proved by the wire and the other by this Instance's
@@ -36,11 +37,20 @@ export function CallFlags({
   call,
   className,
 }: {
-  call: Pick<Call, 'emergency' | 'encrypted' | 'tone' | 'tones' | 'patches'>
+  call: Pick<
+    Call,
+    'emergency' | 'encrypted' | 'tone' | 'tones' | 'patches' | 'delayed'
+  >
   className?: string
 }) {
   const patches = call.patches ?? []
-  if (!call.emergency && !call.encrypted && !call.tone && patches.length === 0)
+  if (
+    !call.emergency &&
+    !call.encrypted &&
+    !call.tone &&
+    patches.length === 0 &&
+    !call.delayed
+  )
     return null
   return (
     <span className={cn('flex shrink-0 items-center gap-1', className)}>
@@ -69,6 +79,14 @@ export function CallFlags({
       {patches.length > 0 && (
         <Flag label={patchedLabel(patches)} className="text-muted-foreground">
           <Waypoints className="size-3.5" aria-hidden />
+        </Flag>
+      )}
+      {/* Muted, and last, for the patch chip's reason: a Delay is a fact about
+          *publication*, not something in the transmission to act on — it
+          answers "why is this ten minutes old?" and nothing more. */}
+      {call.delayed && (
+        <Flag label="Delayed" className="text-muted-foreground">
+          <Hourglass className="size-3.5" aria-hidden />
         </Flag>
       )}
     </span>

@@ -60,6 +60,11 @@ export interface Call {
   /** The talkgroup was encrypted, so this Call is metadata and nothing else
    *  (spec US 9) — there is no `audioUrl` on one. */
   encrypted?: boolean
+  /** A **Delay** kept this Call back before it was published (#73, spec
+   *  US 62) — an Operator's officer-safety policy, which is why it arrives
+   *  minutes after its `timestamp`. Absent when nothing did, which is nearly
+   *  always. */
+  delayed?: boolean
   /** A **Tone profile** on this channel was paged in this Call's audio (#55,
    *  spec US 20). Absent when it wasn't, which is nearly always.
    *
@@ -421,6 +426,10 @@ export interface AdminSystem {
    *  `[retention] days`; `0` keeps them for good, the reading every window in
    *  that section has. */
   retentionDays?: number | null
+  /** How many minutes Calls here wait before they are published (#73, spec
+   *  US 62). `null` and `0` both mean no **Delay** — there is no Instance-wide
+   *  one to inherit. */
+  delayMinutes?: number | null
   talkgroups: number
   units: number
   /** Calls in the Archive under it — what a delete would take. */
@@ -449,6 +458,9 @@ export interface AdminTalkgroup {
   /** How many days Calls here are kept (#69). `null` inherits the System, which
    *  inherits `[retention] days`; `0` keeps them for good. */
   retentionDays?: number | null
+  /** How many minutes Calls here wait before they are published (#73). `null`
+   *  inherits the System; `0` is no **Delay**, even on a System that has one. */
+  delayMinutes?: number | null
   blacklisted: boolean
   calls: number
   createdAtMs: number

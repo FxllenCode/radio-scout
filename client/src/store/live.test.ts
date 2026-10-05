@@ -1701,6 +1701,32 @@ describe('Catch-up (#59, spec US 23)', () => {
     expect(selectIsCatchingUp(rootState(after))).toBe(false)
   })
 
+  /**
+   * **A Delayed Call arriving late joins the queue it arrives into** (#73).
+   * It goes out minutes after its `timestamp`, so a queue ordered by when the
+   * radio keyed up would slot it in ahead of Calls already waiting — or, during
+   * Catch-up, behind the point being drained and never play. The queue is
+   * arrival order (`lib/queue.ts`), so it plays after what was already waiting,
+   * Catch-up carries on through it, and the cursor moves on to its emission.
+   */
+  it('drains a delayed call that arrives late in the order it arrived', () => {
+    const behind = reduce(
+      connected(),
+      received({ ...call(1), timestamp: 600_000 }, 1, NOW),
+      received({ ...call(2), timestamp: 610_000 }, 2, NOW),
+      engageCatchup(),
+    )
+
+    const late = liveReducer(
+      behind,
+      received({ ...call(3), timestamp: 0, delayed: true }, 3, NOW),
+    )
+
+    expect(selectQueue(rootState(late)).map((one) => one.id)).toEqual([2, 3])
+    expect(selectIsCatchingUp(rootState(late))).toBe(true)
+    expect(selectSince(rootState(late))).toBe(3)
+  })
+
   /** Engaging with nothing waiting is not an error, it is already true: there
    *  is nothing to catch up on, so it does not stay on. */
   it('will not engage with an empty queue', () => {
