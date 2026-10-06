@@ -68,6 +68,18 @@ Every difference from rdio-scanner is a defect it has, found by reading `access.
 
 - **TLS:** plain HTTP by default with a **reverse proxy recommended** for HTTPS in v1; built-in Let's Encrypt autocert is a v2 convenience.
 
+### Amendment (#75): one page may be framed, and nothing else may
+
+The **Embed** (spec US 59) is a page another site frames — a fire department's homepage carrying fire dispatch. Shipping it meant deciding who may frame *everything else*, which until then nobody had: no response carried a framing header at all, so every page of every Instance — the admin surface included — could be framed by any site. rdio-scanner is the same, and its community relies on it to iframe the whole app.
+
+**Every response now says who may frame it** (`crate::framing`, one layer over the whole router). The embed page answers `Content-Security-Policy: frame-ancestors *`; every other response — the app, the API, a share page, a 404 — answers `frame-ancestors 'none'` and `X-Frame-Options: DENY`. A handler opts in by putting a marker on its response, so a route added later is unframable until it asks otherwise.
+
+**This closes no hole that was open**, and the record should say so: the session cookie is `SameSite=Strict`, so a cross-site frame of the admin surface has no session, and a third-party frame's storage is partitioned, so a framed app has no **grant**. It is defence that does not depend on a browser's cookie and storage rules continuing to hold — which is what clickjacking defence is supposed to be — and it makes the embed the *one* framable surface by construction rather than by everything else happening to be useless in a frame.
+
+**What it cost, taken knowingly (maintainer's call, grilling #75):** an Operator who framed the whole app — into a Home Assistant dashboard, say — can no longer. The Embed is what to frame instead. A `[server]` setting to re-allow framing the app was considered and not built; it can be added if real deployments ask for it.
+
+**The embed itself is not a credential, and that is what lets it be framed by anybody.** Its token is printed into a stranger's public page source, so it reaches only what a Listener holding no **Access code** hears, intersected with its Selection — never a restricted channel, and never a grant appended to the frame's URL. Restricted channels an embed's Selection names are counted on the admin listing rather than refused, so an Operator learns it from the screen and not from the host.
+
 ## Considered and rejected
 
 - **JWT-in-localStorage** (rdio's approach) — susceptible to XSS token theft and unnecessary for a single-origin deployment; a server-side cookie session is both simpler and safer.

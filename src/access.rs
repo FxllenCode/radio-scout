@@ -382,6 +382,24 @@ impl Viewer {
     }
 }
 
+impl Viewer {
+    /// Whoever presents `grant` to this Instance, right now — or, with `None`,
+    /// a Listener holding no code at all.
+    ///
+    /// The extractor's whole decision, as a function, because one surface asks
+    /// it without a request to extract from: an **Embed** (#75) is a Listener
+    /// holding nothing *whatever* its frame's URL carries, so it asks for `None`
+    /// rather than reading a grant somebody appended to a host's snippet.
+    pub async fn resolve(state: &AppState, grant: Option<&str>) -> Result<Viewer, Failure> {
+        let mut viewer = state
+            .access
+            .viewer(&state.db, grant, state.clock.now_ms())
+            .await?;
+        viewer.delaying = state.delays.is_armed();
+        Ok(viewer)
+    }
+}
+
 impl FromRequestParts<AppState> for Viewer {
     type Rejection = Failure;
 
@@ -389,12 +407,7 @@ impl FromRequestParts<AppState> for Viewer {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let mut viewer = state
-            .access
-            .viewer(&state.db, presented(parts).as_deref(), state.clock.now_ms())
-            .await?;
-        viewer.delaying = state.delays.is_armed();
-        Ok(viewer)
+        Viewer::resolve(state, presented(parts).as_deref()).await
     }
 }
 

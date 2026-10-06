@@ -15,6 +15,7 @@ pub mod call_unit;
 pub mod dirwatch;
 pub mod downstream;
 pub mod downstream_delivery;
+pub mod embed;
 pub mod event;
 pub mod event_call;
 pub mod frequency_health;

@@ -8,7 +8,7 @@ use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
     access_code, api_key, call, call_frequency, call_patch, call_tone, call_unit, dirwatch,
-    downstream, downstream_delivery, event, event_call, group, listener_sample, log_event,
+    downstream, downstream_delivery, embed, event, event_call, group, listener_sample, log_event,
     share_link, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit,
     unit_ref, webhook, webhook_delivery,
 };
@@ -46,6 +46,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0025_rf_health::Migration),
             Box::new(m0026_dirwatches::Migration),
             Box::new(m0027_delay::Migration),
+            Box::new(m0028_embeds::Migration),
         ]
     }
 }
@@ -2519,6 +2520,42 @@ mod m0027_delay {
                         .drop_column(system::Column::DelayMinutes)
                         .to_owned(),
                 )
+                .await
+        }
+    }
+}
+
+/// **Embeds** (#75): the Selections an Operator publishes for another site to
+/// frame. One table, its token unique (the entity says so, and the generated DDL
+/// carries it), and no other index — the roster is a handful of rows read whole
+/// by the admin listing, and the page's lookup is the token's. Guarded, as m0026
+/// guards its table, so a database that already has it is left alone.
+mod m0028_embeds {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0028_embeds"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_table("embeds").await? {
+                return Ok(());
+            }
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(embed::Entity))
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(embed::Entity).to_owned())
                 .await
         }
     }

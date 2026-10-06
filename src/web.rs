@@ -43,7 +43,16 @@ pub async fn spa_handler(uri: Uri) -> Response {
     // *under* it, so `/s/anything` is a clean 404 rather than the whole app
     // served at a share URL. The trailing slash also keeps `/search`,
     // `/session` and `/settings` — three real client-side routes — out of it.
-    if path == "healthz" || path == "api" || path.starts_with("api/") || path.starts_with("s/") {
+    //
+    // `embed/` for the same reason (#75): `/embed` is the embed page's route,
+    // and the app served at `/embed/anything` would be the one surface on this
+    // Instance that looks like the embed and is not framable.
+    if path == "healthz"
+        || path == "api"
+        || path.starts_with("api/")
+        || path.starts_with("s/")
+        || path.starts_with("embed/")
+    {
         return (StatusCode::NOT_FOUND, "not found\n").into_response();
     }
 
@@ -62,6 +71,37 @@ pub async fn spa_handler(uri: Uri) -> Response {
         None => Html(FALLBACK_HTML).into_response(),
     }
 }
+
+/// The **Embed** page (#75): `embed.html`, the second entry the client build
+/// emits — a few kilobytes of its own rather than the whole app, because it is
+/// loaded by every reader of somebody else's homepage.
+///
+/// One static document whatever the token: whether the embed exists is the
+/// feed's answer, and the page draws it. Without a client build there is no
+/// page to serve, so this says so in a sentence — still a page, still framable,
+/// so a host framing an Instance whose binary was built without its UI shows
+/// that sentence instead of a browser error.
+pub fn embed_page() -> Response {
+    page_or_sentence(Assets::get("embed.html").map(|page| page.data.into_owned()))
+}
+
+/// The page if this binary was built with one, else the sentence — a function
+/// of the asset rather than of the build, so both answers are testable in a
+/// tree where only one of them can be served.
+fn page_or_sentence(page: Option<Vec<u8>>) -> Response {
+    match page {
+        Some(page) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response(),
+        None => Html(EMBED_FALLBACK_HTML).into_response(),
+    }
+}
+
+/// What the embed route serves from a binary built without the client.
+const EMBED_FALLBACK_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="robots" content="noindex"><title>Radio-Scout</title></head>
+<body><p>This scanner's player is not built into this copy of Radio-Scout.</p></body>
+</html>
+"#;
 
 fn asset_response(path: &str, data: Vec<u8>) -> Response {
     let mut response = data.into_response();
@@ -165,6 +205,30 @@ const FALLBACK_HTML: &str = r#"<!doctype html>
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    /// The embed route always answers with a page (#75): the built one, or —
+    /// from a binary built without the client — a sentence saying so, which a
+    /// host's frame shows instead of a browser error.
+    #[rstest]
+    #[case::built(Some(b"<main id=\"embed\"></main>".to_vec()), "id=\"embed\"")]
+    #[case::not_built(None, "not built into this copy")]
+    #[tokio::test]
+    async fn the_embed_route_answers_with_a_page_built_or_not(
+        #[case] page: Option<Vec<u8>>,
+        #[case] says: &str,
+    ) {
+        let response = page_or_sentence(page);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a body");
+        assert!(String::from_utf8_lossy(&body).contains(says));
+    }
 
     /// Every extension the SPA build emits, pinned to the type a browser needs
     /// to see (#83).

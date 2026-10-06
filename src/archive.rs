@@ -716,22 +716,11 @@ pub(crate) fn gate(scope: &AccessScope) -> Option<sea_orm::Condition> {
     }
 }
 
-/// A Call whose own channel is open to everybody.
-///
-/// `COALESCE` because `talkgroups.restricted` is nullable and `NULL` **inherits
-/// its System** (#68) — which is what an auto-populated channel carries, so a
-/// Ref a recorder discovers on a gated System is gated by this expression
-/// without anybody having curated it. `systems.restricted` is not null, so the
-/// coalesce always resolves and there is no third state for the comparison to
-/// fall through.
+/// A Call whose own channel is open to everybody — the inheritance rule is
+/// [`crate::db::repo::channel_restricted`]'s, which resolves to a value on every
+/// row, so there is no third state for the comparison to fall through.
 fn unrestricted() -> sea_orm::sea_query::SimpleExpr {
-    use sea_orm::sea_query::{Expr, Func};
-
-    Expr::expr(Func::coalesce([
-        Expr::col((talkgroup::Entity, talkgroup::Column::Restricted)).into(),
-        Expr::col((system::Entity, system::Column::Restricted)).into(),
-    ]))
-    .eq(false)
+    crate::db::repo::channel_restricted().eq(false)
 }
 
 /// One System of a Selection, reduced to a default and the Refs that differ
@@ -865,6 +854,21 @@ pub async fn page<C: ConnectionTrait>(db: &C, search: &CallSearch) -> Result<Sea
     let count = count(db, &filters).await?;
 
     Ok(Page::new(results, count, search.limit, search.offset))
+}
+
+/// **[`page`] without its total**: the Calls one window holds, denormalized.
+///
+/// For a surface that shows a window and never pages it — an **Embed** (#75),
+/// whose feed a newsroom's frontpage can ask for once per reader. The `COUNT`
+/// a paginator needs is the one statement here whose cost grows with the
+/// Archive, and nothing on that page would read it.
+pub async fn window<C: ConnectionTrait>(
+    db: &C,
+    search: &CallSearch,
+) -> Result<Vec<StoredCall>, DbErr> {
+    let filters = Filters::resolve(db, search).await?;
+    let rows = search_rows(db, &filters).await?;
+    stored_calls(db, &rows).await
 }
 
 /// The rows one window holds: filtered, ordered, and paged.

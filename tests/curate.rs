@@ -82,6 +82,10 @@ async fn no_session_reaches_no_curation_route() {
         "/api/admin/dirwatches",
         "/api/admin/dirwatches/1",
         "/api/admin/dirwatches/1/scan",
+        // #75's **Embeds**: what a stranger's homepage plays is the Operator's
+        // to say, so making, re-scoping and revoking one are the gate's.
+        "/api/admin/embeds",
+        "/api/admin/embeds/1",
     ] {
         let response = app.get(path).await;
         assert_eq!(response.status(), 401, "GET {path}");

@@ -4382,8 +4382,6 @@ pub async fn call_channel<C: ConnectionTrait>(
     db: &C,
     id: crate::call::CallId,
 ) -> Result<Option<ChannelOf>, DbErr> {
-    use sea_orm::sea_query::{Expr, Func};
-
     call::Entity::find_by_id(id)
         .select_only()
         .join(sea_orm::JoinType::InnerJoin, call::Relation::System.def())
@@ -4393,18 +4391,31 @@ pub async fn call_channel<C: ConnectionTrait>(
         )
         .column_as(system::Column::Ref, "system_ref")
         .column_as(talkgroup::Column::Ref, "talkgroup_ref")
-        .column_as(
-            Expr::expr(Func::coalesce([
-                Expr::col((talkgroup::Entity, talkgroup::Column::Restricted)).into(),
-                Expr::col((system::Entity, system::Column::Restricted)).into(),
-            ])),
-            "restricted",
-        )
+        .column_as(channel_restricted(), "restricted")
         .column(call::Column::DelayedUntilMs)
         .column(call::Column::EmittedSeq)
         .into_model::<ChannelOf>()
         .one(db)
         .await
+}
+
+/// **Whether a channel is restricted, as SQL** — over a query that has joined
+/// both `talkgroups` and `systems`.
+///
+/// `COALESCE` because `talkgroups.restricted` is nullable and `NULL` **inherits
+/// its System** (#68) — which is what an auto-populated channel carries, so a
+/// Ref a recorder discovers on a gated System is gated without anybody having
+/// curated it. `systems.restricted` is not null, so the coalesce always
+/// resolves. Written once: [`call_channel`] reads it for one Call,
+/// [`restricted_channels`] for the roster, and `archive`'s gate filters on it —
+/// three readings of one inheritance rule that must not drift apart (#75).
+pub(crate) fn channel_restricted() -> sea_orm::sea_query::Expr {
+    use sea_orm::sea_query::{Expr, Func};
+
+    Expr::expr(Func::coalesce([
+        Expr::col((talkgroup::Entity, talkgroup::Column::Restricted)).into(),
+        Expr::col((system::Entity, system::Column::Restricted)).into(),
+    ]))
 }
 
 /// Where one Call sits, for the access gate — and whether it has gone out yet,
@@ -4452,6 +4463,28 @@ pub async fn anything_restricted<C: ConnectionTrait>(db: &C) -> Result<bool, DbE
         .one(db)
         .await?
         .is_some())
+}
+
+/// Every channel this Instance restricts, as `(system_ref, talkgroup_ref)`.
+///
+/// The **Embed** listing's question (#75): which of the channels an embed names
+/// will never play in it, because an embed hears what a Listener holding no code
+/// hears. One statement for the whole roster, asked only when
+/// [`anything_restricted`] would say yes, read through [`channel_restricted`]
+/// exactly as [`call_channel`] reads one Call.
+pub async fn restricted_channels<C: ConnectionTrait>(db: &C) -> Result<Vec<(i64, i64)>, DbErr> {
+    talkgroup::Entity::find()
+        .select_only()
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            talkgroup::Relation::System.def(),
+        )
+        .column_as(system::Column::Ref, "system_ref")
+        .column_as(talkgroup::Column::Ref, "talkgroup_ref")
+        .filter(channel_restricted().eq(true))
+        .into_tuple()
+        .all(db)
+        .await
 }
 
 /// The **Access code** a presented grant names, live or not.

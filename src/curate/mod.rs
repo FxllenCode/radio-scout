@@ -78,6 +78,7 @@ pub mod codes;
 pub mod dirwatches;
 pub mod document;
 pub mod downstreams;
+pub mod embeds;
 pub mod events;
 pub mod keys;
 pub mod labels;
@@ -233,6 +234,15 @@ pub fn routes() -> Router<AppState> {
             patch(dirwatches::update).delete(dirwatches::remove),
         )
         .route("/api/admin/dirwatches/{id}/scan", post(dirwatches::scan))
+        // **Embeds** (#75, spec US 59) — the Selections another site may frame.
+        // Here rather than beside the share links because an Operator makes
+        // these on purpose, and a stranger's homepage playing one is the
+        // Operator's to start and to stop.
+        .route("/api/admin/embeds", get(embeds::list).post(embeds::create))
+        .route(
+            "/api/admin/embeds/{id}",
+            patch(embeds::update).delete(embeds::remove),
+        )
         .route("/api/admin/api-keys", get(keys::list).post(keys::create))
         .route(
             "/api/admin/api-keys/{id}",
@@ -264,6 +274,7 @@ pub enum What {
     /// never the Call's, because the Call may be long gone (#67).
     EventCall,
     Dirwatch,
+    Embed,
 }
 
 impl What {
@@ -284,6 +295,7 @@ impl What {
             What::Event => "event",
             What::EventCall => "call in this event",
             What::Dirwatch => "dirwatch",
+            What::Embed => "embed",
         }
     }
 
@@ -306,6 +318,7 @@ impl What {
             What::Event => "event-not-found",
             What::EventCall => "event-call-not-found",
             What::Dirwatch => "dirwatch-not-found",
+            What::Embed => "embed-not-found",
         }
     }
 
@@ -327,7 +340,8 @@ impl What {
             | What::ShareLink
             | What::Event
             | What::EventCall
-            | What::Dirwatch => "ref-taken",
+            | What::Dirwatch
+            | What::Embed => "ref-taken",
         }
     }
 
@@ -347,7 +361,8 @@ impl What {
             | What::ShareLink
             | What::Event
             | What::EventCall
-            | What::Dirwatch => "has-calls",
+            | What::Dirwatch
+            | What::Embed => "has-calls",
         }
     }
 }

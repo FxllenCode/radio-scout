@@ -109,7 +109,9 @@ enum RouteClass {
     /// talking to us, and the traffic the request log exists for.
     Ingest,
     /// Traffic that arrives many times over for one user-visible event: SPA
-    /// assets, a Call's audio ranges, the liveness probe.
+    /// assets, a Call's audio ranges, the liveness probe — and an **Embed**'s
+    /// page and feed (#75), which arrive once per reader of somebody else's
+    /// homepage.
     Chatty,
     /// Everything else — archive, admin, the live-feed upgrade, SPA navigation,
     /// and anything unrouted.
@@ -128,6 +130,13 @@ impl RouteClass {
             // scraper presenting the wrong token stays findable.
             "/healthz" => RouteClass::Chatty,
             crate::metrics::METRICS_PATH => RouteClass::Chatty,
+            // **An Embed's page and its feed** (#75) are loaded by every reader
+            // of somebody else's homepage, and at INFO each would be a line
+            // here *and* a row in the stored operator log per page view — the
+            // very cost the embed opens no socket to avoid. A 4xx still
+            // escalates, so a site still framing an embed the Operator deleted
+            // is a WARN they can find.
+            crate::embed::EMBED_PATH | crate::embed::FEED_PATH => RouteClass::Chatty,
             _ if is_call_audio(path) || is_spa_asset(path) => RouteClass::Chatty,
             _ => RouteClass::Other,
         }
@@ -338,6 +347,8 @@ mod tests {
     #[case("/api/call/1/audio", RouteClass::Chatty)]
     #[case("/api/call/999999/audio", RouteClass::Chatty)]
     #[case("/healthz", RouteClass::Chatty)]
+    #[case("/embed", RouteClass::Chatty)]
+    #[case("/api/embed", RouteClass::Chatty)]
     #[case("/metrics", RouteClass::Chatty)]
     #[case("/assets/index-a1b2c3.js", RouteClass::Chatty)]
     #[case("/assets/index-a1b2c3.css", RouteClass::Chatty)]

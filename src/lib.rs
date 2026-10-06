@@ -20,10 +20,12 @@ pub mod delay;
 pub mod delivery;
 pub mod dirwatch;
 pub mod downstream;
+pub mod embed;
 pub mod enhance;
 pub mod event;
 pub mod export;
 pub mod failure;
+pub mod framing;
 pub mod http_log;
 pub mod import;
 pub mod ingest;
@@ -342,6 +344,13 @@ pub fn build_app(state: AppState) -> Router {
         .route(crate::event::EVENT_PATH, get(crate::event::open))
         .route(crate::event::EVENT_AUDIO_PATH, get(crate::event::audio))
         .route(crate::event::EVENT_EXPORT_PATH, get(crate::event::export))
+        // **The embeddable player** (#75, spec US 59): the one page another
+        // site may frame, and what it reads. Outside `/api` for the share page's
+        // reason — it is the URL in a snippet — with the token in the query
+        // string, where `http_log` never looks. The feed is under `/api` so the
+        // service worker never answers it from a cache.
+        .route(crate::embed::EMBED_PATH, get(crate::embed::page))
+        .route(crate::embed::FEED_PATH, get(crate::embed::feed))
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.
         .fallback(web::spa_handler)
@@ -357,6 +366,12 @@ pub fn build_app(state: AppState) -> Router {
             },
             http_log::log_requests,
         ))
+        // **Who may frame what** (#75): every response says, and only the
+        // embed page says "anybody" (`crate::framing`). Outermost of all — over
+        // the router's own 404s and 405s, and over the request log too, because
+        // that is where a 5xx is rebuilt with nothing in it but its request id,
+        // and a header written inside it would be thrown away with the body.
+        .layer(axum::middleware::map_response(framing::apply))
         .with_state(state)
 }
 

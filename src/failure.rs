@@ -199,6 +199,10 @@ stages! {
     /// Reading the Event a share token names — the page, one member's audio, and
     /// the download alike.
     OpenEvent => "open-event",
+    // -- Embeds (`crate::embed`, #75) ---------------------------------------
+    /// Reading the **Embed** a token names, and the recent Calls its feed
+    /// carries.
+    OpenEmbed => "open-embed",
 }
 
 impl Stage {
@@ -336,6 +340,11 @@ pub enum Reason {
     /// it — and distinguished in the **log**, which is where the Operator whose
     /// links stopped working goes to find out why.
     SharingDisabled,
+    // -- Embeds (#75, spec US 59) -------------------------------------------
+    /// No **Embed** by that token: never made, or deleted — which is how an
+    /// Operator revokes one. The page draws "no longer available" from it, so a
+    /// host whose embed was taken down shows a sentence rather than an error.
+    EmbedNotFound,
     // -- Range export (#65, spec US 33) -------------------------------------
     /// `[export] enabled` is off.
     ExportDisabled,
@@ -765,6 +774,15 @@ impl Reason {
                 Level::DEBUG,
                 StatusCode::NOT_FOUND,
                 text("share link not found\n"),
+            ),
+            // **DEBUG**, for the dead share link's reason: a host still framing
+            // an embed the Operator deleted is the Operator's own doing, and the
+            // request log's 4xx line already carries it (rule 3).
+            Reason::EmbedNotFound => Refusal::new(
+                "embed-not-found",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("embed not found\n"),
             ),
             // **DEBUG, all five.** The client is told the count *before* it
             // offers the control (`GET /api/catalog`), so every one of these is
@@ -1374,6 +1392,14 @@ mod tests {
     #[case::locked_out(
         Reason::AdminLockedOut { client_addr: LOCALHOST, retry_after_secs: 900 },
         "admin-locked-out", 429, "too many failed logins; try again later\n", " WARN "
+    )]
+    // -- Embeds (#75) ------------------------------------------------------
+    #[case::embed_not_found(
+        Reason::EmbedNotFound,
+        "embed-not-found",
+        404,
+        "embed not found\n",
+        " DEBUG "
     )]
     // -- The metrics surface (#70) -----------------------------------------
     // A 404 because the token *is* the switch, so "not configured" and "no such
