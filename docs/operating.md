@@ -1023,6 +1023,61 @@ them.
   everyone: voice-band radio audio has nothing above 4 kHz to lose, and one format is what lets
   every player play it.
 
+## Putting the scanner on another site
+
+An **embed** is a small player another site can frame — the fire department's homepage carrying
+fire dispatch, a local newsroom carrying the county. It shows the recent calls of a selection you
+choose, newest first, and a **Listen live** button; a reader who presses it hears each new call as
+it arrives, and can play any listed call by tapping it. At the bottom is a link that opens the full
+scanner, tuned to the same selection.
+
+Make one in Settings → Admin → **Embeds**: name it, choose what it plays, and copy the snippet it
+hands you. That `<iframe>` is all the host pastes into their page. There is no setting to turn the
+feature on — an instance with no embeds has nothing for another site to frame.
+
+**The snippet names the embed, not the selection.** Change what an embed plays, or rename it, and
+every site framing it plays the new selection the next time a reader loads the page or presses
+**Listen live**, without anybody editing their HTML. **Delete it** to take it down: the host's
+frame then says *this feed is no longer available*. A reader who was already listening when you
+deleted it keeps hearing the live feed until they stop or reload — it is open listening they
+could reach anyway. To stop one host and not another, give each its own embed.
+
+**It plays open channels only.** The snippet's address sits in a stranger's public page source, so
+it cannot carry an access code: an embed hears what a listener holding no code hears. A
+[restricted](#gating-sensitive-channels) channel in its selection never plays there, and the
+Embeds screen says how many of those an embed names. A [delayed](#delaying-what-listeners-hear) call
+appears when it is released and not before.
+
+**Set `[server] public_url` before handing out a snippet.** Without it, the snippet points at the
+address *you* are browsing from — often a LAN address like `192.168.1.5`, which no reader of the
+host's page can reach — and the screen says so beside it. The instance has to be reachable from
+the internet for an embed to work anywhere but your own network, and Chrome refuses outright to
+let a public site frame a private address.
+
+**And serve it over HTTPS.** Nearly every site is served over https, and a browser will not let an
+https page frame a plain `http://` address — the frame is simply blank. So an embed needs this
+instance reachable at an `https://` address, which today means
+[behind a reverse proxy](#behind-a-reverse-proxy) that terminates TLS. The Embeds screen warns
+beside any snippet whose address is plain http.
+
+**What it costs.** Loading a page with an embed on it costs this instance one small page (about
+20 KB, cached by the browser after the first load) and one read of the recent calls. The snippet
+asks the browser to load the frame lazily, so an embed below the fold costs nothing until someone
+scrolls to it. Only a reader who presses **Listen live** holds a connection, and they are counted
+as a [listener](#listener-counts) because they are one. A busy homepage full of readers who never
+press play is a few reads a second, not a few thousand open connections.
+
+**Nothing else on the instance can be framed.** Every other page answers `X-Frame-Options: DENY`
+and `frame-ancestors 'none'`. If you used to iframe the whole of rdio-scanner into a dashboard
+(Home Assistant, say), that stops working here: frame an embed instead.
+
+**If the instance goes down while a page is open,** the embed keeps the list it has. A reader
+who is listening sees *Reconnecting…*, and hears what they missed when the instance is back; a
+reader who taps a call that will not load is told it could not be played. If the instance is
+down when the host's page *loads*, the frame never receives the player at all, so the host's
+readers see their browser's own "can't connect" box in its place — nothing served from the
+instance can run when the instance is not there.
+
 ## Events: keeping an incident for good
 
 Retention eventually takes everything. An **Event** is the exception: a named collection of calls
@@ -1272,8 +1327,9 @@ What you can rely on:
 
 - **Every HTTP request leaves one line** — method, path, status, duration — under a request id
   echoed back as `x-request-id`. Chatty routes (audio range requests, health probes, SPA
-  assets) sit at DEBUG so a Pi is not writing a line per range request; a 4xx or 5xx escalates
-  whatever the route.
+  assets, and an embed's page and feed, which every reader of the host's page loads) sit at
+  DEBUG so a Pi is not writing a line per range request; a 4xx or 5xx escalates whatever the
+  route.
 - **Every refused request says why**, with a machine-readable `reason=` — `invalid-api-key`,
   `duplicate`, `blacklisted`, `no-talkgroup`, and the same for the admin surface. A Call that
   does not become a row leaves a line explaining itself. The message is always

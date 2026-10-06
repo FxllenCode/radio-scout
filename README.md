@@ -170,6 +170,12 @@ VLC, a Sonos, a smart speaker or a car: calls in order, silence between them, ne
 live, and the talkgroup on the player's "now playing" screen. It obeys access codes and delays
 exactly as the app does, and costs about 32 kbps of upload per stream.
 
+**On somebody else's site.** Make an **embed** in admin and hand a fire department or a newsroom
+an `<iframe>` snippet: their page shows your chosen selection's recent calls and a *Listen live*
+button. Change what it plays from admin and every host follows; delete it and their frame says it
+is gone. It plays open channels only, opens a connection only for a reader who presses play, and
+is the one page on the instance any site may frame.
+
 **On your phone.** Installable to the home screen, and works offline for the app shell.
 Radio-Scout does not send notifications — it never asks for the permission and never wakes
 your device ([ADR-0014](docs/adr/0014-no-notifications.md)).

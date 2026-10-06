@@ -219,6 +219,12 @@ It is **one more way to hear the live feed**, never the **Archive**: a stream fo
 Every stream is a **Listener**, and holds one of its **Access code**'s connections for as long as it plays. Unlike a socket, which learns of a changed code on its next reconnect, a stream is re-scoped the moment its code or a channel's `restricted` column is written — a speaker never reconnects.
 _Avoid_: radio mode, icecast feed (the mechanism), broadcast, DVR (which is the Archive, played).
 
+**Embed**:
+A **Selection** an **Operator** publishes for another site to frame — a fire department's homepage, a newsroom — as a small page of its recent **Calls** with a *Listen live* button. The Operator makes one and hands the host an `<iframe>` snippet; the snippet names the Embed rather than spelling the Selection, so re-scoping it changes what every host plays and deleting it is the revoke, without anybody editing somebody else's HTML.
+
+**Its address is public, so it opens nothing.** The token is printed into a stranger's page source, which means it cannot be a credential: an Embed hears what a **Listener** holding no **Access code** hears, intersected with its Selection, and never a **Restricted** channel or a Call still waiting out a **Delay**. That is why — unlike a **Share link**'s token or a **Webhook**'s URL — its address *is* on the admin listing. Listening is the ordinary **live feed**, opened only when a reader presses the button, so a reader who never does costs one page and one read; one who does is a Listener and is counted as one. The Embed page is the one page on an **Instance** any site may frame; nothing else may be framed at all.
+_Avoid_: widget, iframe (the mechanism), public player, share (a **Share link** is one Call, minted by a Listener).
+
 ### Ingest & distribution
 
 **Recorder**:
