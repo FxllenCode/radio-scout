@@ -132,13 +132,24 @@ test.describe('PWA', () => {
       ).toBeVisible()
     }
 
-    // Then the two share links. A **navigation**, not a `fetch`:
-    // `NavigationRoute` matches on `request.mode === 'navigate'`, so a `fetch()`
-    // would prove nothing about it either way. Offline and denylisted, these
-    // reach for the network and fail — where a worker answering them with the
-    // shell would succeed, which is the bug. Last, because a failed navigation
-    // leaves the page on an error document.
-    await expect(page.goto('/s?t=nope')).rejects.toThrow()
-    await expect(page.goto('/e?t=nope')).rejects.toThrow()
+    // Then the server's own pages: the two share links, and the **Embed** page
+    // (#75) — its own document, which an Operator opening the snippet's address
+    // to check it must see as the player rather than the app. A **navigation**,
+    // not a `fetch`: `NavigationRoute` matches on `request.mode === 'navigate'`,
+    // so a `fetch()` would prove nothing about it either way. Offline and
+    // denylisted, these reach for the network and fail — where a worker
+    // answering them with the shell would succeed, which is the bug.
+    //
+    // **Each in a tab of its own.** A failed navigation leaves a tab on
+    // Chrome's error document, and no navigation from *there* is offered to the
+    // worker again — so the second of two in one tab fails whatever the
+    // denylist says, and asserts nothing. This passed with `/embed` missing
+    // from the list until each path got a fresh tab (#75); the worker is the
+    // context's, so every tab is controlled by it.
+    for (const path of ['/s?t=nope', '/e?t=nope', '/embed?t=nope']) {
+      const tab = await context.newPage()
+      await expect(tab.goto(path), path).rejects.toThrow()
+      await tab.close()
+    }
   })
 })
