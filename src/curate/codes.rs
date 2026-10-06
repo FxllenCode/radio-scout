@@ -208,6 +208,9 @@ pub async fn update(
         .update(&state.db)
         .await
         .map_err(Stage::Curate.failed())?;
+    // A code holds streams open (#74); what they reach is re-read now, not when
+    // the speaker is next turned off and on.
+    state.access.changed();
 
     Ok(row_of(row, &state))
 }
@@ -228,7 +231,10 @@ pub async fn remove(
         .map_err(Stage::Curate.failed())?;
     match deleted.rows_affected {
         0 => Err(Rejected::NotFound(What::AccessCode).into()),
-        _ => Ok(Removed),
+        _ => {
+            state.access.changed();
+            Ok(Removed)
+        }
     }
 }
 

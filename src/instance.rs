@@ -408,6 +408,9 @@ impl Instance {
     /// restart that stopped it would silently end the logging of everything
     /// that outlives the restart.
     async fn stop_run(&mut self) {
+        // Every Station stream first: each is a response that never ends, and
+        // the graceful stop below waits for every response to (#74).
+        self.state.stations.close();
         if let Some(shutdown) = self.running.shutdown.take() {
             // The receiver is gone only if the server task has already ended,
             // which is the outcome being asked for.
@@ -625,6 +628,7 @@ async fn assemble(
     state.shares =
         crate::share::Shares::new(config.share.clone(), config.server.public_url.clone());
     state.exports = crate::export::Exports::new(config.export.clone());
+    state.stations = crate::station::Stations::new(config.station.clone());
     // The read-only half of `[retention] starred_days` (#66), so the catalog
     // can tell a Listener what a Star is worth here. The policy itself stays
     // with the sweeper that acts on it.

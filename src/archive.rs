@@ -2137,16 +2137,9 @@ pub(crate) fn parse_search(
             .transpose()?,
         unit_ref: params.number("unit")?,
         mark,
-        // All or nothing, the way the client's own reader takes it: a link is
-        // one statement made by somebody else, and applying half of it would
-        // answer with a scanner nobody asked for.
-        selection: params
-            .raw("sel")
-            .map(|raw| {
-                crate::selection::Selection::decode(raw)
-                    .ok_or_else(|| bad("sel must be a selection, as the share link spells one"))
-            })
-            .transpose()?,
+        // All or nothing — `Params::selection`, the one reading every surface
+        // that takes a Selection shares.
+        selection: params.selection()?,
         // Absent and `false` are one answer (#66): a Listener who has never
         // touched the control and one who has cleared it are asking the same
         // question, and a checkbox spells the second.

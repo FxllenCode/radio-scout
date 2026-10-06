@@ -48,6 +48,7 @@ pub mod service;
 pub mod share;
 pub mod star;
 pub mod startup;
+pub mod station;
 pub mod tone;
 pub mod web;
 pub mod webhook;
@@ -126,6 +127,9 @@ pub struct AppState {
     /// roster and not a queue: the only state an export has is whether one is
     /// already in flight.
     pub exports: crate::export::Exports,
+    /// The scanner as a radio station (#74, spec US 60) — the policy, and the
+    /// slots a stream holds for as long as somebody is listening to it.
+    pub stations: crate::station::Stations,
     /// How many people are listening (#62, spec US 41) — the count a live-feed
     /// connection joins, and the one a status page (#70) reads. Counts only:
     /// there is nothing in it that could name anybody.
@@ -184,6 +188,7 @@ impl AppState {
             shares: crate::share::Shares::default(),
             stars: crate::star::Stars::default(),
             exports: crate::export::Exports::default(),
+            stations: crate::station::Stations::default(),
             listeners: crate::listeners::Listeners::default(),
             access: crate::access::Access::default(),
             clock: Clock::system(),
@@ -280,6 +285,11 @@ pub fn build_app(state: AppState) -> Router {
         // How busy the Archive was under a search (#62, spec US 34–35) —
         // the density ribbon over its results, and the hour-by-day heatmap.
         .route("/api/calls/activity", get(archive::activity))
+        // **The scanner as a radio station** (#74, spec US 60): a Selection as
+        // one endless MP3, for a speaker, a car or VLC. Under `/api` so the
+        // service worker never answers it from a cache, and named `.mp3`
+        // because some players decide what a URL is by how it ends.
+        .route(crate::station::STATION_PATH, get(crate::station::stream))
         // What a listener can select from (#12) — Systems + Talkgroups, whether
         // or not any of their Calls are still in the archive.
         .route("/api/catalog", get(catalog::catalog))

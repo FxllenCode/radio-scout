@@ -673,7 +673,11 @@ pub fn render(status: &Status) -> String {
         );
     }
 
-    out.family("listeners", GAUGE, "Live-feed connections open right now.");
+    out.family(
+        "listeners",
+        GAUGE,
+        "Listeners connected right now: live-feed sockets and Station streams.",
+    );
     out.sample("listeners", &[], status.listeners);
 
     out.family("calls", GAUGE, "Calls held in the archive.");

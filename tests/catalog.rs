@@ -21,6 +21,8 @@ async fn a_fresh_instance_offers_an_empty_catalog() {
             "activityWindowMs": 24 * 60 * 60 * 1000_i64,
             "sharing": true,
             "export": { "enabled": true, "maxCalls": 1000 },
+            // The scanner plays as a radio station out of the box (#74).
+            "station": true,
             // A Star is a bookmark until an Operator says otherwise (#66), and
             // saying so is what stops the control claiming more than it does.
             "starred": { "kept": false, "keptDays": 0 },
@@ -79,6 +81,7 @@ async fn a_talkgroup_carries_what_the_panel_groups_and_labels_it_by() {
             "activityWindowMs": 24 * 60 * 60 * 1000_i64,
             "sharing": true,
             "export": { "enabled": true, "maxCalls": 1000 },
+            "station": true,
             "starred": { "kept": false, "keptDays": 0 },
         })
     );

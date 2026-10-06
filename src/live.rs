@@ -339,16 +339,12 @@ impl Connection {
     /// Does this connection receive `call`? The shared Selection rule
     /// ([`crate::selection`]), gated further by the connection's access scope —
     /// so a Talkgroup the Listener selected but may not hear delivers nothing.
+    ///
+    /// [`AccessScope::delivers`], which the **Station stream** asks too (#74).
+    /// The restriction rides on the view for nothing, which is what lets a live
+    /// frame be gated on the same fact the Archive's SQL filters on.
     fn wants(&self, call: &StoredCall) -> bool {
-        self.sub.reaches(call, |system_ref, talkgroup_ref| {
-            // The restriction is the Call's own channel's (#68), whichever
-            // channel of the Call's the Selection matched on — a transmission
-            // addressed to a gated channel stays gated however it was patched.
-            // It rides on the view for nothing, which is what lets a live frame
-            // be gated on the same fact the Archive's SQL filters on.
-            self.scope
-                .permits(system_ref, talkgroup_ref, call.restricted)
-        })
+        self.scope.delivers(&self.sub, call)
     }
 
     /// Apply a client text message. Malformed and unknown frames are ignored —
@@ -438,10 +434,7 @@ impl Connection {
     /// `None` for the connection that has no code, which is every connection on
     /// every Instance that gates nothing.
     fn ran_out(&self, now_ms: i64) -> Option<crate::failure::Reason> {
-        let held = self.held.as_ref()?;
-        held.expires_at_ms
-            .filter(|expires_at_ms| now_ms >= *expires_at_ms)
-            .map(|_| crate::failure::Reason::AccessCodeExpired { code_id: held.id })
+        self.held.as_ref()?.ran_out(now_ms)
     }
 
     /// Deliver a **Backfill**: the Calls this Listener missed and may hear,
@@ -708,12 +701,8 @@ async fn handle_socket(mut socket: impl Socket, state: AppState, viewer: crate::
     // silently resets every code's count to zero.
     let held = match viewer.code() {
         Some(code) => match state.access.hold(code) {
-            Some(held) => Some(held),
-            None => {
-                let refused = crate::failure::Reason::AccessConnectionLimit {
-                    code_id: code.id,
-                    limit: code.max_connections.unwrap_or_default(),
-                };
+            Ok(held) => Some(held),
+            Err(refused) => {
                 state.metrics.refuse(&refused);
                 // Said out loud and then closed. rdio tells its client `max` and
                 // carries on serving it, because by then it has already assigned

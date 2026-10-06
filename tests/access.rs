@@ -822,20 +822,13 @@ async fn a_connection_limit_refuses_the_newest_and_says_why() {
     let frame = next_json(&mut first).await;
     assert_eq!(frame["call"]["talkgroupRef"], GATED);
 
-    // ...and closing it hands the slot back. Polled rather than awaited: the
-    // slot is released when the *server's* task ends, which is not something a
-    // client's `drop` can wait for.
+    // ...and closing it hands the slot back — released when the *server's* task
+    // ends, which is what `eventually` exists for.
     drop(first);
-    let mut opened = false;
-    for _ in 0..50 {
-        let (_socket, greeting) = app.try_connect_ws_as(&grant).await;
-        if greeting["t"] == "hello" {
-            opened = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(opened, "the slot came back when the first socket went");
+    common::eventually("the slot came back when the first socket went", || async {
+        app.try_connect_ws_as(&grant).await.1["t"] == "hello"
+    })
+    .await;
 }
 
 /// A code that expires **while a socket is open** takes the socket with it, on

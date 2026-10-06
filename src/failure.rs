@@ -387,6 +387,13 @@ pub enum Reason {
     /// and closed. rdio tells its client `max` and then goes on serving it,
     /// because the scope was assigned before the check.
     AccessConnectionLimit { code_id: i64, limit: i64 },
+    // -- The Station stream (#74, spec US 60) -------------------------------
+    /// `[station] max_streams` is `0`.
+    StationDisabled,
+    /// Every one of `[station] max_streams` is playing to somebody already.
+    /// Carries the number, because "raise the cap" is only actionable if the
+    /// Operator reading the line knows what it is now.
+    StationFull { max: u32 },
     // -- Curation (#49) -----------------------------------------------------
     /// A curation write the admin surface refused — a blank field, a name or a
     /// Ref already taken, a row that is not there, or a delete that would have
@@ -803,6 +810,26 @@ impl Reason {
                 text("another export is running; try again in a moment\n"),
             )
             .retry_after(EXPORT_RETRY_AFTER_SECS),
+            Reason::StationDisabled => Refusal::new(
+                "station-disabled",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("station streams are not enabled on this instance\n"),
+            ),
+            // **WARN, where `export-busy` is DEBUG.** Both are a Listener told to
+            // come back later, but this cap is the Operator's own number — and a
+            // smart speaker refused because of it is exactly what tells them it
+            // is set too low (rule 7). 429 for `export-busy`'s reason: nothing
+            // is wrong with the Instance.
+            Reason::StationFull { max } => Refusal::new(
+                "station-full",
+                Level::WARN,
+                StatusCode::TOO_MANY_REQUESTS,
+                text(format!(
+                    "every station stream is in use (limit {max}); try again later\n"
+                )),
+            )
+            .retry_after(STATION_RETRY_AFTER_SECS),
             Reason::InvalidAccessCode {
                 client_addr,
                 failures,
@@ -903,6 +930,13 @@ pub(crate) const CALL_IMPORTED: &str = "Call imported successfully.\n";
 /// guess at the shape of the thing, since the real answer is "as long as the
 /// other one takes" and nothing here knows that.
 const EXPORT_RETRY_AFTER_SECS: u64 = 30;
+
+/// How long a player is asked to wait when every Station stream is taken. A
+/// stream ends when somebody turns a speaker off, which nothing here can
+/// predict — so this is long enough not to be hammered by a player that retries
+/// on its own, and short enough that one which does gets in soon after a slot
+/// comes free.
+const STATION_RETRY_AFTER_SECS: u64 = 60;
 
 /// Which of the guard's refusals applied is for the operator's log, not for
 /// whoever is knocking.
@@ -1355,6 +1389,24 @@ mod tests {
     #[case::invalid_metrics_token(
         Reason::InvalidMetricsToken { client_addr: LOCALHOST },
         "invalid-metrics-token", 401, "invalid metrics token\n", " WARN "
+    )]
+    // -- The Station stream (#74) ------------------------------------------
+    // Off is a 404, `export-disabled`'s answer. Full is a WARN, unlike
+    // `export-busy`: the cap is the Operator's own number, and a Listener's
+    // speaker refused because of it is exactly what tells them to raise it.
+    #[case::station_disabled(
+        Reason::StationDisabled,
+        "station-disabled",
+        404,
+        "station streams are not enabled on this instance\n",
+        " DEBUG "
+    )]
+    #[case::station_full(
+        Reason::StationFull { max: 8 },
+        "station-full",
+        429,
+        "every station stream is in use (limit 8); try again later\n",
+        " WARN "
     )]
     #[tokio::test]
     async fn every_reason_decides_its_slug_status_body_and_level(

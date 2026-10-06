@@ -89,6 +89,22 @@ impl<'a> Params<'a> {
             .transpose()
     }
 
+    /// A **Selection**, in the spelling a share link uses (#61) — read the one
+    /// way for every surface that takes one: the archive search a **DVR**
+    /// scopes (#63), and a **Station stream** (#74).
+    ///
+    /// **All or nothing**, like the client's own reader and for its reason: a
+    /// link is one statement made by somebody else, and applying half of it
+    /// would answer with a scanner nobody asked for.
+    pub(crate) fn selection(&self) -> Filtered<Option<crate::selection::Selection>> {
+        self.raw("sel")
+            .map(|raw| {
+                crate::selection::Selection::decode(raw)
+                    .ok_or_else(|| bad("sel must be a selection, as the share link spells one"))
+            })
+            .transpose()
+    }
+
     /// A page size, defaulted and **clamped** rather than refused: one request
     /// must not be able to ask a Pi to serialize the whole table. Zero is read
     /// as "unset", never as "an empty page".
@@ -182,6 +198,28 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    /// **A Selection is read one way, wherever it arrives** (#74): the DVR's
+    /// `sel=`, an export's and a Station stream's. Blank is absent like every
+    /// other filter here, and a spelling that does not read is refused whole
+    /// and by name — half of somebody else's scanner is not something they
+    /// meant to send.
+    #[rstest]
+    #[case::absent(&[], Ok(None))]
+    #[case::blank(&[("sel", " ")], Ok(None))]
+    #[case::everything(&[("sel", "1")], Ok(Some(crate::selection::Selection { all: true, ..Default::default() })))]
+    #[case::not_a_selection(
+        &[("sel", "everything")],
+        Err(bad("sel must be a selection, as the share link spells one"))
+    )]
+    fn a_selection_reads_one_way(
+        #[case] pairs: &[(&str, &str)],
+        #[case] read: Filtered<Option<crate::selection::Selection>>,
+    ) {
+        let params = query(pairs);
+
+        assert_eq!(Params::new(&params).selection(), read);
     }
 
     /// Blank is absent, because the form a client builds these from produces

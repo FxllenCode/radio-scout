@@ -230,6 +230,24 @@ impl AccessScope {
         }
     }
 
+    /// Does a Listener holding this scope, listening to `selection`, hear `call`
+    /// as it goes out?
+    ///
+    /// **The live feed's question, written once** (#74). The **Station stream**
+    /// is a second way to hear the same Calls, and one that answered it
+    /// differently — a Patch honoured on one and not the other, a gate checked
+    /// on the patched channel instead of the Call's own — would be a Listener
+    /// hearing a gated Call on a smart speaker that their phone refuses them.
+    ///
+    /// The restriction is the Call's **own** channel's, whichever of its
+    /// channels the Selection matched on (#68): a transmission addressed to a
+    /// gated channel stays gated however it was patched.
+    pub fn delivers(&self, selection: &Selection, call: &crate::call::StoredCall) -> bool {
+        selection.reaches(call, |system_ref, talkgroup_ref| {
+            self.permits(system_ref, talkgroup_ref, call.restricted)
+        })
+    }
+
     /// Whether this scope reaches every Call there is, and so has no filtering
     /// left to do.
     pub fn reaches_everything(&self) -> bool {
@@ -304,6 +322,22 @@ pub struct CodeHeld {
     pub expires_at_ms: Option<i64>,
     /// How many live-feed connections may hold it at once; `None` is unlimited.
     pub max_connections: Option<i64>,
+}
+
+impl CodeHeld {
+    /// Has this code run out by `now_ms`, and so what ends whatever is holding
+    /// it open?
+    ///
+    /// **Written once for everything that stays open on a code** — a live-feed
+    /// socket on its heartbeat and a **Station stream** on its own clock (#74).
+    /// rdio assigns the scope *before* it looks at expiry and never looks
+    /// again, so an expired code there keeps delivering for as long as the
+    /// connection lasts.
+    pub fn ran_out(&self, now_ms: i64) -> Option<crate::failure::Reason> {
+        self.expires_at_ms
+            .filter(|expires_at_ms| now_ms >= *expires_at_ms)
+            .map(|_| crate::failure::Reason::AccessCodeExpired { code_id: self.id })
+    }
 }
 
 /// Who is asking, and what they may hear.
@@ -448,6 +482,18 @@ struct Inner {
     /// on every configuration write, so editing an unrelated setting silently
     /// resets every code's count to zero.
     connections: Mutex<HashMap<i64, u32>>,
+    /// Bumped whenever what a grant reaches may have changed — a code edited,
+    /// disabled, rotated or revoked, or the gate re-armed because a channel's
+    /// `restricted` column was written.
+    ///
+    /// For what stays open on a grant long after the request that presented it
+    /// (#74): a **Station stream** is the listener nobody reconnects, so a scope
+    /// read once when it opened would be a code an Operator could never take
+    /// back from a kitchen radio. A stream waits on this and resolves its grant
+    /// again — on the same request that changed it, which is this module's
+    /// rule for every cached answer, and at no cost to an Instance where
+    /// nothing changes.
+    changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl Default for Access {
@@ -463,6 +509,7 @@ impl Access {
             gating: AtomicBool::new(false),
             lockout: Mutex::new(Lockout::default()),
             connections: Mutex::new(HashMap::new()),
+            changed: tokio::sync::watch::Sender::new(0),
         }))
     }
 
@@ -494,13 +541,31 @@ impl Access {
     /// hiccup into an unlocked Instance.
     pub fn arm(&self, answer: Result<bool, sea_orm::DbErr>) {
         match answer {
-            Ok(gating) => self.set_gating(gating),
+            Ok(gating) => {
+                self.set_gating(gating);
+                self.changed();
+            }
             Err(error) => tracing::warn!(
                 reason = %"roster-unreadable",
                 %error,
                 "could not re-read which channels are restricted; keeping the last answer"
             ),
         }
+    }
+
+    /// Say that what a grant reaches may have changed, to everything holding
+    /// one open ([`Access::watch`]).
+    pub fn changed(&self) {
+        self.0
+            .changed
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    /// Be told when what a grant reaches may have changed. Marked as seen at
+    /// the moment it is taken, so a holder hears only what changes after it
+    /// resolved its own grant.
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.changed.subscribe()
     }
 
     /// Set the bit directly. The boot path's own, and a test seam.
@@ -631,23 +696,31 @@ impl Access {
         })
     }
 
-    /// Take a live-feed connection slot for a code, or find the limit spent.
+    /// Take a connection slot for a code, or be refused because its limit is
+    /// spent.
     ///
     /// The slot is returned by dropping what this hands back, which is the
     /// [`crate::listeners::Listeners`] shape and for its reason: a connection
     /// ends in several ways — a close frame, a socket error, a task cancelled
     /// out from under it — and a decrement that some arm has to remember is a
     /// decrement some arm will not.
-    pub fn hold(&self, code: &CodeHeld) -> Option<Holding> {
+    ///
+    /// The refusal is built here rather than by each caller, because two kinds
+    /// of connection hold a slot — a live-feed socket and a **Station stream**
+    /// (#74) — and a limit is one policy however it is reached.
+    pub fn hold(&self, code: &CodeHeld) -> Result<Holding, Reason> {
         let mut held = self.0.connections.lock().expect("connections");
         let taken = held.entry(code.id).or_insert(0);
         if let Some(limit) = code.max_connections
             && i64::from(*taken) >= limit
         {
-            return None;
+            return Err(Reason::AccessConnectionLimit {
+                code_id: code.id,
+                limit,
+            });
         }
         *taken += 1;
-        Some(Holding {
+        Ok(Holding {
             access: self.clone(),
             code_id: code.id,
         })
@@ -1033,7 +1106,17 @@ mod tests {
         let first = access.hold(&code).expect("the first connection");
         let second = access.hold(&code).expect("the second");
         assert_eq!(access.connections_held(code.id), 2);
-        assert!(access.hold(&code).is_none(), "the third is over the limit");
+        // Refused with the one vocabulary's reason, built here and nowhere
+        // else — a live socket and a Station stream (#74) both take a slot,
+        // and both say the same thing when there is none.
+        assert_eq!(
+            access.hold(&code).err(),
+            Some(Reason::AccessConnectionLimit {
+                code_id: code.id,
+                limit: 2
+            }),
+            "the third is over the limit"
+        );
 
         drop(second);
         assert_eq!(access.connections_held(code.id), 1);
@@ -1071,7 +1154,7 @@ mod tests {
     fn a_limit_of_zero_admits_nobody() {
         let access = Access::default();
 
-        assert!(access.hold(&code(Some(0))).is_none());
+        assert!(access.hold(&code(Some(0))).is_err());
     }
 
     /// One code's connections are not another's.
@@ -1087,10 +1170,10 @@ mod tests {
         let _held = access.hold(&fire).expect("fire");
 
         assert!(
-            access.hold(&police).is_some(),
+            access.hold(&police).is_ok(),
             "a different code, its own budget"
         );
-        assert!(access.hold(&fire).is_none(), "and fire is still spent");
+        assert!(access.hold(&fire).is_err(), "and fire is still spent");
     }
 
     // --- The credential ------------------------------------------------------

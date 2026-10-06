@@ -2560,6 +2560,7 @@ dependencies = [
  "rstest",
  "rubato",
  "rust-embed",
+ "rusty_mp3",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -3094,6 +3095,12 @@ dependencies = [
  "tempfile",
  "wait-timeout",
 ]
+
+[[package]]
+name = "rusty_mp3"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bc136ac5835a05cd84a7cb8ec91d2ad8e87f7c9120c5c322fb1a7089ccd54d4"
 
 [[package]]
 name = "ryu"

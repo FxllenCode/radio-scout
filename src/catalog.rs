@@ -156,6 +156,15 @@ pub struct Catalog {
     /// Listener has to be told "that is 4,312 Calls" **before** they wait for a
     /// download that was never going to arrive.
     pub export: ExportOffer,
+    /// Whether this Instance plays **Station streams** (#74, spec US 60) —
+    /// `[station] max_streams` above zero.
+    ///
+    /// On the wire for `sharing`'s reason: the Talkgroups screen offers a
+    /// stream URL, and an Operator who turned the station off turned it off
+    /// for a reason. Whether a slot is free *right now* is deliberately not
+    /// said — that changes by the second, and a URL pasted into a speaker
+    /// outlives any answer this could give.
+    pub station: bool,
     /// What a **Star** is worth on this Instance (#66, spec US 37).
     ///
     /// On the wire for `sharing`'s reason, one step on: a control that is
@@ -304,6 +313,7 @@ pub async fn catalog(
             enabled: state.exports.enabled(),
             max_calls: state.exports.max_calls(),
         },
+        station: state.stations.enabled(),
         starred: state.stars.kept_days().into(),
         // The bit is the Instance's and the rest is this request's, which is why
         // both are named here and neither is a default something else filled in.

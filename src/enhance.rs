@@ -573,7 +573,7 @@ fn normalize(samples: &mut [f32], rate: u32, target_lufs: f64) -> Result<(), Enh
 /// Hand-written rather than a dependency: this is the entire format, it has no
 /// patent surface and no C, and it is the one encoder that plays on every iOS
 /// version there has ever been.
-fn encode_wav(samples: &[f32], rate: u32) -> Vec<u8> {
+pub(crate) fn encode_wav(samples: &[f32], rate: u32) -> Vec<u8> {
     let data: Vec<u8> = samples
         .iter()
         .flat_map(|s| ((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes())

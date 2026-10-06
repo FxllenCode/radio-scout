@@ -23,10 +23,7 @@ use serde_json::Value;
 /// A Call with real audio behind it: a pure tone at `hz`, `ms` long, stored
 /// under its own key, with the length written down the way ingest writes it.
 async fn seed_audible_call(app: &TestApp, talkgroup_ref: i64, at_ms: i64, hz: f32, ms: i64) -> i64 {
-    let samples: Vec<f32> = (0..(ms as usize * 8_000) / 1000)
-        .map(|n| (n as f32 * hz * std::f32::consts::TAU / 8_000.0).sin() * 0.5)
-        .collect();
-    let audio = wav(&samples, 8_000);
+    let audio = common::tone_wav(hz, ms);
     let key = format!("k/{talkgroup_ref}-{at_ms}.wav");
     app.put_object(&key, &audio).await;
     app.seed_call(

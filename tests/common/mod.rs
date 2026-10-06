@@ -67,6 +67,7 @@ mod peer;
 mod recorder;
 pub mod s3;
 mod sink;
+mod station;
 mod upload;
 mod ws;
 
@@ -75,7 +76,7 @@ mod ws;
 // below stay checked.
 #[allow(unused_imports)]
 pub use audio::{
-    SdrTrunkMp3, TWO_KEYUPS_GAPS, page_out, routine_traffic, silence_ms, two_keyups, wav,
+    SdrTrunkMp3, TWO_KEYUPS_GAPS, page_out, routine_traffic, silence_ms, tone_wav, two_keyups, wav,
 };
 #[allow(unused_imports)]
 pub use faults::{Faults, INJECTED_IO, REFUSED, Statements, faults_over_store, faulty_store};
@@ -85,6 +86,8 @@ pub use peer::{Peer, Received, unreachable_url};
 pub use recorder::{FakeRecorder, call_frame};
 #[allow(unused_imports)]
 pub use sink::{Sink, unreachable_hook_url};
+#[allow(unused_imports)]
+pub use station::{Heard, Tuned};
 #[allow(unused_imports)]
 pub use upload::CallUpload;
 #[allow(unused_imports)]
@@ -1679,6 +1682,27 @@ impl TestApp {
         (ws, first)
     }
 
+    // -- The Station stream (#74) -------------------------------------------
+
+    /// `GET /api/station.mp3?{query}` — the response as it stands, refused or
+    /// not, for a test about whether a stream is let through at all.
+    pub async fn tune(&self, query: &str) -> reqwest::Response {
+        self.client
+            .get(self.url(&format!("/api/station.mp3?{query}")))
+            .header("icy-metadata", "1")
+            .send()
+            .await
+            .expect("GET a station stream")
+    }
+
+    /// The same, expecting a stream — and listening to it the way a player
+    /// does, metadata and all.
+    pub async fn tune_in(&self, query: &str) -> Tuned {
+        let response = self.tune(query).await;
+        assert_eq!(response.status(), 200, "the stream was refused");
+        Tuned::new(response)
+    }
+
     // -- The recorder status socket (#71) -----------------------------------
 
     /// Dial in as a **Recorder** would, presenting an **API key** in the query
@@ -2105,6 +2129,27 @@ pub fn database_url_in(server: &str, name: &str) -> String {
     match query {
         Some(query) => format!("{root}/{name}?{query}"),
         None => format!("{root}/{name}"),
+    }
+}
+
+/// Wait until `holds` answers yes, failing the test — naming `what` — if it has
+/// not within ten seconds.
+///
+/// **For what a *connection* owns, and nothing else.** A slot an Access code or
+/// a Station stream gives back, a Listener leaving the count: each is released
+/// when the *server* notices its peer went, which no client's `drop` can wait
+/// for and which is not a **Worker**, so [`TestApp::settle`] cannot see it.
+/// Everything a Worker does is waited for with `settle`; this is the one
+/// sanctioned poll beside it, written once so its budget is one number.
+pub async fn eventually<F, Fut>(what: &str, mut holds: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !holds().await {
+        assert!(tokio::time::Instant::now() < deadline, "never: {what}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 

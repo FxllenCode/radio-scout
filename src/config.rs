@@ -138,6 +138,7 @@ use crate::observability::{self, LogConfig};
 use crate::quiet::QuietConfig;
 use crate::retention::{self, RetentionConfig};
 use crate::share::ShareConfig;
+use crate::station::StationConfig;
 use crate::tone::ToneConfig;
 use crate::webhook::WebhookConfig;
 
@@ -484,6 +485,7 @@ pub struct Config {
     pub access: AccessConfig,
     pub share: ShareConfig,
     pub export: ExportConfig,
+    pub station: StationConfig,
     pub listeners: ListenerConfig,
     pub metrics: MetricsConfig,
     pub log: LogConfig,
@@ -1387,6 +1389,18 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "station.max_streams",
+        var: "RADIO_SCOUT_STATION_MAX_STREAMS",
+        expected: "a number of streams",
+        // `0`, because the stream is on by default and turning it off is the
+        // likeliest reason to write this variable at all.
+        example: "0",
+        set: |setting, config, value| {
+            config.station.max_streams = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
         key: "listeners.enabled",
         var: "RADIO_SCOUT_LISTENERS_ENABLED",
         expected: "true or false",
@@ -2192,6 +2206,21 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # with the count, so the range gets narrowed rather than half-delivered. Raise it
 # if you routinely hand over whole shifts, lower it on a metered connection.
 # max_calls = 1000
+
+[station]
+# The Station stream (#74): your scanner as a radio station. One URL plays a
+# selection as a continuous MP3 -- calls in the order they went out, silence
+# between them -- in VLC, a browser, a Sonos, a smart speaker or a car, none of
+# which can run the app. Listeners copy it from the Talkgroups screen.
+#
+# Each stream costs about 32 kbps of upload (4 KB/s, ~14 MB an hour) -- a
+# quarter of what one app listener playing 8 kHz WAVs pulls -- and a moment of
+# CPU per call to decode and re-encode it. Silence costs nothing. A stream obeys
+# access codes exactly as the app does, and holds one of its code's connections.
+#
+# How many may play at once. Above it a player is refused and told to come back
+# in a minute. 0 turns the stream off altogether, and the app stops offering it.
+# max_streams = 8
 
 [metrics]
 # The Prometheus endpoint (#70), at GET /metrics. **The token is the switch**:

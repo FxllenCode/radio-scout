@@ -45,6 +45,17 @@ pub fn silence_ms(millis: i64) -> Vec<u8> {
     wav(&vec![0.0; samples], RATE)
 }
 
+/// A pure tone at `hz`, `millis` long, at half scale and the 8 kHz Trunk
+/// Recorder writes — a Call that is really a sound, for the tests that judge
+/// what a stitched export (#65) or a Station stream (#74) actually plays.
+pub fn tone_wav(hz: f32, millis: i64) -> Vec<u8> {
+    const RATE: u32 = 8_000;
+    let samples: Vec<f32> = (0..(millis as usize * RATE as usize) / 1000)
+        .map(|n| (n as f32 * hz * std::f32::consts::TAU / RATE as f32).sin() * 0.5)
+        .collect();
+    wav(&samples, RATE)
+}
+
 /// **A page-out, as a scanner records one** (#55) — a Quick Call II sequence at
 /// two real tone-set frequencies, followed by the dispatcher.
 ///

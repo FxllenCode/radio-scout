@@ -99,6 +99,14 @@ notify = "8.2"
 # always been compiled into.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex = "1"
+# The **Station stream**'s MP3 encoder (#74). MP3 because it is the one format
+# every radio-stream player plays — VLC, every browser including iOS Safari,
+# Sonos, smart speakers, car head units — and its patents expired in 2017.
+# Pure Rust with no runtime dependencies, chosen over LAME so the tree gains no
+# autotools build on every release target. Young (2026), so it is held to one
+# module, `station::encode`, whose tests judge its output with *our* decoder
+# rather than its own.
+rusty_mp3 = "1"
 
 # What ships (#23, ADR-0007). Nothing had ever been built in release mode
 # before this ticket, so every value here is a deliberate choice rather than an
