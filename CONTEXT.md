@@ -13,7 +13,7 @@ The person who runs an **Instance** — installs it, points **Recorders** at it,
 _Avoid_: admin, user, host, owner.
 
 **Listener**:
-The person who listens through the web app. Needs no account and no **Session**: their whole state — **Selection**, **Hold**, **Avoid**, **Profile** — lives in their own browser. One person is often both a Listener and the **Operator**; the terms name the role, not the human.
+The person who listens — through the web app, or through a **Station stream** they copied out of it into a speaker, a car or VLC. Needs no account and no **Session**: their whole state — **Selection**, **Hold**, **Avoid**, **Profile** — lives in their own browser, and a stream carries its Selection in its URL. One person is often both a Listener and the **Operator**; the terms name the role, not the human.
 _Avoid_: user, client, subscriber, viewer.
 
 ### Core entities
@@ -176,7 +176,7 @@ How much traffic a stretch of time held, counted bucket by bucket. Read under ex
 _Avoid_: volume, traffic (fine in prose, wrong for the measurement), stats, metrics (a **Metric** is what an Operator scrapes).
 
 **Listener count**:
-How many **Listeners** were connected at once, sampled onto an interval and kept as a series. A count and an instant and nothing else: no address, no session, no per-**Talkgroup** breakdown, because on a quiet channel that would be a record of *who* was listening ([ADR-0011](docs/adr/0011-observability-logging-policy.md) rule 5). Each sample is the **peak** since the one before it rather than a reading taken at the tick, so somebody who arrived and left between two ticks is still somebody who was there. The **Operator's**, not the Listener's — an open Archive does not make how many people listen to an Instance public.
+How many **Listeners** were connected at once — live-feed sockets and **Station streams** alike — sampled onto an interval and kept as a series. A count and an instant and nothing else: no address, no session, no per-**Talkgroup** breakdown, because on a quiet channel that would be a record of *who* was listening ([ADR-0011](docs/adr/0011-observability-logging-policy.md) rule 5). Each sample is the **peak** since the one before it rather than a reading taken at the tick, so somebody who arrived and left between two ticks is still somebody who was there. The **Operator's**, not the Listener's — an open Archive does not make how many people listen to an Instance public.
 _Avoid_: audience, traffic, users, sessions, analytics.
 
 **Metric**:
@@ -213,7 +213,11 @@ _Avoid_: time machine, rewind mode, tape, playlist (the word for what a DVR play
 
 **Station stream**:
 A continuous audio stream of a **Selection** — calls in order, silence-filled — for players that can't run the app (smart speakers, stream URLs, car radios).
-_Avoid_: radio mode, icecast feed (the mechanism), broadcast.
+
+It is **one more way to hear the live feed**, never the **Archive**: a stream follows the same fanout a socket does, asks the socket's own question of every **Call** (Selection, **Patch**, **Access code**), hears a **Delay**ed Call when it is released, and starts at *now*. What it adds is a timeline of its own — a Call a stream heard is played after the ones it heard before, so a stream can fall behind live, and is held to two minutes behind by passing over the oldest waiting Calls. Its Selection is in its URL and fixed there, which is what makes it a *station* rather than a mirror of somebody's app.
+
+Every stream is a **Listener**, and holds one of its **Access code**'s connections for as long as it plays. Unlike a socket, which learns of a changed code on its next reconnect, a stream is re-scoped the moment its code or a channel's `restricted` column is written — a speaker never reconnects.
+_Avoid_: radio mode, icecast feed (the mechanism), broadcast, DVR (which is the Archive, played).
 
 ### Ingest & distribution
 

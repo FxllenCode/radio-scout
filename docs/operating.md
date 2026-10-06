@@ -952,6 +952,77 @@ placed on one. Both are still in the zip's manifest. A call whose audio object h
 since the export began becomes silence of exactly its declared length, so the file stays valid and
 everything after it still plays where it should.
 
+## The station stream
+
+Your scanner as a radio station. One URL plays a listener's selection as a continuous MP3, for
+players that cannot run the app: VLC, a browser tab, a Sonos, a smart speaker, a car's head unit.
+It carries the calls in the order they went out, with half a second of silence between them and
+silence while nothing is happening, and each new call joins as it arrives. Listeners copy the URL
+from the Talkgroups screen; [using.md](using.md#playing-it-on-a-speaker-or-in-the-car) is their
+side of it.
+
+```toml
+[station]
+max_streams = 8
+```
+
+**It is on by default, capped at eight.** `max_streams` is how many may play at once, and `0`
+turns the stream off — the app stops offering it, and the URL answers `404`. A player past the
+cap is refused with `429` and asked to come back in a minute, and the log says so at `warn`
+(`reason=station-full`), because a speaker refused by your own cap is your cue to raise it.
+
+**What one stream costs:**
+
+- **Upload: 32 kbps, all the time** — 4 KB a second, about 14 MB an hour, ~350 MB a day. The rate
+  is constant, silence included, because a radio player expects a steady stream. That is a
+  quarter of what one app listener pulls while playing 8 kHz WAVs, but a stream never stops: eight
+  speakers left on is ~2.8 GB a day. Mind it on a metered connection.
+- **CPU: a moment per call, per stream, and nothing between calls.** Each stream decodes, resamples
+  and encodes every call it plays, on a background thread, a call ahead of the one on the air — so
+  three speakers on the same selection do that work three times. In a release build it took 3.3 ms
+  for a five-second call on one Apple-silicon core (about 1,500× real time); a Pi 5 core is a few
+  times slower, so a stream playing back-to-back traffic is still well under one percent of one
+  core. Silence is a single frame encoded once at startup and repeated, so a quiet scanner costs
+  nothing.
+- **Memory: about one call per stream.** The call playing, the one read ahead of it, and a list of
+  the calls waiting — references, not audio.
+
+**It follows the live feed exactly.** A stream hears what an app listener with the same selection
+would hear, when they would hear it: a patched call reaches it the same way, a
+[delayed](#delaying-what-listeners-hear) call plays when it is released and not before, and an
+encrypted call is skipped because there is nothing in it to play. It reads no database row per
+call.
+
+**Access codes apply to it as they do to the app.** A gated channel is silent on a stream unless
+its URL carries a grant for it — the app adds the listener's own when they copy the URL. A stream
+holds one of its code's connections, so a code limited to one listener cannot be stretched across
+a house, and it ends the moment its code expires rather than playing until somebody turns the
+speaker off.
+
+**Changing a code reaches the streams already playing it.** A speaker is the listener nobody
+reconnects, so a stream does not keep what its code meant when it was opened: revoke the code,
+disable it, rotate it or narrow what it opens, and every stream holding it falls back to the open
+channels *at once* — including the calls it had queued — and gives the connection back. Marking a
+channel restricted reaches a stream that opened before anything was gated in the same way. A call
+already on the air finishes.
+
+**Every stream is a listener.** The [listener count](#listener-counts) and the status page include
+them.
+
+**What it does not do:**
+
+- **It starts at now.** There is no rewind and no backlog on connect — that is the
+  [DVR](using.md#the-dvr)'s job.
+- **It stays about two minutes from live.** On a selection wide enough that calls arrive faster
+  than they can play, the oldest waiting calls are skipped once everything queued ahead of the
+  air — each call's length and the half-second after it — would hold the stream more than two
+  minutes behind. A busy evening is one `debug` line per skip, not a fault.
+- **It plays what the URL says, for good.** The selection is in the URL, so changing your mind in
+  the app does not change a speaker already playing — copy a new URL.
+- **There is no per-stream volume, gain or format choice.** It is 16 kHz mono MP3 at 32 kbps for
+  everyone: voice-band radio audio has nothing above 4 kHz to lose, and one format is what lets
+  every player play it.
+
 ## Events: keeping an incident for good
 
 Retention eventually takes everything. An **Event** is the exception: a named collection of calls

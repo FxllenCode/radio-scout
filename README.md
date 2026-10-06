@@ -165,6 +165,11 @@ limit on how many people may be on it at once, and a listener's browser remember
 instance where you have marked nothing is byte-for-byte the instance it was before the feature
 existed — not one extra query per request.
 
+**The scanner as a radio station.** Copy one URL and your selection plays as a continuous MP3 in
+VLC, a Sonos, a smart speaker or a car: calls in order, silence between them, new ones joining
+live, and the talkgroup on the player's "now playing" screen. It obeys access codes and delays
+exactly as the app does, and costs about 32 kbps of upload per stream.
+
 **On your phone.** Installable to the home screen, and works offline for the app shell.
 Radio-Scout does not send notifications — it never asks for the permission and never wakes
 your device ([ADR-0014](docs/adr/0014-no-notifications.md)).

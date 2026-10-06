@@ -279,6 +279,35 @@ the open channels — nothing breaks, and nothing goes silently missing without 
 > A code is per *channel*, not per person: there are no accounts here, and nothing records who
 > listened or when.
 
+### Playing it on a speaker, or in the car
+
+The 📻 button in the bar at the top hands you a **station stream** URL: what you have selected,
+played as one continuous radio stream by anything that takes a stream URL. That covers VLC
+(*Media → Open Network Stream*), a browser tab, and the many smart-speaker, Sonos and car apps
+with a "custom station" or "play a URL" option. None of them needs this app.
+
+What you hear is the scanner, live: each call as it goes out, in the order it went out, with
+half a second of quiet between calls and silence while nothing is happening. Players that show
+"now playing" show the system and talkgroup of the call on the air, and keep showing the last one
+through the silence after it, the way a scanner's display does.
+
+Five things to know:
+
+- **It is your selection at the moment you copied it.** The selection is part of the URL, so
+  changing what is on here afterwards does not change a speaker already playing. Copy a new URL
+  for a new selection.
+- **It runs about three seconds behind live**, plus whatever your player buffers. On a very busy
+  selection it skips the oldest waiting calls rather than fall much more than two minutes behind.
+- **It is about 14 MB an hour**, all the time, silence included. Fine on Wi-Fi; on mobile data a
+  car left playing all day is roughly 350 MB.
+- **If you have unlocked channels, the URL carries your access.** Anyone you give it to hears
+  those channels too, so treat it as you would the code. If the operator revokes or changes the
+  code, the stream carries on with the open channels only; if the code expires, the stream ends —
+  and a player that reconnects by itself gets the open channels.
+- **The operator decides whether there is one, and how many may play at once.** No button means
+  this instance does not play streams. A player turned away because every stream is in use is
+  told to try again in a minute.
+
 ### Two independent setups in one browser
 
 Add `?id=` and a name to the URL:
