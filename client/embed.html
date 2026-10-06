@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- The **Embed** page (#75): the one document on this Instance another site
+     may frame. A second entry of the build, deliberately apart from the app —
+     a few kilobytes for every reader of somebody else's homepage, where the
+     app is half a megabyte. Served at /embed by the binary (src/embed.rs). -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- A stranger's homepage is where this belongs, not a search result. -->
+    <meta name="robots" content="noindex" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Radio-Scout</title>
+  </head>
+  <body>
+    <main id="embed"></main>
+    <script type="module" src="/src/embed/main.ts"></script>
+  </body>
+</html>

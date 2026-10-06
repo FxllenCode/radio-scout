@@ -10,6 +10,7 @@ import type {
   AdminDirwatch,
   AdminDownstream,
   AdminWebhook,
+  AdminEmbed,
   AdminLabel,
   AdminSystem,
   AdminTalkgroup,
@@ -54,6 +55,12 @@ export class FakeInstance {
   dirwatches: AdminDirwatch[] = []
   dirwatchRoots: string[] = ['/srv/recorders']
   webhooks: AdminWebhook[] = []
+  /** **Embeds** (#75). The address *is* on the row — it is printed into a
+   *  stranger's HTML by design — so the fake carries it as the real one does. */
+  embeds: AdminEmbed[] = []
+  /** `[server] public_url`, as the real listing reflects it into each row's
+   *  `url`. Unset, as it ships. */
+  publicUrl: string | null = null
   shares: AdminShareLink[] = []
   /** Events (#67), with their frozen members beside them for `members`' reason:
    *  the real listing deliberately keeps them off the rows. */
@@ -221,6 +228,24 @@ export class FakeInstance {
       ...row,
     }
     this.webhooks.push(created)
+    return created
+  }
+
+  /** One **Embed** (#75), addressed the way the server addresses one. */
+  embed(row: Partial<AdminEmbed> = {}): AdminEmbed {
+    const id = this.id()
+    const path = `/embed?t=token${id}`
+    const created: AdminEmbed = {
+      id,
+      name: 'Fire dispatch',
+      path,
+      url: this.publicUrl === null ? null : `${this.publicUrl}${path}`,
+      selection: { all: false, sel: { 11: { '*': true } } },
+      restricted: 0,
+      createdAtMs: 1_700_000_000_000,
+      ...row,
+    }
+    this.embeds.push(created)
     return created
   }
 
@@ -964,6 +989,46 @@ export function curationHandlers(instance: FakeInstance) {
       instance.webhooks = instance.webhooks.filter(
         (it) => String(it.id) !== params.id,
       )
+      return new HttpResponse(null, { status: 204 })
+    }),
+
+    // **Embeds** (#75). The refusal modelled is the one a form renders beside
+    // its input: a blank name.
+    http.get(`${ORIGIN}/api/admin/embeds`, () =>
+      HttpResponse.json({ results: instance.embeds }),
+    ),
+    http.post(`${ORIGIN}/api/admin/embeds`, async ({ request }) => {
+      const body = await record('POST', request, '/api/admin/embeds')
+      const name = String(body.name ?? '').trim()
+      if (name === '') {
+        return refusal(400, 'field-required', 'name is required', { field: 'name' })
+      }
+      const row = instance.embed({
+        name,
+        selection: (body.selection as AdminEmbed['selection']) ?? {
+          all: false,
+          sel: {},
+        },
+      })
+      return HttpResponse.json(row, { status: 201 })
+    }),
+    http.patch(`${ORIGIN}/api/admin/embeds/:id`, async ({ request, params }) => {
+      const body = await record('PATCH', request, `/api/admin/embeds/${params.id}`)
+      const row = instance.embeds.find((it) => String(it.id) === params.id)
+      if (!row) return refusal(404, 'embed-not-found', 'no such embed')
+      if (typeof body.name === 'string' && body.name.trim() === '') {
+        return refusal(400, 'field-required', 'name is required', { field: 'name' })
+      }
+      Object.assign(row, body)
+      return HttpResponse.json(row)
+    }),
+    http.delete(`${ORIGIN}/api/admin/embeds/:id`, ({ params }) => {
+      instance.wrote.push({
+        method: 'DELETE',
+        path: `/api/admin/embeds/${params.id}`,
+        body: undefined,
+      })
+      instance.embeds = instance.embeds.filter((it) => String(it.id) !== params.id)
       return new HttpResponse(null, { status: 204 })
     }),
 

@@ -649,6 +649,34 @@ export const WEBHOOK_FORMATS: readonly WebhookFormat[] = [
   'discord',
 ]
 
+/**
+ * An **Embed** (#75, spec US 59) as Settings → Admin → Embeds lists it: a
+ * Selection another site may frame.
+ *
+ * **The address is here**, unlike a share link's token or a webhook's URL: it is
+ * printed into a stranger's public HTML by design and opens nothing a Listener
+ * holding no code could not hear, so it is an address and not a credential.
+ */
+export interface AdminEmbed {
+  id: number
+  name: string
+  /** `/embed?t=…`, always. */
+  path: string
+  /** The same, absolute — only when `[server] public_url` is set. */
+  url: string | null
+  /** What it plays — the live feed's own **Selection**. */
+  selection: SelectionMatrix
+  /** How many restricted channels the Selection names: channels that never
+   *  play in an embed, which hears only open listening. */
+  restricted: number
+  createdAtMs: number
+}
+
+export interface NewEmbed {
+  name: string
+  selection: SelectionMatrix
+}
+
 /** A configured **Webhook** as the admin listing carries one (#54).
  *
  *  **There is no `url`**, and the omission is the point: a webhook's URL *is*

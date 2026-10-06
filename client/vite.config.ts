@@ -4,6 +4,31 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import type { Plugin } from 'vite'
+
+/**
+ * Take the app's manifest link back out of the **Embed** page (#75).
+ *
+ * `vite-plugin-pwa` writes `<link rel="manifest">` into every HTML entry, and
+ * the embed is not the app: opened on its own — which is how an Operator checks
+ * the snippet they are about to hand out — a browser would offer to install the
+ * whole scanner from a page that is a player. `post`, and after the PWA plugin
+ * in the list, so it runs once the link is there.
+ */
+function embedIsNotTheApp(): Plugin {
+  return {
+    name: 'radio-scout:embed-is-not-the-app',
+    enforce: 'post',
+    transformIndexHtml: {
+      order: 'post',
+      handler(html, { filename }) {
+        return filename.endsWith('embed.html')
+          ? html.replace(/\s*<link rel="manifest"[^>]*>/, '')
+          : html
+      },
+    },
+  }
+}
 
 // In dev, the SPA runs on Vite's server and proxies the API + live-feed
 // WebSocket to the Rust backend, so the app sees a single origin — matching
@@ -68,9 +93,25 @@ export default defineConfig({
         // `skipWaiting` and the navigation denylist moved into `src/sw.ts`,
         // which is where they are now decided.)
         globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
+        // ...and not the **Embed** page (#75), which is not the app: it is
+        // framed by other sites, where this worker never runs, and a phone
+        // with the app installed has no use for a second copy of it offline.
+        globIgnores: ['embed.html', 'assets/embed-*'],
       },
     }),
+    embedIsNotTheApp(),
   ],
+  build: {
+    // Two documents: the app, and the **Embed** page another site frames
+    // (#75) — its own entry so a reader of a stranger's homepage downloads the
+    // few kilobytes it needs rather than the app.
+    rolldownOptions: {
+      input: {
+        index: path.resolve(import.meta.dirname, 'index.html'),
+        embed: path.resolve(import.meta.dirname, 'embed.html'),
+      },
+    },
+  },
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, './src'),
@@ -119,6 +160,9 @@ export default defineConfig({
         'src/**/*.{test,spec}.{ts,tsx}',
         'src/test/**',
         'src/main.tsx',
+        // The embed page's entry (#75): read `?t=` and mount — `mount.ts`, which
+        // is tested, is everything else.
+        'src/embed/main.ts',
         // The service worker is a different global scope with no jsdom
         // implementation (no `clients`, no precache manifest, no workbox
         // runtime). Since #107 took the push handler out there is no decision

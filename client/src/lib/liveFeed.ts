@@ -72,7 +72,7 @@ export interface LiveFeedHandle {
 const FIRST_RETRY_MS = 1_000
 /** Backoff ceiling. A phone that wakes to a dead network shouldn't hammer it,
  *  but a listener shouldn't wait long once it's back either. */
-const MAX_RETRY_MS = 30_000
+export const MAX_RETRY_MS = 30_000
 
 /** `/api/live` on this origin, as a WebSocket URL. Same origin as everything
  *  else: in dev Vite proxies it, in production the binary serves it — and a

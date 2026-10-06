@@ -21,6 +21,7 @@ import { RecordersScreen } from '@/routes/admin/RecordersScreen'
 import { StatusScreen } from '@/routes/admin/StatusScreen'
 import { SharesScreen } from '@/routes/admin/SharesScreen'
 import { WebhooksScreen } from '@/routes/admin/WebhooksScreen'
+import { EmbedsScreen } from '@/routes/admin/EmbedsScreen'
 import { GroupsScreen, TagsScreen } from '@/routes/admin/LabelsScreen'
 import { SystemsScreen } from '@/routes/admin/SystemsScreen'
 import { UnitsScreen } from '@/routes/admin/UnitsScreen'
@@ -72,6 +73,7 @@ export default function App() {
           element={<DownstreamsScreen />}
         />
         <Route path="settings/admin/webhooks" element={<WebhooksScreen />} />
+        <Route path="settings/admin/embeds" element={<EmbedsScreen />} />
         {/* Folders a Recorder drops Calls into (#72, spec US 14). */}
         <Route path="settings/admin/dirwatch" element={<DirwatchesScreen />} />
         <Route path="settings/admin/shares" element={<SharesScreen />} />

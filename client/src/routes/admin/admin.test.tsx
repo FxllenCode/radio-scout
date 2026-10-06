@@ -119,6 +119,7 @@ describe('the admin gate', () => {
       '/settings/admin/dirwatch',
       '/settings/admin/downstreams',
       '/settings/admin/webhooks',
+      '/settings/admin/embeds',
       '/settings/admin/shares',
       '/settings/admin/events',
       '/settings/admin/listeners',

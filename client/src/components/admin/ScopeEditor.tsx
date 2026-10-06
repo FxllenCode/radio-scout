@@ -49,11 +49,17 @@ export function ScopeEditor({
   id,
   scope,
   onChange,
+  legend = 'What to forward',
+  everythingLabel = 'Forward everything',
 }: {
   /** Unique per mounted editor, so two on one screen do not share input ids. */
   id: string
   scope: Selection
   onChange: (scope: Selection) => void
+  /** What the Selection is *for*, in the screen's own words — forwarding by
+   *  default, the first thing this edited; an **Embed** plays (#75). */
+  legend?: string
+  everythingLabel?: string
 }) {
   // Seeded once, from the scope this editor was opened on. It is not resynced
   // from the prop afterwards, and must not be: the only thing that changes the
@@ -90,7 +96,7 @@ export function ScopeEditor({
   return (
     <fieldset className="flex flex-col gap-2 rounded-lg border border-border px-3 py-2">
       <legend className="px-1 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-        What to forward
+        {legend}
       </legend>
 
       {!editable && (
@@ -115,7 +121,7 @@ export function ScopeEditor({
             }
           }}
         />
-        Forward everything
+        {everythingLabel}
       </label>
 
       {!everything && editable && (

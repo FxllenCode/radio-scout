@@ -26,6 +26,7 @@ import type {
   AdminUnit,
   AdminUnitQuery,
   AdminWebhook,
+  AdminEmbed,
   Call,
   Catalog,
   CuratedPage,
@@ -53,6 +54,7 @@ import type {
   NewEvent,
   NewToneProfile,
   NewWebhook,
+  NewEmbed,
   RangeDelta,
   RangeReport,
   SearchPage,
@@ -130,6 +132,7 @@ export const api = createApi({
     'Downstream',
     'Dirwatch',
     'Webhook',
+    'Embed',
     'ToneProfile',
     'ShareLink',
     'Star',
@@ -738,6 +741,33 @@ export const api = createApi({
       invalidatesTags: ['Webhook'],
     }),
 
+    /** **Embeds** (#75): the Selections another site may frame. An edit keeps
+     *  the address, which is the point — the host's snippet plays whatever the
+     *  row says next. */
+    getEmbeds: builder.query<Listing<AdminEmbed>, void>({
+      query: () => ({ url: 'api/admin/embeds' }),
+      providesTags: ['Embed'],
+    }),
+    createEmbed: builder.mutation<AdminEmbed, NewEmbed>({
+      query: (body) => ({ url: 'api/admin/embeds', method: 'POST', body }),
+      invalidatesTags: ['Embed'],
+    }),
+    updateEmbed: builder.mutation<
+      AdminEmbed,
+      { id: number; patch: Partial<NewEmbed> }
+    >({
+      query: ({ id, patch }) => ({
+        url: `api/admin/embeds/${id}`,
+        method: 'PATCH',
+        body: patch,
+      }),
+      invalidatesTags: ['Embed'],
+    }),
+    deleteEmbed: builder.mutation<void, number>({
+      query: (id) => ({ url: `api/admin/embeds/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Embed'],
+    }),
+
     /**
      * Mint (or re-mint) a Call's expiring public link (#64, spec US 32).
      *
@@ -885,6 +915,7 @@ export const {
   useCreateApiKeyMutation,
   useCreateDirwatchMutation,
   useCreateDownstreamMutation,
+  useCreateEmbedMutation,
   useCreateEventMutation,
   useCreateToneProfileMutation,
   useCreateWebhookMutation,
@@ -897,6 +928,7 @@ export const {
   useDeleteApiKeyMutation,
   useDeleteDirwatchMutation,
   useDeleteDownstreamMutation,
+  useDeleteEmbedMutation,
   useDeleteEventMutation,
   useDeleteToneProfileMutation,
   useDeleteWebhookMutation,
@@ -923,6 +955,7 @@ export const {
   useSetStarMutation,
   useGetDirwatchesQuery,
   useGetDownstreamsQuery,
+  useGetEmbedsQuery,
   useGetEventQuery,
   useGetEventsQuery,
   useGetToneProfilesQuery,
@@ -952,6 +985,7 @@ export const {
   useScanDirwatchMutation,
   useUpdateDirwatchMutation,
   useUpdateDownstreamMutation,
+  useUpdateEmbedMutation,
   useUpdateEventMutation,
   useUpdateToneProfileMutation,
   useUpdateWebhookMutation,

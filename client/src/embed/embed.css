@@ -1,0 +1,244 @@
+/* The **Embed** page (#75). Hand-written rather than Tailwind, for the bundle's
+ * sake: this sheet is all a reader of somebody else's homepage downloads, and
+ * the app's is forty kilobytes of utilities this page never uses.
+ *
+ * Light or dark by the reader's own setting — the host's page could be either,
+ * and the reader's preference is the one signal that is about them. System
+ * fonts, so a homepage pays for no webfont. The LED is the one meaningful
+ * colour, as in the app (docs/design/brief.md), and is set per row inline. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #18181b;
+  --muted: #71717a;
+  --line: #e4e4e7;
+  --raised: #f4f4f5;
+  --accent: #18181b;
+  --on-accent: #ffffff;
+  --live: #15803d;
+  --focus: #2563eb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #09090b;
+    --fg: #fafafa;
+    --muted: #a1a1aa;
+    --line: #27272a;
+    --raised: #18181b;
+    --accent: #fafafa;
+    --on-accent: #09090b;
+    --live: #3ddc84;
+    --focus: #5b9bff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+#embed,
+.embed {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.name {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listen {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.listen svg,
+.play svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+
+/* A live region stays in the document whether or not it says anything, or a
+ * screen reader can miss its first words — so an empty one collapses rather
+ * than disappearing. */
+.status {
+  margin: 0;
+  padding: 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status:not(:empty) {
+  padding-top: 8px;
+}
+
+.embed[data-live='connected'] .status {
+  color: var(--live);
+}
+
+.embed[data-live='connected'] .status::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 1px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .embed[data-live='connected'] .status::before {
+    animation: none;
+  }
+}
+
+.note {
+  margin: 0;
+  padding: 28px 14px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.calls {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.call {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.call[data-playing='true'] {
+  background: var(--raised);
+}
+
+.led {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.what {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.talkgroup,
+.facts {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.talkgroup {
+  font-weight: 500;
+}
+
+.facts {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.play {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.call[data-playing='true'] .play {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.foot {
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.open {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.open:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}

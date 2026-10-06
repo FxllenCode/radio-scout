@@ -64,6 +64,11 @@ const SECTIONS = [
     hint: 'addresses that get your flagged calls',
   },
   {
+    to: '/settings/admin/embeds',
+    label: 'Embeds',
+    hint: 'a player other sites can frame',
+  },
+  {
     to: '/settings/admin/shares',
     label: 'Share links',
     hint: 'public links to a single call',

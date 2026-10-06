@@ -47,10 +47,20 @@ cleanupOutdatedCaches()
  * so the client-side routes beginning with those letters (`/search`, `/session`,
  * `/settings`, and anything later starting with an `e`) still get the shell:
  * what is denied is `/s` and `/e` exactly, and anything under `/s/` or `/e/`.
+ *
+ * **`/embed` is on it too** (#75), for the same reason one notch sharper: the
+ * embed page is its own document (`embed.html`), the one an Operator opens to
+ * check the snippet they are about to hand out — and answering it with the app
+ * shell would show them the app where their readers will see the player.
  */
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('/index.html'), {
-    denylist: [/^\/api\//, /^\/healthz$/, /^\/rdio-scanner/, /^\/[se](\/|\?|$)/],
+    denylist: [
+      /^\/api\//,
+      /^\/healthz$/,
+      /^\/rdio-scanner/,
+      /^\/([se]|embed)(\/|\?|$)/,
+    ],
   }),
 )
 
