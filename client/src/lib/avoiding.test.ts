@@ -8,6 +8,7 @@ const CATALOG: Catalog = {
   activityWindowMs: 86_400_000,
   sharing: true,
   export: { enabled: true, maxCalls: 1000 },
+  station: true,
   starred: { kept: false, keptDays: 0 },
   systems: [
     {

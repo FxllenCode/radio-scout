@@ -260,6 +260,10 @@ export interface Catalog {
    *  quietly means less than a Listener thinks it does is the same lie told
    *  more slowly, and only the server knows `[retention] starred_days`. */
   starred: { kept: boolean; keptDays: number }
+  /** Whether this Instance plays **Station streams** (#74, spec US 60) — a
+   *  Selection as one endless MP3 for a speaker or a car. Here for `sharing`'s
+   *  reason: an Operator who turned the station off turned it off for one. */
+  station: boolean
   /** Where this browser stands with **Access codes** (#68, spec US 52).
    *
    *  Absent entirely on an Instance that gates nothing — which is every

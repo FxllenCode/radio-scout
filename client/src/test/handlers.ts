@@ -134,6 +134,7 @@ export const CATALOG: Catalog = {
   activityWindowMs: 24 * 60 * 60 * 1_000,
   sharing: true,
   export: { enabled: true, maxCalls: 1000 },
+  station: true,
   starred: { kept: false, keptDays: 0 },
   systems: [
     {
@@ -170,6 +171,7 @@ export function countyCatalog(rows: number, now = Date.now()): Catalog {
     activityWindowMs: 24 * 60 * 60 * 1_000,
     sharing: true,
     export: { enabled: true, maxCalls: 1000 },
+    station: true,
     starred: { kept: false, keptDays: 0 },
     systems: [
       {

@@ -1,4 +1,13 @@
-import { ChevronDown, ChevronRight, Link2, Lock, Pin, Search, Zap } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronRight,
+  Link2,
+  Lock,
+  Pin,
+  RadioReceiver,
+  Search,
+  Zap,
+} from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
@@ -6,6 +15,7 @@ import { Screen } from '@/components/layout/Screen'
 import { StatusLed } from '@/components/StatusLed'
 import { UnlockSheet } from '@/components/UnlockSheet'
 import { Button } from '@/components/ui/button'
+import { useGrant } from '@/hooks/useGrant'
 import { useShareLink } from '@/hooks/useShareLink'
 import { useWindowedRows } from '@/hooks/useWindowedRows'
 import { accessOf, lockedCount } from '@/lib/access'
@@ -22,6 +32,7 @@ import {
 } from '@/lib/panel'
 import type { TriState } from '@/lib/selection'
 import { decodeSelection, encodeSelection } from '@/lib/selectionUrl'
+import { STATION_PATH, stationQuery } from '@/lib/station'
 import { cn } from '@/lib/utils'
 import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -51,6 +62,7 @@ const EMPTY_CATALOG: Catalog = {
   activityWindowMs: 0,
   sharing: false,
   export: { enabled: false, maxCalls: 0 },
+  station: false,
   starred: { kept: false, keptDays: 0 },
 }
 
@@ -171,6 +183,9 @@ export function TalkgroupsScreen() {
   // **Hold** laid over it — reading of the moment, not of the scanner.
   const chosen = useAppSelector(selectSelection)
   const link = useShareLink()
+  // Carried on the Station stream's URL (#74), so a channel this browser
+  // unlocked plays on the speaker as well as on the phone.
+  const grant = useGrant()
   useLinkedSelection()
   // **Access codes** (#68, spec US 52). Both readings come off the catalog the
   // panel is already drawn from — whether this Instance gates anything at all,
@@ -292,6 +307,31 @@ export function TalkgroupsScreen() {
               >
                 <Link2 className="size-3.5" aria-hidden />
               </Button>
+              {/* The same Selection as a radio station (#74, spec US 60) — a
+                  URL for VLC, a Sonos, a smart speaker or a car, none of which
+                  can run this app. Beside the link because it is the same
+                  thing played somewhere else, and only where the Instance plays
+                  one: a URL that answers 404 is a control that lies. A radio
+                  set, not the broadcast mark: that one is the Live tab's, and
+                  this hands over a URL rather than going live. */}
+              {catalog.station && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-label="Copy station stream URL"
+                  title="Station stream: play this selection in VLC, a smart speaker or a car"
+                  className="h-7 px-2"
+                  onClick={() =>
+                    link.share(
+                      STATION_PATH,
+                      stationQuery(chosen, grant),
+                      'Radio-Scout station',
+                    )
+                  }
+                >
+                  <RadioReceiver className="size-3.5" aria-hidden />
+                </Button>
+              )}
             </div>
             {link.notice && (
               <p

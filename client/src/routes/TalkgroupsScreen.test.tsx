@@ -6,6 +6,7 @@ import { axe } from 'vitest-axe'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { EVERYTHING } from '@/lib/selection'
+import { grantHeld } from '@/store/access'
 import {
   avoid,
   chooseEverything,
@@ -19,7 +20,7 @@ import { makeStore, type AppStore } from '@/store/store'
 import { progressed } from '@/store/transport'
 
 import { TalkgroupsScreen } from './TalkgroupsScreen'
-import { countyCatalog, ORIGIN } from '@/test/handlers'
+import { CATALOG, countyCatalog, ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderApp, renderWithProviders, routerProbe } from '@/test/utils'
 import { NOTICE_MS } from '@/hooks/useShareLink'
@@ -783,5 +784,75 @@ describe('TalkgroupsScreen — the share notice (#61)', () => {
 
     expect(screen.queryByText('Link copied.')).toBeNull()
     vi.useRealTimers()
+  })
+})
+
+/** The scanner as a radio station (#74, spec US 60): the URL a speaker, a car
+ *  or VLC plays, handed over from the bar that already hands over a link to
+ *  the Selection — because it is the same Selection, played somewhere else. */
+describe('TalkgroupsScreen — the Station stream (#74)', () => {
+  /** What the platform was handed, in order. */
+  function clipboard(): string[] {
+    const written: string[] = []
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (text: string) => (written.push(text), Promise.resolve()) },
+    })
+    return written
+  }
+
+  function oneChannel(): AppStore {
+    const store = scannerStore()
+    store.dispatch(chooseEverything(false))
+    store.dispatch(
+      chooseTalkgroups({ keys: [{ systemRef: 100, talkgroupRef: 2 }], on: true }),
+    )
+    return store
+  }
+
+  it('hands the platform a stream of what is selected', async () => {
+    const user = userEvent.setup()
+    const written = clipboard()
+    renderApp('/talkgroups', oneChannel())
+    await screen.findByText('Alpha Law')
+
+    await user.click(screen.getByRole('button', { name: 'Copy station stream URL' }))
+
+    await waitFor(() =>
+      expect(written.at(-1)).toBe('http://localhost/api/station.mp3?sel=0_100.2'),
+    )
+    expect(await screen.findByText('Link copied.')).toBeInTheDocument()
+  })
+
+  it('carries the grant this browser holds, so a channel it unlocked plays there too', async () => {
+    const user = userEvent.setup()
+    const written = clipboard()
+    const store = oneChannel()
+    store.dispatch(grantHeld('rsg_abc123'))
+    renderApp('/talkgroups', store)
+    await screen.findByText('Alpha Law')
+
+    await user.click(screen.getByRole('button', { name: 'Copy station stream URL' }))
+
+    await waitFor(() =>
+      expect(written.at(-1)).toBe(
+        'http://localhost/api/station.mp3?sel=0_100.2&grant=rsg_abc123',
+      ),
+    )
+  })
+
+  it('is not offered by an Instance that plays no stream', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/catalog`, () =>
+        HttpResponse.json({ ...CATALOG, station: false }),
+      ),
+    )
+    renderApp('/talkgroups', scannerStore())
+    await screen.findByText('Alpha Law')
+
+    expect(screen.queryByRole('button', { name: 'Copy station stream URL' })).toBeNull()
+    // ...while the link to the Selection itself, which needs nothing from the
+    // server, is still there.
+    expect(screen.getByRole('button', { name: 'Copy link to this selection' })).toBeInTheDocument()
   })
 })

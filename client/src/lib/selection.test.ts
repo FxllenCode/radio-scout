@@ -141,6 +141,7 @@ const CATALOG: Catalog = {
   activityWindowMs: 24 * 60 * 60 * 1_000,
   sharing: true,
   export: { enabled: true, maxCalls: 1000 },
+  station: true,
   starred: { kept: false, keptDays: 0 },
   systems: [
     {
@@ -239,6 +240,7 @@ describe('reading the catalog against a selection', () => {
       activityWindowMs: 0,
       sharing: true,
       export: { enabled: true, maxCalls: 1000 },
+      station: true,
       starred: { kept: false, keptDays: 0 },
       systems: [{ ref: 100, talkgroups: [{ ref: 9, groups: [] }] }],
     }
@@ -254,6 +256,7 @@ describe('reading the catalog against a selection', () => {
       activityWindowMs: 0,
       sharing: true,
       export: { enabled: true, maxCalls: 1000 },
+      station: true,
       starred: { kept: false, keptDays: 0 },
     }
 

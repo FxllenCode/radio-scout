@@ -12,6 +12,7 @@ const catalog = (over: Partial<Catalog['export']> = {}): Catalog => ({
   activityWindowMs: 0,
   sharing: true,
   export: { enabled: true, maxCalls: 1000, ...over },
+  station: true,
   starred: { kept: false, keptDays: 0 },
 })
 
