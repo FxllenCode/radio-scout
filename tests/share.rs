@@ -444,3 +444,29 @@ async fn a_public_url_completes_the_preview_card() {
         "{html}"
     );
 }
+
+/// A shared Call says whose scanner it came from (#77): the Operator's name on
+/// the card and under the player, where it used to say "Radio-Scout" whoever
+/// ran the Instance — escaped, because the name is the Operator's to type.
+#[tokio::test]
+async fn a_shared_call_says_whose_scanner_it_came_from() {
+    let (app, id) = an_instance_with_a_call().await;
+    app.login().await;
+    app.admin_patch(
+        "/api/admin/instance",
+        serde_json::json!({ "name": "Fulton <Scanner>" }),
+    )
+    .await;
+
+    let link = app.mint_share(id).await;
+    let html = app.get(&link.page).await.text().await.expect("a page");
+
+    assert!(
+        html.contains(r#"<meta property="og:site_name" content="Fulton &lt;Scanner&gt;">"#),
+        "{html}"
+    );
+    assert!(
+        html.contains("Shared from Fulton &lt;Scanner&gt; ·"),
+        "{html}"
+    );
+}

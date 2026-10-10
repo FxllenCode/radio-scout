@@ -132,6 +132,12 @@ pub struct Feed {
     /// The most recent Calls this Selection reaches under open listening,
     /// newest first.
     pub calls: Vec<StoredCall>,
+    /// Whose scanner it is — the **Instance identity**'s name, or the
+    /// product's (#77) — for the link under the list that opens the app.
+    pub site: String,
+    /// How the page writes a time: the Operator's clock (#77), here as in the
+    /// app, since a homepage reader is the same Operator's audience.
+    pub time_format: crate::identity::TimeFormat,
 }
 
 crate::answers_json!(Feed);
@@ -176,10 +182,15 @@ pub async fn feed(
         .await
         .map_err(Stage::OpenEmbed.failed())?;
 
+    let identity = state.identity.held().settings;
     Ok(Feed {
         name: embed.name,
         selection,
         calls,
+        site: identity
+            .name
+            .unwrap_or_else(|| crate::identity::PRODUCT_NAME.to_owned()),
+        time_format: identity.time_format,
     })
 }
 

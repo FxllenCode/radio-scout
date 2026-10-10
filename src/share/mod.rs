@@ -495,6 +495,7 @@ pub async fn open(
         &opened.token,
         opened.expires_at_ms,
         state.shares.public_url(),
+        state.identity.name(),
     )))
 }
 

@@ -58,8 +58,14 @@ use crate::failure::{Failure, Reason, Stage};
 /// `client/src/lib/led.ts`. An import is the only way a Talkgroup gets one, so
 /// this is where an unknown color is caught — a typo becomes a reported row, not
 /// a Talkgroup that renders with no LED.
-pub const LED_PALETTE: [&str; 8] = [
-    "blue", "cyan", "green", "magenta", "orange", "red", "white", "yellow",
+///
+/// Sixteen since #77 (spec US 56): rdio's eight, which every rdio CSV still
+/// names, and eight more **after** them — so a county-scale System's fallback
+/// colours collide half as often, and the half of an uncurated archive whose
+/// hash lands in the first eight keeps exactly the colour it had.
+pub const LED_PALETTE: [&str; 16] = [
+    "blue", "cyan", "green", "magenta", "orange", "red", "white", "yellow", "purple", "pink",
+    "lime", "teal", "coral", "indigo", "brown", "gray",
 ];
 
 /// Separator for several Groups in one cell (`Fire;EMS`). A Talkgroup can belong
@@ -1861,7 +1867,7 @@ mod tests {
     #[case("ref,label\nnope,TDB A1\n", "ref-not-a-number")]
     #[case("ref,label\n54.5,TDB A1\n", "ref-not-a-number")]
     #[case("ref,label\n\"54,241\",TDB A1\n", "ref-not-a-number")]
-    #[case("ref,led\n54241,purple\n", "led-not-in-palette")]
+    #[case("ref,led\n54241,puce\n", "led-not-in-palette")]
     #[case("ref,led\n54241,#ff0000\n", "led-not-in-palette")]
     fn row_rejection_cases(#[case] csv: &str, #[case] expected_reason: &str) {
         assert_eq!(only_rejection(csv).reason, expected_reason);
@@ -1872,8 +1878,8 @@ mod tests {
     #[test]
     fn rejections_quote_the_offending_value() {
         assert_eq!(
-            only_rejection("ref,led\n54241,purple\n").detail.as_deref(),
-            Some("purple")
+            only_rejection("ref,led\n54241,puce\n").detail.as_deref(),
+            Some("puce")
         );
         assert_eq!(
             only_rejection("ref,label\nnope,x\n").detail.as_deref(),

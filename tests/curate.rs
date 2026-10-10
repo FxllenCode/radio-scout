@@ -86,12 +86,17 @@ async fn no_session_reaches_no_curation_route() {
         // to say, so making, re-scoping and revoking one are the gate's.
         "/api/admin/embeds",
         "/api/admin/embeds/1",
+        // #77's **Instance identity**: what every Listener's app is called and
+        // what their Reference page says — a defacement if it were open.
+        "/api/admin/instance",
+        "/api/admin/reference",
     ] {
         let response = app.get(path).await;
         assert_eq!(response.status(), 401, "GET {path}");
 
         for method in [
             reqwest::Method::POST,
+            reqwest::Method::PUT,
             reqwest::Method::PATCH,
             reqwest::Method::DELETE,
         ] {

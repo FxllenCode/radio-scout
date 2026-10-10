@@ -454,7 +454,7 @@ async fn dry_run_reports_the_real_run_and_writes_nothing() {
     let app = admin_app().await;
     let csv = "ref,label,group,tag,led\n\
                54241,TDB A1,Fire,Dispatch,red\n\
-               54242,TDB A2,Fire,Fireground,purple\n";
+               54242,TDB A2,Fire,Fireground,puce\n";
 
     let dry = import_ok(&app, "?system=11&dryRun=true", csv).await;
     assert_eq!(dry["dryRun"], true);
@@ -490,7 +490,7 @@ async fn dry_run_reports_the_real_run_and_writes_nothing() {
     ] {
         assert_eq!(dry[field], real[field], "dry run mispredicted {field}");
     }
-    assert_eq!(talkgroup_count(&app.db).await, 1); // the purple row was rejected
+    assert_eq!(talkgroup_count(&app.db).await, 1); // the puce row was rejected
 }
 
 /// `?dryRun` with no value is the spelling an operator reaches for first. It

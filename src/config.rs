@@ -131,6 +131,7 @@ use crate::enhance::{EnhancementConfig, Output};
 use crate::export::ExportConfig;
 use crate::ingest::IngestConfig;
 use crate::listeners::ListenerConfig;
+use crate::live::LiveConfig;
 use crate::logsink;
 use crate::metrics::MetricsConfig;
 use crate::mining::MiningConfig;
@@ -494,6 +495,7 @@ pub struct Config {
     pub share: ShareConfig,
     pub export: ExportConfig,
     pub station: StationConfig,
+    pub live: LiveConfig,
     pub listeners: ListenerConfig,
     pub metrics: MetricsConfig,
     pub log: LogConfig,
@@ -1557,6 +1559,16 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        key: "live.max_listeners",
+        var: "RADIO_SCOUT_LIVE_MAX_LISTENERS",
+        expected: crate::live::EXPECTED_MAX_LISTENERS,
+        example: "500",
+        set: |setting, config, value| {
+            config.live.max_listeners = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
         key: "listeners.enabled",
         var: "RADIO_SCOUT_LISTENERS_ENABLED",
         expected: "true or false",
@@ -2366,6 +2378,18 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # arrived as and are not scanned, which is logged; a listener catching up on one
 # of those hears it at the raised rate, untrimmed.
 # queue_depth = 512
+
+[live]
+# The live feed (#77). How many people may be connected to it at once -- the app,
+# and every embedded player -- before the next one is told "this scanner is full"
+# and their app keeps quietly trying until a seat frees up. Station streams are
+# not counted here; they have [station] max_streams.
+#
+# The sockets cost a Pi almost nothing. What each listener does cost is upload:
+# a busy minute is about 4 KB/s of audio per person, so 200 is roughly 6 Mbit/s.
+# Set it to what your connection can carry. It must be at least 1 -- there is no
+# "unlimited", so write a large number if that is what you mean.
+# max_listeners = 200
 
 [listeners]
 # Listener counts over time (#62): how many people were connected, written down
@@ -3306,6 +3330,44 @@ mod tests {
         let error = error.to_string();
         assert!(error.contains(source), "{error}");
         assert!(error.contains(retention::EXPECTED_MAX_SIZE_GB), "{error}");
+    }
+
+    /// A live feed that seats nobody is refused from either layer that can
+    /// carry it, in one sentence (#77). rdio reads `maxClients = 0` as exactly
+    /// that, and serves an Instance nobody can listen to.
+    #[rstest]
+    #[case::file(&[], Some("[live]\nmax_listeners = 0\n"), "radio-scout.toml")]
+    #[case::environment(&[("RADIO_SCOUT_LIVE_MAX_LISTENERS", "0")], None, "RADIO_SCOUT_LIVE_MAX_LISTENERS")]
+    fn a_live_feed_that_seats_nobody_is_refused(
+        #[case] vars: &[(&str, &str)],
+        #[case] text: Option<&str>,
+        #[case] source: &str,
+    ) {
+        let file = text.map(file);
+        let error = resolve(&cli(&[]), env(vars), file.as_ref())
+            .expect_err("a cap of nobody")
+            .to_string();
+
+        assert!(error.contains(source), "{error}");
+        assert!(
+            error.contains(crate::live::EXPECTED_MAX_LISTENERS),
+            "{error}"
+        );
+    }
+
+    /// ...and any other number is the cap, from either.
+    #[rstest]
+    #[case::file(&[], Some("[live]\nmax_listeners = 1\n"), 1)]
+    #[case::environment(&[("RADIO_SCOUT_LIVE_MAX_LISTENERS", "5000")], None, 5000)]
+    fn a_live_feed_seats_what_it_is_told(
+        #[case] vars: &[(&str, &str)],
+        #[case] text: Option<&str>,
+        #[case] seats: u32,
+    ) {
+        let file = text.map(file);
+        let config = resolve(&cli(&[]), env(vars), file.as_ref()).expect("resolve");
+
+        assert_eq!(config.live.max_listeners.get(), seats);
     }
 
     /// Ingest tuning (#5, #8) — rdio-scanner keeps both of these in its database

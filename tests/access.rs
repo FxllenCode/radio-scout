@@ -831,6 +831,37 @@ async fn a_connection_limit_refuses_the_newest_and_says_why() {
     .await;
 }
 
+/// When the Instance is full *and* the code is at its limit, the Listener is
+/// told the Instance is full (#77).
+///
+/// The seat is asked for first, so that is the true answer as well as the more
+/// useful one: a code-holder told "your code is at its limit" would go and
+/// close a tab that is not the problem, where "the scanner is full" is a thing
+/// they wait out.
+#[tokio::test]
+async fn a_full_instance_is_said_before_a_code_at_its_limit() {
+    let app = TestApp::builder()
+        .config(|config| config.live.max_listeners = std::num::NonZeroU32::MIN)
+        .spawn()
+        .await;
+    app.create_api_key("k").await;
+    app.upload_ok(CallUpload::new().talkgroup(GATED)).await;
+    app.login().await;
+    app.restrict_talkgroup(SYSTEM, GATED, Some(true)).await;
+    let grant = app
+        .create_access_code_as(json!({
+            "code": "FIRE-2026-OPS",
+            "scope": { "all": true },
+            "maxConnections": 1,
+        }))
+        .await;
+    let _first = app.connect_ws_as(&grant).await;
+
+    let (_second, refused) = app.try_connect_ws_as(&grant).await;
+
+    assert_eq!(refused["reason"], "instance-full");
+}
+
 /// A code that expires **while a socket is open** takes the socket with it, on
 /// the connection's own heartbeat. rdio never re-checks at all.
 #[tokio::test]

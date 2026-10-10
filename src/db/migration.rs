@@ -8,9 +8,9 @@ use sea_orm_migration::prelude::*;
 
 use crate::db::entities::{
     access_code, api_key, call, call_frequency, call_patch, call_tone, call_unit, dirwatch,
-    downstream, downstream_delivery, embed, event, event_call, group, listener_sample, log_event,
-    share_link, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref, tone_profile, unit,
-    unit_ref, webhook, webhook_delivery,
+    downstream, downstream_delivery, embed, event, event_call, group, identity, listener_sample,
+    log_event, share_link, site, system, tag, talkgroup, talkgroup_group, talkgroup_ref,
+    tone_profile, unit, unit_ref, webhook, webhook_delivery,
 };
 
 pub struct Migrator;
@@ -47,6 +47,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0026_dirwatches::Migration),
             Box::new(m0027_delay::Migration),
             Box::new(m0028_embeds::Migration),
+            Box::new(m0029_identity::Migration),
         ]
     }
 }
@@ -2556,6 +2557,42 @@ mod m0028_embeds {
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
                 .drop_table(Table::drop().table(embed::Entity).to_owned())
+                .await
+        }
+    }
+}
+
+/// The **Instance identity** (#77): one row, or none, holding what an Operator
+/// curated about the Instance itself — its name, its help link, the defaults
+/// every Listener's app starts from, and the **Reference page**. No index: the
+/// row is read once at boot and written by one form. Guarded, as m0028 guards
+/// its table.
+mod m0029_identity {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m0029_identity"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_table("identity").await? {
+                return Ok(());
+            }
+            let schema = Schema::new(manager.get_database_backend());
+            manager
+                .create_table(schema.create_table_from_entity(identity::Entity))
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(identity::Entity).to_owned())
                 .await
         }
     }

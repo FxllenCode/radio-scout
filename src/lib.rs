@@ -27,6 +27,7 @@ pub mod export;
 pub mod failure;
 pub mod framing;
 pub mod http_log;
+pub mod identity;
 pub mod import;
 pub mod ingest;
 pub mod instance;
@@ -137,6 +138,15 @@ pub struct AppState {
     /// connection joins, and the one a status page (#70) reads. Counts only:
     /// there is nothing in it that could name anybody.
     pub listeners: crate::listeners::Listeners,
+    /// The live feed's seats (#77, spec US 3) — `[live] max_listeners` of them,
+    /// one held by every live-feed connection while it runs. Not
+    /// [`AppState::listeners`], which counts **Station streams** too.
+    pub seats: crate::live::Seats,
+    /// What the Operator curated about the Instance itself (#77) — its name,
+    /// its help link, the **Reference page** and the defaults every Listener's
+    /// app starts from. Read once at boot and replaced by the request that
+    /// changes it.
+    pub identity: crate::identity::Identity,
     /// Who may hear what (#68, spec US 52) — whether this Instance gates any
     /// channel at all, and what a presented **grant** resolves to. Like a
     /// Webhook and unlike enhancement there is no disabled form: an **Access
@@ -197,6 +207,8 @@ impl AppState {
             exports: crate::export::Exports::default(),
             stations: crate::station::Stations::default(),
             listeners: crate::listeners::Listeners::default(),
+            seats: crate::live::Seats::default(),
+            identity: crate::identity::Identity::default(),
             access: crate::access::Access::default(),
             clock: Clock::system(),
             workers: crate::worker::Workers::default(),
@@ -323,6 +335,11 @@ pub fn app_over(state: AppState, transport: Transport) -> Router {
         // What a listener can select from (#12) — Systems + Talkgroups, whether
         // or not any of their Calls are still in the archive.
         .route("/api/catalog", get(catalog::catalog))
+        // **The Instance identity** (#77) — the name, the help link and the
+        // defaults every app is drawn with — and the **Reference page** behind
+        // it, when the Operator has published one.
+        .route("/api/instance", get(identity::document))
+        .route("/api/reference", get(identity::page))
         // One Call, with the recorder detail a list deliberately doesn't carry
         // (#42). Declared before the `/audio` and `/download` children only for
         // readability — the router matches on the whole path, not on order.
@@ -379,6 +396,9 @@ pub fn app_over(state: AppState, transport: Transport) -> Router {
         // service worker never answers it from a cache.
         .route(crate::embed::EMBED_PATH, get(crate::embed::page))
         .route(crate::embed::FEED_PATH, get(crate::embed::feed))
+        // The web app manifest, named for this Instance (#77) — ahead of the
+        // fallback, which would otherwise serve the file as it was built.
+        .route(web::MANIFEST_PATH, get(web::manifest))
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.
         .fallback(web::spa_handler);

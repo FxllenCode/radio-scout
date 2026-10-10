@@ -31,9 +31,7 @@
 use std::fmt::Write;
 
 use crate::call::StoredCall;
-use crate::share::page::{
-    SITE_NAME, category, document, duration, escape, iso, mark_badges, meta, utc,
-};
+use crate::share::page::{category, document, duration, escape, iso, mark_badges, meta, utc};
 
 /// How many members a share page renders.
 ///
@@ -68,6 +66,9 @@ pub struct Preview {
     /// are the two that cannot be relative.
     pub canonical: Option<String>,
     pub icon: Option<String>,
+    /// Whose scanner this came from — the **Instance identity**'s name, or the
+    /// product's (#77).
+    pub site: String,
 }
 
 /// One member, as a row on the page.
@@ -158,7 +159,7 @@ pub fn render(preview: &Preview) -> String {
             _ => summary.clone(),
         }),
     ));
-    head.push_str(&meta("og:site_name", Some(SITE_NAME)));
+    head.push_str(&meta("og:site_name", Some(&preview.site)));
     head.push_str(&meta("og:url", preview.canonical.as_deref()));
     // The icon is the one tag that cannot be relative, so it is the one an
     // Instance which has not been told its address goes without (#54's rule).
@@ -208,7 +209,11 @@ pub fn render(preview: &Preview) -> String {
             preview.total
         );
     }
-    let _ = writeln!(body, "<p class=\"foot\">Shared from {SITE_NAME}.</p>");
+    let _ = writeln!(
+        body,
+        "<p class=\"foot\">Shared from {}.</p>",
+        escape(&preview.site)
+    );
 
     document(&preview.name, &head, &body)
 }
@@ -300,6 +305,7 @@ mod tests {
             stitched_url: Some(String::from("/e/export?t=tok&format=wav")),
             canonical: None,
             icon: None,
+            site: String::from("Radio-Scout"),
         }
     }
 

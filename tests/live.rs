@@ -678,3 +678,118 @@ async fn the_radio_that_keyed_rides_the_live_frame() {
     assert_eq!(frame["call"]["unitRef"], 4424000);
     assert_eq!(frame["call"]["unitLabel"], "MEDIC 7");
 }
+
+// ---------------------------------------------------------------------------
+// The listener cap (#77, spec US 3)
+// ---------------------------------------------------------------------------
+
+/// An app that seats at most `max` live-feed listeners at once.
+async fn seating(max: u32) -> TestApp {
+    TestApp::builder()
+        .config(move |config| {
+            config.live.max_listeners =
+                std::num::NonZeroU32::new(max).expect("a cap of one or more")
+        })
+        .spawn()
+        .await
+}
+
+/// A full Instance turns the newest Listener away, **says why**, and seats the
+/// next one as soon as somebody leaves.
+///
+/// rdio closes the socket without a word (`client.go:61`), so its client
+/// reconnects into the same wall forever and its Listener is told nothing.
+///
+/// The frame is compared whole because what it leaves out is half the point: it
+/// says *that* the Instance is full and never *how* full. How many people
+/// listen is the Operator's number (CONTEXT.md, **Listener count**), and a cap
+/// told to whoever it refuses is a head count by another name.
+#[tokio::test]
+async fn a_full_instance_refuses_the_newest_listener_and_says_so() {
+    let app = seating(1).await;
+    let first = app.connect_ws().await;
+
+    let (mut second, refused) = app.try_connect_ws().await;
+    assert_eq!(
+        refused,
+        serde_json::json!({ "t": "refused", "reason": "instance-full" })
+    );
+    expect_server_closed(&mut second).await;
+
+    // The seat is given back when the *server's* task ends, which is what
+    // `eventually` exists for.
+    drop(first);
+    common::eventually(
+        "the seat came back when the first listener left",
+        || async { app.try_connect_ws().await.1["t"] == "hello" },
+    )
+    .await;
+}
+
+/// Every seat is a seat: a socket that was refused does not hold one, so a
+/// burst of retries against a full Instance cannot fill it any further.
+#[tokio::test]
+async fn a_refused_listener_holds_no_seat() {
+    let app = seating(2).await;
+    let _first = app.connect_ws().await;
+    let second = app.connect_ws().await;
+
+    for _ in 0..3 {
+        assert_eq!(app.try_connect_ws().await.1["reason"], "instance-full");
+    }
+    drop(second);
+    // Had any of those three kept a seat, there would be none to come back.
+    common::eventually(
+        "the seat came back, and none went to the refused",
+        || async { app.try_connect_ws().await.1["t"] == "hello" },
+    )
+    .await;
+}
+
+/// What ships seats rdio's two hundred, so an Operator migrating meets the
+/// ceiling they already had.
+#[tokio::test]
+async fn the_shipped_cap_is_two_hundred() {
+    let app = feed_app().await;
+    assert_eq!(app.config().live.max_listeners.get(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// The Listener count, shown (#77, spec US 57)
+// ---------------------------------------------------------------------------
+
+/// With the count shown, a Listener is told it as they arrive — themselves
+/// included, because they are listening too.
+#[tokio::test]
+async fn a_shown_count_greets_each_listener() {
+    let app = feed_app().await;
+    app.login().await;
+    app.admin_patch(
+        "/api/admin/instance",
+        serde_json::json!({ "showListeners": true }),
+    )
+    .await;
+
+    let (mut first, _) = app.connect_ws_with_hello().await;
+    assert_eq!(
+        common::next_json(&mut first).await,
+        serde_json::json!({ "t": "listeners", "count": 1 })
+    );
+
+    let (mut second, _) = app.connect_ws_with_hello().await;
+    assert_eq!(common::next_json(&mut second).await["count"], 2);
+}
+
+/// Hidden — what ships — nothing about it is said at all: the next frame after
+/// the greeting is the answer to the client's own subscription.
+#[tokio::test]
+async fn a_hidden_count_is_never_mentioned() {
+    let app = feed_app().await;
+    let mut ws = app.connect_ws().await;
+
+    ws.send(WsMessage::Text(r#"{"t":"sub","all":true}"#.into()))
+        .await
+        .unwrap();
+
+    assert_eq!(common::next_json(&mut ws).await["t"], "subscribed");
+}

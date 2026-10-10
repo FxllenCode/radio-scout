@@ -679,6 +679,12 @@ impl TestApp {
         self.admin(reqwest::Method::PATCH, path, Some(body)).await
     }
 
+    /// `PUT` a JSON body — a document replaced whole, like the **Reference
+    /// page** (#77).
+    pub async fn admin_put(&self, path: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+        self.admin(reqwest::Method::PUT, path, Some(body)).await
+    }
+
     /// `DELETE` one row.
     pub async fn admin_delete(&self, path: &str) -> (u16, serde_json::Value) {
         self.admin(reqwest::Method::DELETE, path, None).await
@@ -1700,7 +1706,18 @@ impl TestApp {
     /// over its **Access code**'s connection limit is a `refused` frame rather
     /// than a `hello` (#68).
     pub async fn try_connect_ws_as(&self, grant: &str) -> (Ws, serde_json::Value) {
-        let (mut ws, _) = tokio_tungstenite::connect_async(with_grant(&self.ws_url(), grant))
+        Self::first_frame_of(&with_grant(&self.ws_url(), grant)).await
+    }
+
+    /// Open a live-feed WebSocket holding no grant, keeping whatever the server
+    /// said first — a `refused` frame rather than a `hello` on an Instance that
+    /// is already seating `[live] max_listeners` (#77).
+    pub async fn try_connect_ws(&self) -> (Ws, serde_json::Value) {
+        Self::first_frame_of(&self.ws_url()).await
+    }
+
+    async fn first_frame_of(url: &str) -> (Ws, serde_json::Value) {
+        let (mut ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .expect("ws connect");
         let first = serde_json::from_str(&next_text(&mut ws).await).expect("a first frame");

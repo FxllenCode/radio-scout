@@ -132,6 +132,34 @@ async fn serves_the_pwa_manifest_and_service_worker() {
     );
 }
 
+/// A named Instance installs under its own name (#77): the manifest a browser
+/// reads carries it, and asks to be re-read rather than kept, so a rename
+/// reaches an app that is already installed. The shell's title — what an
+/// unfurled link shows before any script runs — says it too.
+#[tokio::test]
+async fn a_named_instance_installs_under_its_name() {
+    if !web::spa_is_embedded() {
+        return; // nothing to serve until the SPA is built
+    }
+    let app = TestApp::spawn().await;
+    app.login().await;
+    app.admin_patch(
+        "/api/admin/instance",
+        serde_json::json!({ "name": "Fulton Scanner" }),
+    )
+    .await;
+
+    let manifest = app.get("/manifest.webmanifest").await;
+    assert_eq!(header_of(&manifest, "cache-control"), Some("no-cache"));
+    let manifest: serde_json::Value = manifest.json().await.expect("a manifest");
+    assert_eq!(manifest["name"], "Fulton Scanner");
+    assert_eq!(manifest["short_name"], "Fulton Scanner");
+    assert_eq!(manifest["display"], "standalone", "and the rest as built");
+
+    let shell = app.get("/").await.text().await.expect("the shell");
+    assert!(shell.contains("<title>Fulton Scanner</title>"), "{shell}");
+}
+
 /// Content-hashed assets are served with a long-lived immutable cache header.
 #[tokio::test]
 async fn serves_hashed_asset_with_immutable_cache() {

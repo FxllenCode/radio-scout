@@ -137,15 +137,19 @@ pub struct Preview {
     pub canonical: Option<String>,
     pub absolute_audio: Option<String>,
     pub icon: Option<String>,
+    /// Whose scanner this came from — the **Instance identity**'s name, or the
+    /// product's (#77).
+    pub site: String,
 }
 
 impl Preview {
-    /// Read one off the Archive's own view of a Call.
+    /// Read one off the Archive's own view of a Call, shared from `site`.
     pub fn of(
         call: &StoredCall,
         token: &str,
         expires_at_ms: i64,
         public_url: Option<&str>,
+        site: String,
     ) -> Self {
         // Through the **token**, never through `/api/call/{id}/audio`: a share
         // link opens one Call and reaches nothing else, and that has to stay
@@ -181,6 +185,7 @@ impl Preview {
             expires_at_ms,
             canonical: crate::config::absolute_url(&link_to(token), public_url),
             icon: crate::config::absolute_url(ICON_PATH, public_url),
+            site,
         }
     }
 
@@ -293,7 +298,7 @@ pub fn render(preview: &Preview) -> String {
     head.push_str(&meta("og:type", Some("website")));
     head.push_str(&meta("og:title", Some(&title)));
     head.push_str(&meta("og:description", Some(&summary)));
-    head.push_str(&meta("og:site_name", Some(SITE_NAME)));
+    head.push_str(&meta("og:site_name", Some(&preview.site)));
     head.push_str(&meta("og:url", preview.canonical.as_deref()));
     // The icon and the audio are the two tags that *cannot* be relative, so they
     // are the two an Instance which has not been told its address goes without.
@@ -339,7 +344,8 @@ pub fn render(preview: &Preview) -> String {
     }
     let _ = writeln!(
         body,
-        "<p class=\"foot\">Shared from {SITE_NAME} · this link stops working <time datetime=\"{}\">{}</time>.</p>",
+        "<p class=\"foot\">Shared from {} · this link stops working <time datetime=\"{}\">{}</time>.</p>",
+        escape(&preview.site),
         escape(&iso(preview.expires_at_ms)),
         escape(&utc(preview.expires_at_ms))
     );
@@ -398,13 +404,6 @@ pub fn render_gone(gone: Gone) -> String {
         &format!("<h1>{title}</h1>\n<p class=\"sub\">{sentence}</p>\n"),
     )
 }
-
-/// What the card calls this Instance.
-///
-/// Deliberately the product's name rather than the Operator's: **branding is
-/// #71**, and inventing a second place for an instance title here would be a
-/// setting to migrate the moment that lands.
-pub(crate) const SITE_NAME: &str = "Radio-Scout";
 
 /// The icon a card shows — the PWA's own, which the binary already embeds, so
 /// there is no image to generate and none to store (`client/public/`, rasterized
@@ -520,7 +519,13 @@ mod tests {
     }
 
     fn preview_of(call: &StoredCall, public_url: Option<&str>) -> Preview {
-        Preview::of(call, "tok", 1_700_600_000_000, public_url)
+        Preview::of(
+            call,
+            "tok",
+            1_700_600_000_000,
+            public_url,
+            "Radio-Scout".into(),
+        )
     }
 
     /// The card a messaging app renders: what it is, where it was, and when.

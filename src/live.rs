@@ -53,6 +53,7 @@
 //! frame when a page could not reach back far enough).
 
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -60,8 +61,8 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use serde::Deserialize;
-use tokio::sync::broadcast;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{Instrument, Span, debug, info, warn};
 
@@ -98,6 +99,101 @@ const HEARTBEAT: Duration = Duration::from_secs(30);
 /// a gap, and falls back to archive search (#13) for the rest — the live socket
 /// never replays the world.
 const BACKFILL_MAX_CALLS: u64 = 100;
+
+/// How many Listeners the live feed seats when nobody says otherwise: rdio's
+/// own `maxClients` default, so an Operator migrating meets the ceiling they
+/// already had.
+///
+/// The number that matters on a Pi is not the sockets — an idle one costs a
+/// few kilobytes and nothing per second — but the audio they pull: a busy
+/// minute is ~4 KB/s per Listener, so two hundred is about 6 Mbit/s of upload,
+/// which is the order of a home connection.
+const DEFAULT_MAX_LISTENERS: NonZeroU32 = NonZeroU32::new(200).expect("non-zero");
+
+/// `[live]` — the live feed's own settings (#77, spec US 3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LiveConfig {
+    /// How many live-feed connections may be open at once. Above it a Listener
+    /// is told the Instance is full and their client keeps trying.
+    ///
+    /// **One or more, and nothing means "unlimited".** `0` is refused at boot
+    /// rather than read: in rdio it seats nobody, in `[station] max_streams` it
+    /// means off, and a third reading of the same digit would be one too many.
+    /// An Operator who wants no ceiling writes a large one. A `NonZeroU32`, so
+    /// an unusable cap cannot be constructed at all, refused in the
+    /// deserializer for the `ProxyNet` precedent's reason.
+    #[serde(with = "seat_count")]
+    pub max_listeners: NonZeroU32,
+}
+
+/// What an unusable `[live] max_listeners` is told it should have been — one
+/// sentence for the file and the environment alike.
+pub const EXPECTED_MAX_LISTENERS: &str = "a number of listeners, at least 1";
+
+/// A count of seats in the file, a `NonZeroU32` in the type.
+mod seat_count {
+    use std::num::NonZeroU32;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(seats: &NonZeroU32, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(seats.get())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NonZeroU32, D::Error> {
+        let seats = u32::deserialize(deserializer)?;
+        NonZeroU32::new(seats).ok_or_else(|| {
+            serde::de::Error::custom(crate::config::rejected(
+                "live.max_listeners",
+                seats,
+                super::EXPECTED_MAX_LISTENERS,
+            ))
+        })
+    }
+}
+
+impl Default for LiveConfig {
+    fn default() -> Self {
+        LiveConfig {
+            max_listeners: DEFAULT_MAX_LISTENERS,
+        }
+    }
+}
+
+/// The live feed's seats: `[live] max_listeners` of them, one held by every
+/// connection for as long as it runs (#77).
+///
+/// A `Semaphore` for [`crate::station::Stations`]' reason — a seat is a thing
+/// that is *returned*, and an `OwnedSemaphorePermit` is returned however the
+/// connection holding it ends. A count of its own rather than
+/// [`crate::listeners::Listeners`], because that one counts **Station streams**
+/// as well and they have a cap of their own: eight speakers must not be able to
+/// shut the app out.
+#[derive(Clone)]
+pub struct Seats(Arc<Semaphore>);
+
+impl Seats {
+    pub fn new(config: &LiveConfig) -> Self {
+        Seats(Arc::new(
+            Semaphore::new(config.max_listeners.get() as usize),
+        ))
+    }
+
+    /// A seat, if one is free — or the refusal saying the Instance is full.
+    fn take(&self) -> Result<OwnedSemaphorePermit, crate::failure::Reason> {
+        self.0
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| crate::failure::Reason::InstanceFull)
+    }
+}
+
+impl Default for Seats {
+    fn default() -> Self {
+        Seats::new(&LiveConfig::default())
+    }
+}
 
 /// A Call as it went out on the live feed: the Call itself, and the **emission**
 /// it was sent as (#94).
@@ -201,6 +297,12 @@ pub(crate) enum Event<'a> {
     Tick(i64),
     /// The **Backfill** this connection asked for, read and handed back.
     Backfilled(Backfill),
+    /// How many people are listening right now — or `None`, when this Instance
+    /// does not say (#77). Fed in by the adapter on connect and on every
+    /// heartbeat, so the count rides a timer every connection already has
+    /// rather than a frame to every socket on every arrival, which is rdio's
+    /// way and a burst of N² frames when a popular moment brings N people in.
+    Listening(Option<i64>),
     /// The peer is gone: a close frame, a socket error, a stream that ended.
     Gone,
 }
@@ -267,6 +369,9 @@ pub(crate) struct Connection {
     /// most that may ever be said out loud about a code.
     held: Option<crate::access::CodeHeld>,
     heartbeat: Heartbeat,
+    /// The **Listener count** this client was last told, if any (#77) — so it
+    /// is told again only when the number moves.
+    told_listening: Option<i64>,
     /// Where a refusal this connection decides is counted (#70).
     ///
     /// Held rather than reached for, so [`Connection::on`] still awaits nothing
@@ -290,6 +395,7 @@ impl Connection {
             scope,
             held: None,
             heartbeat: Heartbeat::default(),
+            told_listening: None,
             metrics: crate::metrics::Metrics::default(),
         }
     }
@@ -332,6 +438,7 @@ impl Connection {
             Event::Broadcast(result) => self.on_broadcast(result),
             Event::Tick(now_ms) => self.on_tick(now_ms),
             Event::Backfilled(backfill) => self.on_backfilled(backfill),
+            Event::Listening(count) => self.on_listening(count),
             Event::Gone => vec![Action::Close],
         }
     }
@@ -427,6 +534,18 @@ impl Connection {
                 vec![Action::Close]
             }
         }
+    }
+
+    /// How many are listening: told when it moves, and never otherwise — so an
+    /// evening with one steady Listener costs no frames at all. Hidden after
+    /// being shown is said once, as `null`, so a client stops showing a number
+    /// the Operator has since decided to keep.
+    fn on_listening(&mut self, count: Option<i64>) -> Vec<Action> {
+        if count == self.told_listening {
+            return Vec::new();
+        }
+        self.told_listening = count;
+        vec![Action::Send(listeners_frame(count))]
     }
 
     /// Has the **Access code** this connection opened with run out?
@@ -567,6 +686,12 @@ fn catchup_frame(emitted: &Emitted) -> String {
     .to_string()
 }
 
+/// How many people are listening, or `null` once the Operator stops saying
+/// (#77).
+fn listeners_frame(count: Option<i64>) -> String {
+    serde_json::json!({ "t": "listeners", "count": count }).to_string()
+}
+
 /// A notice that the client lagged the fanout and `skipped` Calls were dropped.
 fn lagged_frame(skipped: u64) -> String {
     serde_json::json!({ "t": "lagged", "skipped": skipped }).to_string()
@@ -693,7 +818,20 @@ pub async fn ws_handler(
 /// 5), and rdio-scanner's habit of logging every listener's IP and access-code
 /// ident at info (`client.go:152`) is the thing we are deliberately not doing.
 async fn handle_socket(mut socket: impl Socket, state: AppState, viewer: crate::access::Viewer) {
-    // **The connection limit, before anything else** (#68). Held as a guard, so
+    // **A seat, before anything else** (#77) — before the code's limit below,
+    // so a Listener a full Instance turns away is told the true and the more
+    // useful thing ("the scanner is full", which they wait out) rather than
+    // "your code is at its limit", which sends them to close a tab that is not
+    // the problem. Held as a guard for the slot's reason.
+    let _seat = match state.seats.take() {
+        Ok(seat) => seat,
+        Err(full) => {
+            state.metrics.refuse(&full);
+            let _ = socket.send(Outbound::Text(refused_frame(&full))).await;
+            return;
+        }
+    };
+    // **The code's connection limit** (#68). Held as a guard, so
     // the slot comes back however this ends — a close frame, a socket error, a
     // task cancelled out from under it — rather than on whichever arm remembered
     // to give it back. rdio counts by comparing `Access` *pointers* and rebuilds
@@ -753,7 +891,8 @@ async fn run_connection(mut socket: impl Socket, state: AppState, viewer: crate:
         .holding(viewer.code().cloned())
         .counting(state.metrics.clone());
 
-    let opening = conn.on(Event::Opened);
+    let mut opening = conn.on(Event::Opened);
+    opening.extend(conn.on(Event::Listening(listening(&state))));
     if !carried_on(perform(&mut socket, &state, &mut conn, opening).await) {
         return;
     }
@@ -773,12 +912,29 @@ async fn run_connection(mut socket: impl Socket, state: AppState, viewer: crate:
             Wake::Inbound(Some(Inbound::Quiet)) => conn.on(Event::Quiet),
             Wake::Inbound(None) => conn.on(Event::Gone),
             Wake::Broadcast(result) => conn.on(Event::Broadcast(result)),
-            Wake::Tick => conn.on(Event::Tick(state.clock.now_ms())),
+            Wake::Tick => {
+                // A tick that ends the connection ends with `Close`, and nothing
+                // after it is performed — so the count is never sent to a
+                // connection on its way out.
+                let mut actions = conn.on(Event::Tick(state.clock.now_ms()));
+                actions.extend(conn.on(Event::Listening(listening(&state))));
+                actions
+            }
         };
         if !carried_on(perform(&mut socket, &state, &mut conn, actions).await) {
             break;
         }
     }
+}
+
+/// How many people are listening, if this Instance says (#77) — the Operator's
+/// switch read afresh each time, so turning it off reaches every socket on its
+/// next heartbeat rather than its next reconnect.
+fn listening(state: &AppState) -> Option<i64> {
+    state
+        .identity
+        .shows_listeners()
+        .then(|| state.listeners.current())
 }
 
 /// Did a round of actions leave the connection running? A gone peer and a table
@@ -1229,6 +1385,39 @@ mod tests {
         let mut open = Connection::new(AccessScope::All);
 
         assert_eq!(open.on(Event::Tick(i64::MAX)), vec![Action::Ping]);
+    }
+
+    /// The **Listener count** (#77) is told when it moves and never otherwise:
+    /// once at first, again only for a different number, and once as `null`
+    /// when the Operator stops saying — after which nothing at all.
+    #[test]
+    fn the_listener_count_is_told_only_when_it_moves() {
+        let mut open = Connection::new(AccessScope::All);
+        let told = |count: Option<i64>| {
+            vec![Action::Send(
+                serde_json::json!({ "t": "listeners", "count": count }).to_string(),
+            )]
+        };
+
+        assert_eq!(open.on(Event::Listening(Some(3))), told(Some(3)));
+        assert_eq!(open.on(Event::Listening(Some(3))), vec![], "unchanged");
+        assert_eq!(open.on(Event::Listening(Some(4))), told(Some(4)));
+        assert_eq!(open.on(Event::Listening(None)), told(None), "hidden");
+        assert_eq!(open.on(Event::Listening(None)), vec![], "still hidden");
+        assert_eq!(
+            open.on(Event::Listening(Some(4))),
+            told(Some(4)),
+            "shown again"
+        );
+    }
+
+    /// An Instance that never shows the count never sends a frame about it —
+    /// which is every Instance until an Operator says otherwise.
+    #[test]
+    fn a_count_never_shown_is_never_mentioned() {
+        let mut open = Connection::new(AccessScope::All);
+
+        assert_eq!(open.on(Event::Listening(None)), vec![]);
     }
 
     /// A **restricted connection**, driven the way a real one is: opened with a
@@ -1823,6 +2012,45 @@ mod tests {
         let frames = peer.every_frame().await;
         assert_eq!(frames.len(), 1, "{frames:?}");
         assert_eq!(frames[0]["t"], "hello");
+    }
+
+    /// Showing the **Listener count** (#77): the greeting is followed by it, and
+    /// a heartbeat after the count moves carries the new one — proven over a
+    /// paused clock, so the thirty seconds cost nothing.
+    #[tokio::test]
+    async fn a_shown_count_follows_the_greeting_and_then_the_heartbeat() {
+        let (state, _tmp) = a_state().await;
+        state
+            .identity
+            .write(&state.db, |held| {
+                held.settings.show_listeners = true;
+                Ok::<(), crate::curate::Rejected>(())
+            })
+            .await
+            .expect("shown");
+        tokio::time::pause();
+        let (socket, mut peer) = FakeSocket::pair();
+        tokio::spawn(run_connection(
+            socket,
+            state.clone(),
+            crate::access::Viewer::unrestricted(),
+        ));
+
+        let first = |text: Option<String>| -> serde_json::Value {
+            serde_json::from_str(&text.expect("a frame")).expect("JSON")
+        };
+        assert_eq!(first(peer.next().await)["t"], "hello");
+        assert_eq!(
+            first(peer.next().await),
+            serde_json::json!({ "t": "listeners", "count": 0 })
+        );
+
+        let _somebody = state.listeners.arrive();
+        assert_eq!(peer.next().await.as_deref(), Some("PING"));
+        assert_eq!(
+            first(peer.next().await),
+            serde_json::json!({ "t": "listeners", "count": 1 })
+        );
     }
 
     /// A peer that never answers is pinged once and reaped on the next period —

@@ -655,6 +655,11 @@ async fn assemble(
     state.shares = crate::share::Shares::new(config.share.clone(), config.public_url());
     state.exports = crate::export::Exports::new(config.export.clone());
     state.stations = crate::station::Stations::new(config.station.clone());
+    state.seats = crate::live::Seats::new(&config.live);
+    // The **Instance identity** (#77), read once and held: every app open,
+    // socket and shared page asks for some of it. A read that fails leaves the
+    // defaults, and says so (`Identity::take`).
+    state.identity.load(&db).await;
     // The read-only half of `[retention] starred_days` (#66), so the catalog
     // can tell a Listener what a Star is worth here. The policy itself stays
     // with the sweeper that acts on it.

@@ -351,6 +351,32 @@ async fn shared(app: &TestApp, id: i64) -> String {
     body["url"].as_str().expect("a link").to_string()
 }
 
+/// A shared incident says whose scanner it came from (#77) — the Operator's
+/// name, where it used to say "Radio-Scout" whoever ran the Instance.
+#[tokio::test]
+async fn a_shared_event_says_whose_scanner_it_came_from() {
+    let (app, ids) = an_instance_with_calls(1).await;
+    app.admin_patch(
+        "/api/admin/instance",
+        serde_json::json!({ "name": "Fulton Scanner" }),
+    )
+    .await;
+    let id = an_event_over(&app, "Mill Street fire", &ids).await;
+
+    let html = app
+        .get(&shared(&app, id).await)
+        .await
+        .text()
+        .await
+        .expect("the page");
+
+    assert!(
+        html.contains(r#"<meta property="og:site_name" content="Fulton Scanner">"#),
+        "{html}"
+    );
+    assert!(html.contains("Shared from Fulton Scanner."), "{html}");
+}
+
 /// **The whole promise.** A link opens the incident, publicly, with no session
 /// and no app — and every member on it plays from the Event's *own* copy.
 #[tokio::test]

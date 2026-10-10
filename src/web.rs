@@ -6,9 +6,12 @@
 //! binary hosts the whole app. When the SPA hasn't been built yet, it serves a
 //! minimal backend-only page so `cargo run` still does something useful.
 
+use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
+
+use crate::AppState;
 
 #[derive(RustEmbed)]
 #[folder = "client/dist/"]
@@ -30,7 +33,7 @@ pub fn spa_is_embedded() -> bool {
 /// would cover only half the 404s an unrouted URL can get: axum's own fallback
 /// for everything outside `/api` never reaches this function at all. A
 /// vocabulary that covers half a case is worse than one that declines it.
-pub async fn spa_handler(uri: Uri) -> Response {
+pub async fn spa_handler(State(state): State<AppState>, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
 
     // Reserved server namespaces never fall through to the SPA. Everything real
@@ -65,11 +68,87 @@ pub async fn spa_handler(uri: Uri) -> Response {
     match Assets::get("index.html") {
         Some(index) => (
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            index.data.into_owned(),
+            named_shell(&index.data, state.identity.held().settings.name.as_deref()),
         )
             .into_response(),
         None => Html(FALLBACK_HTML).into_response(),
     }
+}
+
+/// The app shell, titled for this Instance (#77).
+///
+/// The app sets its own title as soon as it runs, so this is for what reads the
+/// page *without* running it — a link unfurled in a chat, a browser's history
+/// before the script has loaded. One title, replaced whole; the build writes it
+/// as the product's name, and an unnamed Instance is served the file as built.
+fn named_shell(index: &[u8], name: Option<&str>) -> Vec<u8> {
+    let Some(name) = name else {
+        return index.to_vec();
+    };
+    String::from_utf8_lossy(index)
+        .replacen(
+            BUILT_TITLE,
+            &format!("<title>{}</title>", crate::share::page::escape(name)),
+            1,
+        )
+        .into_bytes()
+}
+
+/// How the client build titles its shell (`client/index.html`).
+const BUILT_TITLE: &str = "<title>Radio-Scout</title>";
+
+/// Where the build puts the web app manifest, and where a browser asks for it.
+pub const MANIFEST_PATH: &str = "/manifest.webmanifest";
+
+/// `GET /manifest.webmanifest` — the manifest a browser installs the app from,
+/// named for this Instance (#77).
+///
+/// The name is what Android writes under the home-screen icon and in the app
+/// switcher, which is the place an Operator's name is seen most. `no-cache`, so
+/// a browser asks again rather than keeping the name an Instance had when it
+/// was first installed — and the service worker leaves it out of its precache
+/// for the same reason (`client/src/sw.ts`).
+pub async fn manifest(State(state): State<AppState>) -> Response {
+    manifest_or_nothing(
+        Assets::get(MANIFEST_PATH.trim_start_matches('/')).map(|asset| asset.data.into_owned()),
+        state.identity.held().settings.name.as_deref(),
+    )
+}
+
+/// The manifest if this binary was built with one — a function of the asset
+/// rather than of the build, [`page_or_sentence`]'s rule, so both answers are
+/// testable in a tree where only one can be served. A binary built without the
+/// client has no app to install, and says so the way an unknown file does.
+fn manifest_or_nothing(manifest: Option<Vec<u8>>, name: Option<&str>) -> Response {
+    let Some(manifest) = manifest else {
+        return (StatusCode::NOT_FOUND, "not found\n").into_response();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "application/manifest+json"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        named_manifest(&manifest, name),
+    )
+        .into_response()
+}
+
+/// The manifest as built, with `name` and `short_name` the Instance's. A
+/// manifest that is not a JSON object — not one this build wrote — is served as
+/// it is rather than mangled.
+fn named_manifest(manifest: &[u8], name: Option<&str>) -> Vec<u8> {
+    let Some(name) = name else {
+        return manifest.to_vec();
+    };
+    let Ok(mut document) = serde_json::from_slice::<serde_json::Value>(manifest) else {
+        return manifest.to_vec();
+    };
+    let Some(fields) = document.as_object_mut() else {
+        return manifest.to_vec();
+    };
+    fields.insert("name".into(), name.into());
+    fields.insert("short_name".into(), name.into());
+    serde_json::to_vec(&document).unwrap_or_default()
 }
 
 /// The **Embed** page (#75): `embed.html`, the second entry the client build
@@ -205,6 +284,67 @@ const FALLBACK_HTML: &str = r#"<!doctype html>
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    /// A binary built without the client has no manifest to serve.
+    #[test]
+    fn no_built_manifest_is_a_404() {
+        assert_eq!(
+            manifest_or_nothing(None, Some("Fulton")).status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// An unnamed Instance is served the manifest as built, byte for byte.
+    #[test]
+    fn an_unnamed_manifest_is_the_built_one() {
+        let built = br#"{"name":"Radio-Scout","short_name":"Radio-Scout","display":"standalone"}"#;
+
+        assert_eq!(named_manifest(built, None), built.to_vec());
+    }
+
+    /// A named one carries the name in both places Android reads, and every
+    /// other field as it was.
+    #[test]
+    fn a_named_manifest_carries_the_name() {
+        let built = br#"{"name":"Radio-Scout","short_name":"Radio-Scout","display":"standalone"}"#;
+
+        let named: serde_json::Value =
+            serde_json::from_slice(&named_manifest(built, Some("Fulton Scanner"))).expect("JSON");
+
+        assert_eq!(
+            named,
+            serde_json::json!({
+                "name": "Fulton Scanner",
+                "short_name": "Fulton Scanner",
+                "display": "standalone",
+            })
+        );
+    }
+
+    /// Something that is not this build's manifest is passed through, never
+    /// mangled or refused.
+    #[rstest]
+    #[case::not_json(b"not json".as_slice())]
+    #[case::not_an_object(b"[1, 2]".as_slice())]
+    fn a_manifest_it_cannot_read_is_served_as_it_is(#[case] built: &[u8]) {
+        assert_eq!(named_manifest(built, Some("Fulton")), built.to_vec());
+    }
+
+    /// The shell is titled for the Instance, escaped, and otherwise untouched.
+    #[rstest]
+    #[case::unnamed(None, "<title>Radio-Scout</title>")]
+    #[case::named(Some("Fulton Scanner"), "<title>Fulton Scanner</title>")]
+    #[case::escaped(Some("Fulton <b>"), "<title>Fulton &lt;b&gt;</title>")]
+    fn the_shell_is_titled_for_the_instance(#[case] name: Option<&str>, #[case] title: &str) {
+        let built = b"<head><title>Radio-Scout</title></head><body id=\"root\"></body>";
+
+        let named = String::from_utf8(named_shell(built, name)).expect("UTF-8");
+
+        assert_eq!(
+            named,
+            format!("<head>{title}</head><body id=\"root\"></body>")
+        );
+    }
 
     /// The embed route always answers with a page (#75): the built one, or —
     /// from a binary built without the client — a sentence saying so, which a

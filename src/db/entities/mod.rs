@@ -20,6 +20,7 @@ pub mod event;
 pub mod event_call;
 pub mod frequency_health;
 pub mod group;
+pub mod identity;
 pub mod listener_sample;
 pub mod log_event;
 pub mod share_link;

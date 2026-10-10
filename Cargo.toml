@@ -130,6 +130,16 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "
 # When a certificate expires — the one fact about it the renewal schedule and
 # the status page need. Already in instant-acme's tree, at this version.
 x509-parser = "0.18"
+# The **Reference page** (#77, spec US 58): an Operator's markdown rendered to
+# HTML once, when it is saved or read at boot, never per request. CommonMark,
+# pure Rust, four small dependencies; `default-features = false` drops the
+# command-line binary and its argument parser. Raw HTML is escaped and link
+# schemes are allow-listed in `identity::reference` rather than trusted, so the
+# page is markdown and nothing more.
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+# Reading a help link (#77) the way a browser will. **Already in the tree** —
+# reqwest is built on it — so naming it adds no crate.
+url = "2"
 
 # What ships (#23, ADR-0007). Nothing had ever been built in release mode
 # before this ticket, so every value here is a deliberate choice rather than an

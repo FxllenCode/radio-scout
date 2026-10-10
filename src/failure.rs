@@ -345,6 +345,10 @@ pub enum Reason {
     /// Operator revokes one. The page draws "no longer available" from it, so a
     /// host whose embed was taken down shows a sentence rather than an error.
     EmbedNotFound,
+    // -- The Instance identity (#77, spec US 58) ----------------------------
+    /// This Instance has no **Reference page**. The app draws no entry for one,
+    /// so whoever asks typed the address — a 404, as for an unrouted path.
+    NoReferencePage,
     // -- Built-in TLS (#76, spec US 61) -------------------------------------
     /// An ACME HTTP-01 token this Instance is not holding out — never issued,
     /// or the CA has already finished looking.
@@ -404,6 +408,16 @@ pub enum Reason {
     /// and closed. rdio tells its client `max` and then goes on serving it,
     /// because the scope was assigned before the check.
     AccessConnectionLimit { code_id: i64, limit: i64 },
+    // -- The live feed (#77, spec US 3) -------------------------------------
+    /// Every one of `[live] max_listeners` seats is taken.
+    ///
+    /// Recorded rather than rendered, for [`Reason::AccessConnectionLimit`]'s
+    /// reason. Unlike [`Reason::StationFull`] it carries no number: the one
+    /// reader of this body would be the Listener turned away, and how many
+    /// people are listening is the Operator's to know (CONTEXT.md, **Listener
+    /// count**) — a cap told to whoever it refuses is a head count by another
+    /// name. The Operator reading the line already has the number in their file.
+    InstanceFull,
     // -- The Station stream (#74, spec US 60) -------------------------------
     /// `[station] max_streams` is `0`.
     StationDisabled,
@@ -792,6 +806,15 @@ impl Reason {
                 StatusCode::NOT_FOUND,
                 text("embed not found\n"),
             ),
+            // **DEBUG**: nothing links to it, so this is somebody's typing or
+            // a bookmark from before the Operator took the page down, and the
+            // request log's 4xx line already carries it (rule 3).
+            Reason::NoReferencePage => Refusal::new(
+                "no-reference-page",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("this instance has no reference page\n"),
+            ),
             Reason::ChallengeNotFound => Refusal::new(
                 "challenge-not-found",
                 Level::DEBUG,
@@ -914,6 +937,17 @@ impl Reason {
                 )),
             )
             .about_code(*code_id),
+            // **WARN, for `station-full`'s reason**: the cap is the Operator's
+            // own number, and a Listener turned away by it is exactly what tells
+            // them it is set too low (rule 7). The status is vocabulary, as it is
+            // for `access-connection-limit` above — a socket that has already
+            // been upgraded is told in a frame.
+            Reason::InstanceFull => Refusal::new(
+                "instance-full",
+                Level::WARN,
+                StatusCode::TOO_MANY_REQUESTS,
+                text("every live-feed seat is taken; try again later\n"),
+            ),
             Reason::BadImport(error) => Refusal::new(
                 error.reason(),
                 Level::DEBUG,
@@ -1470,6 +1504,23 @@ mod tests {
         "station-full",
         429,
         "every station stream is in use (limit 8); try again later\n",
+        " WARN "
+    )]
+    // -- The Instance identity (#77) -----------------------------------------
+    #[case::no_reference_page(
+        Reason::NoReferencePage,
+        "no-reference-page",
+        404,
+        "this instance has no reference page\n",
+        " DEBUG "
+    )]
+    // -- The live feed (#77) -----------------------------------------------
+    // Station-full's level, for station-full's reason: the Operator's own cap.
+    #[case::instance_full(
+        Reason::InstanceFull,
+        "instance-full",
+        429,
+        "every live-feed seat is taken; try again later\n",
         " WARN "
     )]
     #[tokio::test]

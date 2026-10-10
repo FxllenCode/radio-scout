@@ -80,6 +80,7 @@ pub mod document;
 pub mod downstreams;
 pub mod embeds;
 pub mod events;
+pub mod identity;
 pub mod keys;
 pub mod labels;
 pub mod members;
@@ -242,6 +243,18 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/admin/embeds/{id}",
             patch(embeds::update).delete(embeds::remove),
+        )
+        // **The Instance identity** (#77) — one form's settings, and the
+        // **Reference page** published whole beside them.
+        .route(
+            "/api/admin/instance",
+            get(identity::show).patch(identity::update),
+        )
+        .route(
+            "/api/admin/reference",
+            get(identity::editor)
+                .put(identity::publish)
+                .delete(identity::unpublish),
         )
         .route("/api/admin/api-keys", get(keys::list).post(keys::create))
         .route(
@@ -507,6 +520,14 @@ pub enum Rejected {
         least: i64,
         most: i64,
     },
+    /// Text longer than where it is shown can hold — an Instance's name, a
+    /// **Reference page** (#77). Names the field and the limit, because "too
+    /// long" without a number sends an Operator to guess how much to cut.
+    TooLong { field: &'static str, most: usize },
+    /// A help link a Listener could not follow, or should not (#77): it has to
+    /// be a web page or an address to write to, because it is drawn as a link
+    /// in front of every Listener and a `javascript:` one would run when tapped.
+    UnusableHelpLink,
 }
 
 /// Refuse a **Delay** no Operator could have meant (#73): a day is the longest
@@ -552,6 +573,8 @@ impl Rejected {
             Rejected::UnusableMask { .. } => "unusable-mask",
             Rejected::Unroutable { .. } => "unroutable",
             Rejected::OutOfRange { .. } => "out-of-range",
+            Rejected::TooLong { .. } => "too-long",
+            Rejected::UnusableHelpLink => "unusable-help-link",
         }
     }
 
@@ -575,7 +598,9 @@ impl Rejected {
             | Rejected::NotAudio { .. }
             | Rejected::UnusableMask { .. }
             | Rejected::Unroutable { .. }
-            | Rejected::OutOfRange { .. } => StatusCode::BAD_REQUEST,
+            | Rejected::OutOfRange { .. }
+            | Rejected::TooLong { .. }
+            | Rejected::UnusableHelpLink => StatusCode::BAD_REQUEST,
             Rejected::NotFound(_) => StatusCode::NOT_FOUND,
             Rejected::TooManyCalls { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Rejected::NameTaken { .. }
@@ -597,7 +622,8 @@ impl Rejected {
         });
         if let Rejected::Blank { field }
         | Rejected::Unroutable { field }
-        | Rejected::OutOfRange { field, .. } = self
+        | Rejected::OutOfRange { field, .. }
+        | Rejected::TooLong { field, .. } = self
         {
             body["field"] = serde_json::Value::from(*field);
         }
@@ -711,6 +737,12 @@ impl std::fmt::Display for Rejected {
             Rejected::OutOfRange { field, least, most } => {
                 write!(f, "{field} has to be between {least} and {most}")
             }
+            Rejected::TooLong { field, most } => {
+                write!(f, "{field} can be at most {most} characters")
+            }
+            Rejected::UnusableHelpLink => f.write_str(
+                "a help link has to be a web address (https://...) or an email address",
+            ),
         }
     }
 }

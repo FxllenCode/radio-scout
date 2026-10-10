@@ -136,6 +136,33 @@ async fn an_embed_carries_its_selection_s_recent_calls() {
     assert!(at[0] > at[1], "newest first: {at:?}");
 }
 
+/// A homepage reader is the Operator's audience too (#77): the page says whose
+/// scanner it opens, and writes its times on the Operator's clock. Unnamed, it
+/// is the product, on twenty-four hours — what it said before.
+#[tokio::test]
+async fn an_embed_speaks_for_the_instance_it_belongs_to() {
+    let app = an_instance().await;
+    let row = add_embed(&app, "Fire dispatch", fire_only()).await;
+
+    let unnamed = app.get_json(&feed_of(&row)).await;
+    assert_eq!(unnamed["site"], "Radio-Scout");
+    assert_eq!(unnamed["timeFormat"], "24h");
+
+    app.admin_patch(
+        "/api/admin/instance",
+        json!({ "name": "Fulton Scanner", "timeFormat": "12h" }),
+    )
+    .await;
+
+    let named = app.get_json(&feed_of(&row)).await;
+    assert_eq!(named["site"], "Fulton Scanner");
+    assert_eq!(named["timeFormat"], "12h");
+    assert_eq!(
+        named["name"], "Fire dispatch",
+        "the embed keeps its own name"
+    );
+}
+
 /// The listing carries every embed with where it lives, because the snippet is
 /// the thing an Operator came here for.
 #[tokio::test]

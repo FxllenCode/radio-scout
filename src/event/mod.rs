@@ -654,6 +654,7 @@ pub async fn open(
             stitched_url: offered("wav"),
             canonical: crate::config::absolute_url(&link_to(&token), public_url),
             icon: crate::config::absolute_url(crate::share::page::ICON_PATH, public_url),
+            site: state.identity.name(),
         },
     )))
 }
