@@ -182,8 +182,15 @@ different reactions — and only some of them are yours to fix:
 | Red, steady | **NO LINK** | The server is not reachable. It keeps retrying; a brief gap is filled in for you when it comes back. |
 | Amber, steady | **FEED OFF** | You switched the feed off. Nothing is arriving, by your choice. |
 | Amber, steady | **PLAYBACK** | You are playing the archive, which the live feed is mutually exclusive with. |
+| Amber, pulsing | **FULL** | Every listening slot on this scanner is taken. You are let in on your own as soon as somebody leaves. |
+| Amber, pulsing | **CODE IN USE** | Your access code allows only so many connections at once, and they are all in use — close the app somewhere else, or wait. |
 
-The two amber states are the two silences you asked for; the red ones are the two you didn't.
+The two steady amber states are the two silences you asked for; the red ones are the two you
+didn't, and the pulsing amber ones are the server saying *not yet* — none of them is something
+wrong with your connection.
+
+If the operator publishes it, a 👥 count beside the dot says how many people are listening right
+now, you included.
 When nothing is playing, the panel spells the same thing out in words and says what to do about
 it.
 
@@ -198,6 +205,10 @@ one arrives. That is deliberate: a scanner's readout does not blank the moment a
 and *after* the transmission is exactly when you reach for **Avoid** — so Hold, Avoid and Replay
 go on acting on the Call in front of you. Skip and Pause do not, because there is no audio left
 to skip or pause.
+
+**The readout may dim when nothing is happening**, if the operator set it to — a scanner left
+running on a wall does not need to glow all night. The next call lights it, and so does touching
+it.
 
 ### The strip above the tabs
 
@@ -253,9 +264,11 @@ A big system is hundreds of Talkgroups, and the panel is built for that:
 - **Fold a System away** by tapping its name. A System with more than fifty Talkgroups starts
   folded, so what you see first is a short list of Systems with their counts and controls. Open
   ones stay open next time.
-- **Sort** with **A–Z** (the order the operator's labels give) or **ACTIVE** (busiest first).
-  Each row shows how long ago that channel was last heard — `3m`, `2h` — or, sorted by activity,
-  how many Calls it has taken lately. The ACTIVE button names the window it counts over.
+- **Sort** with **A–Z** (the order the operator's labels give), **TGID** (by talkgroup number —
+  the order a RadioReference listing is in) or **ACTIVE** (busiest first). Each row shows how long
+  ago that channel was last heard — `3m`, `2h` — or, sorted by activity, how many Calls it has
+  taken lately. The ACTIVE button names the window it counts over. Until you pick one, the panel
+  is in whichever order the operator chose for new listeners.
 - **Typing in the filter opens everything**, so a search is never answered by a folded box.
 
 Your selection, your pins, your priorities, your sort and which Systems you folded away are
@@ -360,7 +373,8 @@ Beside play is a second button — ⏩ — that plays *forward in time* from tha
 is newest-first, so ordinary play walks backwards through history; this walks the other way, from
 the moment you tapped through everything that came after it. It does not disturb the list you are
 reading: the results stay sorted as you left them, and the run carries on through later pages on
-its own.
+its own. If the operator has turned on *go live when playback catches up*, a forward run that
+reaches the newest call there is hands you to the live feed rather than stopping.
 
 ### The activity chart
 
@@ -579,14 +593,15 @@ you missed while you were away is in **Search**, which is where it always was.
 
 <img src="images/settings.png" alt="The Settings screen" width="620">
 
-Currently: whether the server is reachable.
+Whether the server is reachable — and, when the operator has provided them, a **Reference** page
+with the local codes and a **Help** link to the operator.
 
 **Audio enhancement**, **Theme** and **Admin** are listed but not built yet — they read "soon"
 because that is honest. Enhancement *works*, but it is configured on the server rather than per
 listener; see [operating.md](operating.md#audio-enhancement).
 
 Almost nothing else is a per-listener setting by design: what the instance does is the
-operator's TOML file, not a preference panel.
+operator's to decide — its configuration file and its admin screens — not a preference panel.
 
 ---
 

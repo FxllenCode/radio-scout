@@ -227,8 +227,8 @@ after switching:
 - **The machine is still configured in a file.** Ports, storage, retention and the database
   live in `radio-scout.toml`, environment variables and flags — and so do the folders a
   dirwatch may read. Everything *else* — systems, talkgroups, groups, tags, units, API keys,
-  downstream peers, dirwatches, tone profiles and webhooks — is edited in the browser under
-  Settings → Admin.
+  downstream peers, dirwatches, tone profiles, webhooks, and the instance's own name, help link
+  and reference page — is edited in the browser under Settings → Admin.
 - **`/rdio-scanner` is not served.** Radio-Scout does not host the legacy app.
 - **A different UI.** It is a replacement, not a reskin — the screens are not where rdio put
   them.

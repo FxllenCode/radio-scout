@@ -65,6 +65,16 @@ Settings → Admin → Dirwatch, and only inside the folders `[dirwatch] roots` 
 its admin page point a watch anywhere the server can read and delete; here that is the
 configuration file's decision ([docs/recorders.md](recorders.md#dirwatch-a-recorder-that-only-writes-files)).
 
+**Your options page, setting by setting.** rdio's *Options* page is split here by what each
+setting is for. Settings → Admin → **Instance** holds what your listeners see:
+`branding` is the instance's **Name**, `email` is its **Help link** (paste the address — it
+becomes a `mailto:`, or give it a web page instead), and `time12hFormat`, `sortTalkgroups`,
+`playbackGoesLive`, `dimmerDelay` and `showListenersCount` are there under their plain names
+([operating.md](operating.md#making-it-yours)). `maxClients` guards the machine, so it is
+`[live] max_listeners` in the file — 200 by default, as it was. Two differences:
+`sortTalkgroups` is now only the order a *new* listener starts in, and `dimmerDelay` is in seconds
+and off unless you set it.
+
 ## Running both at once
 
 **This is the recommended way to switch**, and it costs nothing: recorders will happily upload

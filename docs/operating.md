@@ -263,6 +263,7 @@ needs SSH:
 | **Access codes** | what a listener types to hear a restricted channel — see [below](#gating-sensitive-channels) |
 | **Downstreams** | the other instances you forward calls to — see [below](#forwarding-to-other-instances) |
 | **Webhooks** | addresses that receive your flagged calls — see [below](#webhooks) |
+| **Instance** | its name, where listeners go for help, the defaults every listener's app starts from, and the reference page — see [below](#making-it-yours) |
 
 Four things are worth knowing before you start:
 
@@ -1162,7 +1163,58 @@ of a few bytes each. Turn it off if you would rather keep nothing, or raise `int
 coarser chart will do. How long the rows survive is `[retention] listener_days` above.
 
 The chart is behind the admin password, unlike everything else a browser can read here. Listening
-is open; how many people take that up is yours.
+is open; how many people take that up is yours. If you want listeners to see the number live,
+[**Show how many are listening**](#making-it-yours) puts the current count on their Live screen —
+the count only, refreshed on the connection's 30-second heartbeat, and never the history.
+
+## Making it yours
+
+Settings → Admin → **Instance** is what your listeners see this scanner as. All of it lives in
+the database and is edited there — none of it is a `radio-scout.toml` setting, so there is one
+place to change it, and a change reaches every listener on their next look rather than at the next
+restart.
+
+| Setting | What it does |
+| --- | --- |
+| **Name** | heads every screen, names the browser tab, and is what an installed app is called on a home screen. Shared calls and events say they came from it, and so does an embedded player's link. Unnamed, the app says Radio-Scout and adds nothing to the header. Up to 64 characters. |
+| **Help link** | a web page, or an email address (`ops@example.com` becomes a `mailto:`), offered under Settings as **Help**. Anything that is not `https:`, `http:` or `mailto:` is refused, because it is drawn as a link in front of every listener. |
+| **Time** | 24-hour (what ships) or 12-hour, for every time the app shows — the display, search, the queue, the admin screens, an embedded player. |
+| **Talkgroup order for new listeners** | A–Z, by talkgroup ID (the order a RadioReference listing is in), or most active first. A listener who picks an order for themselves keeps it; this is only where they start. |
+| **Dim the display after** | seconds of quiet before the Live readout dims, for a scanner left running on a wall. A call, or a touch, lights it again. `0` — what ships — never dims. |
+| **Go live when playback catches up** | playing the archive *forwards* (oldest first, with no end date), reaching the newest call hands over to the live feed instead of stopping. Off by default. |
+| **Show how many are listening** | puts the [listener count](#listener-counts) on the Live screen. That number is yours, so it is off until you publish it. |
+
+**The reference page** is below the settings: your county's codes, written in markdown, which
+listeners find under Settings once you publish it. The editor starts from a template holding only
+what is genuinely the same everywhere — the two phonetic alphabets, and how dispatch reads the
+24-hour clock — with an empty table for your own ten-codes, because the same code means different
+things a county apart and a national list is wrong for most of the people it would reach. Nothing
+is shown to listeners until you press **Publish**, and **Take down** removes the page and its
+entry. Raw HTML in the markdown is shown as text and links may only go to `https`, `http`,
+`mailto`, `tel` or this instance, so the page cannot run anything in a listener's browser.
+
+## How many may listen at once
+
+```toml
+[live]
+max_listeners = 200
+```
+
+Past this many live-feed connections — the app and every [embedded player](#putting-the-scanner-on-another-site)
+— the next one is told **this scanner is full**, and their app keeps trying on its own until a
+seat frees up. Station streams have their own cap, [`[station] max_streams`](#the-station-stream),
+and do not count here.
+
+The sockets themselves cost a Pi almost nothing. What a listener does cost is upload: a busy minute
+is about 4 KB/s of audio each, so 200 is roughly 6 Mbit/s. Set it to what your connection carries.
+It has to be at least 1 — there is no "unlimited", so write a large number if that is what you
+mean (rdio-scanner reads `0` as *nobody*, and a third meaning for the same digit would be one too
+many). Each refusal is a `warn` line with `reason=instance-full`: a few of those is your cue to
+raise it.
+
+The listener is told the scanner is full, and never how full. How many people are listening is
+yours to publish or not ([above](#making-it-yours)), and a cap told to whoever it turns away would
+publish it for you.
 
 ## Is it healthy
 
