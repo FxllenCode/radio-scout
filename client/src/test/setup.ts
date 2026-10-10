@@ -83,3 +83,24 @@ afterEach(() => {
   }
 })
 afterAll(() => server.close())
+
+// **No animation frame once a file's tests are done.** RTK Query syncs its
+// subscriptions on a 500 ms timer that every unmount restarts, and the action
+// that timer dispatches is batched onto an animation frame. A file that ends
+// inside that half-second therefore asks for a frame as — or after — jsdom
+// closes its window; jsdom then starts a fresh frame timer on the dead window,
+// the callback throws, and reporting the throw reads `window.location` and
+// crashes. Vitest pins the crash on whichever file it happened in, so it moved
+// between files with nothing but timing, and showed only under the slower
+// parallel coverage run. Found by recording every late request, in ten files.
+//
+// Wrapped here, before any store exists, because the store captures
+// `requestAnimationFrame` when it is made. A frame nobody asserts on can go
+// unscheduled: no test is running to see it.
+let testsAreDone = false
+const scheduleFrame = window.requestAnimationFrame.bind(window)
+window.requestAnimationFrame = (callback: FrameRequestCallback) =>
+  testsAreDone ? 0 : scheduleFrame(callback)
+afterAll(() => {
+  testsAreDone = true
+})
