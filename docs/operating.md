@@ -241,10 +241,12 @@ refreshed) — the second is the bound on a cookie somebody walked off with. Fai
 rate-limited per source address; the cooldown runs from the *last* attempt, so hammering keeps
 it locked and walking away clears it.
 
-> **Behind a reverse proxy terminating TLS, set `[server] trusted_proxies`.** The session cookie
-> is marked `Secure` only when a *trusted* proxy reports `X-Forwarded-Proto: https`. With the
-> list empty — what ships — that header is never believed, and an HTTPS deployment still hands
-> out a cookie a browser will replay over plain `http://` to the same host.
+> **The session cookie is marked `Secure` whenever the login arrived over HTTPS** — on
+> [built-in TLS](deploy.md#built-in-tls)'s own port, or through a *trusted* proxy reporting
+> `X-Forwarded-Proto: https`. A Cloudflare Tunnel or a proxy on the same machine is trusted
+> already. A proxy anywhere else has to be named in
+> [`[server] trusted_proxies`](#behind-a-reverse-proxy), or an HTTPS deployment hands out a
+> cookie a browser will replay over plain `http://` to the same host.
 
 ### Running the instance from a browser
 
@@ -342,8 +344,9 @@ their browser is told, lets go of it, and quietly goes back to the open channels
   recorded about an address that unlocks successfully — see [Logging](#logging).
 - **It does not hide that a channel exists.** The row is listed; its traffic is not.
 - **It is not a substitute for a firewall.** Everything unrestricted is still open to anybody
-  who can reach the instance. If the whole thing should be private, put it behind a reverse
-  proxy, a VPN, or Cloudflare Access — see [Behind a reverse proxy](#behind-a-reverse-proxy).
+  who can reach the instance. If the whole thing should be private, put it behind a VPN, an
+  authenticating proxy, or Cloudflare Access in front of a
+  [tunnel](deploy.md#cloudflare-tunnel-recommended).
 
 ### Two settings
 
@@ -507,7 +510,10 @@ Four things behave the way they do on purpose:
 **Links need `[server] public_url`.** A payload carries a link to the call's audio, and this
 instance cannot know its own public address — it may be behind a proxy, a tunnel, or three. Set
 `public_url` to what you type into a browser and the link appears; leave it unset and the payload
-still carries every fact about the call and simply has no link. A *guessed* URL in somebody's chat
+still carries every fact about the call and simply has no link. (With
+[built-in TLS](deploy.md#built-in-tls) getting its own certificate, the instance *does* know its
+name — a CA just proved it — so `public_url` defaults to `https://` and the first of `[tls]
+domains`.) A *guessed* URL in somebody's chat
 room would be worse than none, and a malformed one is a `400` Discord would make us drop the call
 over — which is why the setting is checked at boot and the instance refuses to start on one that
 is not an absolute `http://` or `https://` address.
@@ -1056,8 +1062,8 @@ let a public site frame a private address.
 
 **And serve it over HTTPS.** Nearly every site is served over https, and a browser will not let an
 https page frame a plain `http://` address — the frame is simply blank. So an embed needs this
-instance reachable at an `https://` address, which today means
-[behind a reverse proxy](#behind-a-reverse-proxy) that terminates TLS. The Embeds screen warns
+instance reachable at an `https://` address — through a tunnel, a proxy, or built-in TLS
+([Putting it on the internet](deploy.md#5-putting-it-on-the-internet)). The Embeds screen warns
 beside any snippet whose address is plain http.
 
 **What it costs.** Loading a page with an embed on it costs this instance one small page (about
@@ -1382,21 +1388,41 @@ useful when you have no shell to grep.
 
 ## Behind a reverse proxy
 
-Set `[server] trusted_proxies` to the proxy's address or CIDR block — Docker's bridge is a
-subnet, so `172.17.0.0/16` is a normal entry:
+Which way to put the instance on the internet — a Cloudflare Tunnel, a reverse proxy, or
+built-in TLS — is [deploy.md's](deploy.md#5-putting-it-on-the-internet). What this section is
+about is the one setting the first two lean on: **whose `X-Forwarded-For` to
+believe.**
+
+`[server] trusted_proxies` is a list of addresses and CIDR blocks. **The default is loopback** —
+`127.0.0.1` and `::1` — which is exactly where a Cloudflare Tunnel or a proxy on the same machine
+relays from, so those work with nothing set. A proxy anywhere else has to be added — Docker's
+bridge is a subnet, so `172.17.0.0/16` is a normal entry — and setting the list replaces the
+default, so keep loopback in it if something on this machine relays too:
 
 ```toml
 [server]
-trusted_proxies = ["127.0.0.1", "172.17.0.0/16"]
+trusted_proxies = ["127.0.0.1", "::1", "172.17.0.0/16"]
 ```
 
-Empty (the default) means `X-Forwarded-For` is **never** read and logs name the TCP peer. That
-is deliberate: the header is attacker-controlled, so believing it from anyone lets a stranger
-forge a recorder's address into your log. When the peer *is* trusted, the address taken is the
-rightmost entry that is not itself a trusted proxy.
+From a peer not in the list, `X-Forwarded-For` is **never** read and logs name the TCP peer.
+That is deliberate: the header is attacker-controlled, so believing it from anyone lets a
+stranger forge a recorder's address into your log. When the peer *is* trusted, the address taken
+is the rightmost entry that is not itself a trusted proxy. `trusted_proxies = []` believes
+nobody at all.
 
-This setting also decides whether the admin session cookie gets marked `Secure`. If you
-terminate TLS at a proxy, you want it set.
+**A raw TCP forwarder is not a proxy.** A tunnel or a reverse proxy *adds* the visitor's address
+to `X-Forwarded-For`; `socat`, `ssh -L` or any plain port-forwarder on this machine passes the
+visitor's own header through untouched, and with loopback trusted, whatever a stranger writes
+there is believed. If that is how you expose the scanner, set `trusted_proxies = []`.
+
+It decides three things, which is why the default changed when the tunnel became the
+recommended way public:
+
+- **The address the log names** for every request.
+- **The address the admin lockout and access-code lockout count.** Behind a tunnel with nobody
+  trusted, every visitor was `127.0.0.1` — one stranger's five bad guesses locked the Operator
+  out of their own admin page, from everywhere, for fifteen minutes.
+- **Whether the admin session cookie is marked `Secure`**, from `X-Forwarded-Proto`.
 
 Proxy the WebSocket too — the live feed, the API and the app are all one origin on one port.
 

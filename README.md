@@ -141,6 +141,12 @@ and the stock `rdioscanner_uploader` plugin works too, needing nothing downloade
 carries less. Those, SDRTrunk, `talkgroupAllow` globs, and how to read upload failures are in
 **[docs/recorders.md](docs/recorders.md)**.
 
+To put it on the internet, a **Cloudflare Tunnel** is the recommended way: nothing to forward on
+your router, no certificate on the Pi, and the scanner believes the tunnel out of the box. A
+reverse proxy works too, and so does the scanner's own Let's Encrypt support for an instance
+with nothing in front of it — all three, side by side, in
+**[docs/deploy.md](docs/deploy.md#5-putting-it-on-the-internet)**.
+
 ## What you get
 
 **Listening.** A live feed that plays Calls as they arrive, filtered to the Talkgroups you

@@ -20,6 +20,14 @@ RadioReference and Trunk Recorder export at.
 
 **Your habits.** Hold, avoid, talkgroup selection, archive search and download are all here.
 
+**Your HTTPS.** `ssl_auto_cert` is `[tls] domains`, `ssl_cert_file` and `ssl_key_file` are
+`[tls] cert_file` and `key_file`, and `ssl_listen` is `[tls] port`. Better on the way: both of
+Let's Encrypt's challenges are answered rather than only the port-443 one, renewals follow the
+CA's own schedule and show on the status page, your own certificate files are picked up when
+they are renewed rather than at the next restart, and the plain port stops serving the whole
+app — admin login included — to the internet. A Cloudflare Tunnel is the simpler road, and the
+recommended one ([docs/deploy.md](deploy.md#5-putting-it-on-the-internet)).
+
 **Access codes — improved rather than copied.** rdio's PIN closes the *whole* instance the
 moment one code exists. Here the gate is on the **channel**: mark the few that need it, hand
 out a code for those, and everything else stays open. Codes are stored hashed (rdio keeps them

@@ -18,7 +18,12 @@ line references so it can be re-checked when those projects move.
 You need two things from the instance:
 
 - **Its address.** `http://<host>:3000` by default. The binary binds `0.0.0.0`, so a recorder
-  on another machine can reach it — check the host's firewall if it can't.
+  on another machine can reach it — check the host's firewall if it can't. **Keep using that
+  address on your LAN** even once the instance is on the internet: with
+  [built-in TLS](deploy.md#built-in-tls) the plain port still serves this machine and your
+  network, and a recorder on the same Pi posting to its own public name needs hairpin NAT many
+  routers lack. A recorder somewhere else uses `https://<your-name>` — and through a Cloudflare
+  Tunnel, mind [Bot Fight Mode](deploy.md#cloudflare-tunnel-recommended).
 - **The ingest API key.** First run generates one and writes it to `.env`; it is never logged,
   so `cat .env` is how you read it back. You can also set `RADIO_SCOUT_API_KEY` yourself to
   anything high-entropy (`openssl rand -hex 16`) — it seeds an instance whose key roster is
@@ -317,7 +322,8 @@ Then the `plugins` entry — beside the uploader's, if you have one:
 ]
 ```
 
-- **`ws://`, not `http://`.** This is a WebSocket. Behind a TLS reverse proxy it is `wss://`.
+- **`ws://`, not `http://`.** This is a WebSocket. Over HTTPS — a tunnel, a proxy, or built-in
+  TLS — it is `wss://`.
 - **Leave `server` out** and it falls back to the recorder's global `statusServer`, which is
   what to do if nothing else is reading that.
 - **A wrong key is refused before the socket opens** — an ordinary `401`, logged on the

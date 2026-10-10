@@ -4,9 +4,10 @@ Radio-Scout is **one file**. The frontend is compiled into the binary, first run
 creates its own database and audio store, and there is nothing else to install —
 no runtime, no ffmpeg, no package manager ([ADR-0007](adr/0007-single-binary-embedded-frontend-distribution.md)).
 
-Four ways in, in the order most people want them. The [README](../README.md)
-covers the quickest of them in a paragraph; this is the whole picture, including
-the ones it skips.
+Four ways in, in the order most people want them, and then
+[how to put it on the internet](#5-putting-it-on-the-internet). The
+[README](../README.md) covers the quickest of them in a paragraph; this is the
+whole picture, including the ones it skips.
 
 Once it is running: [recorders.md](recorders.md) to point a recorder at it,
 [operating.md](operating.md) for storage, retention, enhancement and logging, and
@@ -122,7 +123,10 @@ Notes worth knowing:
 - **The systemd unit is confined.** `ProtectSystem=strict` with a single
   `ReadWritePaths=<base-dir>`, no new privileges, a `@system-service` syscall
   filter, and an empty capability set — except that a port below 1024 gets
-  `CAP_NET_BIND_SERVICE` rather than the whole thing running as root.
+  `CAP_NET_BIND_SERVICE` rather than the whole thing running as root. That
+  includes [built-in TLS](#built-in-tls)'s 443, so **install again after turning
+  it on**: the unit only grants what the configuration it was installed with
+  asked for, and a boot that cannot bind says so, naming the capability.
 - **`--user` is refused on Windows**, where the task runs as the system account:
   a named account would need its password stored alongside the task.
 - **`--database-url` is refused** by `service install` entirely. It routinely
@@ -194,6 +198,212 @@ deletes as it goes.
 when Docker creates it. A *bind mount* (`-v ./data:/data`) does not — the host
 directory keeps its own ownership, and the scanner cannot write to it. Either
 use a named volume, or `chown 65532:65532 ./data` first.
+
+## 5. Putting it on the internet
+
+Out of the box the scanner speaks plain HTTP on port 3000, which is right for a LAN
+and wrong for the internet. Three ways to give it HTTPS and a public name, **in the
+order to try them**:
+
+| | [Cloudflare Tunnel](#cloudflare-tunnel-recommended) | [A reverse proxy](#a-reverse-proxy) | [Built-in TLS](#built-in-tls) |
+| --- | --- | --- | --- |
+| Ports to forward on your router | none | 443, and 80 | 443, or 80 |
+| Works behind CGNAT / no public IP | yes | no | no |
+| A certificate to keep on the Pi | none | the proxy's | the scanner's own |
+| Another program to run | `cloudflared` | Caddy, nginx… | none |
+| Who else sees the traffic | Cloudflare | nobody | nobody |
+
+**Start with the tunnel.** It is what the maintainer runs, and it needs nothing
+opened on your network: `cloudflared` dials *out* to Cloudflare, so there is no
+port to forward, no home IP address published, and it works on the CGNAT
+connections that make forwarding impossible. The other two are for when you would
+rather no third party sat in front of your scanner — and built-in TLS is also
+where rdio-scanner's `ssl_auto_cert` and `ssl_cert_file` went.
+
+Whichever you choose, set [`public_url`](operating.md#webhooks) to the address
+people will use, so share links, embed snippets and webhook links point there
+rather than at your LAN address. (Built-in TLS sets it for you.)
+
+### Cloudflare Tunnel (recommended)
+
+You need a domain whose DNS Cloudflare runs. Then, in the Cloudflare dashboard:
+
+1. **Networking → Tunnels → Create a tunnel**, and name it.
+2. Pick your operating system and **run the install command it shows on the
+   scanner** — `sudo cloudflared service install <token>`. That installs
+   `cloudflared` as a service that comes back at boot, like the scanner does.
+3. On the tunnel's **Routes** tab, **Add route → Published application**: your
+   subdomain and domain, and **Service URL `http://localhost:3000`**.
+
+Then tell the scanner its name, and restart it:
+
+```toml
+[server]
+public_url = "https://scanner.example"
+```
+
+That is all. **Nothing else needs configuring**: `cloudflared` relays every visitor
+from `127.0.0.1`, and loopback is a trusted proxy by default — so the log names
+the real visitor, the admin lockout counts each visitor separately (rather than
+locking *you* out because a stranger guessed five times), and the admin session
+cookie is marked `Secure`. Your recorders on the LAN keep posting to
+`http://<host>:3000` exactly as before; the tunnel is only how the internet gets in.
+
+**In Docker**, run `cloudflared` beside the scanner, sharing its network, so it
+reaches the scanner on `localhost` too and nothing needs trusting:
+
+```yaml
+# docker-compose.yml
+services:
+  radio-scout:
+    image: ghcr.io/fxllencode/radio-scout:latest
+    volumes: ["radio-scout-data:/data"]
+    environment:
+      RADIO_SCOUT_PUBLIC_URL: https://scanner.example
+    ports: ["3000:3000"]          # your LAN and your recorders
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}   # the token from step 2
+    network_mode: service:radio-scout
+volumes:
+  radio-scout-data:
+```
+
+(If `cloudflared` runs on its own network instead, add that network's subnet to
+[`trusted_proxies`](operating.md#behind-a-reverse-proxy) — Docker's networks come
+from `172.16.0.0/12` unless you have changed its address pools.)
+
+Three things worth knowing, all Cloudflare's rather than the scanner's:
+
+- **Cloudflare's terms name audio.** Its CDN terms say that serving "a
+  disproportionate percentage of pictures, audio files, or other large files"
+  without one of its paid products may get your access limited. A scanner serves
+  audio. Short calls at hobby scale are the kind of use many people run without
+  trouble, but that judgment is yours, not ours. If it worries you, keep audio in
+  [S3-compatible storage](operating.md#storage): the scanner then hands each
+  listener a short-lived link straight to the bucket, so call audio never passes
+  through the tunnel. The [station stream](operating.md#the-station-stream) still
+  does, because it is one continuous response from the scanner itself.
+- **A recorder posting from outside your LAN goes through Cloudflare too**, and
+  Bot Fight Mode can answer a non-browser client with a challenge it cannot solve.
+  Uploads then fail with a 403 that never reaches the scanner. Either post over the
+  LAN (a recorder on the same machine should use `http://127.0.0.1:3000` anyway),
+  or add a WAF skip rule for `/api/call-upload` and `/api/trunk-recorder-call-upload`.
+- **To close listening to strangers**, put Cloudflare Access in front of the
+  hostname. That is Cloudflare's login, in front of the whole thing; the scanner's
+  own [access codes](operating.md#gating-sensitive-channels) gate single channels.
+
+### A reverse proxy
+
+If you already run one, point it at port 3000 and proxy the WebSocket too — the
+live feed, the API and the app are one origin. Caddy does certificates, WebSockets
+and the forwarded headers by itself:
+
+```sh
+caddy reverse-proxy --from scanner.example --to localhost:3000
+```
+
+A proxy on the same machine is trusted by default, exactly as a tunnel is. One
+anywhere else has to be named in
+[`trusted_proxies`](operating.md#behind-a-reverse-proxy), or the scanner will not
+believe what it says about who is asking — or that they asked over HTTPS.
+
+### Built-in TLS
+
+The scanner can get and renew its own certificate from Let's Encrypt, with nothing in
+front of it. It is the right choice on a VPS, or at home if you would rather forward
+ports than route through Cloudflare.
+
+```toml
+[tls]
+domains = ["scanner.example"]
+email = "you@example.com"     # optional
+```
+
+The name has to resolve to this machine already, and the internet has to reach it
+on **443** — or on **80**, which Let's Encrypt can use instead. On first boot the
+scanner asks for a certificate. It tries the challenge Let's Encrypt makes on port
+443 first, and falls back to the one on port 80, so either forwarded port is
+enough. Naming a domain accepts the CA's subscriber agreement, and the log links
+it when the account is registered, on the first issuance. From then on:
+
+- **It renews itself**, when Let's Encrypt suggests (ARI) or two-thirds of the way
+  through the certificate's life, with nothing restarted. The certificate is kept
+  in `<base_dir>/tls/`, readable by the scanner's account alone, so a restart serves
+  it again rather than asking for another.
+- **Settings → Admin → Status shows it**: when it expires, when it renews, and the
+  last thing that went wrong in the CA's own words. `/metrics` carries the expiry
+  for an alert. A renewal that fails is an ERROR in the log every time it is
+  tried; the old certificate keeps working meanwhile, and the page gets louder as
+  expiry nears.
+- **Try it on Let's Encrypt's staging CA first**, if you are unsure of your DNS or
+  ports: add `directory = "https://acme-staging-v02.api.letsencrypt.org/directory"`.
+  Browsers will not trust that certificate, but a mistake will not use up your real
+  rate limit. Remove the line to switch, and a real certificate is issued.
+
+**Port 3000 does not go away** when TLS comes on, and it does not stay open to the
+internet either. It answers by who is asking:
+
+| Who | What they get on the plain port |
+| --- | --- |
+| This machine, your LAN, a Tailscale network (carrier-NAT space, `100.64.0.0/10`) | the whole app, exactly as before |
+| Let's Encrypt, checking a challenge | the answer it is owed |
+| Anyone else | a redirect to `https://` |
+
+(Carrier-NAT space is where Tailscale numbers a tailnet, and it is also where some ISPs put
+customers who can reach one another. If yours is one, do not expose `[server] port`.)
+
+So a recorder on the same Pi keeps posting to `http://127.0.0.1:3000`, which matters
+because posting to your own public name from inside your network needs "hairpin
+NAT" that many home routers do not do. And on a VPS nothing but the redirect is
+reachable over plain HTTP. (rdio-scanner keeps serving the whole app, admin login
+included, on its plain port to everyone.)
+
+**Ports.** HTTPS listens on `[tls] port`, 443 by default. On Linux a port below 1024
+needs root or a capability: `radio-scout service install` grants it when the
+configuration asks for one, as above. Behind a home router, forward 443 to the
+scanner's `[tls] port` and, if you want the redirect and the port-80 challenge, 80
+to its `[server] port`. The internal numbers can be anything.
+
+**In Docker**, publish 443, and the plain port to your LAN only. Docker lets the
+image's account bind 443 inside the container, so nothing else is needed:
+
+```sh
+docker run -d -p 443:443 -p 192.168.1.5:3000:3000 \
+  -e RADIO_SCOUT_TLS_DOMAINS=scanner.example \
+  -v radio-scout-data:/data ghcr.io/fxllencode/radio-scout:latest
+```
+
+Publish the plain port to the internet (`-p 80:3000`) only on standard Docker on
+Linux. The plain port tells a stranger from a neighbour by the address the
+connection comes from. Standard Docker hands the container the real one; rootless
+Docker and Docker Desktop show every connection as coming from a private gateway,
+which the scanner would take for your LAN.
+
+**Your own certificate** instead — certbot's, `tailscale cert`'s, a wildcard you
+already have:
+
+```toml
+[tls]
+cert_file = "/etc/letsencrypt/live/scanner.example/fullchain.pem"
+key_file = "/etc/letsencrypt/live/scanner.example/privkey.pem"
+```
+
+The files are **read again every minute**, so when certbot renews them the scanner
+serves the new certificate without a restart. (rdio reads them once, at boot.) A file
+caught half-written keeps the old certificate in service and says so.
+
+**What refuses to boot**, so it is not found out from a browser later: a wildcard
+name (that needs a DNS challenge, which the scanner does not do), an IP address in
+place of a name, a name that is not one, an ACME directory that is not `https://`,
+a certificate file without its key or the other way round, both `domains` and your
+own files at once, `[tls] port` the same as `[server] port`, and — once the rest is
+fine — certificate files that cannot be read. Each says which setting, and why.
+
+**Coming from rdio-scanner**: `ssl_auto_cert` is `[tls] domains`, `ssl_cert_file`
+and `ssl_key_file` are `cert_file` and `key_file`, and `ssl_listen` is `[tls] port`.
 
 ---
 
