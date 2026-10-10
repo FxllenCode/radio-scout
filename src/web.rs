@@ -59,7 +59,10 @@ pub async fn spa_handler(State(state): State<AppState>, uri: Uri) -> Response {
         return (StatusCode::NOT_FOUND, "not found\n").into_response();
     }
 
+    // The shell asked for by name is still the shell, and titled like one — it is
+    // the copy the service worker precaches (#77).
     if !path.is_empty()
+        && path != "index.html"
         && let Some(asset) = Assets::get(path)
     {
         return asset_response(path, asset.data.into_owned());
@@ -68,7 +71,7 @@ pub async fn spa_handler(State(state): State<AppState>, uri: Uri) -> Response {
     match Assets::get("index.html") {
         Some(index) => (
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            named_shell(&index.data, state.identity.held().settings.name.as_deref()),
+            named_shell(&index.data, state.identity.named().as_deref()),
         )
             .into_response(),
         None => Html(FALLBACK_HTML).into_response(),
@@ -111,7 +114,7 @@ pub const MANIFEST_PATH: &str = "/manifest.webmanifest";
 pub async fn manifest(State(state): State<AppState>) -> Response {
     manifest_or_nothing(
         Assets::get(MANIFEST_PATH.trim_start_matches('/')).map(|asset| asset.data.into_owned()),
-        state.identity.held().settings.name.as_deref(),
+        state.identity.named().as_deref(),
     )
 }
 

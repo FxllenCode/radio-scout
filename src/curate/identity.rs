@@ -26,12 +26,6 @@ pub const MAX_NAME_CHARS: usize = 64;
 /// screen has been left alone, and a dimmer that never arrives is `0`.
 pub const MAX_DIMMER_SECS: u32 = 60 * 60;
 
-/// `GET /api/admin/instance` — the document every Listener is sent, because
-/// nothing in it is the Operator's alone.
-pub async fn show(State(state): State<AppState>) -> InstanceDocument {
-    state.identity.held().into()
-}
-
 /// A change to the settings: an absent field is left alone, and `null` (or a
 /// blank string) clears the two that can be cleared.
 #[derive(Debug, Default, Deserialize)]
@@ -92,12 +86,18 @@ fn apply(settings: &mut Settings, patch: SettingsPatch) -> Result<(), Rejected> 
 /// a header.
 fn instance_name(raw: Option<String>) -> Result<Option<String>, Rejected> {
     let name = optional_text(raw);
-    match name {
-        Some(name) if name.chars().count() > MAX_NAME_CHARS => Err(Rejected::TooLong {
-            field: "name",
-            most: MAX_NAME_CHARS,
-        }),
-        name => Ok(name),
+    if let Some(name) = &name {
+        at_most(name, "name", MAX_NAME_CHARS)?;
+    }
+    Ok(name)
+}
+
+/// Text no longer than `most` **characters** — not bytes, because a name or a
+/// page in another script is not shorter for being multi-byte.
+fn at_most(text: &str, field: &'static str, most: usize) -> Result<(), Rejected> {
+    match text.chars().count() > most {
+        true => Err(Rejected::TooLong { field, most }),
+        false => Ok(()),
     }
 }
 
@@ -206,12 +206,7 @@ fn publishable(markdown: &str) -> Result<String, Rejected> {
     if markdown.trim().is_empty() {
         return Err(Rejected::Blank { field: "markdown" });
     }
-    if markdown.chars().count() > reference::MAX_CHARS {
-        return Err(Rejected::TooLong {
-            field: "markdown",
-            most: reference::MAX_CHARS,
-        });
-    }
+    at_most(markdown, "markdown", reference::MAX_CHARS)?;
     Ok(markdown.to_owned())
 }
 

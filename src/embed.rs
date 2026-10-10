@@ -182,15 +182,12 @@ pub async fn feed(
         .await
         .map_err(Stage::OpenEmbed.failed())?;
 
-    let identity = state.identity.held().settings;
     Ok(Feed {
         name: embed.name,
         selection,
         calls,
-        site: identity
-            .name
-            .unwrap_or_else(|| crate::identity::PRODUCT_NAME.to_owned()),
-        time_format: identity.time_format,
+        site: state.identity.name(),
+        time_format: state.identity.time_format(),
     })
 }
 

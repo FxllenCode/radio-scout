@@ -18,7 +18,7 @@
  * - **Storage being denied is a supported state.** Safari in private mode
  *   throws on `getItem`/`setItem`; the scanner still runs, just unremembered.
  */
-import type { PanelMemory, PanelSort } from './panel'
+import { PANEL_SORTS, type PanelMemory, type PanelSort } from './panel'
 import type { Avoids, Hold, Selection } from './selection'
 
 /** Prefix for every key this app owns in local storage. */
@@ -171,27 +171,41 @@ export function panelKey(namespace: string): string {
 export function loadPanel(storage: Storage, namespace: string): Partial<PanelMemory> {
   const stored = parseStored(storage, panelKey(namespace))
   if (!isRecord(stored)) return {}
+  const order = chosenOrder(stored)
 
   return {
-    ...(isSort(stored.sort) ? { sort: stored.sort } : {}),
+    ...(order ? { sort: order } : {}),
     ...(isKeyList(stored.pinned) ? { pinned: stored.pinned } : {}),
     ...(isExpanded(stored.expanded) ? { expanded: stored.expanded } : {}),
   }
 }
 
-/** Remember how the panel is arranged for `namespace`. */
+/** Remember how the panel is arranged for `namespace` — the order as
+ *  `order`, and only when the Listener chose one ([`chosenOrder`]). */
 export function savePanel(
   storage: Storage,
   namespace: string,
-  panel: PanelMemory,
+  { sort, ...panel }: PanelMemory,
 ): void {
-  writeStored(storage, panelKey(namespace), JSON.stringify(panel))
+  writeStored(storage, panelKey(namespace), JSON.stringify({ ...panel, order: sort }))
 }
 
-const SORTS: readonly PanelSort[] = ['name', 'active', 'ref']
-
 const isSort = (value: unknown): value is PanelSort =>
-  SORTS.includes(value as PanelSort)
+  PANEL_SORTS.includes(value as PanelSort)
+
+/**
+ * The order this Profile **chose**, if it chose one (#77).
+ *
+ * Stored as `order` since #77, and written only by a choice. Before that it
+ * was `sort`, written with the default `name` by every Profile that pinned or
+ * folded anything — so an old `name` proves nothing and is read as no choice,
+ * which lets that Profile follow the Operator's order. An old `active` was
+ * never a default, so it was chosen, and is kept.
+ */
+function chosenOrder(stored: Record<string, unknown>): PanelSort | undefined {
+  if (isSort(stored.order)) return stored.order
+  return stored.sort === 'active' ? 'active' : undefined
+}
 
 /** Every **Pin** names a Talkgroup, or the panel would hold up a row it cannot
  *  draw — [`isAvoids`]'s lesson, one key at a time. */

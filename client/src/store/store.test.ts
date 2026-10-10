@@ -461,7 +461,7 @@ describe('remembering how the panel is arranged (#57, spec US 29)', () => {
     store.dispatch(sortPanel('active'))
 
     expect(storage.getItem(panelKey('truck'))).toBe(
-      JSON.stringify({ pinned: ['11:100'], expanded: { 11: false }, sort: 'active' }),
+      JSON.stringify({ pinned: ['11:100'], expanded: { 11: false }, order: 'active' }),
     )
     expect(reopened(storage, 'truck')).toEqual({
       sort: 'active',
@@ -483,6 +483,23 @@ describe('remembering how the panel is arranged (#57, spec US 29)', () => {
 
     store.dispatch(sortPanel('ref'))
     expect(reopened(storage, 'truck').sort).toBe('ref')
+  })
+
+  /**
+   * Before #77 every Profile that pinned or folded anything stored the
+   * default `sort: 'name'` alongside it, chosen or not — so a stored `name`
+   * proves nothing, and reading it as a choice would keep half the Listeners
+   * off the Operator's order forever. `active` was never a default, so it was
+   * chosen. Choices since are stored as `order`, which only a choice writes.
+   */
+  it.each([
+    ['an old default it never chose', '{"sort":"name","pinned":["11:100"]}', undefined],
+    ['an old order it did choose', '{"sort":"active"}', 'active'],
+    ['an order chosen since', '{"order":"ref","sort":"active"}', 'ref'],
+  ])('reads %s', (_what, stored, sort) => {
+    const { storage } = fakeStorage({ [panelKey('default')]: stored })
+
+    expect(reopened(storage).sort).toBe(sort)
   })
 
   it('is independent per Profile, like everything else in one', () => {

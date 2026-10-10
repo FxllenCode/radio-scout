@@ -255,8 +255,18 @@ impl Identity {
 
     /// What this Instance is called — the Operator's name, or the product's.
     pub fn name(&self) -> String {
+        self.named().unwrap_or_else(|| PRODUCT_NAME.to_owned())
+    }
+
+    /// The Operator's name for it, if they gave one — for a surface that adds
+    /// nothing when there is none, where [`Identity::name`] always says something.
+    pub fn named(&self) -> Option<String> {
         self.reading(|held| held.settings.name.clone())
-            .unwrap_or_else(|| PRODUCT_NAME.to_owned())
+    }
+
+    /// How the Operator writes a time.
+    pub fn time_format(&self) -> TimeFormat {
+        self.reading(|held| held.settings.time_format)
     }
 
     /// Whether Listeners are told how many people are listening.

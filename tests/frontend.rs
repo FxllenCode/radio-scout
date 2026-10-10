@@ -156,8 +156,15 @@ async fn a_named_instance_installs_under_its_name() {
     assert_eq!(manifest["short_name"], "Fulton Scanner");
     assert_eq!(manifest["display"], "standalone", "and the rest as built");
 
-    let shell = app.get("/").await.text().await.expect("the shell");
-    assert!(shell.contains("<title>Fulton Scanner</title>"), "{shell}");
+    // ...at the root, and asked for by name — the copy the service worker
+    // precaches.
+    for path in ["/", "/index.html"] {
+        let shell = app.get(path).await.text().await.expect("the shell");
+        assert!(
+            shell.contains("<title>Fulton Scanner</title>"),
+            "{path}: {shell}"
+        );
+    }
 }
 
 /// Content-hashed assets are served with a long-lived immutable cache header.

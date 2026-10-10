@@ -61,12 +61,6 @@ async fn what_an_operator_saves_every_listener_reads_and_a_restart_keeps() {
     });
     assert_eq!(saved, expected);
     assert_eq!(app.get_json("/api/instance").await, expected);
-    // ...and the admin surface's own read is the same document, because
-    // nothing in it is the Operator's alone.
-    assert_eq!(
-        app.admin_get("/api/admin/instance").await,
-        (200, expected.clone())
-    );
 
     app.restart().await;
     assert_eq!(app.get_json("/api/instance").await, expected);

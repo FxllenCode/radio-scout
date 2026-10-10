@@ -123,9 +123,29 @@ export function connectLiveFeed(
   function open() {
     handlers.onStatus('connecting')
     socket = new WebSocket(liveFeedUrl(location, grant))
+    /**
+     * Whether the server *took this connection in* — greeted it, and did not
+     * turn it away (#77). Only such a connection resets the backoff when it
+     * drops. "It opened" is not enough: a full Instance opens the socket before
+     * saying no, so a client that reset on open would knock again a second
+     * later, every second, on the very Pi the cap exists to protect. Refused
+     * wins over greeted, whatever order they came in.
+     */
+    let greeted = false
+    let turnedAway = false
+    const heard: LiveFeedHandlers = {
+      ...handlers,
+      onHello: () => {
+        greeted = true
+        handlers.onHello()
+      },
+      onRefused: (reason) => {
+        turnedAway = true
+        handlers.onRefused(reason)
+      },
+    }
 
     socket.onopen = () => {
-      retry = retryMs
       handlers.onStatus('connected')
       // Re-sent on every connection: the server holds the matrix per socket, so
       // a reconnect starts from nothing until we say otherwise — and a
@@ -134,11 +154,14 @@ export function connectLiveFeed(
       reconnecting = false
     }
 
-    socket.onmessage = (event) => receive(handlers, event.data)
+    socket.onmessage = (event) => receive(heard, event.data)
 
     socket.onclose = () => {
       handlers.onStatus('offline')
       if (closed) return
+      // A connection that was taken in starts the next drop's waiting afresh;
+      // one that was turned away keeps doubling it.
+      if (greeted && !turnedAway) retry = retryMs
       reconnecting = true
       retryTimer = setTimeout(open, retry)
       retry = Math.min(retry * 2, MAX_RETRY_MS)

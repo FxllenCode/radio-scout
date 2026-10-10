@@ -246,10 +246,9 @@ pub fn routes() -> Router<AppState> {
         )
         // **The Instance identity** (#77) — one form's settings, and the
         // **Reference page** published whole beside them.
-        .route(
-            "/api/admin/instance",
-            get(identity::show).patch(identity::update),
-        )
+        // No read of its own: `GET /api/instance` is the same document, since
+        // nothing in it is the Operator's alone.
+        .route("/api/admin/instance", patch(identity::update))
         .route(
             "/api/admin/reference",
             get(identity::editor)

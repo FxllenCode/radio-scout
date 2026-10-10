@@ -238,6 +238,26 @@ describe('live feed client', () => {
     await vi.waitFor(() => expect(recorder.refusals).toEqual(['instance-full']))
   })
 
+  /** A full Instance (#77) opens the socket before it says no, so a client
+   *  that took "opened" for "welcome" would knock again a second later, every
+   *  second, on the very Pi the cap protects. Turned away is a drop like any
+   *  other: the wait doubles. */
+  it('backs off while it is being turned away', async () => {
+    const at: number[] = []
+    onConnect = (client) => {
+      at.push(performance.now())
+      client.send(JSON.stringify({ t: 'refused', reason: 'instance-full' }))
+      setTimeout(() => client.close(), 0)
+    }
+    connect({ retryMs: 20 })
+
+    await vi.waitFor(() => expect(at.length).toBeGreaterThanOrEqual(4), { timeout: 3_000 })
+    const gaps = at.slice(1).map((when, index) => when - at[index])
+    // 20, 40, 80 ms: the third wait is four times the first, where a reset on
+    // every open would keep them all at 20.
+    expect(gaps[2]).toBeGreaterThan(gaps[0] * 2.5)
+  })
+
   /** A greeting is the server taking the connection in — what ends being
    *  turned away. */
   it('says when the server took it in', async () => {

@@ -136,6 +136,9 @@ export const COLLAPSE_ABOVE = 50
  */
 export type PanelSort = DefaultPanelSort
 
+/** Every order there is — what a stored order is checked against. */
+export const PANEL_SORTS: readonly PanelSort[] = ['name', 'ref', 'active']
+
 /**
  * How the panel is *arranged*, and the whole of what is remembered about it
  * (`lib/persist`, `store/panel`).

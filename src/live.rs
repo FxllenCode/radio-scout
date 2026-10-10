@@ -825,11 +825,7 @@ async fn handle_socket(mut socket: impl Socket, state: AppState, viewer: crate::
     // the problem. Held as a guard for the slot's reason.
     let _seat = match state.seats.take() {
         Ok(seat) => seat,
-        Err(full) => {
-            state.metrics.refuse(&full);
-            let _ = socket.send(Outbound::Text(refused_frame(&full))).await;
-            return;
-        }
+        Err(full) => return turn_away(&mut socket, &state, &full).await,
     };
     // **The code's connection limit** (#68). Held as a guard, so
     // the slot comes back however this ends — a close frame, a socket error, a
@@ -840,14 +836,7 @@ async fn handle_socket(mut socket: impl Socket, state: AppState, viewer: crate::
     let held = match viewer.code() {
         Some(code) => match state.access.hold(code) {
             Ok(held) => Some(held),
-            Err(refused) => {
-                state.metrics.refuse(&refused);
-                // Said out loud and then closed. rdio tells its client `max` and
-                // carries on serving it, because by then it has already assigned
-                // the scope.
-                let _ = socket.send(Outbound::Text(refused_frame(&refused))).await;
-                return;
-            }
+            Err(refused) => return turn_away(&mut socket, &state, &refused).await,
         },
         None => None,
     };
@@ -864,6 +853,18 @@ async fn handle_socket(mut socket: impl Socket, state: AppState, viewer: crate::
     // meaning.
     let connected_ms = connected_at.elapsed().as_millis() as u64;
     info!(connected_ms, "live-feed listener disconnected");
+}
+
+/// Turn a connection away before it is served: write the refusal down, count
+/// it, and tell the client why — a full Instance (#77) or a code at its limit
+/// (#68) — after which the socket is dropped.
+///
+/// Said out loud and then closed. rdio closes a full Instance's socket without
+/// a word, and tells a code over its limit `max` and then carries on serving
+/// it, because by then it has already assigned the scope.
+async fn turn_away(socket: &mut impl Socket, state: &AppState, why: &crate::failure::Reason) {
+    state.metrics.refuse(why);
+    let _ = socket.send(Outbound::Text(refused_frame(why))).await;
 }
 
 /// Which source woke the loop. One step short of an [`Event`], because the
