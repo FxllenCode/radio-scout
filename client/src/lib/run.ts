@@ -170,6 +170,19 @@ const nextWindow = (run: Run): RunWindow => ({
   offset: run.from + run.limit,
 })
 
+/**
+ * Has this Run, played out, caught up with the present? (#77)
+ *
+ * What decides **playback goes live**: only a Run walking forwards through
+ * history with no upper bound ends at *now*. Newest-first ends at the oldest
+ * Call there is, a search bounded by `before` ends at that moment, and an
+ * interruption was a single Call over a live feed that never stopped — none of
+ * those is a place the live feed takes up from.
+ */
+export function reachesNow(run: Run): boolean {
+  return !run.interrupting && run.search.sort === 'oldest' && run.search.before === undefined
+}
+
 /** The gestures a Run answers to. */
 export type RunEvent =
   /** The Listener tapped the `index`-th row of a page of `search`. */

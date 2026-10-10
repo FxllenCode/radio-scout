@@ -5,6 +5,7 @@ import type { Call } from '@/types'
 import type { LiveStatus, Subscription } from '@/lib/liveFeed'
 
 import { feedPlays } from '@/lib/feed'
+import { reachesNow } from '@/lib/run'
 import { stripView, type Strip, type StripReturn } from '@/lib/strip'
 
 import {
@@ -382,10 +383,27 @@ export const wayBackAction = {
   'leave-playback': enterLiveFeed,
 } satisfies Record<StripReturn, unknown>
 
-/** Skip forward: the next archive result, or the next Call in the queue. */
+/**
+ * Skip forward: the next archive result, or the next Call in the queue.
+ *
+ * `goesLive` is the Operator's **playback goes live** (#77): a **Run** walking
+ * forwards that has just played out its last Call has caught up with the
+ * present, and the live feed takes over from there instead of the audio
+ * stopping in an Archive with nothing left in it. A parameter rather than read
+ * from the store, because it is the **Instance identity**'s and that is the
+ * server's document, not a slice this module owns.
+ */
 export const nextCall =
-  () => (dispatch: AppDispatch, getState: () => TransportRoot) => {
-    dispatch(selectIsLiveSource(getState()) ? advance() : next())
+  (goesLive: boolean) =>
+  (dispatch: AppDispatch, getState: () => TransportRoot) => {
+    if (selectIsLiveSource(getState())) {
+      dispatch(advance())
+      return
+    }
+    const walked = getState().playback.run
+    dispatch(next())
+    const ranOut = walked !== null && getState().playback.run === null
+    if (goesLive && ranOut && reachesNow(walked)) dispatch(enterLiveFeed())
   }
 
 /**

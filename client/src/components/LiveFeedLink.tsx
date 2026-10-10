@@ -11,8 +11,11 @@ import {
   connecting,
   disconnected,
   gapped,
+  greeted,
   lagged,
+  listenersCounted,
   received,
+  refusedBy,
   selectFeedStatus,
   selectSince,
 } from '@/store/live'
@@ -75,6 +78,9 @@ export function LiveFeedLink() {
         onCall: (call, seq) => dispatch(received(call, seq)),
         onLagged: (skipped) => dispatch(lagged(skipped)),
         onGap: () => dispatch(gapped()),
+        onListeners: (count) => dispatch(listenersCounted(count)),
+        onRefused: (reason) => dispatch(refusedBy(reason)),
+        onHello: () => dispatch(greeted()),
         // Read at send time, not subscribe time: the cursor moves with every
         // Call and only matters when the socket comes back (ADR-0004). Turning
         // the feed off clears it, so coming back subscribes from now.

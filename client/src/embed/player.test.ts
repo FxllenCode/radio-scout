@@ -28,6 +28,8 @@ function feed(...calls: Call[]): EmbedFeed {
     name: 'Fire dispatch',
     selection: { all: false, sel: { 11: { 100: true } } },
     calls,
+    site: 'Radio-Scout',
+    timeFormat: '24h',
   }
 }
 
@@ -235,6 +237,27 @@ describe('listening live', () => {
     expect(step(connecting, { type: 'status', status: 'connecting' })).toBe(
       connecting,
     )
+  })
+
+  /** A full scanner (#77) turns the page away like any other Listener, and
+   *  takes it in again when a seat frees — a greeting is what says so. */
+  it('is turned away by a full scanner until a seat frees', () => {
+    const full = step(listening(), { type: 'refused' })
+    expect(full.turnedAway).toBe(true)
+    expect(step(full, { type: 'refused' })).toBe(full)
+
+    const seated = step(full, { type: 'greeted' })
+    expect(seated.turnedAway).toBe(false)
+    expect(step(seated, { type: 'greeted' })).toBe(seated)
+  })
+
+  /** ...and stopping forgets it, so pressing listen again starts clean; a
+   *  refusal for a socket already closed says nothing. */
+  it('forgets being turned away when the reader stops', () => {
+    const stopped = step(step(listening(), { type: 'refused' }), { type: 'stop' })
+
+    expect(stopped.turnedAway).toBe(false)
+    expect(step(stopped, { type: 'refused' })).toBe(stopped)
   })
 
   /** A late status from a socket the reader already closed must not light the

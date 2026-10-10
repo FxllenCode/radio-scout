@@ -40,6 +40,29 @@ describe('led palette', () => {
     expect(Object.keys(LED_HEX).sort()).toEqual([...LED_ORDER].sort())
   })
 
+  /** #77 doubled the palette (spec US 56), and doubled it *after* rdio's
+   *  eight: the fallback indexes by a hash modulo the length, so appending is
+   *  what keeps every talkgroup whose hash lands in the first half on the colour
+   *  it already had. Re-sorting the sixteen would repaint the whole archive. */
+  it('keeps rdio-scanner\'s eight first, in their order', () => {
+    expect(LED_ORDER).toHaveLength(16)
+    expect(LED_ORDER.slice(0, 8)).toEqual([
+      'blue',
+      'cyan',
+      'green',
+      'magenta',
+      'orange',
+      'red',
+      'white',
+      'yellow',
+    ])
+  })
+
+  it('reaches every colour of the sixteen', () => {
+    const seen = new Set(Array.from({ length: 64 }, (_, i) => ledForTalkgroup(1, i)))
+    expect(seen.size).toBe(16)
+  })
+
   it('spreads talkgroups across more than one color', () => {
     const seen = new Set(
       Array.from({ length: 40 }, (_, i) => ledForTalkgroup(1, i)),
@@ -71,7 +94,7 @@ describe('ledForCall', () => {
     }
   })
 
-  it.each(['purple', '#ff0000', '', '   ', 'led-red'])(
+  it.each(['puce', '#ff0000', '', '   ', 'led-red'])(
     'falls back rather than trusting an off-palette %o',
     (led) => {
       // The server validates on import, so this is a hand-edited or

@@ -21,6 +21,7 @@ import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
 import { useShareLink } from '@/hooks/useShareLink'
+import { useClock } from '@/hooks/useInstance'
 import { formatCallTime, formatDuration } from '@/lib/archive'
 import { CATCHUP_RATE } from '@/lib/catchup'
 import { systemName, talkgroupName } from '@/lib/call'
@@ -119,6 +120,7 @@ const SHARED = 'shared'
  * that arithmetic; this screen draws it and listens.
  */
 export function DvrScreen() {
+  const clock = useClock()
   const dispatch = useAppDispatch()
   const [params, setParams] = useSearchParams()
 
@@ -400,10 +402,10 @@ export function DvrScreen() {
             </p>
             <p className="truncate font-mono text-[11px] text-muted-foreground">
               {current
-                ? `${systemName(current)} · ${formatCallTime(playingAt)} · ${
+                ? `${systemName(current)} · ${formatCallTime(playingAt, clock)} · ${
                     position.index + 1
                   } of ${position.total}`
-                : `${formatCallTime(view.at)} onwards`}
+                : `${formatCallTime(view.at, clock)} onwards`}
             </p>
           </div>
           {current && (

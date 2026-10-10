@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button'
 import { useGrant } from '@/hooks/useGrant'
 import { useShareLink } from '@/hooks/useShareLink'
 import { useWindowedRows } from '@/hooks/useWindowedRows'
+import { useInstance } from '@/hooks/useInstance'
 import { accessOf, lockedCount } from '@/lib/access'
 import { avoidMinutesLeft } from '@/lib/avoiding'
 import {
@@ -167,7 +168,10 @@ export function TalkgroupsScreen() {
   // next, and `store/panel`'s rule is that nothing in it can (#58).
   const priority = useAppSelector(selectPriority)
   const expanded = useAppSelector(selectExpandedSystems)
-  const sort = useAppSelector(selectPanelSort)
+  // The order this Profile chose, or — until it chooses — the one the Operator
+  // set for everybody (#77). A Listener's own choice always wins.
+  const operatorSort = useInstance().panelSort
+  const sort = useAppSelector(selectPanelSort) ?? operatorSort
   // Refetched when the Listener comes back to this screen and the answer is
   // more than a minute old (#57): the last-heard ages are measured from the
   // moment the catalog was read, so a panel opened after lunch would otherwise
@@ -433,6 +437,9 @@ function SortToggle({
 }) {
   const options: { value: PanelSort; label: string; name: string }[] = [
     { value: 'name', label: 'A–Z', name: 'Sort by name' },
+    // By TGID (#77) — the order a RadioReference listing is in, and what an
+    // rdio Operator's admin order usually was.
+    { value: 'ref', label: 'TGID', name: 'Sort by talkgroup ID' },
     {
       value: 'active',
       label: 'Active',

@@ -97,18 +97,30 @@ describe('msToDateTimeLocal', () => {
 
 describe('formatCallTime', () => {
   it('formats in the listener timezone with fixed-width fields', () => {
-    expect(formatCallTime(Date.parse('2026-07-25T14:32:05'))).toBe(
+    expect(formatCallTime(Date.parse('2026-07-25T14:32:05'), '24h')).toBe(
       '2026-07-25 14:32:05',
     )
     // Single-digit parts are padded so a list of calls stays aligned.
-    expect(formatCallTime(Date.parse('2026-01-02T03:04:05'))).toBe(
+    expect(formatCallTime(Date.parse('2026-01-02T03:04:05'), '24h')).toBe(
       '2026-01-02 03:04:05',
     )
   })
 
+  /** The Operator's twelve-hour clock (#77), still fixed-width — midnight and
+   *  noon are the two hours a naive `% 12` gets wrong. */
+  it.each([
+    ['2026-07-25T14:32:05', '2026-07-25 02:32:05 PM'],
+    ['2026-07-25T00:15:00', '2026-07-25 12:15:00 AM'],
+    ['2026-07-25T12:00:00', '2026-07-25 12:00:00 PM'],
+    ['2026-07-25T11:59:59', '2026-07-25 11:59:59 AM'],
+    ['2026-07-25T23:00:00', '2026-07-25 11:00:00 PM'],
+  ])('writes %s on a twelve-hour clock as %s', (at, written) => {
+    expect(formatCallTime(Date.parse(at), '12h')).toBe(written)
+  })
+
   it('shows a dash when a call has no time', () => {
-    expect(formatCallTime(undefined)).toBe('—')
-    expect(formatCallTime(Number.NaN)).toBe('—')
+    expect(formatCallTime(undefined, '24h')).toBe('—')
+    expect(formatCallTime(Number.NaN, '12h')).toBe('—')
   })
 })
 

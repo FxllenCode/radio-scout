@@ -10,6 +10,25 @@ import {
 } from './heatmap'
 import type { Series } from '@/types'
 
+import { hourMark, hourName } from './heatmap'
+
+/** The column names follow the Operator's clock (#77) — midnight and noon
+ *  being the two a naive `% 12` gets wrong. */
+describe('an hour of the day, on either clock', () => {
+  it.each([
+    [0, '00:00', '00', '12 AM', '12a'],
+    [3, '03:00', '03', '3 AM', '3a'],
+    [12, '12:00', '12', '12 PM', '12p'],
+    [15, '15:00', '15', '3 PM', '3p'],
+    [23, '23:00', '23', '11 PM', '11p'],
+  ])('names hour %i', (hour, name24, mark24, name12, mark12) => {
+    expect(hourName(hour, '24h')).toBe(name24)
+    expect(hourMark(hour, '24h')).toBe(mark24)
+    expect(hourName(hour, '12h')).toBe(name12)
+    expect(hourMark(hour, '12h')).toBe(mark12)
+  })
+})
+
 /** A local instant, so every assertion below is about the Listener's own clock
  *  rather than about whichever timezone the run happens to be in. */
 const localHour = (

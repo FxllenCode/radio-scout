@@ -6,7 +6,7 @@
  * status means to an Operator — are tested without a DOM, and so the screen
  * never offers a field the server would ignore or refuse.
  */
-import type { AdminDirwatch, DirwatchFormat, DirwatchStatus } from '@/types'
+import type { AdminDirwatch, DirwatchFormat, DirwatchStatus, TimeFormat } from '@/types'
 
 import { formatCallTime } from './archive'
 
@@ -86,13 +86,13 @@ const STATUS: Record<DirwatchStatus, string> = {
 }
 
 /** A watch's health as one line. */
-export function healthLine(row: AdminDirwatch): string {
+export function healthLine(row: AdminDirwatch, clock: TimeFormat): string {
   const parts = [formatChoice(row.format).label, STATUS[row.health.status]]
   if (row.deleteAfter) parts.push('deletes as it goes')
   parts.push(
     row.health.lastIngestMs == null
       ? `${row.health.ingested} ingested`
-      : `${row.health.ingested} ingested, last ${formatCallTime(row.health.lastIngestMs)}`,
+      : `${row.health.ingested} ingested, last ${formatCallTime(row.health.lastIngestMs, clock)}`,
   )
   if (row.health.refused > 0) {
     parts.push(

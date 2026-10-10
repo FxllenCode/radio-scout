@@ -14,6 +14,7 @@ import {
 import {
   enterPlaybackMode,
   selectCurrentCall,
+  selectPlaybackMode,
   startRun,
   toggleHurry,
 } from './playback'
@@ -158,7 +159,7 @@ describe('transport', () => {
     it('walks the live queue when the feed owns the audio', () => {
       const store = listening(call(1), call(2))
 
-      store.dispatch(nextCall())
+      store.dispatch(nextCall(false))
 
       expect(selectLiveCall(store.getState())).toEqual(call(2))
     })
@@ -168,7 +169,7 @@ describe('transport', () => {
       store.dispatch(enterPlaybackMode())
       store.dispatch(startRun({ search: {}, page: searchPage(), index: 0 }))
 
-      store.dispatch(nextCall())
+      store.dispatch(nextCall(false))
 
       expect(selectCurrentCall(store.getState())).toEqual(ARCHIVE[1])
     })
@@ -203,11 +204,47 @@ describe('transport', () => {
       expect(selectCurrentCall(store.getState())).toEqual(ARCHIVE[0])
     })
 
+    /** **Playback goes live** (#77): a forwards Run that plays out hands the
+     *  audio to the live feed when the Operator says so — and stays in the
+     *  Archive, as it always has, when they do not. */
+    it.each([
+      [true, 'live'],
+      [false, 'playback'],
+    ] as const)('a Run that reaches now, with going live %s, ends in %s', (goesLive, mode) => {
+      const store = makeStore()
+      store.dispatch(enterPlaybackMode())
+      store.dispatch(
+        startRun({ search: { sort: 'oldest' }, page: searchPage(), index: ARCHIVE.length - 1 }),
+      )
+
+      store.dispatch(nextCall(goesLive))
+
+      expect(selectPlaybackMode(store.getState())).toBe(mode)
+    })
+
+    /** ...but only a Run that has *run out*: one still walking, or one that
+     *  ended somewhere in the past, leaves the Listener where they were. */
+    it('goes live only from a Run that reached the present', () => {
+      const store = makeStore()
+      store.dispatch(enterPlaybackMode())
+      store.dispatch(startRun({ search: { sort: 'newest' }, page: searchPage(), index: ARCHIVE.length - 1 }))
+
+      store.dispatch(nextCall(true))
+
+      expect(selectPlaybackMode(store.getState())).toBe('playback')
+
+      store.dispatch(startRun({ search: { sort: 'oldest' }, page: searchPage(), index: 0 }))
+      store.dispatch(nextCall(true))
+
+      expect(selectPlaybackMode(store.getState())).toBe('playback')
+      expect(selectCurrentCall(store.getState())).toEqual(ARCHIVE[1])
+    })
+
     it('does nothing at all when neither source is playing', () => {
       const store = makeStore()
       const before = store.getState()
 
-      store.dispatch(nextCall())
+      store.dispatch(nextCall(false))
       store.dispatch(previousCall())
 
       expect(store.getState().live).toEqual(before.live)

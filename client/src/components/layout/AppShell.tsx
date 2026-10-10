@@ -11,7 +11,9 @@ import { SelectionUndoBar } from '@/components/SelectionUndo'
 import { UpdateBanner } from '@/components/UpdateBanner'
 import { useAppUpdate } from '@/hooks/useAppUpdate'
 import { useCatchupQuiet } from '@/hooks/useCatchupQuiet'
+import { useInstance } from '@/hooks/useInstance'
 import { useStaleGrantWatch } from '@/hooks/useStaleGrantWatch'
+import { instanceName } from '@/lib/instance'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { selectStrip } from '@/store/transport'
@@ -53,6 +55,12 @@ export function AppShell() {
   // changed is *what can be heard*, which is not a fact about the screen
   // anybody happens to be on.
   useStaleGrantWatch()
+  // The tab says whose scanner this is (#77) — and so does the name iOS
+  // proposes when the app is added to a home screen, which is read from here.
+  const name = instanceName(useInstance())
+  useEffect(() => {
+    document.title = name
+  }, [name])
   const { pathname, search } = useLocation()
   /**
    * Where the Search tab goes back to (#61, spec US 30).

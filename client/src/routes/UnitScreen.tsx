@@ -12,6 +12,7 @@ import { downloadUrl, formatCallTime, formatDuration } from '@/lib/archive'
 import { talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
 import { useGrant } from '@/hooks/useGrant'
+import { useClock } from '@/hooks/useInstance'
 import { useGetUnitHistoryQuery, useSearchCallsQuery } from '@/store/api'
 import { useAppDispatch } from '@/store/hooks'
 import { startRun } from '@/store/playback'
@@ -83,6 +84,7 @@ export function UnitScreen() {
 /** The apparatus: what it is called, what it answers to, and how long it has
  *  been around. */
 function Summary({ unit }: { unit: UnitHistory }) {
+  const clock = useClock()
   return (
     <section
       aria-label="Unit summary"
@@ -99,10 +101,10 @@ function Summary({ unit }: { unit: UnitHistory }) {
           {spans(unit.memberRefs)}
         </Stat>
         <Stat name="First heard" testId="unit-first">
-          {formatCallTime(unit.firstHeardMs)}
+          {formatCallTime(unit.firstHeardMs, clock)}
         </Stat>
         <Stat name="Last heard" testId="unit-last">
-          {formatCallTime(unit.lastHeardMs)}
+          {formatCallTime(unit.lastHeardMs, clock)}
         </Stat>
       </dl>
     </section>
@@ -121,6 +123,7 @@ function spans(members: RefSpan[] | undefined): string {
 /** Where this radio talks, busiest first — the question the whole view exists
  *  for, which is why the server orders it rather than the screen. */
 function Talkgroups({ unit }: { unit: UnitHistory }) {
+  const clock = useClock()
   if (unit.talkgroups.length === 0) {
     return (
       <p className="mt-5 rounded-xl border border-border bg-card px-6 py-8 text-center font-mono text-sm text-muted-foreground">
@@ -150,7 +153,7 @@ function Talkgroups({ unit }: { unit: UnitHistory }) {
               {talkgroup.calls}
             </span>
             <time className="shrink-0 text-[11px] text-muted-foreground">
-              {formatCallTime(talkgroup.lastHeardMs)}
+              {formatCallTime(talkgroup.lastHeardMs, clock)}
             </time>
           </li>
         ))}
@@ -170,6 +173,7 @@ function Calls({
   search: { system: number; unit: number }
   page: SearchPage | undefined
 }) {
+  const clock = useClock()
   // The **grant** goes on the link, never through the base query: a download
   // is a navigation (#68).
   const grant = useGrant()
@@ -194,7 +198,7 @@ function Calls({
                 <CallFlags call={call} />
               </p>
               <time className="font-mono text-[11px] text-muted-foreground">
-                {formatCallTime(call.timestamp)}
+                {formatCallTime(call.timestamp, clock)}
               </time>
             </div>
             <span className="w-12 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
@@ -206,7 +210,7 @@ function Calls({
                 for. */}
             <StarButton
               call={call}
-              describedAs={`${talkgroupName(call)} at ${formatCallTime(call.timestamp)}`}
+              describedAs={`${talkgroupName(call)} at ${formatCallTime(call.timestamp, clock)}`}
             />
             {/* An encrypted Call has no audio at all — no `audioUrl` — so it
                 gets no controls rather than controls that 404 (spec US 9). */}
@@ -215,7 +219,7 @@ function Calls({
                 <Button
                   variant="outline"
                   size="icon"
-                  aria-label={`Play ${talkgroupName(call)} at ${formatCallTime(call.timestamp)}`}
+                  aria-label={`Play ${talkgroupName(call)} at ${formatCallTime(call.timestamp, clock)}`}
                   onClick={() => dispatch(startRun({ search, page, index }))}
                 >
                   <Play className="size-4" aria-hidden />
@@ -223,7 +227,7 @@ function Calls({
                 <a
                   href={downloadUrl(call.id, grant)}
                   download
-                  aria-label={`Download ${talkgroupName(call)} at ${formatCallTime(call.timestamp)}`}
+                  aria-label={`Download ${talkgroupName(call)} at ${formatCallTime(call.timestamp, clock)}`}
                   className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
                 >
                   <Download className="size-4" aria-hidden />

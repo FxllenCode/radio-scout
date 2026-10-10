@@ -23,7 +23,7 @@ import {
 } from '@/store/playback'
 import { progressed, selectProgress } from '@/store/transport'
 import { makeStore, type AppStore } from '@/store/store'
-import { liveFeed, searchPage } from '@/test/handlers'
+import { instanceIs, liveFeed, searchPage } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderApp } from '@/test/utils'
 import type { Call } from '@/types'
@@ -1082,5 +1082,69 @@ describe('Catch-up on the display (#59, spec US 23)', () => {
       store.dispatch(advance())
     })
     await waitFor(() => expect(screen.queryByText('1.5×')).not.toBeInTheDocument())
+  })
+})
+
+/**
+ * The Operator's **display dimmer** (#77, spec US 57) — rdio's `dimmerDelay`:
+ * the readout dims after a quiet the Operator chose, and a Call or a touch
+ * lights it again. Real time, a second of it, because the readout's timer is
+ * started by the identity arriving over the network — a clock faked under
+ * that would be faking the network's too.
+ */
+describe('the display dimmer (#77)', () => {
+  const readout = () => screen.getByTestId('scanner-readout')
+
+  it('dims a quiet readout, and a touch lights it again', async () => {
+    server.use(instanceIs({ dimmerSecs: 1 }))
+    renderApp('/')
+
+    await waitFor(() => expect(readout()).toHaveAttribute('data-dimmed', 'true'), {
+      timeout: 3_000,
+    })
+    await userEvent.pointer({ keys: '[MouseLeft>]', target: readout() })
+
+    expect(readout()).toHaveAttribute('data-dimmed', 'false')
+  })
+})
+
+/**
+ * What the server says about *us* (#77): how many are listening, when the
+ * Operator publishes it, and — when the scanner is full — that it is, rather
+ * than the "no link" a bare close used to read as.
+ */
+describe('what the server says about the connection (#77)', () => {
+  it('shows how many are listening while live', async () => {
+    server.use(
+      liveFeed.addEventListener('connection', ({ client }) => {
+        client.send(JSON.stringify({ t: 'hello', protocol: 2 }))
+        client.send(JSON.stringify({ t: 'listeners', count: 14 }))
+      }),
+    )
+    renderApp('/')
+
+    expect(await screen.findByLabelText('14 listening')).toBeInTheDocument()
+  })
+
+  it('shows no count when the server sends none', async () => {
+    renderApp('/')
+
+    await screen.findByText('connected')
+    expect(screen.queryByLabelText(/listening$/)).not.toBeInTheDocument()
+  })
+
+  it('says the scanner is full, and that it is waiting for a seat', async () => {
+    server.use(
+      // After a tick, so it lands after the shared handler's greeting — which a
+      // real server never sends to a socket it is about to turn away.
+      liveFeed.addEventListener('connection', ({ client }) => {
+        setTimeout(() => client.send(JSON.stringify({ t: 'refused', reason: 'instance-full' })), 10)
+      }),
+    )
+    renderApp('/')
+
+    expect(await screen.findByText('This scanner is full right now.')).toBeInTheDocument()
+    expect(screen.getByText('FULL')).toBeInTheDocument()
+    expect(screen.queryByText('connected')).not.toBeInTheDocument()
   })
 })

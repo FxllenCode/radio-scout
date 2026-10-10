@@ -12,6 +12,14 @@ export const LED_COLORS = {
   red: 'var(--color-led-red)',
   white: 'var(--color-led-white)',
   yellow: 'var(--color-led-yellow)',
+  purple: 'var(--color-led-purple)',
+  pink: 'var(--color-led-pink)',
+  lime: 'var(--color-led-lime)',
+  teal: 'var(--color-led-teal)',
+  coral: 'var(--color-led-coral)',
+  indigo: 'var(--color-led-indigo)',
+  brown: 'var(--color-led-brown)',
+  gray: 'var(--color-led-gray)',
 } as const
 
 export type LedColor = keyof typeof LED_COLORS
@@ -28,9 +36,20 @@ export const LED_HEX: Record<LedColor, string> = {
   red: '#ff5c5c',
   white: '#fafafa',
   yellow: '#eac54f',
+  purple: '#a67cff',
+  pink: '#ff6fb2',
+  lime: '#a3e635',
+  teal: '#14b89a',
+  coral: '#ff8a65',
+  indigo: '#7c83ff',
+  brown: '#b5835a',
+  gray: '#9ca3af',
 }
 
-/** Stable ordering, matching the palette carried over from rdio-scanner. */
+/** Stable ordering: rdio-scanner's eight, then the eight #77 added (spec US
+ *  56). **Appended, never re-sorted** — [`ledForTalkgroup`] indexes this by a
+ *  hash modulo its length, so every talkgroup whose hash lands in the first
+ *  eight keeps the colour it had before the palette doubled. */
 export const LED_ORDER: readonly LedColor[] = [
   'blue',
   'cyan',
@@ -40,6 +59,14 @@ export const LED_ORDER: readonly LedColor[] = [
   'red',
   'white',
   'yellow',
+  'purple',
+  'pink',
+  'lime',
+  'teal',
+  'coral',
+  'indigo',
+  'brown',
+  'gray',
 ]
 
 /** The CSS value for a LED color, for use in inline `style` (dynamic per call). */

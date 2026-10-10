@@ -22,7 +22,9 @@ import type { PanelMemory, PanelSort } from '@/lib/panel'
  *  derivation cannot disagree about what a panel's arrangement *is*. */
 export type PanelState = PanelMemory
 
-export const initialPanelState: PanelState = { sort: 'name', pinned: [], expanded: {} }
+/** No sort of its own: a **Profile** that has not chosen one is drawn in the
+ *  Operator's order (#77), and remembers nothing until the Listener picks. */
+export const initialPanelState: PanelState = { pinned: [], expanded: {} }
 
 const panelSlice = createSlice({
   name: 'panel',
@@ -63,4 +65,7 @@ export const selectPinned = (state: WithPanel): string[] => state.panel.pinned
 export const selectExpandedSystems = (state: WithPanel): Record<number, boolean> =>
   state.panel.expanded
 
-export const selectPanelSort = (state: WithPanel): PanelSort => state.panel.sort
+/** The order this Profile *chose* — `undefined` until it chooses, which the
+ *  screen reads as "the Operator's" (#77). */
+export const selectPanelSort = (state: WithPanel): PanelSort | undefined =>
+  state.panel.sort

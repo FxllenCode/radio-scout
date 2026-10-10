@@ -79,6 +79,11 @@ const SECTIONS = [
     hint: 'incidents kept past retention',
   },
   {
+    to: '/settings/admin/instance',
+    label: 'Instance',
+    hint: 'its name, help link, reference page and defaults',
+  },
+  {
     to: '/settings/admin/listeners',
     label: 'Listeners',
     hint: 'how many people have been on',

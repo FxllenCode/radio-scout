@@ -1,3 +1,4 @@
+import { useClock } from '@/hooks/useInstance'
 import { barHeights } from '@/lib/density'
 import { formatCallTime } from '@/lib/archive'
 import { cn } from '@/lib/utils'
@@ -52,10 +53,11 @@ export function SeriesBars({
  * about which instant they are naming.
  */
 export function SeriesExtent({ series }: { series: Series }) {
+  const clock = useClock()
   return (
     <div className="flex justify-between font-mono text-[10px] text-muted-foreground">
-      <span>{formatCallTime(series.fromMs)}</span>
-      <span>{formatCallTime(series.toMs - 1)}</span>
+      <span>{formatCallTime(series.fromMs, clock)}</span>
+      <span>{formatCallTime(series.toMs - 1, clock)}</span>
     </div>
   )
 }

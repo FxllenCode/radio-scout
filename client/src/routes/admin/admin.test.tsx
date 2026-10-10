@@ -122,6 +122,7 @@ describe('the admin gate', () => {
       '/settings/admin/embeds',
       '/settings/admin/shares',
       '/settings/admin/events',
+      '/settings/admin/instance',
       '/settings/admin/listeners',
       '/settings/logs',
     ])
@@ -903,6 +904,15 @@ describe('talkgroups', () => {
       'red',
       'white',
       'yellow',
+      // ...and the eight #77 added after them (spec US 56).
+      'purple',
+      'pink',
+      'lime',
+      'teal',
+      'coral',
+      'indigo',
+      'brown',
+      'gray',
     ])
   })
 

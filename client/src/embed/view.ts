@@ -16,9 +16,10 @@
  */
 import { formatCallTime, formatDuration } from '@/lib/archive'
 import { systemName, talkgroupName } from '@/lib/call'
+import { PRODUCT_NAME } from '@/lib/instance'
 import { LED_HEX, ledForCall } from '@/lib/led'
 import { encodeSelection } from '@/lib/selectionUrl'
-import type { Call } from '@/types'
+import type { Call, TimeFormat } from '@/types'
 
 import type { PlayerState } from './player'
 
@@ -61,10 +62,15 @@ function element<K extends keyof HTMLElementTagNameMap>(
 
 /** When a Call happened, as a reader of a homepage reads it: the time of day
  *  for today, the date as well for anything older. */
-export function when(ms: number | undefined, now: number = Date.now()): string {
+export function when(
+  ms: number | undefined,
+  clock: TimeFormat,
+  now: number = Date.now(),
+): string {
   if (ms === undefined) return ''
-  // The app's own fixed `YYYY-MM-DD HH:MM:SS` — less its date, for today.
-  const full = formatCallTime(ms)
+  // The app's own fixed `YYYY-MM-DD HH:MM:SS` — less its date, for today — on
+  // the Operator's clock (#77).
+  const full = formatCallTime(ms, clock)
   return new Date(ms).toDateString() === new Date(now).toDateString()
     ? full.slice('YYYY-MM-DD '.length)
     : full
@@ -78,6 +84,9 @@ function statusText(state: PlayerState): string {
       ? ''
       : "Couldn't play that call. The scanner may be unreachable."
   }
+  // Said over whatever the socket is doing, which on a full scanner is opening
+  // and being closed again every few seconds (#77).
+  if (state.turnedAway) return 'The scanner is full — waiting for a seat…'
   switch (state.live) {
     case 'connected':
       return 'Live'
@@ -123,7 +132,7 @@ export function createView(
   const list = element('ul', 'calls')
   list.setAttribute('aria-label', 'Recent calls')
   const foot = element('footer', 'foot')
-  const open = element('a', 'open', 'Open in Radio-Scout')
+  const open = element('a', 'open', `Open in ${PRODUCT_NAME}`)
   open.target = '_blank'
   open.rel = 'noopener'
   foot.append(open)
@@ -136,7 +145,10 @@ export function createView(
   return {
     render(state) {
       if (state.name !== undefined) heading.textContent = state.name
-      document.title = state.name ?? 'Radio-Scout'
+      document.title = state.name ?? state.site ?? PRODUCT_NAME
+      // Whose scanner the link opens (#77): the Instance's name, once the
+      // feed has said it.
+      open.textContent = `Open in ${state.site ?? PRODUCT_NAME}`
 
       const ready = state.phase === 'ready'
       listen.hidden = !ready
@@ -169,7 +181,7 @@ export function createView(
       state.calls.forEach((call, index) => {
         let row = rows.get(call.id)
         if (!row) {
-          row = makeRow(call, handlers)
+          row = makeRow(call, handlers, state.clock)
           rows.set(call.id, row)
         }
         row.update(call.id === state.playing)
@@ -186,14 +198,14 @@ interface Row {
   update(playing: boolean): void
 }
 
-function makeRow(call: Call, handlers: ViewHandlers): Row {
+function makeRow(call: Call, handlers: ViewHandlers, clock: TimeFormat): Row {
   const item = element('li', 'call')
   const led = element('span', 'led')
   led.setAttribute('aria-hidden', 'true')
   led.style.background = LED_HEX[ledForCall(call)]
 
   const what = element('div', 'what')
-  const facts = [systemName(call), when(call.timestamp)]
+  const facts = [systemName(call), when(call.timestamp, clock)]
   if (call.durationMs !== undefined) facts.push(formatDuration(call.durationMs))
   if (call.encrypted) facts.push('Encrypted')
   what.append(

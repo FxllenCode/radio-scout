@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 
 import { DockedBanner } from '@/components/layout/DockedBanner'
 import { Button } from '@/components/ui/button'
+import { useInstance } from '@/hooks/useInstance'
 import { createInstall, type Install, type InstallOffer } from '@/lib/install'
+import { instanceName } from '@/lib/instance'
 
 import { StatusLed } from './StatusLed'
 
@@ -17,6 +19,9 @@ import { StatusLed } from './StatusLed'
  */
 export function InstallBanner() {
   const [offer, setOffer] = useState<InstallOffer>('none')
+  // What it will be called on the home screen (#77): the manifest and the tab
+  // both carry the Instance's name, so the offer says the same thing.
+  const name = instanceName(useInstance())
   const install = useRef<Install>(null)
 
   useEffect(() => {
@@ -40,7 +45,7 @@ export function InstallBanner() {
         <StatusLed color="red" size={14} />
       </span>
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">Install Radio-Scout</p>
+        <p className="text-sm font-semibold">Install {name}</p>
         <p className="text-xs text-muted-foreground">
           {offer === 'prompt'
             ? 'Full screen, faster start, background audio'

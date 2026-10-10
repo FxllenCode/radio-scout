@@ -130,7 +130,7 @@ describe('a Downstream scope, as a form edits it', () => {
 
 describe("a peer's health, in one line", () => {
   it('says a working peer is working, and nothing else', () => {
-    const line = healthLine(peer())
+    const line = healthLine(peer(), '24h')
 
     expect(line).toContain('https://peer.example')
     expect(line).toContain('last delivered')
@@ -149,6 +149,7 @@ describe("a peer's health, in one line", () => {
         lastFailure: 'sink-refused (503)',
         lastSuccessMs: null,
       }),
+      '24h',
     )
 
     expect(line).toContain('12 queued')
@@ -160,16 +161,16 @@ describe("a peer's health, in one line", () => {
    *  a peer's shape and never its key. Without this it is indistinguishable
    *  from a peer whose key is simply wrong. */
   it('calls out a peer that still needs its key', () => {
-    expect(healthLine(peer({ hasKey: false, disabled: true }))).toContain(
+    expect(healthLine(peer({ hasKey: false, disabled: true }), '24h')).toContain(
       'needs its key',
     )
-    expect(healthLine(peer({ disabled: true }))).toContain('disabled')
+    expect(healthLine(peer({ disabled: true }), '24h')).toContain('disabled')
   })
 
   /** A failure with no slug behind it still reads as a sentence rather than
    *  trailing off — the server can leave the column null on a row whose
    *  failures predate it. */
   it('reports a failure count with no reason attached', () => {
-    expect(healthLine(peer({ consecutiveFailures: 2 }))).toContain('2 failed')
+    expect(healthLine(peer({ consecutiveFailures: 2 }), '24h')).toContain('2 failed')
   })
 })

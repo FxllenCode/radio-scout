@@ -31,7 +31,7 @@ function call(id: number, extra: Partial<Call> = {}): Call {
 const SELECTION = { all: false, sel: { 11: { 100: true } } }
 
 function feedOf(...calls: Call[]): EmbedFeed {
-  return { name: 'Fire dispatch', selection: SELECTION, calls }
+  return { name: 'Fire dispatch', selection: SELECTION, calls, site: 'Radio-Scout', timeFormat: '24h' }
 }
 
 /** How many times the page asked for its feed. */
@@ -197,6 +197,19 @@ describe('the embed page', () => {
     expect(link).toHaveAttribute('rel', 'noopener')
   })
 
+  /** Whose scanner it opens, and on whose clock (#77) — the Operator's. */
+  it('names the Instance it opens and keeps its clock', async () => {
+    answering({
+      ...feedOf(call(1, { timestamp: new Date(2020, 0, 2, 15, 4, 5).getTime() })),
+      site: 'Fulton Scanner',
+      timeFormat: '12h',
+    })
+    mount()
+
+    expect(await screen.findByRole('link', { name: /Open in Fulton Scanner/ })).toBeInTheDocument()
+    expect(screen.getByText(/03:04:05 PM/)).toBeInTheDocument()
+  })
+
   it('has no accessibility violations', async () => {
     answering(feedOf(call(2), call(1)))
     const root = mount()
@@ -219,6 +232,23 @@ describe('listening live', () => {
     expect(feedReads).toBe(2)
     expect(await screen.findByRole('status')).toHaveTextContent('Live')
     expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+  })
+
+  /** A full scanner says so on the page (#77) — a homepage reader counts
+   *  toward the cap like anybody — and stops saying it once seated. */
+  it('says the scanner is full, and lets go of it once seated', async () => {
+    answering(feedOf(call(1)))
+    mount()
+    await userEvent.click(await screen.findByRole('button', { name: 'Listen live' }))
+    await waitFor(() => expect(socket).toBeDefined())
+
+    socket?.send(JSON.stringify({ t: 'refused', reason: 'instance-full' }))
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent('The scanner is full'),
+    )
+
+    socket?.send(JSON.stringify({ t: 'hello', protocol: 2 }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Live'))
   })
 
   /** The address is public, so the page is a Listener holding nothing — even

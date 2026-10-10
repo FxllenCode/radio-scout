@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 
+import { useClock } from '@/hooks/useInstance'
 import { SeriesBars, SeriesExtent } from '@/components/SeriesBars'
 import { bucketAt, bucketStartMs } from '@/lib/density'
 import { formatCallTime } from '@/lib/archive'
@@ -64,6 +65,7 @@ export function DensityRibbon({
   /** Take the Listener to this bucket. */
   onJump: (bucket: number) => void
 }) {
+  const clock = useClock()
   const track = useRef<HTMLDivElement>(null)
   /** Where the Listener has pointed, while they are still pointing at it.
    *
@@ -84,7 +86,7 @@ export function DensityRibbon({
   // own `clampIndex`), as does `bucketAt`, so `here` is always a bucket that
   // exists — and a fallback nothing can reach is a branch no test could kill.
   const calls = series.values[here]
-  const readout = `${formatCallTime(bucketStartMs(series, here))} · ${calls} ${
+  const readout = `${formatCallTime(bucketStartMs(series, here), clock)} · ${calls} ${
     calls === 1 ? 'call' : 'calls'
   }`
 

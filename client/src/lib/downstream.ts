@@ -24,7 +24,7 @@
  * - Writing produces only shapes reading can round-trip, so a scope this form
  *   saved is always one it can re-open.
  */
-import type { AdminDownstream } from '@/types'
+import type { AdminDownstream, TimeFormat } from '@/types'
 
 import { formatCallTime } from './archive'
 import { WILDCARD, type Selection } from './selection'
@@ -151,7 +151,7 @@ export function parseRefs(raw: string): number[] {
  * also what an imported backup looks like — a document carries a peer's shape
  * and never its credential.
  */
-export function healthLine(row: AdminDownstream): string {
+export function healthLine(row: AdminDownstream, clock: TimeFormat): string {
   const parts = [row.url]
   if (row.disabled) parts.push('disabled')
   if (!row.hasKey) parts.push('needs its key')
@@ -166,7 +166,7 @@ export function healthLine(row: AdminDownstream): string {
   parts.push(
     row.lastSuccessMs == null
       ? 'never delivered'
-      : `last delivered ${formatCallTime(row.lastSuccessMs)}`,
+      : `last delivered ${formatCallTime(row.lastSuccessMs, clock)}`,
   )
   return parts.join(' · ')
 }

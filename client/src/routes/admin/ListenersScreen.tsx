@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { SeriesBars, SeriesExtent } from '@/components/SeriesBars'
 import { formatCallTime } from '@/lib/archive'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import {
   LISTENER_RANGES,
   listenerQuery,
@@ -34,6 +35,7 @@ import { useGetListenerHistoryQuery } from '@/store/api'
  * has a permanent record of *who* and no answer to *how many*.
  */
 export function ListenersScreen() {
+  const clock = useClock()
   const signedIn = useAdminSession()
   const [range, setRange] = useState<ListenerRange>(LISTENER_RANGES[0])
   // The clock is read once per range change rather than on every render, so the
@@ -78,14 +80,14 @@ export function ListenersScreen() {
           <div className="mt-3 space-y-2 rounded-xl border border-border bg-card px-4 py-4">
             <p className="font-mono text-xs text-muted-foreground">
               {peak
-                ? `Peak ${peak.listeners} ${peak.listeners === 1 ? 'listener' : 'listeners'}, ${formatCallTime(peak.atMs)}`
+                ? `Peak ${peak.listeners} ${peak.listeners === 1 ? 'listener' : 'listeners'}, ${formatCallTime(peak.atMs, clock)}`
                 : 'Nobody has listened in this window.'}
             </p>
             <div
               role="img"
               aria-label={
                 peak
-                  ? `Peak listeners over the last ${range.label}: highest ${peak.listeners} at ${formatCallTime(peak.atMs)}`
+                  ? `Peak listeners over the last ${range.label}: highest ${peak.listeners} at ${formatCallTime(peak.atMs, clock)}`
                   : `Peak listeners over the last ${range.label}: nobody`
               }
             >

@@ -42,6 +42,7 @@
  */
 import { FastForward, Play, SkipForward, X } from 'lucide-react'
 
+import { useClock } from '@/hooks/useInstance'
 import { formatCallTime } from '@/lib/archive'
 import { talkgroupName, systemName } from '@/lib/call'
 import {
@@ -67,6 +68,7 @@ import { StatusLed } from './StatusLed'
 import { UnitLink } from './UnitLink'
 
 export function QueueSheet({ onClose }: { onClose: () => void }) {
+  const clock = useClock()
   const dispatch = useAppDispatch()
   const queue = useAppSelector(selectQueue)
   const catchingUp = useAppSelector(selectIsCatchingUp)
@@ -132,7 +134,7 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
                     {talkgroupName(call)}
                   </span>
                   <span className="truncate font-mono text-[10px] text-muted-foreground">
-                    {systemName(call)} · {formatCallTime(call.timestamp)}
+                    {systemName(call)} · {formatCallTime(call.timestamp, clock)}
                   </span>
                 </span>
                 {/* Not inside a row-wide button: an anchor within a button is

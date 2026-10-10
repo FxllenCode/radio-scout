@@ -1,4 +1,5 @@
-import { DAY_LABELS, heatmapOf, isHourly } from '@/lib/heatmap'
+import { useClock } from '@/hooks/useInstance'
+import { DAY_LABELS, heatmapOf, hourMark, hourName, isHourly } from '@/lib/heatmap'
 import type { Series } from '@/types'
 
 /**
@@ -16,6 +17,7 @@ import type { Series } from '@/types'
  * because the server has no idea what timezone the Listener is in.
  */
 export function ActivityHeatmap({ series }: { series: Series }) {
+  const clock = useClock()
   // The server widens a grain that would not fit its own bound and says so in
   // the answer. Folding a widened series would attribute three hours of traffic
   // to whichever hour it began in — a confidently wrong grid with nothing on
@@ -51,12 +53,8 @@ export function ActivityHeatmap({ series }: { series: Series }) {
                 {/* Every third hour is *drawn*, because twenty-four labels in
                     19rem is a smear — but every column is still named, or the
                     grid's headers say nothing to a screen reader. */}
-                <span className="sr-only">
-                  {String(hour).padStart(2, '0')}:00
-                </span>
-                <span aria-hidden>
-                  {hour % 3 === 0 ? String(hour).padStart(2, '0') : ''}
-                </span>
+                <span className="sr-only">{hourName(hour, clock)}</span>
+                <span aria-hidden>{hour % 3 === 0 ? hourMark(hour, clock) : ''}</span>
               </th>
             ))}
           </tr>
@@ -76,7 +74,7 @@ export function ActivityHeatmap({ series }: { series: Series }) {
                   // The number is the accessible answer; the shade is the
                   // glanceable one. A screen reader gets the cell's own title
                   // rather than a grid of colours it cannot see.
-                  title={`${DAY_LABELS[day]} ${String(hour).padStart(2, '0')}:00 — ${calls} calls`}
+                  title={`${DAY_LABELS[day]} ${hourName(hour, clock)} — ${calls} calls`}
                   className="h-4 rounded-[1px] bg-muted-foreground"
                   style={{ opacity: shade(calls, busiest) }}
                 >

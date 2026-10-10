@@ -1,9 +1,11 @@
 import { http, HttpResponse, ws } from 'msw'
 
+import { DEFAULT_INSTANCE } from '@/lib/instance'
 import type {
   Call,
   Catalog,
   FilterOptions,
+  Instance,
   LogEvent,
   LogPage,
   SearchPage,
@@ -312,6 +314,13 @@ export function logPage(url: URL): LogPage {
   }
 }
 
+/** `GET /api/instance` answered with an Instance the Operator has curated
+ *  (#77) — the defaults, with `curated` laid over them. For `server.use(...)`. */
+export const instanceIs = (curated: Partial<Instance>) =>
+  http.get(`${ORIGIN}/api/instance`, () =>
+    HttpResponse.json({ ...DEFAULT_INSTANCE, ...curated }),
+  )
+
 /** The live-feed socket, same origin as the API (ADR-0004). Tests that care
  *  what the feed sends override this link through `server.use(...)`. */
 export const liveFeed = ws.link(`${ORIGIN.replace('http', 'ws')}/api/live`)
@@ -351,6 +360,14 @@ export const handlers = [
   // backlog with no gaps in it and Catch-up running on the rate alone.
   http.get(`${ORIGIN}/api/calls/quiet`, () => HttpResponse.json({})),
   http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(CATALOG)),
+  // The **Instance identity** (#77) as an Instance nobody has curated sends it:
+  // no name, no help link, no Reference page. Every screen mounts the shell,
+  // which asks for it, so every test reads this unless it says otherwise.
+  http.get(`${ORIGIN}/api/instance`, () => HttpResponse.json(DEFAULT_INSTANCE)),
+  http.get(
+    `${ORIGIN}/api/reference`,
+    () => new HttpResponse('this instance has no reference page\n', { status: 404 }),
+  ),
   // One radio's history (#47). Answers for the one radio `ARCHIVE` names and
   // 404s for anything else, which is the server's own rule.
   http.get(`${ORIGIN}/api/unit/:system/:ref`, ({ params }) =>

@@ -112,7 +112,7 @@ import {
   type Selection,
   type TalkgroupKey,
 } from './selection'
-import type { Catalog } from '@/types'
+import type { Catalog, DefaultPanelSort } from '@/types'
 
 /**
  * How many rows a System may hold before it starts folded away (#57).
@@ -131,9 +131,10 @@ export const COLLAPSE_ABOVE = 50
  * `name` is the catalog's own order, which the server has already sorted by
  * what a Listener reads (label, then Ref). `active` is the busiest first — the
  * answer to "what is happening right now" that a 400-row alphabetical list
- * cannot give.
+ * cannot give. `ref` is by TGID (#77) — the order a RadioReference listing is
+ * in, and what an rdio Operator's admin order usually was.
  */
-export type PanelSort = 'name' | 'active'
+export type PanelSort = DefaultPanelSort
 
 /**
  * How the panel is *arranged*, and the whole of what is remembered about it
@@ -144,7 +145,11 @@ export type PanelSort = 'name' | 'active'
  * in `store/`, and the persistence layer needs to name this shape.
  */
 export interface PanelMemory {
-  sort: PanelSort
+  /** The order this **Profile** chose — absent until it chooses one, and then
+   *  the Operator's default applies (#77). Absent rather than defaulted here,
+   *  so a Profile that never touched the control follows the Operator if they
+   *  change their mind, and one that did is never overridden. */
+  sort?: PanelSort
   /** The **Pin**ned Talkgroups, by row key. A key the catalog has nothing for
    *  simply draws nothing — a Talkgroup an Operator deleted must not become an
    *  unnameable row. */
@@ -275,7 +280,10 @@ export interface Panel {
   empty: boolean
 }
 
-export interface PanelInput extends PanelMemory {
+export interface PanelInput extends Omit<PanelMemory, 'sort'> {
+  /** The order to draw in: the Profile's own choice, or the Operator's
+   *  default when it has made none (#77) — decided before it reaches here. */
+  sort: PanelSort
   catalog: Catalog
   /** The **Selection** with the Avoids already laid over it — what the Listener
    *  will actually hear (`selectAudibleSelection`). */
@@ -365,7 +373,7 @@ export function panelOf({
  *  counts down; a last-heard age climbs. A count does neither, which is why the
  *  most-active sort needs no clock at all. */
 const ticks = (row: PanelRow, sort: PanelSort): boolean =>
-  (row.avoidedUntil ?? 0) > 0 || (sort === 'name' && row.lastCallAtMs !== undefined)
+  (row.avoidedUntil ?? 0) > 0 || (sort !== 'active' && row.lastCallAtMs !== undefined)
 
 /**
  * The rows of a section, in the order they are drawn.
@@ -378,6 +386,7 @@ const ticks = (row: PanelRow, sort: PanelSort): boolean =>
  */
 function ordered(entries: CatalogEntry[], sort: PanelSort): CatalogEntry[] {
   if (sort === 'name') return entries
+  if (sort === 'ref') return [...entries].sort((a, b) => a.talkgroupRef - b.talkgroupRef)
   return [...entries].sort(
     (a, b) =>
       (b.recentCalls ?? 0) - (a.recentCalls ?? 0) ||

@@ -59,6 +59,8 @@ import {
   selectQueueDepth,
   selectSessionLog,
   selectFeedStatus,
+  selectListenerCount,
+  selectRefused,
   selectSelection,
   selectSince,
   toggleHoldSystem,
@@ -66,6 +68,9 @@ import {
   turnFeedOff,
   turnFeedOn,
   type LiveState,
+  greeted,
+  listenersCounted,
+  refusedBy,
 } from './live'
 
 function call(id: number, systemRef = 11, talkgroupRef = 100): Call {
@@ -151,6 +156,39 @@ describe('live slice', () => {
       const state = reduce(lagged(12), lagged(3))
 
       expect(selectMissed(rootState(state))).toBe(15)
+    })
+
+    /** Turned away (#77): the reason is kept through every retry — each of
+     *  which opens a socket before it is refused — and only a greeting, the
+     *  server taking a connection in, clears it. */
+    it('stays turned away until the server takes a connection in', () => {
+      let state = reduce(connected(), refusedBy('instance-full'), disconnected(), connecting())
+      expect(selectRefused(rootState(state))).toBe('instance-full')
+
+      state = liveReducer(state, connected())
+      expect(selectFeedStatus(rootState(state))).toBe('down')
+
+      state = liveReducer(state, greeted())
+      expect(selectRefused(rootState(state))).toBeNull()
+      expect(selectFeedStatus(rootState(state))).toBe('live')
+    })
+
+    /** Switching the feed off closes the socket, so nothing is being refused
+     *  any more — and coming back on starts from a clean slate. */
+    it('forgets a refusal when the feed is switched off', () => {
+      const state = reduce(refusedBy('instance-full'), turnFeedOff())
+
+      expect(selectRefused(rootState(state))).toBeNull()
+    })
+
+    /** The **Listener count** (#77): held as the server last said it, and gone
+     *  when the server says to stop. */
+    it('holds the listener count the server last sent', () => {
+      expect(selectListenerCount(rootState(reduce({ type: '@@INIT' })))).toBeNull()
+      expect(selectListenerCount(rootState(reduce(listenersCounted(7))))).toBe(7)
+      expect(
+        selectListenerCount(rootState(reduce(listenersCounted(7), listenersCounted(null)))),
+      ).toBeNull()
     })
   })
 

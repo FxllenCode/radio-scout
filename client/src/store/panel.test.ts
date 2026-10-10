@@ -16,8 +16,11 @@ const after = (actions: Parameters<typeof panelReducer>[1][], from = initialPane
   actions.reduce(panelReducer, from)
 
 describe('the Talkgroups panel’s own state (#57)', () => {
-  it('starts with nothing pinned, nothing said about a System, and catalog order', () => {
-    expect(initialPanelState).toEqual({ sort: 'name', pinned: [], expanded: {} })
+  /** No sort at all: a **Profile** that has not chosen one is drawn in the
+   *  order the Operator chose (#77), and says nothing of its own. */
+  it('starts with nothing pinned, nothing said about a System, and no sort of its own', () => {
+    expect(initialPanelState).toEqual({ pinned: [], expanded: {} })
+    expect(selectPanelSort({ panel: initialPanelState })).toBeUndefined()
   })
 
   it('pins a Talkgroup and unpins it again', () => {

@@ -233,6 +233,19 @@ export interface LiveState {
    * Not persisted, unlike [`feedOff`]: a reload starts on the live feed.
    */
   inPlayback: boolean
+  /**
+   * Why the server last turned this connection away — `instance-full` (#77),
+   * `access-connection-limit` (#68) — or `null` while it is taking us.
+   *
+   * Kept through the retries, each of which opens a socket *before* it is
+   * refused, and cleared only by a greeting: so the feed reads **Feed down**,
+   * in words saying why, rather than flashing `connected` once per attempt.
+   */
+  refused: string | null
+  /** How many people are listening, as the server last said — `null` when the
+   *  Operator does not show it (#77, spec US 57). Their number, published
+   *  because they chose to. */
+  listeners: number | null
 }
 
 /** An **Avoid** that can still be taken back, and everything it displaced. */
@@ -285,6 +298,8 @@ export const initialLiveState: LiveState = {
   feedOff: false,
   catchup: false,
   inPlayback: false,
+  refused: null,
+  listeners: null,
 }
 
 /**
@@ -295,7 +310,12 @@ export const initialLiveState: LiveState = {
  * one derived value rather than each assembling their own from the parts.
  */
 const statusOf = (state: LiveState): FeedStatus =>
-  feedStatus({ off: state.feedOff, playback: state.inPlayback, link: state.status })
+  feedStatus({
+    off: state.feedOff,
+    playback: state.inPlayback,
+    link: state.status,
+    refused: state.refused,
+  })
 
 /**
  * Does the listener still want this Call?
@@ -617,6 +637,22 @@ const liveSlice = createSlice({
       state.status = 'offline'
     },
 
+    /** The server turned the connection away, and said why (#77). */
+    refusedBy(state, action: PayloadAction<string>) {
+      state.refused = action.payload
+    },
+
+    /** The server greeted the connection — took it in — so whatever turned the
+     *  last one away no longer holds. */
+    greeted(state) {
+      state.refused = null
+    },
+
+    /** How many are listening, or `null` once the Operator stops saying. */
+    listenersCounted(state, action: PayloadAction<number | null>) {
+      state.listeners = action.payload
+    },
+
     /**
      * Switch the live feed off (#80) — the master off rdio's LIVE FEED button
      * has and Pause is not.
@@ -633,6 +669,8 @@ const liveSlice = createSlice({
      */
     turnFeedOff(state) {
       state.feedOff = true
+      // No socket, so nobody is refusing us; coming back on starts clean.
+      state.refused = null
       state.queue = []
       // `play(…, null)` rather than clearing `current`, so the Call being cut
       // off is filed under history: switched off is not the same as never heard,
@@ -1116,11 +1154,14 @@ export const {
   engageCatchup,
   expireAvoids,
   gapped,
+  greeted,
   jumpToNewest,
   lagged,
+  listenersCounted,
   playQueued,
   quietFound,
   received,
+  refusedBy,
   replay,
   stopCatchup,
   toggleHoldOn,
@@ -1158,6 +1199,12 @@ interface WithLive {
 }
 
 export const selectLiveStatus = (state: WithLive): LiveStatus => state.live.status
+
+/** Why the server is turning this connection away, if it is (#77). */
+export const selectRefused = (state: WithLive): string | null => state.live.refused
+
+/** How many people are listening, when the Operator shows it (#77). */
+export const selectListenerCount = (state: WithLive): number | null => state.live.listeners
 
 export const selectLiveCall = (state: WithLive): Call | null => state.live.current
 

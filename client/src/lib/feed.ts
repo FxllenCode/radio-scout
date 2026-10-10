@@ -31,6 +31,9 @@ export interface FeedFacts {
   playback: boolean
   /** What the socket is doing. */
   link: LiveStatus
+  /** Why the server last turned this connection away, until it next takes one
+   *  in (#77) — the `refused` frame's slug. */
+  refused?: string | null
 }
 
 /**
@@ -49,9 +52,13 @@ export interface FeedFacts {
  *   delivering. How far along it is belongs to the display
  *   ([`feedReadout`]), not to the cause.
  */
-export function feedStatus({ off, playback, link }: FeedFacts): FeedStatus {
+export function feedStatus({ off, playback, link, refused }: FeedFacts): FeedStatus {
   if (off) return 'off'
   if (playback) return 'playback'
+  // Turned away is down, whatever the socket says: the server opens it before
+  // saying no, and the retry opens another — so the link alone would flash
+  // `live` at a Listener being refused, once per attempt (#77).
+  if (refused) return 'down'
   return link === 'connected' ? 'live' : 'down'
 }
 
@@ -196,7 +203,12 @@ export interface FeedReadout {
  * Saying the server is unreachable while we are in the act of reaching it would
  * make the message worthless the rest of the time.
  */
-export function feedReadout(status: FeedStatus, link: LiveStatus): FeedReadout {
+export function feedReadout(
+  status: FeedStatus,
+  link: LiveStatus,
+  refused?: string | null,
+): FeedReadout {
+  if (status === 'down' && refused) return turnedAway(refused)
   switch (status) {
     case 'live':
       return {
@@ -245,5 +257,48 @@ export function feedReadout(status: FeedStatus, link: LiveStatus): FeedReadout {
                 'Nothing can reach you until the connection is back — it is being retried. Calls that arrive meanwhile are still recorded, and a brief gap is filled in for you.',
             },
           }
+  }
+}
+
+/**
+ * **Feed down** because the server said no, rather than because it could not
+ * be reached (#77) — and so, said as *that*, with what to do about it.
+ *
+ * Amber for the two a Listener can understand: neither is a fault, and both
+ * clear by themselves as the client keeps trying. It pulses, because it is
+ * being retried. A reason this build has no words for is red, and says only
+ * that it was refused — the Operator's log has the slug.
+ *
+ * rdio closes the socket without a word (`client.go:61`), so its client sits in
+ * a reconnect loop a Listener can only read as the network being broken.
+ */
+function turnedAway(reason: string): FeedReadout {
+  switch (reason) {
+    case 'instance-full':
+      return {
+        badge: { label: 'FULL', color: 'orange', pulse: true },
+        empty: {
+          headline: 'This scanner is full right now.',
+          detail:
+            'Every listening slot is taken. You will be let in as soon as somebody leaves — this keeps trying on its own.',
+        },
+      }
+    case 'access-connection-limit':
+      return {
+        badge: { label: 'CODE IN USE', color: 'orange', pulse: true },
+        empty: {
+          headline: 'Your access code is in use elsewhere.',
+          detail:
+            'It allows only so many connections at once, and they are all taken. Close the app on another device, or wait — this keeps trying.',
+        },
+      }
+    default:
+      return {
+        badge: { label: 'REFUSED', color: 'red', pulse: true },
+        empty: {
+          headline: 'The server turned this connection away.',
+          detail: 'It keeps trying. If this does not clear, the operator can see why in their log.',
+        },
+      }
   }
 }

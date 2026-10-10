@@ -236,6 +236,62 @@ export interface CatalogSystem {
   talkgroups: CatalogTalkgroup[]
 }
 
+/** How every time in the app is written — the Operator's call, for everyone
+ *  (#77). */
+export type TimeFormat = '24h' | '12h'
+
+/** The order the Talkgroups panel starts in for a **Profile** that has not
+ *  chosen one (#77) — `lib/panel`'s `PanelSort`, spelled here because the
+ *  server sends it. */
+export type DefaultPanelSort = 'name' | 'active' | 'ref'
+
+/**
+ * The **Instance identity** (#77, spec US 4, 57, 58) — `GET /api/instance`.
+ * What the Operator decided about how the app looks and behaves for everyone.
+ */
+export interface Instance {
+  /** The Instance's name. Absent is unnamed, and the product's name is shown. */
+  name?: string
+  /** Where a Listener goes for help: an `https://` page or a `mailto:`. */
+  helpUrl?: string
+  timeFormat: TimeFormat
+  panelSort: DefaultPanelSort
+  /** A **Run** walking forward that reaches the newest Call hands over to the
+   *  live feed rather than stopping. */
+  playbackGoesLive: boolean
+  /** Seconds of quiet before the Live display dims; `0` never. */
+  dimmerSecs: number
+  /** Whether the **Listener count** is shown — sent on the live socket. */
+  showListeners: boolean
+  /** Whether there is a **Reference page** to draw an entry for. */
+  reference: boolean
+}
+
+/** The published **Reference page** (#77) — `GET /api/reference`, rendered to
+ *  HTML on the server with raw HTML escaped and every address checked. */
+export interface ReferencePage {
+  html: string
+  publishedAtMs: number
+}
+
+/** What the Reference page editor opens on — `GET /api/admin/reference`. */
+export interface ReferenceEditor {
+  /** What is published, if anything is. */
+  markdown?: string
+  publishedAtMs?: number
+  /** What a page starts from: only what is the same everywhere. */
+  seed: string
+}
+
+/** A change to the identity — what the admin form sends. `null` clears the two
+ *  fields that can be cleared. */
+export type InstancePatch = Partial<
+  Omit<Instance, 'name' | 'helpUrl' | 'reference'> & {
+    name: string | null
+    helpUrl: string | null
+  }
+>
+
 /** `GET /api/catalog` — everything the Talkgroups panel offers. Unlike
  *  [`FilterOptions`], this is the *configured* world rather than the archived
  *  one: a Talkgroup whose Calls have aged out is still selectable. */

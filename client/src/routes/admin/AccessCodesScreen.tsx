@@ -14,6 +14,7 @@ import { ScopeEditor } from '@/components/admin/ScopeEditor'
 import { Screen } from '@/components/layout/Screen'
 import { Button } from '@/components/ui/button'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import { dateTimeLocalToMs, formatCallTime, msToDateTimeLocal } from '@/lib/archive'
 import {
   useCreateAccessCodeMutation,
@@ -21,7 +22,7 @@ import {
   useGetAccessCodesQuery,
   useUpdateAccessCodeMutation,
 } from '@/store/api'
-import type { AdminAccessCode } from '@/types'
+import type { AdminAccessCode, TimeFormat } from '@/types'
 
 /**
  * Settings → Admin → Access codes (#68, spec US 52, ADR-0008).
@@ -39,6 +40,7 @@ import type { AdminAccessCode } from '@/types'
  * admin API, and exports it in the configuration document.
  */
 export function AccessCodesScreen() {
+  const clock = useClock()
   const signedIn = useAdminSession()
   const listing = useGetAccessCodesQuery(undefined, { skip: !signedIn })
   const [create, creating] = useCreateAccessCodeMutation()
@@ -133,7 +135,7 @@ export function AccessCodesScreen() {
               <RowCard
                 key={row.id}
                 title={row.label ?? `Code ${row.id}`}
-                subtitle={subtitleOf(row)}
+                subtitle={subtitleOf(row, clock)}
                 actions={
                   <>
                     <Button
@@ -179,7 +181,7 @@ export function AccessCodesScreen() {
 
 /** What an Operator is actually asking of this listing: is this code being used,
  *  and until when. */
-function subtitleOf(row: AdminAccessCode): string {
+function subtitleOf(row: AdminAccessCode, clock: TimeFormat): string {
   const parts = [
     row.connections === 1 ? '1 listening' : `${row.connections} listening`,
     row.maxConnections == null
@@ -187,7 +189,7 @@ function subtitleOf(row: AdminAccessCode): string {
       : `limit ${row.maxConnections}`,
     row.expiresAtMs == null
       ? 'never expires'
-      : `until ${formatCallTime(row.expiresAtMs)}`,
+      : `until ${formatCallTime(row.expiresAtMs, clock)}`,
   ]
   if (row.disabled) parts.push('disabled')
   return parts.join(' · ')

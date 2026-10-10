@@ -45,6 +45,7 @@ import { feedPlays } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
 import { cn } from '@/lib/utils'
 import { useGrant } from '@/hooks/useGrant'
+import { useClock } from '@/hooks/useInstance'
 import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
@@ -58,6 +59,7 @@ import {
 import type { Call } from '@/types'
 
 export function SessionScreen() {
+  const clock = useClock()
   // The **grant** goes on the link, never through the base query: a download
   // is a navigation (#68).
   const grant = useGrant()
@@ -160,7 +162,7 @@ export function SessionScreen() {
                 className="max-w-24 shrink-0 font-mono text-[11px] text-muted-foreground"
               />
               <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
-                {formatCallTime(call.timestamp)}
+                {formatCallTime(call.timestamp, clock)}
               </time>
             </li>
           ))}

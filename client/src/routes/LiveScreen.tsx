@@ -8,6 +8,7 @@ import {
   Radio,
   RotateCcw,
   SkipForward,
+  Users,
   Zap,
 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
@@ -22,6 +23,8 @@ import { StarMark } from '@/components/StarMark'
 import { StatusLed } from '@/components/StatusLed'
 import { UnitLink } from '@/components/UnitLink'
 import { useStar } from '@/hooks/useStar'
+import { useClock, useInstance } from '@/hooks/useInstance'
+import { useDimmer } from '@/hooks/useDimmer'
 import { Button } from '@/components/ui/button'
 import { Waveform } from '@/components/Waveform'
 import { callCategory, formatFrequency, systemName, talkgroupName, unitName } from '@/lib/call'
@@ -44,8 +47,10 @@ import {
   selectHold,
   selectHasGap,
   selectLiveCall,
+  selectListenerCount,
   selectLiveControls,
   selectLiveStatus,
+  selectRefused,
   selectIsPriority,
   selectMissed,
   selectIsCatchingUp,
@@ -111,7 +116,15 @@ export function LiveScreen() {
   // header above it disagrees with.
   const feed = useAppSelector(selectFeedStatus)
   const can = useAppSelector(selectLiveControls)
-  const readout = feedReadout(feed, status)
+  // Why the server is turning us away, when it is (#77) — so the screen says
+  // "full" rather than "no link" while the retries go on.
+  const refused = useAppSelector(selectRefused)
+  const readout = feedReadout(feed, status, refused)
+  // How many are listening, when the Operator publishes it (#77) — and only
+  // while live, because a count kept from a dropped socket is a number about a
+  // moment that has passed.
+  const listeners = useAppSelector(selectListenerCount)
+  const counted = feed === 'live' ? listeners : null
   // The switch's own position, which is a different question from why the feed
   // is quiet: in playback mode the feed is not delivering and the switch is
   // still on, so pressing it there is a request to switch it off.
@@ -135,6 +148,7 @@ export function LiveScreen() {
    * strictly less than the sentence explaining how to get the feed back.
    */
   const { call: showing, ended } = useAppSelector(selectDisplay)
+  const dimmer = useDimmer(showing !== null && !ended, useInstance().dimmerSecs)
   // Asked of the Call the display is showing, so the control reads as pressed
   // for exactly the Talkgroup pressing it would act on (#58).
   const prioritized = useAppSelector((state) =>
@@ -197,22 +211,42 @@ export function LiveScreen() {
               {CATCHUP_RATE}×
             </span>
           )}
+          {counted !== null && (
+            <span
+              aria-label={`${counted} listening`}
+              className="inline-flex items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground"
+            >
+              <Users className="size-3" aria-hidden />
+              {counted}
+            </span>
+          )}
           <LinkState badge={readout.badge} />
         </span>
       }
     >
-      {showing ? (
-        <Display
-          call={showing}
-          ended={ended}
-          progress={progress}
-          paused={paused}
-          missed={missed}
-          gap={gap}
-        />
-      ) : (
-        <Idle empty={readout.empty} missed={missed} gap={gap} />
-      )}
+      {/* The Operator's **display dimmer** (#77): the readout dims after a
+          quiet they chose and lights for the next Call — or a touch, because
+          somebody reaching for it is looking at it. Only the readout: the
+          controls under it stay as bright as a control has to be to be used. */}
+      <div
+        data-testid="scanner-readout"
+        data-dimmed={dimmer.dimmed}
+        onPointerDown={dimmer.wake}
+        className={cn('transition-opacity duration-700', dimmer.dimmed && 'opacity-25')}
+      >
+        {showing ? (
+          <Display
+            call={showing}
+            ended={ended}
+            progress={progress}
+            paused={paused}
+            missed={missed}
+            gap={gap}
+          />
+        ) : (
+          <Idle empty={readout.empty} missed={missed} gap={gap} />
+        )}
+      </div>
 
       {/* The master switch (#80). First, and its own row, because it governs
           everything below it — and because a listener reaching for silence
@@ -420,6 +454,7 @@ function Display({
   missed: number
   gap: boolean
 }) {
+  const clock = useClock()
   const color = ledForCall(call)
 
   return (
@@ -486,7 +521,7 @@ function Display({
           {unitName(call) === undefined ? '—' : <UnitLink call={call} />}
         </Stat>
         <Stat name="Time" testId="stat-time">
-          {formatCallTime(call.timestamp)}
+          {formatCallTime(call.timestamp, clock)}
         </Stat>
       </dl>
 
@@ -615,6 +650,7 @@ function History({
    *  nothing would be the common case, not a corner. */
   disabled: boolean
 }) {
+  const clock = useClock()
   if (calls.length === 0) return null
 
   return (
@@ -684,7 +720,7 @@ function History({
               className="max-w-24 shrink-0 font-mono text-[11px] text-muted-foreground"
             />
             <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
-              {formatCallTime(call.timestamp)}
+              {formatCallTime(call.timestamp, clock)}
             </time>
           </li>
         ))}

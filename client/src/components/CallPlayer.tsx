@@ -12,7 +12,9 @@ import {
   setPlaybackState,
   setPositionState,
 } from '@/lib/mediaSession'
+import { useInstance } from '@/hooks/useInstance'
 import { withGrant } from '@/lib/access'
+import { instanceName } from '@/lib/instance'
 import { prefetchAudio } from '@/lib/prefetch'
 import { keepAliveLoopUrl } from '@/lib/silence'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -57,6 +59,10 @@ const HANDOVER = 0.3
  */
 export function CallPlayer() {
   const dispatch = useAppDispatch()
+  // The Operator's say on what follows the last Call of a forwards Run (#77),
+  // and whose name the lock screen shows.
+  const instance = useInstance()
+  const goesLive = instance.playbackGoesLive
   const current = useAppSelector(selectNowPlaying)
   const upcoming = useAppSelector(selectUpcomingCall)
   const paused = useAppSelector(selectIsPaused)
@@ -95,10 +101,10 @@ export function CallPlayer() {
       bindTransport({
         play: () => dispatch(resume()),
         pause: () => dispatch(pause()),
-        nexttrack: () => dispatch(nextCall()),
+        nexttrack: () => dispatch(nextCall(goesLive)),
         previoustrack: () => dispatch(previousCall()),
       }),
-    [dispatch, foregrounded],
+    [dispatch, foregrounded, goesLive],
   )
 
   // Coming back from the background. The keep-alive works around a WebKit bug
@@ -135,10 +141,11 @@ export function CallPlayer() {
   // clock from whatever position state it was last given, so a stale one runs
   // off the end of a Call that has finished; no scrubber is honest, a running
   // one is not.
+  const site = instanceName(instance)
   useEffect(() => {
     if (bridging) setPositionState(null)
-    else setNowPlaying(current)
-  }, [current, bridging])
+    else setNowPlaying(current, site)
+  }, [current, bridging, site])
 
   useEffect(() => {
     if (current || bridging) setPlaybackState(paused ? 'paused' : 'playing')
@@ -278,7 +285,7 @@ export function CallPlayer() {
       // Instance that gates nothing.
       src={bridging ? keepAliveLoopUrl() : withGrant(current?.audioUrl ?? '', grant) || undefined}
       loop={bridging}
-      onEnded={() => dispatch(nextCall())}
+      onEnded={() => dispatch(nextCall(goesLive))}
       onLoadedMetadata={(event) => {
         if (bridging) return
         setPositionState(event.currentTarget.duration, 0, rate)
@@ -308,7 +315,7 @@ export function CallPlayer() {
             return
           }
           if (step?.do === 'advance') {
-            dispatch(nextCall())
+            dispatch(nextCall(goesLive))
             return
           }
         }
@@ -325,7 +332,7 @@ export function CallPlayer() {
           duration > 0 &&
           duration - currentTime <= HANDOVER
         ) {
-          dispatch(nextCall())
+          dispatch(nextCall(goesLive))
         }
       }}
     />

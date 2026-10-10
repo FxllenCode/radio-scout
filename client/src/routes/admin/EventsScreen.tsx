@@ -13,6 +13,7 @@ import {
 import { Screen } from '@/components/layout/Screen'
 import { Button } from '@/components/ui/button'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import { formatCallTime, pageSummary } from '@/lib/archive'
 import { callCategory, systemName, talkgroupName } from '@/lib/call'
 import { eventExportUrl, eventSummary } from '@/lib/events'
@@ -143,13 +144,14 @@ function EventRow({
   onToggle: () => void
   onDelete: () => void
 }) {
+  const clock = useClock()
   return (
     <RowCard
       title={event.name}
       subtitle={[
         eventSummary(event.calls, event.bytes),
         event.shared && 'shared',
-        `made ${formatCallTime(event.createdAtMs)}`,
+        `made ${formatCallTime(event.createdAtMs, clock)}`,
       ]
         .filter(Boolean)
         .join(' · ')}
@@ -172,6 +174,7 @@ function EventEditor({
   event: AdminEvent
   onDelete: () => void
 }) {
+  const clock = useClock()
   const detail = useGetEventQuery(event.id)
   const { data: catalog } = useGetCatalogQuery()
   const [update, updating] = useUpdateEventMutation()
@@ -296,7 +299,7 @@ function EventEditor({
                   {[
                     systemName(member),
                     callCategory(member),
-                    formatCallTime(member.timestamp),
+                    formatCallTime(member.timestamp, clock),
                   ]
                     .filter(Boolean)
                     .join(' · ')}

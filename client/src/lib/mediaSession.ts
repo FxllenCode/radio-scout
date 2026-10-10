@@ -15,6 +15,7 @@
 import type { Call } from '@/types'
 
 import { ARTWORK_SIZES, ledArtworkUrl } from './artwork'
+import { PRODUCT_NAME } from './instance'
 import { ledForCall } from './led'
 
 /** The lock-screen buttons we answer — the four a queue needs. iOS also renders
@@ -39,8 +40,9 @@ function session(): MediaSession | undefined {
   return navigator.mediaSession as MediaSession | undefined
 }
 
-/** Put `call` on the lock screen, or clear it when nothing is playing. */
-export function setNowPlaying(call: Call | null): void {
+/** Put `call` on the lock screen, or clear it when nothing is playing — from
+ *  `site`, the **Instance**'s name (#77), where the Call is filed under nothing. */
+export function setNowPlaying(call: Call | null, site: string = PRODUCT_NAME): void {
   const media = session()
   if (!media) return
 
@@ -61,7 +63,7 @@ export function setNowPlaying(call: Call | null): void {
     title: call.talkgroupLabel ?? `Talkgroup ${call.talkgroupRef}`,
     artist: call.systemLabel ?? `System ${call.systemRef}`,
     album: [call.talkgroupTag, call.talkgroupGroup].filter(Boolean).join(' · ')
-      || 'Radio-Scout',
+      || site,
     // Several sizes, all small: iOS picks one, and small is what it has
     // historically rendered without pixelating (research §4).
     artwork: ARTWORK_SIZES.map((size) => ({

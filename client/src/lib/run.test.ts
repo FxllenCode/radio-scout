@@ -5,6 +5,7 @@ import type { Call } from '@/types'
 
 import {
   advance,
+  reachesNow,
   runView,
   sameSearch,
   type Run,
@@ -463,6 +464,32 @@ describe('the search changing under a Run', () => {
 
   it('is nothing to a Run that is not there', () => {
     expect(advance(null, changed)).toBeNull()
+  })
+})
+
+/**
+ * Whether a Run that has played out has caught up with the present (#77) —
+ * what decides "playback goes live". Only forwards through history, with no
+ * upper bound, ends at *now*: walking newest-first ends at the oldest Call
+ * there is, and a range that stops last Tuesday ends last Tuesday.
+ */
+describe('a Run reaching the present', () => {
+  const started = (search: RunSearch, interrupting = false) =>
+    walk({ type: 'started', search, page: page(), index: 0, interrupting })!
+
+  it.each<[string, RunSearch, boolean]>([
+    ['forwards, unbounded', { sort: 'oldest' }, true],
+    ['forwards, after a moment but not before one', { sort: 'oldest', after: 5 }, true],
+    ['newest first', NEWEST, false],
+    ['in the default order, which is newest first', {}, false],
+    ['forwards, but only until a moment', { sort: 'oldest', before: 9 }, false],
+  ])('%s', (_what, search, reaches) => {
+    expect(reachesNow(started(search))).toBe(reaches)
+  })
+
+  /** A single Call over the live feed was never walking anywhere. */
+  it('is never true of an interruption', () => {
+    expect(reachesNow(started({ sort: 'oldest' }, true))).toBe(false)
   })
 })
 

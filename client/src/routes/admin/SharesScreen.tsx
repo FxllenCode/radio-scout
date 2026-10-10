@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { useState } from 'react'
 
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import { formatCallTime, pageSummary } from '@/lib/archive'
 import { callCategory, systemName, talkgroupName } from '@/lib/call'
 import { useDeleteShareLinkMutation, useGetShareLinksQuery } from '@/store/api'
@@ -42,6 +43,7 @@ const PAGE_SIZE = 50
  * older link invisible *and* unrevocable, which is the one thing it is for.
  */
 export function SharesScreen() {
+  const clock = useClock()
   const signedIn = useAdminSession()
   const [offset, setOffset] = useState(0)
   const listing = useGetShareLinksQuery(
@@ -76,10 +78,10 @@ export function SharesScreen() {
                   systemName(row.call),
                   callCategory(row.call),
                   row.call.timestamp !== undefined &&
-                    formatCallTime(row.call.timestamp),
+                    formatCallTime(row.call.timestamp, clock),
                   row.expired
                     ? 'expired'
-                    : `until ${formatCallTime(row.expiresAtMs)}`,
+                    : `until ${formatCallTime(row.expiresAtMs, clock)}`,
                 ]
                   .filter(Boolean)
                   .join(' · ')}

@@ -13,6 +13,7 @@ import {
 import { Screen } from '@/components/layout/Screen'
 import { Button } from '@/components/ui/button'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import {
   FORMATS,
   MASK_TOKENS,
@@ -48,6 +49,7 @@ import type { AdminDirwatch, DirwatchFormat, NewDirwatch } from '@/types'
  * read?" has to be answerable from somewhere.
  */
 export function DirwatchesScreen() {
+  const clock = useClock()
   const signedIn = useAdminSession()
   const listing = useGetDirwatchesQuery(undefined, { skip: !signedIn })
   const [remove, removing] = useDeleteDirwatchMutation()
@@ -94,7 +96,7 @@ export function DirwatchesScreen() {
               <RowCard
                 key={row.id}
                 title={row.label ?? row.directory}
-                subtitle={healthLine(row)}
+                subtitle={healthLine(row, clock)}
                 actions={
                   <>
                     <Button

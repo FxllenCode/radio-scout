@@ -29,8 +29,18 @@ import { NavigationRoute, registerRoute } from 'workbox-routing'
 
 declare const self: ServiceWorkerGlobalScope
 
-/** The app shell, injected at build time by `vite-plugin-pwa`. */
-precacheAndRoute(self.__WB_MANIFEST)
+/**
+ * The app shell, injected at build time by `vite-plugin-pwa` — less the web app
+ * manifest (#77). The binary writes the Instance's name into that one as it
+ * serves it, so a copy cached at install would keep whatever name the Instance
+ * had then, and an Operator's rename would never reach an installed app.
+ */
+const MANIFEST = 'manifest.webmanifest'
+precacheAndRoute(
+  self.__WB_MANIFEST.filter(
+    (entry) => (typeof entry === 'string' ? entry : entry.url) !== MANIFEST,
+  ),
+)
 cleanupOutdatedCaches()
 
 /**

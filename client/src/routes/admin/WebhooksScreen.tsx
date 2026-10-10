@@ -14,6 +14,7 @@ import { ScopeEditor } from '@/components/admin/ScopeEditor'
 import { Screen } from '@/components/layout/Screen'
 import { Button } from '@/components/ui/button'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import { NOTHING } from '@/lib/downstream'
 import type { Selection } from '@/lib/selection'
 import { formatName, looksPostable, markName, webhookHealthLine } from '@/lib/webhook'
@@ -52,6 +53,7 @@ import {
  * keep.
  */
 export function WebhooksScreen() {
+  const clock = useClock()
   const signedIn = useAdminSession()
   const listing = useGetWebhooksQuery(undefined, { skip: !signedIn })
   const [remove, removing] = useDeleteWebhookMutation()
@@ -87,7 +89,7 @@ export function WebhooksScreen() {
               <RowCard
                 key={row.id}
                 title={row.label ?? row.host ?? `Webhook ${row.id}`}
-                subtitle={webhookHealthLine(row)}
+                subtitle={webhookHealthLine(row, clock)}
                 actions={
                   <>
                     <Button

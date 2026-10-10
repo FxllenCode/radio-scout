@@ -12,6 +12,7 @@ import {
 } from '@/components/admin/AdminUi'
 import { Screen } from '@/components/layout/Screen'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import { Button } from '@/components/ui/button'
 import { formatCallTime } from '@/lib/archive'
 import {
@@ -35,6 +36,7 @@ import type { AdminApiKey } from '@/types'
  * page, its database and every backup of it hand out every recorder's secret.
  */
 export function ApiKeysScreen() {
+  const clock = useClock()
   const signedIn = useAdminSession()
   const listing = useGetApiKeysQuery(undefined, { skip: !signedIn })
   const [create, creating] = useCreateApiKeyMutation()
@@ -130,7 +132,7 @@ export function ApiKeysScreen() {
                   row.systemRef == null
                     ? 'every system'
                     : `system ${row.systemRef}`
-                } · added ${formatCallTime(row.createdAtMs)}${
+                } · added ${formatCallTime(row.createdAtMs, clock)}${
                   row.disabled ? ' · disabled' : ''
                 }`}
                 actions={

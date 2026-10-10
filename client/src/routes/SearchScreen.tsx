@@ -61,6 +61,7 @@ import {
   useSearchCallsQuery,
 } from '@/store/api'
 import { useGrant } from '@/hooks/useGrant'
+import { useClock } from '@/hooks/useInstance'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   enterLiveFeed,
@@ -110,6 +111,7 @@ const EMPTY_PAGE: SearchPage = {
  * options that search to nothing.
  */
 export function SearchScreen() {
+  const clock = useClock()
   const dispatch = useAppDispatch()
   const [params, setParams] = useSearchParams()
   /** The whole of what this screen is showing, read off the URL — the filters
@@ -613,8 +615,8 @@ export function SearchScreen() {
 
         {options?.dateStartMs !== undefined && (
           <p className="col-span-2 font-mono text-[11px] text-muted-foreground/70">
-            Archive spans {formatCallTime(options.dateStartMs)} –{' '}
-            {formatCallTime(options.dateStopMs)}
+            Archive spans {formatCallTime(options.dateStartMs, clock)} –{' '}
+            {formatCallTime(options.dateStopMs, clock)}
           </p>
         )}
       </form>
@@ -880,12 +882,13 @@ function ResultRow({
   selected?: boolean
   onSelect: () => void
 }) {
+  const clock = useClock()
   // The **grant** goes on the link, never through the base query: a download
   // is a navigation (#68).
   const grant = useGrant()
   const name = talkgroupName(call)
   const system = systemName(call)
-  const description = `${name} on ${system} at ${formatCallTime(call.timestamp)}`
+  const description = `${name} on ${system} at ${formatCallTime(call.timestamp, clock)}`
 
   return (
     <li
@@ -930,7 +933,7 @@ function ResultRow({
         <UnitLink call={call} />
       </span>
       <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
-        {formatCallTime(call.timestamp)}
+        {formatCallTime(call.timestamp, clock)}
       </time>
       {/* Right-aligned and fixed-width so a column of lengths reads as a
           column — which is what makes a kerchunk visible next to a dispatch

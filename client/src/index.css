@@ -93,6 +93,60 @@
   --color-led-red: #ff5c5c;
   --color-led-white: #fafafa;
   --color-led-yellow: #eac54f;
+  /* ...and the eight #77 added after them (spec US 56). */
+  --color-led-purple: #a67cff;
+  --color-led-pink: #ff6fb2;
+  --color-led-lime: #a3e635;
+  --color-led-teal: #14b89a;
+  --color-led-coral: #ff8a65;
+  --color-led-indigo: #7c83ff;
+  --color-led-brown: #b5835a;
+  --color-led-gray: #9ca3af;
+}
+
+/* The **Reference page** (#77): markdown's own tags, rendered on the server,
+   given the app's type and spacing — there is no typography plugin to borrow,
+   and a codes page is headings, lists and tables. */
+@layer components {
+  .reference {
+    @apply text-sm leading-relaxed;
+  }
+  .reference h1 {
+    @apply mt-2 mb-3 font-mono text-base font-semibold;
+  }
+  .reference h2 {
+    @apply mt-6 mb-2 font-mono text-sm font-semibold uppercase tracking-wider text-muted-foreground;
+  }
+  .reference h3 {
+    @apply mt-4 mb-2 font-semibold;
+  }
+  .reference p,
+  .reference ul,
+  .reference ol {
+    @apply my-2;
+  }
+  .reference ul {
+    @apply list-disc pl-5;
+  }
+  .reference ol {
+    @apply list-decimal pl-5;
+  }
+  .reference a {
+    @apply underline underline-offset-2;
+  }
+  .reference code {
+    @apply rounded bg-muted px-1 font-mono text-xs;
+  }
+  .reference table {
+    @apply my-3 w-full border-collapse font-mono text-xs;
+  }
+  .reference th,
+  .reference td {
+    @apply border border-border px-2 py-1 text-left align-top;
+  }
+  .reference th {
+    @apply bg-muted font-semibold;
+  }
 }
 
 @layer base {

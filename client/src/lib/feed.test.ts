@@ -41,6 +41,19 @@ describe('feedStatus', () => {
       expect(feedStatus({ off, playback, link })).toBe(expected)
     },
   )
+
+  /** Turned away (#77) is **Feed down** whatever the socket says: the server
+   *  opens the socket before it says no, so `connected` alone would flash a
+   *  green light at a Listener being refused on every retry. The Listener's
+   *  own silences still outrank it. */
+  it.each([
+    [false, false, 'connected', 'down'],
+    [false, false, 'connecting', 'down'],
+    [false, true, 'connected', 'playback'],
+    [true, false, 'connected', 'off'],
+  ] as const)('with off=%s playback=%s link=%s and a refusal, is %s', (off, playback, link, expected) => {
+    expect(feedStatus({ off, playback, link, refused: 'instance-full' })).toBe(expected)
+  })
 })
 
 /** Nothing held, nothing on the air, nothing to replay. */
@@ -250,6 +263,32 @@ const READOUT_CASES: {
     says: 'as soon as the connection is up',
   },
 ]
+
+/** What a Listener turned away is told (#77): *why*, in words that say what
+ *  to do about it — which for a full Instance is nothing but wait. */
+describe('feedReadout, turned away', () => {
+  it.each([
+    ['instance-full', 'FULL', 'This scanner is full right now.', 'as soon as'],
+    ['access-connection-limit', 'CODE IN USE', 'Your access code is in use elsewhere.', 'another device'],
+    ['something-new', 'REFUSED', 'The server turned this connection away.', 'keeps trying'],
+  ])('reads %s as %s', (reason, label, headline, says) => {
+    const readout = feedReadout('down', 'connected', reason)
+
+    expect(readout.badge.label).toBe(label)
+    // Being retried, so it pulses; not a fault on the Listener's side, so it
+    // is not red — except for a reason this build cannot explain.
+    expect(readout.badge.pulse).toBe(true)
+    expect(readout.badge.color).toBe(label === 'REFUSED' ? 'red' : 'orange')
+    expect(readout.empty.headline).toBe(headline)
+    expect(readout.empty.detail).toContain(says)
+  })
+
+  /** A refusal is about the *feed*; the Listener's own choices still speak
+   *  for themselves. */
+  it('leaves the Listener\'s own silences their own words', () => {
+    expect(feedReadout('off', 'connected', 'instance-full').badge.label).toBe('FEED OFF')
+  })
+})
 
 describe('feedReadout', () => {
   it.each(READOUT_CASES)(

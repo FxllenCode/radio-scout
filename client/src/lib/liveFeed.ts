@@ -42,6 +42,17 @@ export interface LiveFeedHandlers {
    *  assume, because a silent truncation looks exactly like having missed
    *  nothing. */
   onGap(): void
+  /** How many people are listening, when the Operator shows it (#77) — or
+   *  `null` once they stop, which means stop drawing one. */
+  onListeners(count: number | null): void
+  /** The server turned this connection away, and why — the `refused` frame's
+   *  slug: `instance-full` (#77), `access-connection-limit` (#68). The socket
+   *  closes after it, and is retried like any other drop; what this adds is
+   *  the reason, where a bare close used to read as a network fault. */
+  onRefused(reason: string): void
+  /** The server greeted the connection: it was taken in, so whatever turned
+   *  the last one away no longer applies. */
+  onHello(): void
   /** The highest **emission** seen so far, read at send time. It is sent
    *  **only** when re-subscribing after a drop, as the Backfill cursor — a
    *  cursor on an ordinary matrix change would ask the server to backfill
@@ -158,7 +169,14 @@ export function connectLiveFeed(
 function receive(handlers: LiveFeedHandlers, data: unknown) {
   if (typeof data !== 'string') return
 
-  let frame: { t?: string; call?: Call; seq?: number; skipped?: number }
+  let frame: {
+    t?: string
+    call?: Call
+    seq?: number
+    skipped?: number
+    count?: unknown
+    reason?: unknown
+  }
   try {
     frame = JSON.parse(data)
   } catch {
@@ -178,8 +196,19 @@ function receive(handlers: LiveFeedHandlers, data: unknown) {
   }
   if (frame.t === 'gap') {
     handlers.onGap()
+    return
   }
-  // `hello` and `subscribed` need no action: the greeting's heartbeat cadence
-  // is the server's business (the browser answers its pings), and the ack only
-  // matters to a client that wants to serialize subscribe→ingest.
+  if (frame.t === 'listeners' && (typeof frame.count === 'number' || frame.count === null)) {
+    handlers.onListeners(frame.count)
+    return
+  }
+  if (frame.t === 'refused' && typeof frame.reason === 'string') {
+    handlers.onRefused(frame.reason)
+    return
+  }
+  // The greeting's heartbeat cadence is the server's business (the browser
+  // answers its pings); what matters here is only that it came, because a
+  // server that greets has taken the connection in. `subscribed` needs no
+  // action: the ack only matters to a client that serializes subscribe→ingest.
+  if (frame.t === 'hello') handlers.onHello()
 }

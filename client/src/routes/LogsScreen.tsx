@@ -7,6 +7,7 @@ import {
   SignOutButton,
   controlClass,
 } from '@/components/admin/AdminUi'
+import { useClock } from '@/hooks/useInstance'
 import { Screen } from '@/components/layout/Screen'
 import { Button } from '@/components/ui/button'
 import { dateTimeLocalToMs, formatCallTime, pageSummary } from '@/lib/archive'
@@ -193,6 +194,7 @@ const levelClass: Record<string, string> = {
 
 /** One event: when, how loud, what happened, and the detail behind it. */
 function EventRow({ event }: { event: LogEvent }) {
+  const clock = useClock()
   const fields = Object.entries(event.fields ?? {})
 
   return (
@@ -207,7 +209,7 @@ function EventRow({ event }: { event: LogEvent }) {
           {event.level}
         </span>
         <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
-          {formatCallTime(event.atMs)}
+          {formatCallTime(event.atMs, clock)}
         </time>
         <span
           data-testid="log-message"

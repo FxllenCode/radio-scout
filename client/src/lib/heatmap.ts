@@ -26,7 +26,7 @@
  * and drawing a confidently wrong picture. [`heatmapWindow`] asks for a stretch
  * that fits, so the answer is always exact.
  */
-import type { Series } from '@/types'
+import type { Series, TimeFormat } from '@/types'
 
 import { bucketStartMs } from './density'
 
@@ -45,6 +45,20 @@ export const HEATMAP_DAYS = 28
 /** Rows, starting Monday — which groups the weekend, and the weekend is the
  *  shape somebody opens this looking for. */
 export const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+/** An hour of the day as a column is named — `14:00`, or `2 PM` on the
+ *  Operator's twelve-hour clock (#77). */
+export function hourName(hour: number, clock: TimeFormat): string {
+  if (clock === '24h') return `${String(hour).padStart(2, '0')}:00`
+  return `${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}`
+}
+
+/** ...and as it is drawn over the column, where twenty-four labels have 19rem
+ *  between them: `14`, or `2p`. */
+export function hourMark(hour: number, clock: TimeFormat): string {
+  if (clock === '24h') return String(hour).padStart(2, '0')
+  return `${hour % 12 || 12}${hour < 12 ? 'a' : 'p'}`
+}
 
 /** A week of hours, and the busiest cell in it. */
 export interface Heatmap {

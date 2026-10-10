@@ -188,7 +188,7 @@ export function savePanel(
   writeStored(storage, panelKey(namespace), JSON.stringify(panel))
 }
 
-const SORTS: readonly PanelSort[] = ['name', 'active']
+const SORTS: readonly PanelSort[] = ['name', 'active', 'ref']
 
 const isSort = (value: unknown): value is PanelSort =>
   SORTS.includes(value as PanelSort)

@@ -14,6 +14,7 @@ import { ScopeEditor } from '@/components/admin/ScopeEditor'
 import { Screen } from '@/components/layout/Screen'
 import { Button } from '@/components/ui/button'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import { NOTHING, healthLine } from '@/lib/downstream'
 import type { Selection } from '@/lib/selection'
 import {
@@ -41,6 +42,7 @@ import type { AdminDownstream } from '@/types'
  * one deliberately cannot show even once.
  */
 export function DownstreamsScreen() {
+  const clock = useClock()
   const signedIn = useAdminSession()
   const listing = useGetDownstreamsQuery(undefined, { skip: !signedIn })
   const [remove, removing] = useDeleteDownstreamMutation()
@@ -75,7 +77,7 @@ export function DownstreamsScreen() {
               <RowCard
                 key={row.id}
                 title={row.label ?? row.url}
-                subtitle={healthLine(row)}
+                subtitle={healthLine(row, clock)}
                 actions={
                   <>
                     <Button

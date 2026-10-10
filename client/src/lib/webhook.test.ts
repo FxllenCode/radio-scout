@@ -55,7 +55,7 @@ describe('what an operator is told about a webhook', () => {
    *  the server and a screen of rows an Operator cannot tell apart is one they
    *  will misconfigure. */
   it('leads with the host and says when it has never delivered', () => {
-    expect(webhookHealthLine(hook())).toBe(
+    expect(webhookHealthLine(hook(), '24h')).toBe(
       'discord.com · Radio-Scout JSON · Emergency · never delivered',
     )
   })
@@ -65,14 +65,14 @@ describe('what an operator is told about a webhook', () => {
    *  on this screen that produces no error anywhere, so nothing else would
    *  reveal it. */
   it('says when a webhook is watching nothing', () => {
-    expect(webhookHealthLine(hook({ marks: [] }))).toContain('watching nothing')
+    expect(webhookHealthLine(hook({ marks: [] }), '24h')).toContain('watching nothing')
   })
 
   /** A stored address that is not a URL at all is a webhook that will never
    *  deliver, and the row says so rather than rendering a blank where a host
    *  should be. */
   it('says when there is no usable address', () => {
-    expect(webhookHealthLine(hook({ host: null }))).toContain('no usable URL')
+    expect(webhookHealthLine(hook({ host: null }), '24h')).toContain('no usable URL')
   })
 
   /** The queue depth is the number that says whether anything is wrong right
@@ -87,6 +87,7 @@ describe('what an operator is told about a webhook', () => {
         lastFailure: 'sink-refused (429)',
         lastSuccessMs: 1_700_000_000_000,
       }),
+      '24h',
     )
 
     expect(line).toContain('disabled')
@@ -98,10 +99,10 @@ describe('what an operator is told about a webhook', () => {
   /** A failure with no reason stored still counts, rather than rendering a
    *  dangling separator. */
   it('counts a failure that has no reason beside it', () => {
-    expect(webhookHealthLine(hook({ consecutiveFailures: 1 }))).toContain(
+    expect(webhookHealthLine(hook({ consecutiveFailures: 1 }), '24h')).toContain(
       '1 failed ·',
     )
-    expect(webhookHealthLine(hook({ consecutiveFailures: 1 }))).not.toContain(
+    expect(webhookHealthLine(hook({ consecutiveFailures: 1 }), '24h')).not.toContain(
       '1 failed · ·',
     )
   })

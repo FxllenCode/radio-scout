@@ -10,6 +10,7 @@ import type {
   ListenerQuery,
   LogQuery,
   SearchQuery,
+  TimeFormat,
 } from '@/types'
 
 /** Serialize filters into a query string, dropping anything unset. Keys are
@@ -83,16 +84,22 @@ export function msToDateTimeLocal(ms: number | undefined): string {
 }
 
 /** A Call's time in the listener's timezone, in a fixed `YYYY-MM-DD HH:MM:SS`
- *  shape — a scanner log reads better aligned than localized. */
-export function formatCallTime(ms: number | undefined): string {
+ *  shape — a scanner log reads better aligned than localized.
+ *
+ *  On the clock the **Operator** chose (#77): twenty-four-hour, or twelve with
+ *  `AM`/`PM` after it — still padded, so a column of them still lines up.
+ *  Required rather than defaulted, so a screen cannot quietly keep writing
+ *  twenty-four-hour times on an Instance that asked for twelve. */
+export function formatCallTime(ms: number | undefined, clock: TimeFormat): string {
   if (ms === undefined) return '—'
   const at = new Date(ms)
   if (Number.isNaN(at.getTime())) return '—'
   const pad = (value: number) => String(value).padStart(2, '0')
-  return (
-    `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}` +
-    ` ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`
-  )
+  const date = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
+  const rest = `${pad(at.getMinutes())}:${pad(at.getSeconds())}`
+  const hours = at.getHours()
+  if (clock === '24h') return `${date} ${pad(hours)}:${rest}`
+  return `${date} ${pad(hours % 12 || 12)}:${rest} ${hours < 12 ? 'AM' : 'PM'}`
 }
 
 /** How long a transmission was (#42, spec US 8), in the shape a scanner

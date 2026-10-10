@@ -125,6 +125,10 @@ export function mountEmbed(
         // archive, and what it skipped is still on the scanner it links to.
         onLagged: () => {},
         onGap: () => {},
+        // The count is the app's to show; the embed is a player (#77).
+        onListeners: () => {},
+        onRefused: () => dispatch({ type: 'refused' }),
+        onHello: () => dispatch({ type: 'greeted' }),
         since: () => cursor,
       }, { retryMs: liveRetryMs })
     } else if (!state.listening && socket) {

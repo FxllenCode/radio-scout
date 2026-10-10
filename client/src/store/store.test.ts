@@ -461,13 +461,28 @@ describe('remembering how the panel is arranged (#57, spec US 29)', () => {
     store.dispatch(sortPanel('active'))
 
     expect(storage.getItem(panelKey('truck'))).toBe(
-      JSON.stringify({ sort: 'active', pinned: ['11:100'], expanded: { 11: false } }),
+      JSON.stringify({ pinned: ['11:100'], expanded: { 11: false }, sort: 'active' }),
     )
     expect(reopened(storage, 'truck')).toEqual({
       sort: 'active',
       pinned: ['11:100'],
       expanded: { 11: false },
     })
+  })
+
+  /** A Profile that never chose an order stores none (#77), so it goes on
+   *  following the Operator's — and one that chose Ref order keeps it. */
+  it('stores no sort until one is chosen, and the Ref one once it is', () => {
+    const { storage } = fakeStorage()
+    const store = makeStore({ storage, namespace: 'truck' })
+
+    store.dispatch(togglePin('11:100'))
+    expect(storage.getItem(panelKey('truck'))).toBe(
+      JSON.stringify({ pinned: ['11:100'], expanded: {} }),
+    )
+
+    store.dispatch(sortPanel('ref'))
+    expect(reopened(storage, 'truck').sort).toBe('ref')
   })
 
   it('is independent per Profile, like everything else in one', () => {

@@ -7,6 +7,7 @@ import type { Catalog } from '@/types'
  *  serves it. */
 const DAY = 24 * 60 * 60 * 1_000
 
+import { ledForTalkgroup } from './led'
 import { lastHeard, panelOf, windowLabel } from './panel'
 import {
   talkgroupKey,
@@ -70,8 +71,9 @@ describe('the Talkgroups panel, derived once (#91)', () => {
       talkgroupRef: 1,
       systemLabel: 'Alpha',
       // Resolved here rather than per row per render (#91 left this behind on
-      // purpose, for the ticket that windowed the list).
-      led: 'red',
+      // purpose, for the ticket that windowed the list) — the uncurated
+      // fallback, whatever the palette's size (#77 doubled it).
+      led: ledForTalkgroup(100, 1),
       selected: true,
       pinned: false,
       recentCalls: 0,
@@ -410,6 +412,33 @@ describe('the Talkgroups panel at county scale (#57)', () => {
       ).toEqual(['Newer', 'Older', 'Silent A', 'Silent B'])
     })
 
+    /** By **Ref** (#77) — the TGID order a RadioReference listing is in, and
+     *  what rdio's admin order usually was. Numeric, not the strings' order. */
+    it('orders by Ref, as numbers', () => {
+      const catalog: Catalog = {
+        activityWindowMs: DAY,
+        sharing: true,
+        export: { enabled: true, maxCalls: 1000 },
+        station: true,
+        starred: { kept: false, keptDays: 0 },
+        systems: [
+          {
+            ref: 1,
+            label: 'County',
+            talkgroups: [
+              { ref: 900, label: 'Alpha', groups: [] },
+              { ref: 1000, label: 'Bravo', groups: [] },
+              { ref: 80, label: 'Charlie', groups: [] },
+            ],
+          },
+        ],
+      }
+
+      expect(
+        draw({ catalog, sort: 'ref' }).systems[0].rows.map((row) => row.label),
+      ).toEqual(['Charlie', 'Alpha', 'Bravo'])
+    })
+
     it('sorts the pinned section the same way', () => {
       const catalog = county(3)
 
@@ -512,6 +541,11 @@ describe('the Talkgroups panel at county scale (#57)', () => {
      *  keep true. */
     it('needs none for the same catalog sorted by activity', () => {
       expect(draw({ catalog: county(3), sort: 'active' }).ticking).toBe(false)
+    })
+
+    /** By Ref the rows show ages, as they do A–Z (#77). */
+    it('needs one for the same catalog sorted by Ref', () => {
+      expect(draw({ catalog: county(3), sort: 'ref' }).ticking).toBe(true)
     })
 
     it.each([

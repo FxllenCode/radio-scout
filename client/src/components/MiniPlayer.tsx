@@ -4,6 +4,7 @@ import { CallFlags } from '@/components/CallFlags'
 import { DockedBanner } from '@/components/layout/DockedBanner'
 import { StatusLed } from '@/components/StatusLed'
 import { Button } from '@/components/ui/button'
+import { useInstance } from '@/hooks/useInstance'
 import { talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
 import type { Strip } from '@/lib/strip'
@@ -53,6 +54,7 @@ export function MiniPlayer({ strip }: { strip: Strip }) {
 function Playing({ strip }: { strip: Extract<Strip, { mode: 'playing' }> }) {
   const dispatch = useAppDispatch()
   const paused = useAppSelector(selectIsPaused)
+  const goesLive = useInstance().playbackGoesLive
   const { call } = strip
 
   return (
@@ -87,7 +89,7 @@ function Playing({ strip }: { strip: Extract<Strip, { mode: 'playing' }> }) {
         variant="outline"
         size="icon"
         aria-label="Skip"
-        onClick={() => dispatch(nextCall())}
+        onClick={() => dispatch(nextCall(goesLive))}
       >
         <SkipForward className="size-4" aria-hidden />
       </Button>

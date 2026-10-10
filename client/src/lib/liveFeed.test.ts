@@ -56,6 +56,12 @@ interface Recorder {
   gaps: number
   /** The cursor the client reads when it re-subscribes after a drop. */
   since: number | undefined
+  /** Every **Listener count** the server told it (#77). */
+  listeners: (number | null)[]
+  /** Every reason the server gave for turning the connection away (#77). */
+  refusals: string[]
+  /** How many times the server greeted it — took it in. */
+  greetings: number
 }
 
 /** Connect with recording handlers. */
@@ -67,6 +73,9 @@ function connect(options?: { retryMs?: number }): Recorder {
     lagged: [],
     gaps: 0,
     since: undefined,
+    listeners: [],
+    refusals: [],
+    greetings: 0,
   }
   handle = connectLiveFeed(
     {
@@ -77,6 +86,9 @@ function connect(options?: { retryMs?: number }): Recorder {
       },
       onLagged: (skipped) => recorder.lagged.push(skipped),
       onGap: () => (recorder.gaps += 1),
+      onListeners: (count) => recorder.listeners.push(count),
+      onRefused: (reason) => recorder.refusals.push(reason),
+      onHello: () => (recorder.greetings += 1),
       since: () => recorder.since,
     },
     options,
@@ -199,6 +211,40 @@ describe('live feed client', () => {
     const recorder = connect()
 
     await vi.waitFor(() => expect(recorder.lagged).toEqual([7]))
+  })
+
+  /** The **Listener count**, when the Operator shows it (#77) — and `null`
+   *  when they stop, which is the server saying to stop drawing one. */
+  it('hands over the listener count, and its withdrawal', async () => {
+    onConnect = (client) => {
+      client.send(JSON.stringify({ t: 'listeners', count: 12 }))
+      client.send(JSON.stringify({ t: 'listeners', count: null }))
+      client.send(JSON.stringify({ t: 'listeners', count: 'many' })) // not a count
+    }
+    const recorder = connect()
+
+    await vi.waitFor(() => expect(recorder.listeners).toEqual([12, null]))
+  })
+
+  /** Turned away — a full Instance, a code at its limit (#68, #77) — the
+   *  client is told *why*, where it used to see only a close. */
+  it('says why the server turned it away', async () => {
+    onConnect = (client) => {
+      client.send(JSON.stringify({ t: 'refused', reason: 'instance-full' }))
+      client.send(JSON.stringify({ t: 'refused' })) // no reason, nothing to say
+    }
+    const recorder = connect()
+
+    await vi.waitFor(() => expect(recorder.refusals).toEqual(['instance-full']))
+  })
+
+  /** A greeting is the server taking the connection in — what ends being
+   *  turned away. */
+  it('says when the server took it in', async () => {
+    onConnect = (client) => client.send(JSON.stringify({ t: 'hello', protocol: 2 }))
+    const recorder = connect()
+
+    await vi.waitFor(() => expect(recorder.greetings).toBeGreaterThan(0))
   })
 
   /** The server may grow frames we don't know yet (ADR-0004 announces a

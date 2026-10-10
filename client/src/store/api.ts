@@ -38,6 +38,8 @@ import type {
   HealthQuery,
   HealthReport,
   IssuedAccessCode,
+  Instance,
+  InstancePatch,
   InstanceStatus,
   IssuedApiKey,
   ListenerQuery,
@@ -57,6 +59,8 @@ import type {
   NewEmbed,
   RangeDelta,
   RangeReport,
+  ReferenceEditor,
+  ReferencePage,
   SearchPage,
   SearchQuery,
   Series,
@@ -138,6 +142,8 @@ export const api = createApi({
     'Star',
     'Event',
     'AccessCode',
+    'Instance',
+    'Reference',
   ],
   endpoints: (builder) => ({
     /** Server liveness — proves the one-origin wiring end to end. */
@@ -241,6 +247,18 @@ export const api = createApi({
      *  tagged `Call` because ingesting a Call for an unknown Talkgroup is what
      *  auto-populate (#8) grows the catalog by — and `Talkgroup` because
      *  curation (#49) is the other way it changes. */
+    /** The **Instance identity** (#77) — the name, the help link and the
+     *  defaults every screen is drawn with. Read once and held: it changes when
+     *  the Operator saves the admin form, which invalidates it. */
+    getInstance: builder.query<Instance, void>({
+      query: () => ({ url: 'api/instance' }),
+      providesTags: ['Instance'],
+    }),
+    /** The **Reference page** (#77, spec US 58), as HTML the server rendered. */
+    getReference: builder.query<ReferencePage, void>({
+      query: () => ({ url: 'api/reference' }),
+      providesTags: ['Reference'],
+    }),
     getCatalog: builder.query<Catalog, void>({
       query: () => ({ url: 'api/catalog' }),
       providesTags: ['Call', 'Talkgroup'],
@@ -744,6 +762,30 @@ export const api = createApi({
     /** **Embeds** (#75): the Selections another site may frame. An edit keeps
      *  the address, which is the point — the host's snippet plays whatever the
      *  row says next. */
+    /** Change the **Instance identity** (#77). Invalidates what every screen
+     *  reads, so the Operator sees their own change land. */
+    updateInstance: builder.mutation<Instance, InstancePatch>({
+      query: (body) => ({ url: 'api/admin/instance', method: 'PATCH', body }),
+      invalidatesTags: ['Instance'],
+    }),
+    getReferenceEditor: builder.query<ReferenceEditor, void>({
+      query: () => ({ url: 'api/admin/reference' }),
+      providesTags: ['Reference'],
+    }),
+    /** Publish the **Reference page**, whole. */
+    publishReference: builder.mutation<ReferenceEditor, string>({
+      query: (markdown) => ({
+        url: 'api/admin/reference',
+        method: 'PUT',
+        body: { markdown },
+      }),
+      invalidatesTags: ['Reference', 'Instance'],
+    }),
+    /** Take it down, and the app's entry for it with it. */
+    unpublishReference: builder.mutation<void, void>({
+      query: () => ({ url: 'api/admin/reference', method: 'DELETE' }),
+      invalidatesTags: ['Reference', 'Instance'],
+    }),
     getEmbeds: builder.query<Listing<AdminEmbed>, void>({
       query: () => ({ url: 'api/admin/embeds' }),
       providesTags: ['Embed'],
@@ -947,6 +989,12 @@ export const {
   useGetApiKeysQuery,
   useGetCallQuery,
   useGetCatalogQuery,
+  useGetInstanceQuery,
+  useGetReferenceQuery,
+  useGetReferenceEditorQuery,
+  usePublishReferenceMutation,
+  useUnpublishReferenceMutation,
+  useUpdateInstanceMutation,
   useGetFrequencyHealthQuery,
   useGetInstanceStatusQuery,
   useGetListenerHistoryQuery,

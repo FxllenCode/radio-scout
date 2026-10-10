@@ -55,7 +55,7 @@ describe('a Dirwatch format, as the form offers it', () => {
 
 describe("a watch's health line", () => {
   it('says what it is and that it is watching', () => {
-    expect(healthLine(watch())).toBe('Trunk Recorder · watching · 0 ingested')
+    expect(healthLine(watch(), '24h')).toBe('Trunk Recorder · watching · 0 ingested')
   })
 
   it('says when it last ingested, and that it deletes as it goes', () => {
@@ -64,6 +64,7 @@ describe("a watch's health line", () => {
         deleteAfter: true,
         health: { status: 'watching', ingested: 3, refused: 0, lastIngestMs: 1_700_000_000_000 },
       }),
+      '24h',
     )
 
     expect(line).toMatch(/deletes as it goes · 3 ingested, last \d{4}-/)
@@ -75,10 +76,11 @@ describe("a watch's health line", () => {
         watch({
           health: { status: 'watching', ingested: 0, refused: 2, lastRefusal: 'no-match a.wav' },
         }),
+        '24h',
       ),
     ).toContain('2 refused · no-match a.wav')
     expect(
-      healthLine(watch({ health: { status: 'watching', ingested: 0, refused: 1 } })),
+      healthLine(watch({ health: { status: 'watching', ingested: 0, refused: 1 } }), '24h'),
     ).toMatch(/1 refused$/)
   })
 
@@ -92,7 +94,7 @@ describe("a watch's health line", () => {
     ['unreadable', 'cannot read its settings'],
   ] as const)('says what %s means', (status, says) => {
     expect(
-      healthLine(watch({ health: { status, ingested: 0, refused: 0 } })),
+      healthLine(watch({ health: { status, ingested: 0, refused: 0 } }), '24h'),
     ).toContain(says)
   })
 })

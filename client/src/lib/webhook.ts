@@ -6,7 +6,7 @@
  * scoped by the same [`Selection`] a Downstream is, so a form that edited it a
  * second way would be a second set of round-tripping rules to keep honest.
  */
-import type { AdminWebhook, Mark, WebhookFormat } from '@/types'
+import type { AdminWebhook, Mark, TimeFormat, WebhookFormat } from '@/types'
 
 import { formatCallTime } from './archive'
 
@@ -79,7 +79,7 @@ export function looksPostable(url: string): boolean {
  *   it is configured, enabled, correctly scoped, and will never fire. That is
  *   the one misconfiguration here that produces no error anywhere.
  */
-export function webhookHealthLine(row: AdminWebhook): string {
+export function webhookHealthLine(row: AdminWebhook, clock: TimeFormat): string {
   const parts = [row.host ?? 'no usable URL']
   parts.push(formatName(row.format))
   parts.push(
@@ -99,7 +99,7 @@ export function webhookHealthLine(row: AdminWebhook): string {
   parts.push(
     row.lastSuccessMs == null
       ? 'never delivered'
-      : `last delivered ${formatCallTime(row.lastSuccessMs)}`,
+      : `last delivered ${formatCallTime(row.lastSuccessMs, clock)}`,
   )
   return parts.join(' · ')
 }

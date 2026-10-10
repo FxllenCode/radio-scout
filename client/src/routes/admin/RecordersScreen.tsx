@@ -22,6 +22,7 @@ import {
 } from '@/lib/recorders'
 import { asOf, formatUptime } from '@/lib/status'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import { useGetFrequencyHealthQuery, useGetRecordersQuery } from '@/store/api'
 import type { ChannelHealth, Dashboard, HealthReport, RecorderView } from '@/types'
 
@@ -250,6 +251,7 @@ function RecorderCard({ recorder, atMs }: { recorder: RecorderView; atMs: number
  *  quarter-hourly rollup, and re-reading a chart of yesterday twenty times a
  *  minute would cost a Pi the one read this screen is careful about. */
 function HealthCharts({ signedIn }: { signedIn: boolean }) {
+  const clock = useClock()
   // **No range**, deliberately: the server discovers how far its own history
   // reaches and widens the grain to fit, reporting the width it really used.
   // A window built from `Date.now()` would be a fresh cache key on every render
@@ -265,7 +267,7 @@ function HealthCharts({ signedIn }: { signedIn: boolean }) {
   return (
     <Card
       title="Receive health"
-      note={`${formatCallTime(report.fromMs)} → ${formatCallTime(report.toMs)}`}
+      note={`${formatCallTime(report.fromMs, clock)} → ${formatCallTime(report.toMs, clock)}`}
     >
       {report.channels.length === 0 ? (
         <Row label="No calls measured yet" value="—" />
@@ -327,6 +329,7 @@ function Sparkline({
   report: HealthReport
   label: string
 }) {
+  const clock = useClock()
   const heights = plot(trace)
 
   return (
@@ -334,7 +337,7 @@ function Sparkline({
       className="mt-1.5 flex h-6 items-end gap-px"
       role="img"
       aria-label={`${label}, ${trace.length} buckets from ${formatCallTime(
-        bucketAt(report, 0),
+        bucketAt(report, 0), clock,
       )}`}
     >
       {heights.map((height, index) => (

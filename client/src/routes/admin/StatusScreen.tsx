@@ -15,6 +15,7 @@ import {
   type Health,
 } from '@/lib/status'
 import { useAdminSession } from '@/hooks/useAdminSession'
+import { useClock } from '@/hooks/useInstance'
 import { useGetInstanceStatusQuery } from '@/store/api'
 import type { InstanceStatus, TlsHealth } from '@/types'
 
@@ -67,6 +68,7 @@ export function StatusScreen() {
 }
 
 function Report({ status }: { status: InstanceStatus }) {
+  const clock = useClock()
   const found = concerns(status)
   const verdict = overall(found)
   // **Said on every card built from them, not one.** The three below come from
@@ -118,7 +120,7 @@ function Report({ status }: { status: InstanceStatus }) {
               value={`${system.calls} · ${
                 system.lastCallAtMs === undefined
                   ? 'never heard'
-                  : `last ${formatCallTime(system.lastCallAtMs)}`
+                  : `last ${formatCallTime(system.lastCallAtMs, clock)}`
               }`}
             />
           ))
@@ -159,7 +161,7 @@ function Report({ status }: { status: InstanceStatus }) {
         {status.archive.oldestCallAtMs !== undefined && (
           <Row
             label="Oldest call"
-            value={formatCallTime(status.archive.oldestCallAtMs)}
+            value={formatCallTime(status.archive.oldestCallAtMs, clock)}
           />
         )}
       </Card>
@@ -177,7 +179,7 @@ function Report({ status }: { status: InstanceStatus }) {
                 : `${sink.total} · ${sink.queued} queued · ${sink.failing} failing · ${
                     sink.lastSuccessMs === undefined
                       ? 'nothing delivered yet'
-                      : `last ${formatCallTime(sink.lastSuccessMs)}`
+                      : `last ${formatCallTime(sink.lastSuccessMs, clock)}`
                   }`
             }
           />
@@ -210,6 +212,7 @@ function Report({ status }: { status: InstanceStatus }) {
  * is shown in the CA's own words, because that is the thing to fix.
  */
 function HttpsCard({ tls }: { tls: TlsHealth }) {
+  const clock = useClock()
   return (
     <Card title="HTTPS">
       <Row
@@ -219,11 +222,11 @@ function HttpsCard({ tls }: { tls: TlsHealth }) {
       <Row
         label="Expires"
         value={
-          tls.notAfterMs === undefined ? 'no certificate yet' : formatCallTime(tls.notAfterMs)
+          tls.notAfterMs === undefined ? 'no certificate yet' : formatCallTime(tls.notAfterMs, clock)
         }
       />
       {tls.renewAtMs !== undefined && (
-        <Row label="Renews" value={formatCallTime(tls.renewAtMs)} />
+        <Row label="Renews" value={formatCallTime(tls.renewAtMs, clock)} />
       )}
       {tls.lastError !== undefined && <Row label="Last error" value={tls.lastError} />}
     </Card>

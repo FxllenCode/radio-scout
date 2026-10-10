@@ -20,7 +20,7 @@ import { makeStore, type AppStore } from '@/store/store'
 import { progressed } from '@/store/transport'
 
 import { TalkgroupsScreen } from './TalkgroupsScreen'
-import { CATALOG, countyCatalog, ORIGIN } from '@/test/handlers'
+import { CATALOG, countyCatalog, instanceIs, ORIGIN } from '@/test/handlers'
 import { server } from '@/test/setup'
 import { renderApp, renderWithProviders, routerProbe } from '@/test/utils'
 import { NOTICE_MS } from '@/hooks/useShareLink'
@@ -605,6 +605,43 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
         .toBeVisible()
       expect(screen.getByRole('switch', { name: /Channel 001 1 recent call$/ }))
         .toBeVisible()
+    })
+
+    /** A Profile that has not chosen an order is drawn in the Operator's
+     *  (#77) — and a Listener's own choice wins over it. */
+    it("starts in the Operator's order, and the Listener's choice wins", async () => {
+      server.use(instanceIs({ panelSort: 'active' }))
+      showCounty(3)
+
+      expect(
+        await screen.findByRole('button', { name: /Sort by most active/, pressed: true }),
+      ).toBeInTheDocument()
+      expect(switches().map((row) => row.textContent)).toEqual([
+        expect.stringContaining('Channel 003'),
+        expect.stringContaining('Channel 002'),
+        expect.stringContaining('Channel 001'),
+      ])
+
+      await userEvent.click(screen.getByRole('button', { name: 'Sort by name' }))
+
+      expect(screen.getByRole('button', { name: 'Sort by name' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+      expect(switches()[0]).toHaveTextContent('Channel 001')
+    })
+
+    /** By TGID (#77) — RadioReference's order, and rdio's admin order. */
+    it('sorts by talkgroup ID', async () => {
+      showCounty(3)
+      await screen.findByRole('switch', { name: /Channel 001/ })
+
+      await userEvent.click(screen.getByRole('button', { name: 'Sort by talkgroup ID' }))
+
+      expect(screen.getByRole('button', { name: 'Sort by talkgroup ID' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
     })
 
     it('remembers the sort', async () => {

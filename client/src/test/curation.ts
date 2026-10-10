@@ -6,6 +6,7 @@ import type {
   AdminEvent,
   EventMember,
   FreezeReport,
+  Instance,
   AdminShareLink,
   AdminDirwatch,
   AdminDownstream,
@@ -21,6 +22,8 @@ import type {
   AdminToneProfile,
   ToneStep,
 } from '@/types'
+import { DEFAULT_INSTANCE } from '@/lib/instance'
+import { LED_ORDER } from '@/lib/led'
 import { unusable } from '@/lib/tone'
 import { ORIGIN } from './handlers'
 
@@ -58,6 +61,12 @@ export class FakeInstance {
   /** **Embeds** (#75). The address *is* on the row — it is printed into a
    *  stranger's HTML by design — so the fake carries it as the real one does. */
   embeds: AdminEmbed[] = []
+  /** The **Instance identity** (#77), as an uncurated Instance starts — served
+   *  on the public read too, so a screen drawn from it sees the admin form's
+   *  writes land the way it would against the real one. */
+  identity: Instance = { ...DEFAULT_INSTANCE }
+  /** The published **Reference page**'s markdown, or none. */
+  reference: string | undefined = undefined
   /** `[server] public_url`, as the real listing reflects it into each row's
    *  `url`. Unset, as it ships. */
   publicUrl: string | null = null
@@ -333,6 +342,10 @@ export class FakeInstance {
     return created
   }
 }
+
+/** What the fake's editor offers as a starting point — the real seed's first
+ *  line and a table, which is all a screen test needs to tell it apart. */
+export const REFERENCE_SEED = '# Reference\n\n| Letter | APCO |\n| --- | --- |\n| A | Adam |\n'
 
 /** The server's refusal shape — the document `curateFailure` reads back. */
 export function refusal(
@@ -1032,6 +1045,56 @@ export function curationHandlers(instance: FakeInstance) {
       return new HttpResponse(null, { status: 204 })
     }),
 
+    // **The Instance identity** (#77): one document, patched; the public read
+    // beside it, so what the form saves is what every screen is drawn with.
+    http.get(`${ORIGIN}/api/instance`, () => HttpResponse.json(instance.identity)),
+    http.get(`${ORIGIN}/api/admin/instance`, () => HttpResponse.json(instance.identity)),
+    http.patch(`${ORIGIN}/api/admin/instance`, async ({ request }) => {
+      const body = await record('PATCH', request, '/api/admin/instance')
+      if (typeof body.name === 'string' && body.name.length > 64) {
+        return refusal(400, 'too-long', 'name can be at most 64 characters', {
+          field: 'name',
+        })
+      }
+      if (typeof body.helpUrl === 'string' && body.helpUrl.startsWith('javascript:')) {
+        return refusal(
+          400,
+          'unusable-help-link',
+          'a help link has to be a web address (https://...) or an email address',
+        )
+      }
+      const next: Record<string, unknown> = { ...instance.identity, ...body }
+      for (const [key, value] of Object.entries(body)) {
+        if (value === null || value === '') delete next[key]
+      }
+      instance.identity = next as unknown as Instance
+      return HttpResponse.json(instance.identity)
+    }),
+    http.get(`${ORIGIN}/api/admin/reference`, () =>
+      HttpResponse.json({
+        ...(instance.reference === undefined
+          ? {}
+          : { markdown: instance.reference, publishedAtMs: 1_700_000_000_000 }),
+        seed: REFERENCE_SEED,
+      }),
+    ),
+    http.put(`${ORIGIN}/api/admin/reference`, async ({ request }) => {
+      const body = await record('PUT', request, '/api/admin/reference')
+      const markdown = String(body.markdown ?? '')
+      if (markdown.trim() === '') {
+        return refusal(400, 'field-required', 'markdown is required', { field: 'markdown' })
+      }
+      instance.reference = markdown
+      instance.identity = { ...instance.identity, reference: true }
+      return HttpResponse.json({ markdown, publishedAtMs: 1_700_000_000_000, seed: REFERENCE_SEED })
+    }),
+    http.delete(`${ORIGIN}/api/admin/reference`, () => {
+      instance.wrote.push({ method: 'DELETE', path: '/api/admin/reference', body: undefined })
+      instance.reference = undefined
+      instance.identity = { ...instance.identity, reference: false }
+      return new HttpResponse(null, { status: 204 })
+    }),
+
     // **Share links** (#64). A listing and a revoke, because that is the whole
     // surface: minting is the Listener's. The token never comes back — see
     // `FakeInstance.shareLink`.
@@ -1320,17 +1383,9 @@ function applyDelta(
   }
 }
 
-/** The LED palette the server validates against (`curate::checked_led`). */
-const LED_PALETTE = [
-  'blue',
-  'cyan',
-  'green',
-  'magenta',
-  'orange',
-  'red',
-  'white',
-  'yellow',
-]
+/** The LED palette the server validates against (`curate::checked_led`) —
+ *  the client's own, which `src/import.rs` pins the server's to. */
+const LED_PALETTE: readonly string[] = LED_ORDER
 
 /** Groups and Tags behave identically, so their routes are written once — the
  *  same reason `src/curate/labels.rs` writes them once. */

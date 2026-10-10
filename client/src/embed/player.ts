@@ -16,7 +16,7 @@
  */
 import type { LiveStatus } from '@/lib/liveFeed'
 import type { Selection } from '@/lib/selection'
-import type { Call } from '@/types'
+import type { Call, TimeFormat } from '@/types'
 
 /** What `GET /api/embed?t=…` answers. */
 export interface EmbedFeed {
@@ -24,6 +24,10 @@ export interface EmbedFeed {
   selection: Selection
   /** Newest first, open listening only. */
   calls: Call[]
+  /** Whose scanner this is — the Instance's name, or the product's (#77). */
+  site: string
+  /** The Operator's clock (#77). */
+  timeFormat: TimeFormat
 }
 
 export interface PlayerState {
@@ -36,10 +40,18 @@ export interface PlayerState {
   selection?: Selection
   /** Newest first, at most [`MAX_SHOWN`], one entry per Call. */
   calls: Call[]
+  /** Whose scanner the page opens (#77) — unknown until the feed says. */
+  site?: string
+  /** How the page writes a time: twenty-four-hour until the feed says (#77). */
+  clock: TimeFormat
   /** The reader pressed Listen live and has not pressed Stop. */
   listening: boolean
   /** The live socket, while listening; `offline` otherwise. */
   live: LiveStatus
+  /** The scanner turned the socket away — every seat is taken (#77) — and has
+   *  not taken a later one in yet. A homepage reader is a Listener like any
+   *  other, so a full Instance is full for them too, and they are told. */
+  turnedAway: boolean
   /** The Call on the one `<audio>` element. */
   playing?: number
   /** Calls that arrived live while another played, oldest first. */
@@ -56,6 +68,10 @@ export type PlayerEvent =
   | { type: 'listen' }
   | { type: 'stop' }
   | { type: 'status'; status: LiveStatus }
+  /** The scanner said no to the socket (#77). */
+  | { type: 'refused' }
+  /** ...and later took one in. */
+  | { type: 'greeted' }
   | { type: 'arrived'; call: Call }
   /** The reader pressed a row. */
   | { type: 'play'; id: number }
@@ -79,8 +95,10 @@ export const MAX_QUEUED = 10
 export const INITIAL: PlayerState = {
   phase: 'loading',
   calls: [],
+  clock: '24h',
   listening: false,
   live: 'offline',
+  turnedAway: false,
   queue: [],
 }
 
@@ -100,6 +118,8 @@ export function step(state: PlayerState, event: PlayerEvent): PlayerState {
         phase: 'ready',
         name: event.feed.name,
         selection: event.feed.selection,
+        site: event.feed.site,
+        clock: event.feed.timeFormat,
         calls: merged(state.calls, event.feed.calls),
       }
     case 'gone':
@@ -114,6 +134,7 @@ export function step(state: PlayerState, event: PlayerEvent): PlayerState {
         ...state,
         listening: false,
         live: 'offline',
+        turnedAway: false,
         playing: undefined,
         queue: [],
       }
@@ -121,6 +142,10 @@ export function step(state: PlayerState, event: PlayerEvent): PlayerState {
       return state.listening && state.live !== event.status
         ? { ...state, live: event.status }
         : state
+    case 'refused':
+      return state.listening && !state.turnedAway ? { ...state, turnedAway: true } : state
+    case 'greeted':
+      return state.turnedAway ? { ...state, turnedAway: false } : state
     case 'arrived':
       return arrived(state, event.call)
     case 'play': {

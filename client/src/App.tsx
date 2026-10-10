@@ -7,6 +7,7 @@ import { DvrScreen } from '@/routes/DvrScreen'
 import { SearchScreen } from '@/routes/SearchScreen'
 import { SessionScreen } from '@/routes/SessionScreen'
 import { LogsScreen } from '@/routes/LogsScreen'
+import { ReferenceScreen } from '@/routes/ReferenceScreen'
 import { SettingsScreen } from '@/routes/SettingsScreen'
 import { UnitScreen } from '@/routes/UnitScreen'
 import { AdminScreen } from '@/routes/admin/AdminScreen'
@@ -22,6 +23,7 @@ import { StatusScreen } from '@/routes/admin/StatusScreen'
 import { SharesScreen } from '@/routes/admin/SharesScreen'
 import { WebhooksScreen } from '@/routes/admin/WebhooksScreen'
 import { EmbedsScreen } from '@/routes/admin/EmbedsScreen'
+import { InstanceScreen } from '@/routes/admin/InstanceScreen'
 import { GroupsScreen, TagsScreen } from '@/routes/admin/LabelsScreen'
 import { SystemsScreen } from '@/routes/admin/SystemsScreen'
 import { UnitsScreen } from '@/routes/admin/UnitsScreen'
@@ -52,6 +54,9 @@ export default function App() {
             Live screen's RECENT list, never browsed to. */}
         <Route path="session" element={<SessionScreen />} />
         <Route path="settings" element={<SettingsScreen />} />
+        {/* The Operator's **Reference page** (#77) — offered from Settings
+            when there is one. */}
+        <Route path="reference" element={<ReferenceScreen />} />
         {/* Settings -> Logs (#30), behind the admin session the screen asks
             for itself. A child route rather than a tab: an operator opens it
             occasionally, and the four tabs are the listener's. */}
@@ -84,6 +89,8 @@ export default function App() {
         {/* How many people have been listening (#62, spec US 41). Behind the
             same gate as the rest: counts are the Operator's business. */}
         <Route path="settings/admin/listeners" element={<ListenersScreen />} />
+        {/* The **Instance identity** and the Reference page (#77). */}
+        <Route path="settings/admin/instance" element={<InstanceScreen />} />
         {/* Is this instance healthy (#70, spec US 48) — one glance, one
             answer. Same gate, same reason. */}
         <Route path="settings/admin/status" element={<StatusScreen />} />

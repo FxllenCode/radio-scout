@@ -73,6 +73,19 @@ describe('media session', () => {
       })
     })
 
+    /** An Instance the Operator named (#77) says so where the lock screen
+     *  would otherwise say the product's name. */
+    it('falls back to the Instance\'s own name when it has one', () => {
+      const session = installMediaSession()
+
+      setNowPlaying(
+        { id: 8, systemRef: 11, talkgroupRef: 42, audioUrl: '/api/call/8/audio' },
+        'Fulton Scanner',
+      )
+
+      expect(session.metadata?.album).toBe('Fulton Scanner')
+    })
+
     it('names the one category it has when a talkgroup lacks the other', () => {
       const session = installMediaSession()
 
