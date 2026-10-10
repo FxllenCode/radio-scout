@@ -107,6 +107,29 @@ regex = "1"
 # module, `station::encode`, whose tests judge its output with *our* decoder
 # rather than its own.
 rusty_mp3 = "1"
+# **Built-in TLS** (#76): HTTPS from the binary itself, for an Operator with no
+# tunnel or proxy in front. Every crate below rides the rustls + aws-lc-rs stack
+# reqwest and object_store already build on every release target, so the binary
+# gains no C toolchain and no OpenSSL. `rustls` and `tokio-rustls` are already in
+# the tree; named directly to build a server rather than only a client.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
+# PEM in, DER out — an Operator's own certificate files, and the issued chain
+# this Instance writes beside its database. Already in the tree.
+rustls-pki-types = { version = "1", features = ["std"] }
+# The ACME client (RFC 8555): orders, challenges, and ARI (RFC 9773) for when to
+# renew. Chosen over `rustls-acme` because it is a client and nothing more — the
+# renewal schedule, the challenge store and the listener stay ours, so renewal
+# runs on the Instance's own `Clock` as a Worker the suite can settle, where
+# `rustls-acme` keeps its own timer the suite could only sleep on. Its HTTP is
+# hyper-rustls, already in the tree.
+instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "hyper-rustls", "rcgen", "time", "x509-parser"] }
+# The TLS-ALPN-01 challenge certificate (RFC 8737), which carries the
+# `acmeIdentifier` extension a CA looks for. Already in instant-acme's tree.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+# When a certificate expires — the one fact about it the renewal schedule and
+# the status page need. Already in instant-acme's tree, at this version.
+x509-parser = "0.18"
 
 # What ships (#23, ADR-0007). Nothing had ever been built in release mode
 # before this ticket, so every value here is a deliberate choice rather than an
@@ -174,3 +197,7 @@ rstest = "0.26"
 # see the note in `src/testing.rs`.
 tracing-core = "0.1"
 insta = { version = "1", features = ["json"] }
+# `ServiceExt::oneshot`, for the one middleware a socket cannot reach (#76): the
+# LAN door redirects a *public* peer, and every peer the suite can be is
+# loopback. Already in the tree under axum, at this major.
+tower = { version = "0.5", features = ["util"] }

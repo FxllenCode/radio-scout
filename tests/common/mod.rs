@@ -68,6 +68,7 @@ mod recorder;
 pub mod s3;
 mod sink;
 mod station;
+pub mod tls;
 mod upload;
 mod ws;
 
@@ -225,7 +226,11 @@ impl TestApp {
     /// over).
     pub async fn advance(&self, by: std::time::Duration) {
         self.clock.advance(by);
+        // Every Worker that sleeps on the clock is handed the time that passed:
+        // the **Delay** release (#73), and built-in TLS (#76) — which re-reads an
+        // Operator's certificate files, and renews an issued one, on it.
         self.instance.state.delays.wake();
+        self.instance.state.tls.wake();
         self.settle().await;
     }
 
@@ -290,6 +295,26 @@ impl TestApp {
         self.db = self.instance.db.clone();
         self.store = self.instance.store.clone();
         *self.session.lock().expect("session") = None;
+    }
+
+    /// The configuration this app is running on.
+    pub fn config(&self) -> &Config {
+        self.instance.config()
+    }
+
+    /// Where built-in TLS is listening (#76) — panics on an app with none,
+    /// because a test asking is a test that turned it on.
+    pub fn https_addr(&self) -> SocketAddr {
+        self.instance
+            .https_addr
+            .expect("this app was started with [tls] on")
+    }
+
+    /// An absolute `https://` URL for `path`, under the name the test's
+    /// certificates are issued for ([`tls::NAME`]) — a client from
+    /// [`tls::TestCa::client`] resolves it to [`TestApp::https_addr`].
+    pub fn https_url(&self, path: &str) -> String {
+        format!("https://{}:{}{path}", tls::NAME, self.https_addr().port())
     }
 
     /// The folder this app's `[dirwatch] roots` allows (#72) — where a test's
@@ -1869,13 +1894,22 @@ impl TestAppBuilder {
 
     /// Believe `X-Forwarded-For` from these proxies — a comma-separated list of
     /// addresses or CIDR blocks, exactly as `[server] trusted_proxies` takes
-    /// them. The default trusts nobody, which is what ships.
+    /// them. The default trusts loopback (#76), which is what ships.
     pub fn trusted_proxies(self, proxies: &str) -> Self {
         let proxies: Vec<_> = proxies
             .split(',')
             .map(|entry| entry.trim().parse().expect("an address or CIDR block"))
             .collect();
         self.config(move |config| config.server.trusted_proxies = proxies)
+    }
+
+    /// Believe nobody's `X-Forwarded-For` — `trusted_proxies = []`.
+    ///
+    /// The posture a test needs to prove what an **untrusted** peer's claim is
+    /// worth: the suite's every request comes from loopback, and loopback is
+    /// trusted by default since #76.
+    pub fn trust_nobody(self) -> Self {
+        self.config(|config| config.server.trusted_proxies.clear())
     }
 
     /// Boot with the admin surface shut, the way an operator whose env file
@@ -1925,6 +1959,11 @@ impl TestAppBuilder {
             None => baseline_config(),
         };
         config.server.base_dir = tmp.path().to_path_buf();
+        // Ephemeral ports, both of them — set before the edits, so a test that
+        // needs a particular port (the ACME CA validates on fixed ones) says so
+        // like any other setting.
+        config.server.port = 0;
+        config.tls.port = 0;
         // Every app may watch one folder of its own (#72) — the temp-directory
         // Dirwatch driver. Set before the edits, so a test that wants Dirwatch
         // off clears it like any other setting.
@@ -2051,8 +2090,7 @@ pub fn env_value(env_file: &Path, var: &str) -> String {
 }
 
 /// Where a spawned app listens: an ephemeral loopback port.
-const LOOPBACK: SocketAddr =
-    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
 /// `host:port` for a running Instance, as a test addresses it.
 fn loopback(instance: &Instance) -> String {

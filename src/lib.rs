@@ -51,6 +51,7 @@ pub mod share;
 pub mod star;
 pub mod startup;
 pub mod station;
+pub mod tls;
 pub mod tone;
 pub mod web;
 pub mod webhook;
@@ -167,6 +168,10 @@ pub struct AppState {
     /// **column**, so an Instance with none has nothing switched off and pays
     /// nothing.
     pub delays: crate::delay::Delays,
+    /// Built-in TLS (#76) — what the HTTPS listener serves, the challenges the
+    /// LAN door answers, and its Worker's wake-up. Off unless `[tls]` names a
+    /// certificate source.
+    pub tls: crate::tls::Tls,
 }
 
 impl AppState {
@@ -199,6 +204,7 @@ impl AppState {
             metrics: crate::metrics::Metrics::default(),
             dirwatch: crate::dirwatch::Dirwatch::default(),
             delays: crate::delay::Delays::default(),
+            tls: crate::tls::Tls::default(),
         }
     }
 
@@ -261,7 +267,29 @@ impl AppState {
 /// Build the Axum application: the ingest endpoint, the live-feed WebSocket, and
 /// audio serving. This is the single seam the binary and tests share.
 pub fn build_app(state: AppState) -> Router {
-    Router::new()
+    app_over(state, Transport::Plain)
+}
+
+/// Which listener a router answers on (#76) — the one thing about a request
+/// the router itself cannot see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// `[server] port`: plain HTTP, and the LAN door when built-in TLS is on.
+    Plain,
+    /// `[tls] port`: every request on it arrived over TLS, which is the
+    /// listener's own word ([`crate::tls::OverTls`]) rather than a header.
+    Tls,
+}
+
+/// The application, as served on `transport`.
+///
+/// One route table for both listeners, so HTTPS cannot come to serve a
+/// different app from plain HTTP; what differs is one layer. The plain one is
+/// guarded by the LAN door while TLS is on, and the TLS one stamps every
+/// request as having arrived over TLS — both inside the request log, so a
+/// redirected stranger is one line like anybody else (#28).
+pub fn app_over(state: AppState, transport: Transport) -> Router {
+    let routes = Router::new()
         .route("/api/call-upload", post(ingest::call_upload))
         .route(
             "/api/trunk-recorder-call-upload",
@@ -353,7 +381,15 @@ pub fn build_app(state: AppState) -> Router {
         .route(crate::embed::FEED_PATH, get(crate::embed::feed))
         // Everything else is the frontend: embedded SPA assets + client-side
         // routing (ADR-0007). The API/WS/health routes above take precedence.
-        .fallback(web::spa_handler)
+        .fallback(web::spa_handler);
+    let routes = match transport {
+        Transport::Tls => routes.layer(axum::Extension(crate::tls::OverTls)),
+        Transport::Plain if state.tls.is_on() => routes.layer(
+            axum::middleware::from_fn_with_state(state.tls.clone(), crate::tls::door::lan_door),
+        ),
+        Transport::Plain => routes,
+    };
+    routes
         // One line per request (#28), outermost so it sees every outcome —
         // including the 404s and 405s the router answers on its own. It carries
         // its own slice of state (the trust list, #17) rather than the whole of

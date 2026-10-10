@@ -374,6 +374,18 @@ _Avoid_: job, task, background thread, daemon (a **Service** is the operating sy
 The operating system's registration that runs Radio-Scout at boot and restarts it if it dies — a systemd unit, a launchd daemon, or a Windows scheduled task. Installed, removed and controlled by `radio-scout service …`. Distinct from the running process: uninstalling the service leaves the binary, and stopping the process leaves the service.
 _Avoid_: daemon, unit, task (each is one platform's word for it), autostart.
 
+**Tunnel**:
+A Cloudflare Tunnel: `cloudflared` beside the **Instance**, dialling *out* to Cloudflare, which serves the Instance's public name over HTTPS and relays each visitor in from loopback. **The recommended way public** ([ADR-0022](docs/adr/0022-making-an-instance-public.md)), because nothing is forwarded and no certificate lives on the Pi. Loopback is a trusted proxy by default so that a Tunnel on the same machine needs nothing configured.
+_Avoid_: proxy (a Tunnel is not one an **Operator** runs), Argo (its old name).
+
+**Built-in TLS**:
+HTTPS served by the **Instance** itself, on `[tls] port`, from a certificate it got by ACME (`[tls] domains`) or an **Operator**'s own files. The third way public, after a **Tunnel** and a reverse proxy — for an Operator who wants no third party in front.
+_Avoid_: SSL, autocert (rdio's word, and only half of it), HTTPS mode.
+
+**LAN door**:
+What `[server] port` becomes while **Built-in TLS** is on: an ACME challenge answered to anyone, the whole app to this machine and the local network, a redirect to HTTPS for everyone else. Decided by the TCP peer, so a **Recorder** on the same Pi posts exactly where it always did.
+_Avoid_: HTTP redirect (it is one of three answers), plain port (the port, not the policy).
+
 **Target**:
 One platform a release is built for, named by its Rust triple (`aarch64-unknown-linux-musl`). The thing an **asset** name and the installer's machine detection have to agree about.
 _Avoid_: platform, architecture, arch (each is only half of one).

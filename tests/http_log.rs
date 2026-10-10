@@ -345,12 +345,14 @@ async fn a_trusted_proxy_s_forwarded_address_is_logged_instead_of_its_own() {
 
 /// ...and an untrusted peer's claim is worth nothing. rdio-scanner takes the
 /// header unconditionally (`server/main.go:265`), so on a public instance
-/// anyone can forge a recorder's address into the operator's log; the shipped
-/// posture here trusts nobody.
+/// anyone can forge a recorder's address into the operator's log; here only a
+/// peer in `[server] trusted_proxies` is believed — loopback, by default (#76),
+/// and nobody in this test.
 #[tokio::test]
 async fn an_untrusted_peer_cannot_forge_its_address() {
     let capture = LogCapture::start();
-    let app = TestApp::with_key("recorder-key").await;
+    let app = TestApp::builder().trust_nobody().spawn().await;
+    app.create_api_key("recorder-key").await;
 
     app.upload_via_proxy(CallUpload::new().key("recorder-key"), "198.51.100.7")
         .await;

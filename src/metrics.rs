@@ -473,6 +473,61 @@ pub struct Status {
     /// The two **Sink** rosters (#54's word for what a **Downstream** and a
     /// **Webhook** both are), summarised.
     pub sinks: Vec<SinkHealth>,
+    /// Built-in TLS's certificate (#76) — **absent** when this Instance serves
+    /// no HTTPS itself, which is every Instance behind a tunnel or a proxy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsHealth>,
+}
+
+/// How built-in TLS's certificate is doing (#76).
+///
+/// The point of it is the month of warning a renewal gives: a certificate that
+/// cannot be renewed keeps working until it expires, so a failure is silent
+/// unless something shows it. This does, on the page and to Prometheus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsHealth {
+    /// `acme` or `files`.
+    pub source: &'static str,
+    /// The names an ACME certificate is issued for; empty for an Operator's
+    /// own files, whose names are the files' business.
+    pub domains: Vec<String>,
+    /// When the certificate being served expires — absent until there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_after_ms: Option<i64>,
+    /// When the next renewal is due (ACME only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renew_at_ms: Option<i64>,
+    /// The last thing that went wrong keeping it current, and when — cleared by
+    /// the next success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_at_ms: Option<i64>,
+}
+
+impl TlsHealth {
+    /// The reading built-in TLS gives, or `None` when it is off.
+    pub fn of(tls: &crate::tls::Tls) -> Option<Self> {
+        let (source, domains) = match tls.source() {
+            crate::tls::Source::Off => return None,
+            crate::tls::Source::Acme(domains) => ("acme", domains.clone()),
+            crate::tls::Source::Files { .. } => ("files", Vec::new()),
+        };
+        let health = tls.health();
+        let (last_error_at_ms, last_error) = health
+            .last_error
+            .map(|error| (error.at_ms, error.message))
+            .unzip();
+        Some(TlsHealth {
+            source,
+            domains,
+            not_after_ms: health.not_after_ms,
+            renew_at_ms: health.renew_at_ms,
+            last_error,
+            last_error_at_ms,
+        })
+    }
 }
 
 /// One **Worker**'s reading.
@@ -809,6 +864,31 @@ pub fn render(status: &Status) -> String {
         );
     }
 
+    // Built-in TLS (#76). Both families are absent with it off — `maybe` and
+    // `instant` hold a family back until its first sample — so an Instance
+    // behind a tunnel does not report a certificate that expired in 1970.
+    let tls = status.tls.as_ref();
+    out.family(
+        "tls_certificate_expiry_timestamp_seconds",
+        GAUGE,
+        "When the certificate built-in TLS is serving expires.",
+    );
+    out.instant(
+        "tls_certificate_expiry_timestamp_seconds",
+        &[],
+        tls.and_then(|tls| tls.not_after_ms),
+    );
+    out.family(
+        "tls_certificate_failing",
+        GAUGE,
+        "Whether the last attempt to issue, renew or reload that certificate failed.",
+    );
+    out.maybe(
+        "tls_certificate_failing",
+        &[],
+        tls.map(|tls| u8::from(tls.last_error.is_some())),
+    );
+
     out.text
 }
 
@@ -999,6 +1079,7 @@ pub async fn read(state: &AppState) -> Result<Status, Failure> {
         retention: metrics.0.wiring.retention,
         systems: gauges.systems,
         sinks: gauges.sinks,
+        tls: TlsHealth::of(&state.tls),
     })
 }
 
@@ -1286,6 +1367,14 @@ mod tests {
                 queued: 9,
                 last_success_ms: Some(1_700_000_002_000),
             }],
+            tls: Some(TlsHealth {
+                source: "acme",
+                domains: vec!["scanner.example".into()],
+                not_after_ms: Some(1_707_776_000_000),
+                renew_at_ms: Some(1_705_184_000_000),
+                last_error: Some("the CA refused the order".into()),
+                last_error_at_ms: Some(1_700_000_001_000),
+            }),
         }
     }
 
@@ -1407,6 +1496,11 @@ mod tests {
             r#"radio_scout_sink_last_success_timestamp_seconds{sink="downstream"} 1700000002.000"#,
             r#"radio_scout_sink_failing{sink="downstream"} 1"#,
             r#"radio_scout_sinks{sink="downstream"} 2"#,
+            // Built-in TLS (#76): when the certificate expires — what an alert
+            // rule subtracts `time()` from — and whether keeping it current
+            // last failed, which is the earlier warning of the two.
+            "radio_scout_tls_certificate_expiry_timestamp_seconds 1707776000.000",
+            "radio_scout_tls_certificate_failing 1",
         ] {
             assert!(
                 text.lines().any(|line| line == expected),
@@ -1538,10 +1632,16 @@ mod tests {
         status.systems[0].last_call_at_ms = None;
         status.systems[0].label = None;
         status.sinks[0].last_success_ms = None;
+        // An Instance with no built-in TLS has no certificate to report on —
+        // which is every Instance behind a tunnel, and must not read as one
+        // whose certificate expired in 1970.
+        status.tls = None;
 
         let text = render(&status);
 
         for absent in [
+            "radio_scout_tls_certificate_expiry_timestamp_seconds",
+            "radio_scout_tls_certificate_failing",
             "radio_scout_storage_free_bytes",
             "radio_scout_storage_total_bytes",
             "radio_scout_audio_bytes_limit",

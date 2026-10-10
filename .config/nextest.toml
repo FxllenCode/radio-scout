@@ -19,3 +19,16 @@
 retries = 0
 # The live-feed tests use short timeouts; flag anything that hangs.
 slow-timeout = { period = "30s", terminate-after = 2 }
+
+# **ACME against Pebble runs one test at a time** (#76). Pebble validates on
+# fixed ports — TLS-ALPN-01 on 5001, HTTP-01 on 5002 — so two of these tests at
+# once would be two Instances fighting for one port, and the loser's failure
+# would read as an ACME bug. Every other binary keeps its parallelism. The
+# longer timeout is a real CA round trip, twice for the renewal test.
+[test-groups]
+acme = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary(acme)"
+test-group = "acme"
+slow-timeout = { period = "60s", terminate-after = 3 }

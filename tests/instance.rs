@@ -737,8 +737,9 @@ async fn a_port_already_in_use_names_the_port() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
     let taken = held.local_addr().expect("addr");
 
-    let Err(error) = instance::start(config_in(&tmp).await, Wiring::default().bind(taken)).await
-    else {
+    let mut config = config_in(&tmp).await;
+    config.server.port = taken.port();
+    let Err(error) = instance::start(config, Wiring::default().bind(taken.ip())).await else {
         panic!("that port is taken");
     };
 

@@ -43,6 +43,19 @@ Two consequences of that shape, both deliberate and both worth knowing:
 
 **Real S3 is covered (#35)** — ADR-0002's storage half. `TEST_S3_ENDPOINT` (+ credentials, + `TEST_S3_REGION`) is the switch: set, `tests/s3.rs` runs against a store that answers, each test on a **bucket of its own**; unset — the everyday loop — those tests skip *saying so*. Unlike the dialect switch it deliberately does **not** move the rest of the suite: a bucket would put a network round-trip behind every `put_object` in the project. It covers what offline SigV4 cannot — the object contract against a server, an ingested Call landing in the bucket, orphan-GC over a real listing, and the **presigned redirect actually followed** to bytes (then range-requested, because with the S3 backend that request never reaches Radio-Scout at all). CI provisions **two** S3 implementations with `.github/scripts/object-store-up.sh` — Garage in `Backend` and in `Object store on Garage`, RustFS in `Object store on RustFS (advisory)` — a script rather than a `services:` block because a service container cannot be given a command. **Garage gates, RustFS advises** until it has a track record; as with #38's arm64 job, `Object store on Garage` is **a required status check on `master`** since 2026-07-31. `Backend` ran MinIO until #115, when MinIO's images stopped being pullable and its repository was archived. [`docs/agents/real-s3.md`](real-s3.md).
 
+## ACME
+
+**Built-in TLS is tested against a CA that answers (#76)** — the spec's one new test seam.
+`TEST_ACME_DIRECTORY` (+ two roots) is the switch, set by `.github/scripts/acme-up.sh`, which starts
+**Pebble** (Let's Encrypt's own test CA) and a DNS stub on the runner's host network. `Backend` runs it,
+because the floor and the patch gate are measured from that job's profile and the ACME code would be
+invisible to both otherwise; **`ACME on Pebble`** runs `--test acme` on its own, so a red there reads
+as ACME rather than as one failure in a whole suite. Pebble validates on fixed ports, so that binary
+runs one test at a time (`.config/nextest.toml`'s `acme` test group). Not advisory — Pebble is not a
+third party's moving target — but **not yet a required check on `master` either**: that is branch
+protection's to say, by hand. `tests/ci.rs` pins that both jobs run the suite *after* the bring-up
+and that the script hands the directory over. [`acme.md`](acme.md).
+
 ## Advisory jobs and patch coverage
 
 **Everything ADR-0010 names is now wired.** The two browser layers — the PWA suite (#15) and Browser Mode (#34) — run as **advisory** jobs on the same terms: a browser in CI earns a required check by not flaking first. **`Trunk Recorder plugin (advisory)`** (#44) is advisory for a different reason: it builds a third party's source tree, so its red can be somebody else's, and a pinned commit narrows that without closing it.

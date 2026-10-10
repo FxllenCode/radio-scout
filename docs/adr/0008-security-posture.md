@@ -80,6 +80,14 @@ The **Embed** (spec US 59) is a page another site frames — a fire department's
 
 **The embed itself is not a credential, and that is what lets it be framed by anybody.** Its token is printed into a stranger's public page source, so it reaches only what a Listener holding no **Access code** hears, intersected with its Selection — never a restricted channel, and never a grant appended to the frame's URL. Restricted channels an embed's Selection names are counted on the admin listing rather than refused, so an Operator learns it from the screen and not from the host.
 
+### Amendment (#76): loopback is trusted, and TLS can be the Instance's own
+
+Two lines above are no longer the posture. Both changed for the same reason — a **Cloudflare Tunnel** became the recommended way public — and [ADR-0022](0022-making-an-instance-public.md) is the argument in full.
+
+- **`[server] trusted_proxies` defaults to loopback** (`127.0.0.1`, `::1`) rather than to nobody. A tunnel or proxy on the same machine relays every visitor from loopback, and with nobody trusted they were all one address to the lockout: one stranger's five bad guesses locked the Operator out from everywhere. The "known limitation" above — a proxy that terminates TLS without being declared — is therefore closed for a proxy on the same machine, and stands as written for one anywhere else. A peer *not* in the list is still never believed.
+- **`Secure` also follows our own HTTPS listener.** A request arriving on `[tls] port` carries the listener's word (`tls::OverTls`), which no header can forge — so built-in TLS needs no trust configuration at all to mark the cookie.
+- **The TLS line**: plain HTTP is still the default; built-in TLS (ACME or an Operator's own files) shipped in #76, and the recommended order is a tunnel, a reverse proxy, then built-in TLS.
+
 ## Considered and rejected
 
 - **JWT-in-localStorage** (rdio's approach) — susceptible to XSS token theft and unnecessary for a single-origin deployment; a server-side cookie session is both simpler and safer.

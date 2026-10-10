@@ -466,6 +466,54 @@ fn every_job_that_runs_the_whole_suite_can_build_the_recorder_plugin() {
     }
 }
 
+/// **The ACME run is a real run** (#76) — the real-S3 trap again, with a CA in
+/// place of a store.
+///
+/// `tests/acme.rs` skips when `TEST_ACME_DIRECTORY` is unset, so a job that
+/// starts Pebble and never gets its directory to the suite is a green run that
+/// issued nothing. Two jobs provision one: `backend`, because the floor and the
+/// patch gate are measured from its profile and the ACME code would otherwise
+/// be invisible to both, and `acme`, the seam on its own as the spec asks.
+#[test]
+fn every_job_that_provisions_an_acme_ca_runs_the_suite_against_it() {
+    let bring_up = ACME_BRING_UP_PATH
+        .rsplit('/')
+        .next()
+        .expect("a path has a last segment");
+    let mut provisioned: Vec<String> = Vec::new();
+    for (job, block) in jobs(&ci_workflow()) {
+        let lines: Vec<&str> = block.lines().collect();
+        let Some(brought_up) = lines.iter().position(|line| line.contains(bring_up)) else {
+            continue;
+        };
+        let tested = lines
+            .iter()
+            .rposition(|line| runs_the_suite(line))
+            .unwrap_or_else(|| panic!("`{job}` provisions an ACME CA and runs no suite"));
+        assert!(
+            tested > brought_up,
+            "`{job}` runs the suite before the CA it provisions exists, so every ACME \
+             test skips"
+        );
+        provisioned.push(job);
+    }
+    provisioned.sort_unstable();
+    assert_eq!(provisioned, ["acme", "backend"]);
+
+    let script = std::fs::read_to_string(repo_file(ACME_BRING_UP_PATH))
+        .unwrap_or_else(|err| panic!("read {ACME_BRING_UP_PATH}: {err}"));
+    for handoff in ["TEST_ACME_DIRECTORY", "GITHUB_ENV"] {
+        assert!(
+            script.contains(handoff),
+            "{ACME_BRING_UP_PATH} never mentions {handoff}, so the suite is never told \
+             where the CA it just started is"
+        );
+    }
+}
+
+/// The bring-up script the ACME jobs run.
+const ACME_BRING_UP_PATH: &str = ".github/scripts/acme-up.sh";
+
 /// The bring-up script the real-S3 jobs run.
 const BRING_UP_PATH: &str = ".github/scripts/object-store-up.sh";
 

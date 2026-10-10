@@ -9,6 +9,17 @@ use radio_scout::db::entities::talkgroup;
 use rstest::rstest;
 use serde_json::json;
 
+/// Whose `X-Forwarded-*` an app believes.
+#[derive(Debug, Clone, Copy)]
+enum Trust {
+    /// What ships: loopback (#76).
+    Default,
+    /// `trusted_proxies = []`.
+    Nobody,
+    /// Exactly these.
+    Only(&'static str),
+}
+
 /// A CSV the importer would happily apply — the payload that must not land
 /// without a session.
 const CSV: &str = "system,ref,label\n1,100,Fire Dispatch\n";
@@ -39,34 +50,40 @@ async fn a_correct_password_opens_a_session() {
 
 /// `Secure` when — and only when — the request actually came over TLS.
 ///
-/// v1 serves plain HTTP and recommends a reverse proxy for TLS (ADR-0008), so a
-/// cookie marked `Secure` unconditionally would be dropped by the browser on
-/// every zero-config LAN install and make admin login impossible. The flag
+/// Plain HTTP is what ships (ADR-0008), so a cookie marked `Secure`
+/// unconditionally would be dropped by the browser on every zero-config LAN
+/// install and make admin login impossible. Behind a tunnel or a proxy the flag
 /// therefore follows `X-Forwarded-Proto` — believed on exactly the terms #17
 /// already set for `X-Forwarded-For`, since a header nobody vouched for is
-/// attacker-controlled.
+/// attacker-controlled. (Built-in TLS's own listener is the other way a request
+/// arrives over TLS, and `tests/tls.rs` proves that one.)
 #[rstest]
+// **A tunnel or proxy on this machine, over TLS** — with nothing configured,
+// because loopback is trusted by default (#76). A Cloudflare Tunnel is this.
+#[case::a_tunnel_on_this_machine(Trust::Default, Some("https"), true)]
 // Behind a proxy the operator named, over TLS: the flag rides.
-#[case(Some("127.0.0.1"), Some("https"), true)]
-// The same claim from a peer nobody vouched for is not believed — the default
-// trust list is empty, which is what ships.
-#[case(None, Some("https"), false)]
+#[case::a_named_proxy(Trust::Only("127.0.0.1"), Some("https"), true)]
+// The same claim from a peer nobody vouched for is not believed.
+#[case::an_untrusted_peer(Trust::Nobody, Some("https"), false)]
 // A trusted proxy that terminated plain HTTP says so, and is believed.
-#[case(Some("127.0.0.1"), Some("http"), false)]
+#[case::a_proxy_on_plain_http(Trust::Only("127.0.0.1"), Some("http"), false)]
 // No claim at all: a direct plain-HTTP request.
-#[case(Some("127.0.0.1"), None, false)]
-#[case(None, None, false)]
+#[case::no_claim_from_a_proxy(Trust::Only("127.0.0.1"), None, false)]
+#[case::no_claim_from_anybody(Trust::Nobody, None, false)]
 #[tokio::test]
 async fn the_secure_flag_follows_a_trusted_proxys_protocol(
-    #[case] trusted: Option<&str>,
+    #[case] trust: Trust,
     #[case] proto: Option<&str>,
     #[case] expected: bool,
 ) {
-    let mut builder = TestApp::builder();
-    if let Some(trusted) = trusted {
-        builder = builder.trusted_proxies(trusted);
+    let builder = TestApp::builder();
+    let app = match trust {
+        Trust::Default => builder,
+        Trust::Nobody => builder.trust_nobody(),
+        Trust::Only(proxies) => builder.trusted_proxies(proxies),
     }
-    let app = builder.spawn().await;
+    .spawn()
+    .await;
 
     let mut request = app.login_request(ADMIN_PASSWORD);
     if let Some(proto) = proto {
@@ -78,7 +95,7 @@ async fn the_secure_flag_follows_a_trusted_proxys_protocol(
     assert_eq!(
         cookie.contains("Secure"),
         expected,
-        "trusted={trusted:?} proto={proto:?} cookie={cookie}"
+        "trust={trust:?} proto={proto:?} cookie={cookie}"
     );
 }
 
@@ -248,11 +265,15 @@ async fn a_spent_budget_locks_the_address_out_even_from_the_right_password() {
 /// request claims. rdio-scanner keys its attempt ledger on `GetRemoteAddr`,
 /// which reads `X-Forwarded-For` unconditionally (`main.go:265`) — so on a
 /// public instance an attacker rotates the header, is never locked out, and can
-/// lock anyone else out by forging their address. With no trusted proxies
-/// configured — what ships — the header is not read at all.
+/// lock anyone else out by forging their address. From a peer not in `[server]
+/// trusted_proxies` the header is not read at all.
 #[tokio::test]
 async fn a_forged_forwarded_for_does_not_buy_a_fresh_budget() {
-    let app = app_locking_after_three().await;
+    let app = TestApp::builder()
+        .trust_nobody()
+        .config(|config| config.admin.lockout_attempts = 3)
+        .spawn()
+        .await;
 
     for guess in 0..3 {
         let response = app
@@ -275,6 +296,32 @@ async fn a_forged_forwarded_for_does_not_buy_a_fresh_budget() {
         429,
         "a fourth guess from a fourth claimed address is still the same peer"
     );
+}
+
+/// **Behind a tunnel on this machine, a stranger locks out only themselves**
+/// (#76). Every visitor a Cloudflare Tunnel relays arrives from `127.0.0.1`, so
+/// with nobody trusted they were all one address: five bad guesses from anybody
+/// on the internet locked the Operator out of their own admin surface from
+/// everywhere. Loopback is trusted by default now, so the address that is
+/// counted is the one the tunnel says it is relaying.
+#[tokio::test]
+async fn behind_a_tunnel_one_visitors_guesses_lock_out_only_that_visitor() {
+    let app = app_locking_after_three().await;
+    let from = |client: &'static str, password: &str| {
+        app.login_request(password)
+            .header("x-forwarded-for", client)
+            .send()
+    };
+
+    for guess in 0..3 {
+        let response = from("198.51.100.7", "wrong").await.expect("POST");
+        assert_eq!(response.status(), 401, "guess {guess}");
+    }
+
+    let guesser = from("198.51.100.7", "wrong").await.expect("POST");
+    let operator = from("203.0.113.20", ADMIN_PASSWORD).await.expect("POST");
+    assert_eq!(guesser.status(), 429, "the guesser is locked out");
+    assert_eq!(operator.status(), 200, "the Operator is not");
 }
 
 /// The ledger only says it is full when it is (#83).

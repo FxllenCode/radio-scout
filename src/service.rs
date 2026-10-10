@@ -94,8 +94,10 @@ pub struct Params {
     pub args: Vec<String>,
     /// Where state lives.
     pub base_dir: PathBuf,
-    /// The port it will bind.
-    pub port: u16,
+    /// Every port it will bind — `[server] port`, and `[tls] port` when
+    /// built-in TLS is on (#76). Any of them below 1024 earns the unit the one
+    /// capability that binds it.
+    pub ports: Vec<u16>,
     /// The account to run as.
     pub user: Option<String>,
 }
@@ -842,16 +844,18 @@ fn systemd_unit(params: &Params) -> String {
         // primary group, which always exists.
         unit.push_str(&format!("User={user}\n"));
     }
-    if params.port < FIRST_UNPRIVILEGED_PORT {
-        unit.push_str(&format!(
+    match params
+        .ports
+        .iter()
+        .find(|port| **port < FIRST_UNPRIVILEGED_PORT)
+    {
+        Some(port) => unit.push_str(&format!(
             "# Port {port} is privileged, so grant the one capability that binds\n\
              # it rather than running the scanner as root.\n\
              AmbientCapabilities=CAP_NET_BIND_SERVICE\n\
              CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n",
-            port = params.port,
-        ));
-    } else {
-        unit.push_str("CapabilityBoundingSet=\n");
+        )),
+        None => unit.push_str("CapabilityBoundingSet=\n"),
     }
     unit.push_str(&format!(
         "\n\
@@ -912,7 +916,7 @@ mod tests {
             exec: PathBuf::from("/usr/local/bin/radio-scout"),
             args: vec!["--base-dir".into(), "/var/lib/radio-scout".into()],
             base_dir: PathBuf::from("/var/lib/radio-scout"),
-            port: 3000,
+            ports: vec![3000],
             user: Some("radio-scout".into()),
         }
     }
@@ -1639,24 +1643,49 @@ mod tests {
 
     /// A port under 1024 needs a capability an unprivileged account does not
     /// have — and granting it unconditionally would hand every install a
-    /// privilege it has no use for.
+    /// privilege it has no use for. **Any** port it binds counts: built-in TLS
+    /// (#76) adds 443 beside an unprivileged plain port.
     #[rstest]
-    #[case::http(80, true)]
-    #[case::last_privileged(1023, true)]
-    #[case::first_unprivileged(1024, false)]
-    #[case::default(3000, false)]
+    #[case::http(&[80], true)]
+    #[case::last_privileged(&[1023], true)]
+    #[case::first_unprivileged(&[1024], false)]
+    #[case::default(&[3000], false)]
+    #[case::https_beside_a_plain_port(&[3000, 443], true)]
+    #[case::https_on_an_unprivileged_port(&[3000, 8443], false)]
     fn a_privileged_port_is_granted_the_capability_to_bind_it(
-        #[case] port: u16,
+        #[case] ports: &[u16],
         #[case] granted: bool,
     ) {
-        let plan = Manager::Systemd.plan(Action::Install, &Params { port, ..params() });
+        let plan = Manager::Systemd.plan(
+            Action::Install,
+            &Params {
+                ports: ports.to_vec(),
+                ..params()
+            },
+        );
         let unit = plan.file("/etc/systemd/system/radio-scout.service");
 
         assert_eq!(
             unit.contains("AmbientCapabilities=CAP_NET_BIND_SERVICE"),
             granted,
-            "port {port}:\n{unit}"
+            "ports {ports:?}:\n{unit}"
         );
+    }
+
+    /// ...and the comment beside the grant names the port that needed it, so an
+    /// Operator reading their unit file knows why it holds a capability.
+    #[test]
+    fn the_grant_names_the_privileged_port() {
+        let plan = Manager::Systemd.plan(
+            Action::Install,
+            &Params {
+                ports: vec![3000, 443],
+                ..params()
+            },
+        );
+        let unit = plan.file("/etc/systemd/system/radio-scout.service");
+
+        assert!(unit.contains("# Port 443 is privileged"), "{unit}");
     }
 
     /// Without an account the unit says nothing about one, so systemd runs it

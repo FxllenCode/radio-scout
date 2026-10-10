@@ -37,9 +37,11 @@
 //! # What `start` does, in order
 //!
 //! It creates the base directory, opens the database, drains the log sink,
-//! provisions both credentials, opens the store, starts every **Worker**,
-//! builds the router, binds and serves; the handle it returns carries the
-//! address, the database, the store, a `stop` and a `restart`. `main.rs` calls
+//! provisions both credentials, opens the store, reads an Operator's own
+//! certificate if `[tls]` names one, starts every **Worker**, binds — plain
+//! HTTP, and HTTPS beside it when built-in TLS is on (#76) — builds the two
+//! routers and serves; the handle it returns carries the addresses, the
+//! database, the store, a `stop` and a `restart`. `main.rs` calls
 //! it, and so does the test harness.
 //!
 //! The database decorator (#97) only *wraps* the handle — the Instance still
@@ -50,7 +52,7 @@
 //! genuinely provisioned Instance and `AdminAuth::locked()` is an *outcome* (an
 //! unwritable env file) rather than a knob.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -108,14 +110,15 @@ pub struct Wiring {
     credentials: Credentials,
     /// What time it is (#90). The wall clock unless a caller says otherwise.
     clock: Clock,
-    /// Where to listen, when it is not `0.0.0.0:{[server] port}`.
+    /// The address to listen on, when it is not every interface.
     ///
-    /// A socket address rather than a listener, so a **restart** can bind again
-    /// — an ephemeral port asked for twice is two different ports, and a handle
-    /// that could only be started once would not be a handle you can restart.
-    /// The suite asks for loopback; an operator-facing bind-address setting is
-    /// a separate ask, and would be `[server]`'s rather than this.
-    bind: Option<SocketAddr>,
+    /// An address and not a port: the ports are `[server] port` and `[tls]
+    /// port`, configuration like any other (#76), and `0` asks the OS for one —
+    /// so a **restart** binds again where it is told to, and a suite that wants
+    /// two ephemeral ports asks for them the way an Operator would. The suite
+    /// asks for loopback; an operator-facing bind-address setting is a separate
+    /// ask, and would be `[server]`'s rather than this.
+    bind: Option<IpAddr>,
     /// The draining half of the operator log sink (#30), when one is on.
     ///
     /// It arrives from outside because of the order it has to be built in: the
@@ -159,8 +162,8 @@ impl Wiring {
         self
     }
 
-    /// Listen here rather than on every interface.
-    pub fn bind(mut self, addr: SocketAddr) -> Self {
+    /// Listen on this address rather than on every interface.
+    pub fn bind(mut self, addr: IpAddr) -> Self {
         self.bind = Some(addr);
         self
     }
@@ -268,6 +271,10 @@ pub enum StartError {
     /// The listening port could not be bound — the most common way a boot
     /// fails, so it names the port rather than answering with a bare errno.
     Bind { port: u16, source: std::io::Error },
+    /// An Operator's own certificate files could not be served (#76) — named,
+    /// because an HTTPS port that answers no handshake is the worst way to
+    /// find out.
+    Tls(crate::tls::certificate::Unreadable),
     /// The server stopped with an error after it had started serving.
     Serve(std::io::Error),
 }
@@ -281,8 +288,20 @@ impl std::fmt::Display for StartError {
             StartError::Database(source) => write!(f, "could not open the database: {source}"),
             StartError::Store(source) => write!(f, "could not open the audio store: {source}"),
             StartError::Bind { port, source } => {
-                write!(f, "could not bind port {port}: {source}")
+                write!(f, "could not bind port {port}: {source}")?;
+                // The one fix an Operator cannot guess: on Linux a port below
+                // 1024 is root's unless the process holds the capability, and
+                // the service unit grants it only when it was installed with a
+                // configuration that asked (#76).
+                match (*port < 1024, source.kind()) {
+                    (true, std::io::ErrorKind::PermissionDenied) => write!(
+                        f,
+                        " (ports below 1024 need root or CAP_NET_BIND_SERVICE; `radio-scout service install` grants the capability when the configuration it is installed with asks for such a port)"
+                    ),
+                    _ => Ok(()),
+                }
             }
+            StartError::Tls(unreadable) => write!(f, "{unreadable}"),
             StartError::Serve(source) => write!(f, "the server stopped: {source}"),
         }
     }
@@ -295,6 +314,8 @@ pub struct Instance {
     /// The address it is actually listening on — `[server] port = 0` asks the
     /// OS to choose, and the number it chose is the only one a client can use.
     pub addr: SocketAddr,
+    /// ...and where built-in TLS is listening, when it is on (#76).
+    pub https_addr: Option<SocketAddr>,
     /// The database every handler and worker shares.
     pub db: Db,
     /// The audio store every handler and worker shares.
@@ -337,8 +358,8 @@ pub struct Instance {
 struct Parts {
     credentials: Credentials,
     clock: Clock,
-    /// Where to listen, which is not a setting.
-    bind: Option<SocketAddr>,
+    /// The address to listen on, which is not a setting.
+    bind: Option<IpAddr>,
     /// What to compose around the database handle, if a caller asked for
     /// anything — kept because a restart re-opens the database and whatever was
     /// composed around it has to survive that.
@@ -347,14 +368,16 @@ struct Parts {
 
 /// The tasks one run of an Instance owns.
 struct Running {
-    /// The serving task, until it has been awaited — a `JoinHandle` panics if
-    /// it is polled a second time, and both [`Instance::stop`] and
-    /// [`Instance::serve_forever`] await this one. `None` means "already
-    /// finished", which for both of them is the outcome they wanted.
-    server: Option<JoinHandle<Result<(), std::io::Error>>>,
-    /// Tells `axum::serve` to stop accepting and let its connections finish.
+    /// The serving tasks — plain HTTP, and HTTPS when built-in TLS is on (#76)
+    /// — until they have been awaited. A `JoinHandle` panics if it is polled a
+    /// second time, and both [`Instance::stop`] and [`Instance::serve_forever`]
+    /// await these, so they are taken as they are; empty means "already
+    /// finished", which for both callers is the outcome they wanted.
+    servers: Vec<JoinHandle<Result<(), std::io::Error>>>,
+    /// Tells every `axum::serve` to stop accepting and let its connections
+    /// finish — one signal for both listeners, so neither outlives the other.
     /// `None` once it has been used, because a shutdown is sent once.
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown: Option<tokio::sync::watch::Sender<bool>>,
     /// The background workers this run spawned, in the order they were started
     /// — so stopping them is that order reversed (#93).
     workers: Vec<Worker>,
@@ -377,10 +400,14 @@ impl Instance {
     /// the binary blocks on. `None` — already awaited — is the outcome both of
     /// them were asking for.
     async fn finish_serving(&mut self) -> Result<(), StartError> {
-        match self.running.server.take() {
-            Some(server) => server.await.unwrap_or(Ok(())).map_err(StartError::Serve),
-            None => Ok(()),
+        // **Every** server is awaited, whatever the first one said: one left
+        // behind would still be holding its port when this returns.
+        let mut finished = Ok(());
+        for server in std::mem::take(&mut self.running.servers) {
+            let outcome = server.await.unwrap_or(Ok(())).map_err(StartError::Serve);
+            finished = finished.and(outcome);
         }
+        finished
     }
 
     /// Stop serving and stop the workers, and don't come back until the port is
@@ -412,9 +439,9 @@ impl Instance {
         // the graceful stop below waits for every response to (#74).
         self.state.stations.close();
         if let Some(shutdown) = self.running.shutdown.take() {
-            // The receiver is gone only if the server task has already ended,
-            // which is the outcome being asked for.
-            let _ = shutdown.send(());
+            // Every receiver is gone only if every server task has already
+            // ended, which is the outcome being asked for.
+            let _ = shutdown.send(true);
         }
         // Whatever the server has to say about stopping, it was asked to.
         let _ = self.finish_serving().await;
@@ -484,6 +511,7 @@ impl Instance {
         )
         .await?;
         self.addr = run.addr;
+        self.https_addr = run.https_addr;
         self.db = run.db;
         self.store = run.store;
         self.state = run.state;
@@ -623,10 +651,8 @@ async fn assemble(
     state.enhancer = Enhancer::from_config(config.enhancement.clone());
     state.mining = config.mining.clone();
     state.downstreams = crate::downstream::Downstreams::new(config.downstream.clone());
-    state.webhooks =
-        crate::webhook::Webhooks::new(config.webhook.clone(), config.server.public_url.clone());
-    state.shares =
-        crate::share::Shares::new(config.share.clone(), config.server.public_url.clone());
+    state.webhooks = crate::webhook::Webhooks::new(config.webhook.clone(), config.public_url());
+    state.shares = crate::share::Shares::new(config.share.clone(), config.public_url());
     state.exports = crate::export::Exports::new(config.export.clone());
     state.stations = crate::station::Stations::new(config.station.clone());
     // The read-only half of `[retention] starred_days` (#66), so the catalog
@@ -657,6 +683,38 @@ async fn assemble(
     // **Dirwatch** (#72): the roots every watch is bounded by. The Worker is
     // started below with the rest.
     state.dirwatch = crate::dirwatch::Dirwatch::new(config.dirwatch.clone());
+    // **Built-in TLS** (#76). An Operator's own certificate is read *now*,
+    // before a port is bound, so files that cannot be served refuse the boot
+    // naming the file rather than leaving an HTTPS port that answers no
+    // handshake. An issued one lives beside the database, in `tls/`.
+    state.tls = crate::tls::Tls::new(
+        config.tls.clone(),
+        config.server.base_dir.join("tls"),
+        config.public_url(),
+    );
+    match state.tls.source() {
+        crate::tls::Source::Files { cert, key } => {
+            let certificate = crate::tls::certificate::read(cert, key).map_err(StartError::Tls)?;
+            state.tls.serve(certificate);
+        }
+        // ...and an issued one is served the moment a restart binds, so a
+        // restart is never an issuance. None yet is not an error: the Worker's
+        // first pass asks the CA, and the plain port serves meanwhile.
+        crate::tls::Source::Acme(domains) => {
+            // A private CA's root is read now for the same reason the files
+            // are: one that cannot be would otherwise surface as a failed
+            // issuance, minutes after a boot that looked fine.
+            (config.tls.directory_root.as_deref())
+                .map(crate::tls::certificate::read_root)
+                .transpose()
+                .map_err(StartError::Tls)?;
+            let stored = crate::tls::acme::stored(state.tls.dir(), &config.tls.directory, domains);
+            if let Some(certificate) = stored {
+                state.tls.serve(certificate);
+            }
+        }
+        crate::tls::Source::Off => {}
+    }
     // What this Instance has been doing (#70). Wired here rather than
     // constructed in `AppState::new` because two of the three things it needs
     // are configuration: `[metrics]`' own token, which is the switch that
@@ -742,18 +800,25 @@ async fn assemble(
         .start()
         .map(|worker| workers.adopt(worker)),
     );
+    let ip = parts.bind.unwrap_or(IpAddr::from([0, 0, 0, 0]));
+    let (listener, addr) = bind(ip, config.server.port).await?;
+    // HTTPS is bound before the plain app is built, so the LAN door's
+    // redirects name the port the OS actually chose.
+    let https = match state.tls.is_on() {
+        true => Some(bind(ip, config.tls.port).await?),
+        false => None,
+    };
+    let https_addr = https.as_ref().map(|(_, https_addr)| *https_addr);
+    if let Some(https_addr) = https_addr {
+        state.tls.bound(https_addr.port());
+    }
+    // Keeping the certificate current (#76): re-reading an Operator's files,
+    // or issuing and renewing one. With `[tls]` off — what ships — this spawns
+    // nothing. Started only now, with **both ports bound**: its first pass may
+    // ask a CA to connect back to either, and a CA that found nothing listening
+    // would fail the issuance and back off for a quarter of an hour.
+    running.extend(crate::tls::worker::spawn(state.clone()).map(|worker| workers.adopt(worker)));
     let app = build_app(state.clone());
-
-    let bind = parts
-        .bind
-        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], config.server.port)));
-    let port = bind.port();
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .map_err(|source| StartError::Bind { port, source })?;
-    let addr = listener
-        .local_addr()
-        .map_err(|source| StartError::Bind { port, source })?;
     let base_dir = base_dir.display();
     // On one line deliberately: `tracing`'s expansion leaves a zero-count
     // region on each field's own line, so a wrapped call reads as untested
@@ -764,28 +829,40 @@ async fn assemble(
     // With connect info: the request log (#28) names the host an ingest came
     // from, which is the diagnostic that matters when a recorder says it is
     // uploading and the archive disagrees.
-    let (tell_to_stop, stop) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
+    let (tell_to_stop, stop) = tokio::sync::watch::channel(false);
+    let mut servers = vec![serving(
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(async move {
-            // A dropped sender means the handle is gone, which is also a
-            // reason to stop.
-            let _ = stop.await;
-        })
-        .await
-        .inspect_err(|error| error!(%error, "the server stopped"))
-    });
+        .with_graceful_shutdown(stopped(stop.clone())),
+    )];
+    if let Some((https, https_addr)) = https {
+        let port = https_addr.port();
+        info!(%https_addr, port, "radio-scout listening for https");
+        let listener = crate::tls::listener::TlsListener::new(https, state.tls.server_config())
+            .map_err(|source| StartError::Bind { port, source })?;
+        // `tap_io` for the one thing it brings: axum's `ConnectInfo` impl for a
+        // listener of our own, so every handler that names its peer sees the
+        // same `SocketAddr` over TLS as over plain HTTP.
+        let tls_app = crate::app_over(state.clone(), crate::Transport::Tls);
+        servers.push(serving(
+            axum::serve(
+                axum::serve::ListenerExt::tap_io(listener, |_| {}),
+                tls_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(stopped(stop)),
+        ));
+    }
 
     Ok(Instance {
         addr,
+        https_addr,
         db,
         store: audio,
         state,
         running: Running {
-            server: Some(server),
+            servers,
             shutdown: Some(tell_to_stop),
             workers: running,
         },
@@ -794,6 +871,39 @@ async fn assemble(
         config,
         parts,
     })
+}
+
+/// Bind `port` on `ip`, or say which port could not be — answering with the
+/// address it actually bound, because `0` asks the OS to choose.
+async fn bind(ip: IpAddr, port: u16) -> Result<(tokio::net::TcpListener, SocketAddr), StartError> {
+    let failed = move |source: std::io::Error| StartError::Bind { port, source };
+    let listener = tokio::net::TcpListener::bind(SocketAddr::new(ip, port))
+        .await
+        .map_err(failed)?;
+    let addr = listener.local_addr().map_err(failed)?;
+    Ok((listener, addr))
+}
+
+/// Serve on a task of its own until told to stop — and say so if a server ends
+/// any other way, because the handle that would have reported it may never be
+/// awaited.
+fn serving<S>(server: S) -> JoinHandle<Result<(), std::io::Error>>
+where
+    S: std::future::IntoFuture<Output = Result<(), std::io::Error>>,
+    S::IntoFuture: Send + 'static,
+{
+    let server = server.into_future();
+    tokio::spawn(async move {
+        server
+            .await
+            .inspect_err(|error| error!(%error, "the server stopped"))
+    })
+}
+
+/// Resolves when the Instance is told to stop — or when its handle is gone,
+/// which is also a reason to.
+async fn stopped(mut stop: tokio::sync::watch::Receiver<bool>) {
+    let _ = stop.wait_for(|stopping| *stopping).await;
 }
 
 #[cfg(test)]
@@ -889,11 +999,50 @@ mod tests {
                 "3000",
             ),
             (StartError::Serve(denied()), "the server stopped"),
+            // A certificate that cannot be served names its file (#76)...
+            (
+                StartError::Tls(crate::tls::certificate::Unreadable {
+                    path: PathBuf::from("/etc/rs/fullchain.pem"),
+                    why: "no certificate in it".to_string(),
+                }),
+                "/etc/rs/fullchain.pem",
+            ),
+            // ...and a privileged port refused says what grants it, which is
+            // the one fix an Operator cannot guess from "permission denied".
+            (
+                StartError::Bind {
+                    port: 443,
+                    source: denied(),
+                },
+                "CAP_NET_BIND_SERVICE",
+            ),
         ];
 
         for (error, expected) in cases {
             let message = error.to_string();
             assert!(message.contains(expected), "{message:?} omits {expected:?}");
+        }
+    }
+
+    /// ...but only a *privileged* port, and only when the refusal was about
+    /// permission: a busy port 3000 is not a capability problem, and saying it
+    /// was would send an Operator looking in the wrong place.
+    #[test]
+    fn the_capability_hint_is_given_only_where_it_is_the_fix() {
+        let busy = StartError::Bind {
+            port: 80,
+            source: std::io::Error::new(ErrorKind::AddrInUse, "in use"),
+        };
+        let unprivileged = StartError::Bind {
+            port: 3000,
+            source: std::io::Error::new(ErrorKind::PermissionDenied, "denied"),
+        };
+
+        for error in [busy, unprivileged] {
+            assert!(
+                !error.to_string().contains("CAP_NET_BIND_SERVICE"),
+                "{error}"
+            );
         }
     }
 }

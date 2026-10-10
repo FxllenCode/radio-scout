@@ -139,6 +139,7 @@ use crate::quiet::QuietConfig;
 use crate::retention::{self, RetentionConfig};
 use crate::share::ShareConfig;
 use crate::station::StationConfig;
+use crate::tls::{self, TlsConfig};
 use crate::tone::ToneConfig;
 use crate::webhook::WebhookConfig;
 
@@ -257,7 +258,13 @@ pub fn service_params(
         exec,
         args: service_args(cli, &base_dir, config_file.as_deref())?,
         base_dir,
-        port: loaded.config.server.port,
+        // Every port it will bind, from the *resolved* configuration — a
+        // `[tls]` section in the file turns on a second, privileged one (#76).
+        ports: std::iter::once(loaded.config.server.port)
+            .chain(
+                (loaded.config.tls.source() != tls::Source::Off).then_some(loaded.config.tls.port),
+            )
+            .collect(),
         user,
     })
 }
@@ -470,6 +477,7 @@ impl std::error::Error for ConfigError {}
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: Server,
+    pub tls: TlsConfig,
     pub database: Database,
     pub storage: Storage,
     pub retention: RetentionConfig,
@@ -531,6 +539,24 @@ impl Config {
     /// The proxies the request log may believe (ADR-0011 rule 5, #28).
     pub fn trusted_proxies(&self) -> TrustedProxies {
         self.server.trusted_proxies.iter().copied().collect()
+    }
+
+    /// Where this Instance can be reached from outside: `[server] public_url`
+    /// as written, or — with ACME on — the first name the certificate is issued
+    /// for (#76).
+    ///
+    /// An Instance genuinely cannot know its own address behind a tunnel or a
+    /// proxy, which is why the setting is unset by default. With ACME on it
+    /// *can*: a CA has just proved the name reaches this machine. An Operator's
+    /// own certificate files name nothing this reads, so they leave it unset.
+    pub fn public_url(&self) -> Option<String> {
+        if let Some(written) = &self.server.public_url {
+            return Some(written.clone());
+        }
+        match self.tls.source() {
+            tls::Source::Acme(domains) => domains.first().map(|name| format!("https://{name}")),
+            _ => None,
+        }
     }
 
     /// Refuse a configuration that parsed but cannot be run.
@@ -689,6 +715,7 @@ impl Config {
                 EXPECTED_PUBLIC_URL,
             ));
         }
+        self.validate_tls()?;
         validate_directives("log.directives", &self.log.directives)?;
         if self.ingest.dedup_window_ms < 0 {
             return Err(ConfigError::invalid_key(
@@ -750,6 +777,52 @@ impl Config {
             if value == 0 {
                 return Err(ConfigError::invalid_key(key, "0", expected));
             }
+        }
+        Ok(())
+    }
+
+    /// The `[tls]` refusals that span more than one field (#76) — what a field's
+    /// own deserializer cannot see.
+    fn validate_tls(&self) -> Result<(), ConfigError> {
+        let tls = &self.tls;
+        // Half a pair of files is a certificate with no key or a key with no
+        // certificate, and either would be an HTTPS port that answers no
+        // handshake. Named both ways, so the message is about the half that is
+        // missing.
+        match (&tls.cert_file, &tls.key_file) {
+            (Some(_), None) => {
+                return Err(ConfigError::Missing {
+                    key: "tls.key_file",
+                    because: "tls.cert_file is set",
+                });
+            }
+            (None, Some(_)) => {
+                return Err(ConfigError::Missing {
+                    key: "tls.cert_file",
+                    because: "tls.key_file is set",
+                });
+            }
+            _ => {}
+        }
+        // Two sources is two answers to "which certificate do I serve", and
+        // guessing which one the Operator meant is how one of them silently
+        // never applies.
+        if !tls.domains.is_empty() && tls.cert_file.is_some() {
+            let named: Vec<String> = tls.domains.iter().map(ToString::to_string).collect();
+            return Err(ConfigError::invalid_key(
+                "tls.domains",
+                &named.join(","),
+                "either tls.domains or tls.cert_file/tls.key_file, not both",
+            ));
+        }
+        // One port cannot be both doors. Zero is the exception — it asks the OS
+        // for *a* port, and two asks are two different ports.
+        if tls.source() != tls::Source::Off && tls.port != 0 && tls.port == self.server.port {
+            return Err(ConfigError::invalid_key(
+                "tls.port",
+                &tls.port.to_string(),
+                "a port other than server.port, which stays plain HTTP",
+            ));
         }
         Ok(())
     }
@@ -870,6 +943,89 @@ pub const SETTINGS: &[Setting] = &[
                 return Err(setting.invalid(value));
             }
             config.server.public_url = Some(value.to_string());
+            Ok(())
+        },
+    },
+    Setting {
+        key: "tls.port",
+        var: "RADIO_SCOUT_TLS_PORT",
+        expected: "a port number 0-65535",
+        example: "8443",
+        set: |setting, config, value| {
+            config.tls.port = setting.parse(value)?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "tls.domains",
+        var: "RADIO_SCOUT_TLS_DOMAINS",
+        expected: "a comma-separated list of domain names",
+        example: "scanner.example",
+        set: |setting, config, value| {
+            // Each name is refused with *its own* reason — a wildcard and a
+            // typo are different mistakes — under the variable it was written
+            // in, the `ProxyNet` precedent.
+            config.tls.domains = value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    entry
+                        .parse()
+                        .map_err(|expected| ConfigError::invalid_env(setting.var, entry, expected))
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "tls.directory",
+        var: "RADIO_SCOUT_TLS_DIRECTORY",
+        expected: tls::EXPECTED_DIRECTORY,
+        example: "https://acme-staging-v02.api.letsencrypt.org/directory",
+        set: |setting, config, value| {
+            config.tls.directory =
+                tls::checked_directory(value).map_err(|_| setting.invalid(value))?;
+            Ok(())
+        },
+    },
+    Setting {
+        key: "tls.directory_root",
+        var: "RADIO_SCOUT_TLS_DIRECTORY_ROOT",
+        expected: "a path to a PEM certificate",
+        example: "/etc/step-ca/root.pem",
+        set: |_, config, value| {
+            config.tls.directory_root = Some(PathBuf::from(value));
+            Ok(())
+        },
+    },
+    Setting {
+        key: "tls.email",
+        var: "RADIO_SCOUT_TLS_EMAIL",
+        expected: tls::EXPECTED_EMAIL,
+        example: "you@example.com",
+        set: |setting, config, value| {
+            config.tls.email = Some(tls::checked_email(value).map_err(|_| setting.invalid(value))?);
+            Ok(())
+        },
+    },
+    Setting {
+        key: "tls.cert_file",
+        var: "RADIO_SCOUT_TLS_CERT_FILE",
+        expected: "a path to a PEM certificate chain",
+        example: "/etc/letsencrypt/live/scanner.example/fullchain.pem",
+        set: |_, config, value| {
+            config.tls.cert_file = Some(PathBuf::from(value));
+            Ok(())
+        },
+    },
+    Setting {
+        key: "tls.key_file",
+        var: "RADIO_SCOUT_TLS_KEY_FILE",
+        expected: "a path to a PEM private key",
+        example: "/etc/letsencrypt/live/scanner.example/privkey.pem",
+        set: |_, config, value| {
+            config.tls.key_file = Some(PathBuf::from(value));
             Ok(())
         },
     },
@@ -1612,7 +1768,15 @@ pub struct Server {
     pub port: u16,
     pub base_dir: PathBuf,
     /// Addresses and CIDR blocks whose `X-Forwarded-For` may be believed.
-    /// Empty — the shipped posture — means the header is never believed.
+    ///
+    /// **Loopback by default** (#76), and nothing wider. A Cloudflare Tunnel —
+    /// the recommended way public — or a proxy on the same machine relays every
+    /// visitor from `127.0.0.1`, and with the old empty default every one of
+    /// them was the same address: one stranger's five bad admin passwords locked
+    /// the Operator out from everywhere, and the session cookie never got
+    /// `Secure`. A process on this machine is already the Operator's, so
+    /// believing it costs nothing a LAN peer's header would; `[]` still says
+    /// "believe nobody".
     pub trusted_proxies: Vec<ProxyNet>,
     /// Where this Instance can be reached **from outside** — the base a
     /// **Webhook**'s payload builds an absolute audio URL on (#54).
@@ -1630,7 +1794,7 @@ impl Default for Server {
         Server {
             port: 3000,
             base_dir: PathBuf::from("./radio-scout-data"),
-            trusted_proxies: Vec::new(),
+            trusted_proxies: vec![ProxyNet::LOOPBACK_V4, ProxyNet::LOOPBACK_V6],
             public_url: None,
         }
     }
@@ -1648,6 +1812,19 @@ const EXPECTED_PUBLIC_URL: &str = "an absolute URL, e.g. https://scanner.example
 /// somebody has to remember to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProxyNet(IpNet);
+
+impl ProxyNet {
+    /// `127.0.0.1` — trusted by default since #76, with [`ProxyNet::LOOPBACK_V6`].
+    pub const LOOPBACK_V4: ProxyNet = ProxyNet(IpNet::new_assert(
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        32,
+    ));
+    /// `::1`.
+    pub const LOOPBACK_V6: ProxyNet = ProxyNet(IpNet::new_assert(
+        IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        128,
+    ));
+}
 
 /// What an entry that is neither an address nor a block says for itself — in
 /// the file (through serde), on the command line (through clap) and in the
@@ -1830,19 +2007,60 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # base_dir = "./radio-scout-data"
 
 # Addresses and CIDR blocks whose `X-Forwarded-For` header may be believed, for
-# a deployment behind a reverse proxy or Docker's bridge. Empty (the default)
-# means the header is never read and the log names the TCP peer — the header is
-# attacker-controlled, so believing it from anyone would let a stranger forge a
-# recorder's address into your log.
-#   trusted_proxies = ["127.0.0.1", "172.17.0.0/16"]
-# trusted_proxies = []
+# a deployment behind a tunnel, a reverse proxy or Docker's bridge. Loopback
+# (the default) is what a Cloudflare Tunnel or a proxy on this same machine
+# relays from, so those work with nothing set here. Add the subnet of a proxy
+# running anywhere else — a `cloudflared` in its own container is on Docker's
+# bridge. The header is attacker-controlled, so believing it from anyone else
+# would let a stranger forge a recorder's address into your log; [] believes
+# nobody.
+#   trusted_proxies = ["127.0.0.1", "::1", "172.17.0.0/16"]
+# trusted_proxies = ["127.0.0.1", "::1"]
 
 # Where this scanner can be reached from outside — used to build the audio link
-# in a Webhook's payload (Settings -> Webhooks). Unset, a webhook still carries
-# every fact about the Call and simply has no link: a guessed URL in somebody's
-# chat room is worse than none, and this instance genuinely cannot know its own
-# address if it sits behind a proxy or a tunnel.
+# in a Webhook's payload, an embed snippet and a share link. Unset, a webhook
+# still carries every fact about the Call and simply has no link: a guessed URL
+# in somebody's chat room is worse than none, and this instance genuinely cannot
+# know its own address if it sits behind a proxy or a tunnel. With [tls] domains
+# set it defaults to https:// and the first of them.
 #   public_url = "https://scanner.example"
+
+[tls]
+# Built-in HTTPS, for a scanner with nothing in front of it. Off unless one of
+# the two certificate sources below is set. Most installs want neither: a
+# Cloudflare Tunnel or a reverse proxy terminates TLS for you (docs/deploy.md).
+#
+# With it on, [server] port stays plain HTTP and becomes the LAN door: it
+# answers the CA's HTTP challenge, serves the whole app to this machine and your
+# local network (a recorder on the same box keeps posting to it unchanged), and
+# redirects everyone else to https.
+
+# Where HTTPS listens. Ports below 1024 need root or CAP_NET_BIND_SERVICE;
+# `radio-scout service install` grants the capability when this asks for one.
+# port = 443
+
+# Let's Encrypt: the names to get a certificate for. Each must already point at
+# this machine, and port 443 (or 80) must reach it from the internet. Setting
+# this accepts the CA's subscriber agreement, whose URL is logged when the
+# account is registered, on the first issuance.
+#   domains = ["scanner.example"]
+# domains = []
+
+# The ACME directory to ask. Let's Encrypt's staging one is
+# https://acme-staging-v02.api.letsencrypt.org/directory, for trying this out
+# without spending the real rate limit.
+# directory = "https://acme-v02.api.letsencrypt.org/directory"
+
+# A root certificate to trust for a private ACME CA's own HTTPS (step-ca, say).
+#   directory_root = "/etc/step-ca/root.pem"
+
+# A contact address for the CA account. Optional; renewal is automatic.
+#   email = "you@example.com"
+
+# Or your own certificate — certbot's, `tailscale cert`'s, a wildcard you
+# already have. Re-read whenever the files change, so a renewal needs no restart.
+#   cert_file = "/etc/letsencrypt/live/scanner.example/fullchain.pem"
+#   key_file = "/etc/letsencrypt/live/scanner.example/privkey.pem"
 
 [database]
 # A SeaORM connection URL. Unset means SQLite at <base_dir>/radio-scout.db,
@@ -1956,11 +2174,11 @@ pub const TEMPLATE: &str = r##"# Radio-Scout configuration.
 # first run generates one, writes it to that file 0600, and logs only the path
 # — never the password. `cat .env` is how you read it back.
 #
-# If you terminate TLS at a reverse proxy, set [server] trusted_proxies to that
-# proxy's address. The session cookie is marked Secure only when the proxy says
-# the client's hop was HTTPS (X-Forwarded-Proto), and that header is believed
-# only from a proxy you named — so with the list empty, an HTTPS deployment
-# still gets a cookie a browser will replay over plain http:// to the same host.
+# The session cookie is marked Secure when the request arrived over HTTPS: on
+# [tls]'s own port, or through a proxy in [server] trusted_proxies that says the
+# client's hop was HTTPS (X-Forwarded-Proto). A tunnel or proxy on this machine
+# is trusted already; one anywhere else must be added, or an HTTPS deployment
+# gets a cookie a browser will replay over plain http:// to the same host.
 
 # How long a session survives without being used (refreshed on every request),
 # and how long it may live at all however active. The second is the bound on a
@@ -3679,8 +3897,9 @@ mod tests {
     #[case(&[], &[], Some("[server]\ntrusted_proxies = [\"172.17.0.0/16\"]\n"), "172.18.0.9", false)]
     #[case(&[], &[], Some("[server]\ntrusted_proxies = [\"::1\"]\n"), "::1", true)]
     #[case(&[], &[], Some("[server]\ntrusted_proxies = [\"fd00::/8\"]\n"), "fd12::1", true)]
-    // Nothing configured trusts nobody — the shipped posture (ADR-0011).
-    #[case(&[], &[], None, "127.0.0.1", false)]
+    // Nothing configured trusts loopback and nobody else (#76) — see
+    // `loopback_is_a_trusted_proxy_until_told_otherwise`.
+    #[case(&[], &[], None, "10.0.0.1", false)]
     // The environment takes the list comma-separated, as a container passes it.
     #[case(&[], &[("RADIO_SCOUT_TRUSTED_PROXIES", "10.0.0.1, 172.17.0.0/16")], None, "172.17.0.5", true)]
     #[case(&["--trusted-proxy", "10.0.0.1", "--trusted-proxy", "10.0.0.2"], &[], None, "10.0.0.2", true)]
@@ -4344,6 +4563,210 @@ mod tests {
         assert_eq!(reparsed, config);
     }
 
+    /// **Loopback is trusted out of the box** (#76). A Cloudflare Tunnel — the
+    /// recommended way public — or a Caddy on the same machine relays every
+    /// visitor from `127.0.0.1`, and with an empty list one stranger's five bad
+    /// admin passwords locked the Operator out from everywhere. Loopback and
+    /// nothing wider: a LAN peer is a *client*, and believing its header would
+    /// let it forge any address it liked.
+    #[rstest]
+    #[case::ipv4_loopback("127.0.0.1", true)]
+    #[case::ipv6_loopback("::1", true)]
+    #[case::a_lan_peer("192.168.1.20", false)]
+    #[case::a_docker_bridge_peer("172.17.0.2", false)]
+    #[case::the_internet("203.0.113.9", false)]
+    fn loopback_is_a_trusted_proxy_until_told_otherwise(#[case] peer: &str, #[case] trusted: bool) {
+        let config = resolve(&cli(&[]), no_env, None).expect("resolve");
+
+        assert_eq!(config.trusted_proxies().trusts(ip(peer)), trusted);
+    }
+
+    /// ...and an Operator who wants nothing believed can still say so — in the
+    /// file, where an empty list is a value rather than an absence. (A blank
+    /// variable means *unset* everywhere, `set_env`'s rule since 0.1.0, so the
+    /// environment cannot spell it.)
+    #[test]
+    fn trusting_nobody_is_still_expressible() {
+        let config = resolve(
+            &cli(&[]),
+            no_env,
+            Some(&file("[server]\ntrusted_proxies = []\n")),
+        )
+        .expect("resolve");
+
+        assert!(!config.trusted_proxies().trusts(ip("127.0.0.1")));
+    }
+
+    /// Built-in TLS is **off** until a certificate source is named (#76): the
+    /// zero-config LAN install serves plain HTTP exactly as it always has, and
+    /// a tunnel or a proxy in front needs nothing from this section at all.
+    #[test]
+    fn tls_is_off_until_a_certificate_source_is_named() {
+        let config = resolve(&cli(&[]), no_env, None).expect("resolve");
+
+        assert_eq!(config.tls.source(), crate::tls::Source::Off);
+    }
+
+    /// Naming a domain is what switches ACME on — and naming the pair of files
+    /// is what serves an Operator's own certificate — from either layer.
+    #[rstest]
+    #[case::acme_in_the_file(
+        &[],
+        Some("[tls]\ndomains = [\"Scanner.Example\", \"radio.example\"]\n"),
+        crate::tls::Source::Acme(vec!["scanner.example".into(), "radio.example".into()])
+    )]
+    #[case::acme_in_the_environment(
+        &[("RADIO_SCOUT_TLS_DOMAINS", "scanner.example, radio.example")],
+        None,
+        crate::tls::Source::Acme(vec!["scanner.example".into(), "radio.example".into()])
+    )]
+    #[case::files_in_the_file(
+        &[],
+        Some("[tls]\ncert_file = \"/etc/rs/cert.pem\"\nkey_file = \"/etc/rs/key.pem\"\n"),
+        crate::tls::Source::Files { cert: "/etc/rs/cert.pem".into(), key: "/etc/rs/key.pem".into() }
+    )]
+    #[case::files_in_the_environment(
+        &[("RADIO_SCOUT_TLS_CERT_FILE", "/etc/rs/cert.pem"), ("RADIO_SCOUT_TLS_KEY_FILE", "/etc/rs/key.pem")],
+        None,
+        crate::tls::Source::Files { cert: "/etc/rs/cert.pem".into(), key: "/etc/rs/key.pem".into() }
+    )]
+    fn a_certificate_source_comes_from_either_layer(
+        #[case] vars: &[(&str, &str)],
+        #[case] text: Option<&str>,
+        #[case] expected: crate::tls::Source,
+    ) {
+        let file = text.map(file);
+        let config = resolve(&cli(&[]), env(vars), file.as_ref()).expect("resolve");
+
+        assert_eq!(config.tls.source(), expected);
+    }
+
+    /// **A TLS setup that cannot work refuses to boot, naming the problem**
+    /// (#76). Every one of these would otherwise be an Instance that comes up,
+    /// says nothing, and never serves HTTPS — or worse, burns the CA's
+    /// failed-validation rate limit retrying a name it can never be issued.
+    #[rstest]
+    #[case::a_wildcard("[tls]\ndomains = [\"*.example.com\"]\n", "tls.domains", "wildcard")]
+    #[case::an_ipv4_address("[tls]\ndomains = [\"203.0.113.9\"]\n", "tls.domains", "IP address")]
+    #[case::an_ipv6_address("[tls]\ndomains = [\"2001:db8::1\"]\n", "tls.domains", "IP address")]
+    #[case::not_a_hostname(
+        "[tls]\ndomains = [\"scanner example\"]\n",
+        "tls.domains",
+        "domain name"
+    )]
+    #[case::an_empty_name("[tls]\ndomains = [\"\"]\n", "tls.domains", "domain name")]
+    #[case::a_label_too_long(
+        "[tls]\ndomains = [\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example\"]\n",
+        "tls.domains",
+        "domain name"
+    )]
+    #[case::a_leading_hyphen(
+        "[tls]\ndomains = [\"-scanner.example\"]\n",
+        "tls.domains",
+        "domain name"
+    )]
+    #[case::a_cert_without_its_key(
+        "[tls]\ncert_file = \"/c.pem\"\n",
+        "tls.key_file",
+        "tls.cert_file"
+    )]
+    #[case::a_key_without_its_cert(
+        "[tls]\nkey_file = \"/k.pem\"\n",
+        "tls.cert_file",
+        "tls.key_file"
+    )]
+    #[case::both_sources(
+        "[tls]\ndomains = [\"scanner.example\"]\ncert_file = \"/c.pem\"\nkey_file = \"/k.pem\"\n",
+        "tls.domains",
+        "\"scanner.example\""
+    )]
+    #[case::both_sources_says_why(
+        "[tls]\ndomains = [\"scanner.example\"]\ncert_file = \"/c.pem\"\nkey_file = \"/k.pem\"\n",
+        "tls.domains",
+        "not both"
+    )]
+    #[case::one_port_for_both(
+        "[server]\nport = 443\n[tls]\ndomains = [\"scanner.example\"]\n",
+        "tls.port",
+        "server.port"
+    )]
+    #[case::a_directory_over_plain_http(
+        "[tls]\ndomains = [\"scanner.example\"]\ndirectory = \"http://ca.example/dir\"\n",
+        "tls.directory",
+        "https://"
+    )]
+    #[case::an_email_that_is_not_one(
+        "[tls]\ndomains = [\"scanner.example\"]\nemail = \"ops at example\"\n",
+        "tls.email",
+        "email address"
+    )]
+    fn a_tls_setup_that_cannot_work_refuses_to_boot(
+        #[case] text: &str,
+        #[case] key: &str,
+        #[case] says: &str,
+    ) {
+        let error = resolve(&cli(&[]), no_env, Some(&file(text))).expect_err("refused");
+
+        let message = error.to_string();
+        assert!(message.contains(key), "names {key}: {message}");
+        assert!(message.contains(says), "says {says:?}: {message}");
+    }
+
+    /// The same refusals, met through the environment, name the variable the
+    /// Operator wrote rather than the key they didn't.
+    #[rstest]
+    #[case::a_wildcard(&[("RADIO_SCOUT_TLS_DOMAINS", "*.example.com")], "RADIO_SCOUT_TLS_DOMAINS")]
+    #[case::a_plain_directory(&[("RADIO_SCOUT_TLS_DIRECTORY", "http://ca.example/dir")], "RADIO_SCOUT_TLS_DIRECTORY")]
+    #[case::a_bad_email(&[("RADIO_SCOUT_TLS_EMAIL", "nobody")], "RADIO_SCOUT_TLS_EMAIL")]
+    #[case::a_bad_port(&[("RADIO_SCOUT_TLS_PORT", "https")], "RADIO_SCOUT_TLS_PORT")]
+    fn a_tls_setting_refused_from_the_environment_names_its_variable(
+        #[case] vars: &[(&str, &str)],
+        #[case] var: &str,
+    ) {
+        let error = resolve(&cli(&[]), env(vars), None).expect_err("refused");
+
+        assert!(error.to_string().contains(var), "{error}");
+    }
+
+    /// Two ports, then, and they must differ — **unless both are ephemeral**,
+    /// which is how the suite asks for two different ones.
+    #[test]
+    fn two_ephemeral_ports_are_not_one_port() {
+        let config = resolve(
+            &cli(&[]),
+            no_env,
+            Some(&file(
+                "[server]\nport = 0\n[tls]\nport = 0\ndomains = [\"scanner.example\"]\n",
+            )),
+        );
+
+        assert!(config.is_ok(), "{config:?}");
+    }
+
+    /// **With ACME on, this Instance knows its own public address** (#76): it
+    /// is the name the certificate was issued for. So an embed snippet, a
+    /// Webhook's link and a share link all point somewhere real without the
+    /// Operator writing the same name twice — and one written out still wins.
+    #[rstest]
+    #[case::unset_and_no_tls("", None)]
+    #[case::the_first_domain(
+        "[tls]\ndomains = [\"scanner.example\", \"radio.example\"]\n",
+        Some("https://scanner.example")
+    )]
+    #[case::written_wins(
+        "[server]\npublic_url = \"https://elsewhere.example\"\n[tls]\ndomains = [\"scanner.example\"]\n",
+        Some("https://elsewhere.example")
+    )]
+    #[case::own_files_name_no_host("[tls]\ncert_file = \"/c.pem\"\nkey_file = \"/k.pem\"\n", None)]
+    fn the_public_url_defaults_to_the_certificates_name(
+        #[case] text: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let config = resolve(&cli(&[]), no_env, Some(&file(text))).expect("resolve");
+
+        assert_eq!(config.public_url().as_deref(), expected);
+    }
+
     /// `--log` is validated like every other layer.
     #[test]
     fn unparseable_log_directives_on_the_command_line_refuse_to_boot() {
@@ -4436,6 +4859,33 @@ mod tests {
         );
     }
 
+    /// **With built-in TLS on, the service is told about the HTTPS port too**
+    /// (#76) — 443 is the privileged one an Operator turning TLS on is likeliest
+    /// to ask for, and a unit that granted the capability for port 3000's sake
+    /// alone would refuse to start with "permission denied" on 443.
+    #[rstest]
+    #[case::tls_off("", &[3000])]
+    #[case::acme("[tls]\ndomains = [\"scanner.example\"]\n", &[3000, 443])]
+    #[case::own_files("[tls]\nport = 8443\ncert_file = \"/c.pem\"\nkey_file = \"/k.pem\"\n", &[3000, 8443])]
+    fn a_service_is_told_every_port_it_will_bind(#[case] text: &str, #[case] ports: &[u16]) {
+        let cli = Cli::parse_from(["radio-scout", "service", "install"]);
+        let loaded = Loaded {
+            config: resolve(&cli, no_env, Some(&file(text))).expect("resolve"),
+            file: None,
+        };
+
+        let params = service_params(
+            &cli,
+            &loaded,
+            Path::new("/home/pi"),
+            PathBuf::from("/usr/local/bin/radio-scout"),
+            None,
+        )
+        .expect("nothing secret");
+
+        assert_eq!(params.ports, ports);
+    }
+
     /// The three things `main.rs` used to decide, where they can be seen: both
     /// paths absolute against the working directory, and the port from the
     /// resolved configuration rather than the flag — it decides whether the
@@ -4466,7 +4916,7 @@ mod tests {
         .expect("nothing secret");
 
         assert_eq!(params.base_dir, PathBuf::from("/home/pi/radio-scout-data"));
-        assert_eq!(params.port, 80);
+        assert_eq!(params.ports, [80]);
         assert_eq!(params.user.as_deref(), Some("radio-scout"));
         assert_eq!(
             params.args,

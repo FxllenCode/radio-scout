@@ -396,6 +396,7 @@ crate::answers_json!(SessionResponse);
 pub async fn login(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    on_tls_listener: Option<axum::Extension<crate::tls::OverTls>>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<OpenedSession, Failure> {
@@ -431,7 +432,9 @@ pub async fn login(
         cookie: session_cookie(
             &id,
             state.admin.config(),
-            arrived_over_tls(&headers, peer.ip(), &state.trusted_proxies),
+            // Our own HTTPS listener's word (#76), or a trusted proxy's.
+            on_tls_listener.is_some()
+                || arrived_over_tls(&headers, peer.ip(), &state.trusted_proxies),
         ),
         session,
     })
@@ -596,11 +599,12 @@ fn session_id_of(headers: &HeaderMap) -> Option<String> {
 /// lost by it. `Max-Age` is the session's absolute lifetime — the server
 /// decides expiry, and the browser is merely told not to keep it longer.
 ///
-/// `Secure` rides only when the request actually arrived over TLS. v1 serves
-/// plain HTTP and recommends a reverse proxy for HTTPS (ADR-0008), and a
-/// browser silently discards a `Secure` cookie sent over plain HTTP — so
-/// setting it unconditionally would make admin login impossible on exactly the
-/// zero-config LAN install this project exists to make easy.
+/// `Secure` rides only when the request actually arrived over TLS — on built-in
+/// TLS's own port, or through a trusted proxy that says so (#76). Plain HTTP is
+/// still what ships (ADR-0008), and a browser silently discards a `Secure`
+/// cookie sent over plain HTTP — so setting it unconditionally would make admin
+/// login impossible on exactly the zero-config LAN install this project exists
+/// to make easy.
 fn session_cookie(id: &str, config: &AdminConfig, over_tls: bool) -> String {
     let secure = match over_tls {
         true => " Secure;",
@@ -620,14 +624,15 @@ fn session_cookie(id: &str, config: &AdminConfig, over_tls: bool) -> String {
 /// comment to warn about.
 const COOKIE_ATTRIBUTES: &str = "SameSite=Strict; Path=/";
 
-/// Whether this request reached us over TLS.
+/// Whether a proxy says this request reached it over TLS.
 ///
-/// We only ever serve plain HTTP ourselves, so the answer is always somebody
-/// else's claim — and a claim is believed on the same terms `X-Forwarded-For`
-/// is (#17): from a peer the operator named in `[server] trusted_proxies`, and
-/// otherwise not at all. An operator who terminates TLS without declaring the
-/// proxy gets a working session without the flag, which is the safe way to be
-/// wrong.
+/// The other half of the answer is our own HTTPS listener's (#76), which
+/// [`login`] asks first. This one is somebody else's claim — and a claim is
+/// believed on the same terms `X-Forwarded-For` is (#17): from a peer in
+/// `[server] trusted_proxies`, and otherwise not at all. Loopback is in that
+/// list by default, so a tunnel or proxy on the same machine is believed with
+/// nothing configured; one elsewhere that is not declared gets a working
+/// session without the flag, which is the safe way to be wrong.
 fn arrived_over_tls(headers: &HeaderMap, peer: IpAddr, trusted: &TrustedProxies) -> bool {
     trusted.trusts(peer)
         && headers

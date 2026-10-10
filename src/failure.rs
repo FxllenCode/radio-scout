@@ -345,6 +345,14 @@ pub enum Reason {
     /// Operator revokes one. The page draws "no longer available" from it, so a
     /// host whose embed was taken down shows a sentence rather than an error.
     EmbedNotFound,
+    // -- Built-in TLS (#76, spec US 61) -------------------------------------
+    /// An ACME HTTP-01 token this Instance is not holding out — never issued,
+    /// or the CA has already finished looking.
+    ChallengeNotFound,
+    /// A stranger reached the LAN door with no `Host` header and the Instance
+    /// has no public URL of its own, so there is no `https://` address to send
+    /// them to — and the plain app is not theirs to be served.
+    NoHostToRedirectTo,
     // -- Range export (#65, spec US 33) -------------------------------------
     /// `[export] enabled` is off.
     ExportDisabled,
@@ -783,6 +791,18 @@ impl Reason {
                 Level::DEBUG,
                 StatusCode::NOT_FOUND,
                 text("embed not found\n"),
+            ),
+            Reason::ChallengeNotFound => Refusal::new(
+                "challenge-not-found",
+                Level::DEBUG,
+                StatusCode::NOT_FOUND,
+                text("challenge not found\n"),
+            ),
+            Reason::NoHostToRedirectTo => Refusal::new(
+                "no-host-to-redirect-to",
+                Level::DEBUG,
+                StatusCode::BAD_REQUEST,
+                text("a Host header is required to redirect to https\n"),
             ),
             // **DEBUG, all five.** The client is told the count *before* it
             // offers the control (`GET /api/catalog`), so every one of these is
@@ -1399,6 +1419,24 @@ mod tests {
         "embed-not-found",
         404,
         "embed not found\n",
+        " DEBUG "
+    )]
+    // -- Built-in TLS (#76) ------------------------------------------------
+    // DEBUG, both: a token nobody was issued is a scanner probing the
+    // well-known path, and a request with no `Host` is a bot — neither is
+    // anything an Operator acts on.
+    #[case::challenge_not_found(
+        Reason::ChallengeNotFound,
+        "challenge-not-found",
+        404,
+        "challenge not found\n",
+        " DEBUG "
+    )]
+    #[case::no_host_to_redirect_to(
+        Reason::NoHostToRedirectTo,
+        "no-host-to-redirect-to",
+        400,
+        "a Host header is required to redirect to https\n",
         " DEBUG "
     )]
     // -- The metrics surface (#70) -----------------------------------------
