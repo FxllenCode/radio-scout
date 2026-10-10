@@ -1327,4 +1327,22 @@ export interface InstanceStatus {
   retention: RetentionHealth
   systems: SystemHealth[]
   sinks: SinkHealth[]
+  /** Built-in TLS's certificate (#76) — **absent** when this instance serves
+   *  no HTTPS itself, which is every instance behind a tunnel or a proxy. */
+  tls?: TlsHealth
+}
+
+/** How built-in TLS's certificate is doing (#76). */
+export interface TlsHealth {
+  /** Issued by an ACME CA, or an Operator's own files. */
+  source: 'acme' | 'files'
+  /** The names an ACME certificate is issued for; empty for files. */
+  domains: string[]
+  /** When the certificate being served expires — absent until there is one. */
+  notAfterMs?: number
+  /** When the next renewal is due (ACME only). */
+  renewAtMs?: number
+  /** The last thing that went wrong keeping it current, cleared by a success. */
+  lastError?: string
+  lastErrorAtMs?: number
 }

@@ -16,7 +16,7 @@ import {
 } from '@/lib/status'
 import { useAdminSession } from '@/hooks/useAdminSession'
 import { useGetInstanceStatusQuery } from '@/store/api'
-import type { InstanceStatus } from '@/types'
+import type { InstanceStatus, TlsHealth } from '@/types'
 
 /** How often the page asks again. The process-side numbers are free to read, and
  *  the database-side ones are cached server-side on a longer window — so this
@@ -164,6 +164,8 @@ function Report({ status }: { status: InstanceStatus }) {
         )}
       </Card>
 
+      {status.tls && <HttpsCard tls={status.tls} />}
+
       <Card title="Delivery" note={age}>
         {status.sinks.map((sink) => (
           <Row
@@ -195,6 +197,36 @@ function Report({ status }: { status: InstanceStatus }) {
         ))}
       </Card>
     </div>
+  )
+}
+
+/**
+ * Built-in TLS's certificate (#76) — only on an instance that serves HTTPS
+ * itself, because behind a tunnel or a proxy the certificate is somebody
+ * else's to report on.
+ *
+ * The renewal date is ACME's alone: an Operator's own files are theirs to
+ * renew, and the page will not promise a date it does not keep. The last error
+ * is shown in the CA's own words, because that is the thing to fix.
+ */
+function HttpsCard({ tls }: { tls: TlsHealth }) {
+  return (
+    <Card title="HTTPS">
+      <Row
+        label="Certificate"
+        value={tls.source === 'acme' ? `ACME · ${tls.domains.join(', ')}` : 'your own files'}
+      />
+      <Row
+        label="Expires"
+        value={
+          tls.notAfterMs === undefined ? 'no certificate yet' : formatCallTime(tls.notAfterMs)
+        }
+      />
+      {tls.renewAtMs !== undefined && (
+        <Row label="Renews" value={formatCallTime(tls.renewAtMs)} />
+      )}
+      {tls.lastError !== undefined && <Row label="Last error" value={tls.lastError} />}
+    </Card>
   )
 }
 

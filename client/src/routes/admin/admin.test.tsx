@@ -3972,6 +3972,61 @@ describe('instance status', () => {
     )
   })
 
+  /** **The HTTPS card** (#76): which names the certificate is for, when it
+   *  expires and when it renews — and the last thing that went wrong, said in
+   *  the CA's own words, because that is what an Operator fixes. */
+  it('shows built-in TLS: the certificate, its dates, and what last failed', async () => {
+    const status = healthy()
+    const now = status.startedAtMs + status.uptimeSeconds * 1_000
+    status.tls = {
+      source: 'acme',
+      domains: ['scanner.example', 'radio.example'],
+      notAfterMs: now + 20 * 24 * 60 * 60 * 1_000,
+      renewAtMs: now + 2 * 24 * 60 * 60 * 1_000,
+      lastError: 'could not connect to scanner.example:443',
+      lastErrorAtMs: now,
+    }
+    reporting(status)
+    signedIn(<StatusScreen />)
+
+    expect(await screen.findByText('Worth a look')).toBeInTheDocument()
+    expect(screen.getByText(/could not be renewed, and expires in 20 days/)).toBeInTheDocument()
+    expect(screen.getByText('Certificate').nextSibling).toHaveTextContent(
+      'ACME · scanner.example, radio.example',
+    )
+    expect(screen.getByText('Expires').nextSibling).toHaveTextContent(/\S/)
+    expect(screen.getByText('Renews').nextSibling).toHaveTextContent(/\S/)
+    expect(screen.getByText('Last error').nextSibling).toHaveTextContent(
+      'could not connect to scanner.example:443',
+    )
+  })
+
+  /** An Operator's own files, still being fetched or freshly served: no
+   *  renewal date to promise (the files are theirs to renew), and no error row
+   *  when nothing has gone wrong. */
+  it('shows an Operator\'s own certificate without a renewal date', async () => {
+    const status = healthy()
+    status.tls = { source: 'files', domains: [] }
+    reporting(status)
+    signedIn(<StatusScreen />)
+
+    await screen.findByText('Worth a look')
+    expect(screen.getByText('Certificate').nextSibling).toHaveTextContent('your own files')
+    expect(screen.getByText('Expires').nextSibling).toHaveTextContent('no certificate yet')
+    expect(screen.queryByText('Renews')).not.toBeInTheDocument()
+    expect(screen.queryByText('Last error')).not.toBeInTheDocument()
+  })
+
+  /** ...and an instance behind a tunnel has no HTTPS card at all — its TLS is
+   *  the tunnel's, not this instance's to report on. */
+  it('has no HTTPS card when the instance serves no HTTPS itself', async () => {
+    reporting(healthy())
+    signedIn(<StatusScreen />)
+    await screen.findByText('Healthy')
+
+    expect(screen.queryByText('Certificate')).not.toBeInTheDocument()
+  })
+
   /** "Not on this machine" is a different fact from "no room", and reads
    *  differently: an S3 instance has no volume to report and must not be drawn
    *  as a full disk. */

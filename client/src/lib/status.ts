@@ -20,7 +20,7 @@
  *   can fix: frozen **Event** audio over the cap, which the sweeper reports once
  *   per sweep and can do nothing about.
  */
-import type { ArchiveHealth, InstanceStatus, StorageHealth } from '@/types'
+import type { ArchiveHealth, InstanceStatus, StorageHealth, TlsHealth } from '@/types'
 
 /** How a reading should be read. */
 export type Health = 'ok' | 'warn' | 'bad'
@@ -32,6 +32,11 @@ export interface Concern {
   health: Health
   message: string
 }
+
+/** A certificate this close to expiry is worth saying out loud even with
+ *  nothing failing — an Operator's own files are theirs to renew — and a
+ *  failing renewal this close is an emergency rather than a warning. */
+const CERTIFICATE_WEEK_MS = 7 * 24 * 60 * 60 * 1_000
 
 /** Below this fraction of the volume free, the disk is worth mentioning. */
 const DISK_WARN = 0.15
@@ -78,6 +83,9 @@ export function concerns(status: InstanceStatus): Concern[] {
     })
   }
 
+  const certificate = certificateConcern(status)
+  if (certificate) found.push(certificate)
+
   for (const sink of status.sinks) {
     if (sink.failing > 0) {
       found.push({
@@ -93,6 +101,57 @@ export function concerns(status: InstanceStatus): Concern[] {
   // are written above rather than whatever a comparator happened to do.
   const rank: Record<Health, number> = { bad: 0, warn: 1, ok: 2 }
   return found.sort((a, b) => rank[a.health] - rank[b.health])
+}
+
+/**
+ * What, if anything, is worth saying about built-in TLS's certificate (#76).
+ *
+ * Judged on the **server's** clock — `startedAtMs` plus its uptime — because
+ * the certificate's dates are on it, and a browser a day out would otherwise
+ * move every threshold here by a day. A renewal that fails keeps the old
+ * certificate working until it expires, so the same failure is a warning with
+ * a month in hand and an emergency with a week.
+ */
+function certificateConcern(status: InstanceStatus): Concern | undefined {
+  const tls: TlsHealth | undefined = status.tls
+  if (!tls) return undefined
+  const now = status.startedAtMs + status.uptimeSeconds * 1_000
+  const id = 'certificate'
+
+  if (tls.notAfterMs === undefined) {
+    return tls.lastError === undefined
+      ? { id, health: 'warn', message: 'Waiting for the first HTTPS certificate.' }
+      : {
+          id,
+          health: 'bad',
+          message: 'There is no HTTPS certificate: getting one failed. The Logs view says why.',
+        }
+  }
+  const left = tls.notAfterMs - now
+  if (left <= 0) {
+    return { id, health: 'bad', message: 'The HTTPS certificate has expired.' }
+  }
+  if (tls.lastError !== undefined) {
+    return {
+      id,
+      health: left < CERTIFICATE_WEEK_MS ? 'bad' : 'warn',
+      message: `The HTTPS certificate could not be renewed, and expires in ${daysLeft(left)}.`,
+    }
+  }
+  if (left < CERTIFICATE_WEEK_MS) {
+    return {
+      id,
+      health: 'warn',
+      message: `The HTTPS certificate expires in ${daysLeft(left)}.`,
+    }
+  }
+  return undefined
+}
+
+/** Whole days, rounded down, and never "0 days" for a certificate still valid. */
+function daysLeft(ms: number): string {
+  const days = Math.max(1, Math.floor(ms / (24 * 60 * 60 * 1_000)))
+  return days === 1 ? '1 day' : `${days} days`
 }
 
 /** The one verdict, from the list rather than beside it. */

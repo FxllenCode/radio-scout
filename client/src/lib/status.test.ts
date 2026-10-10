@@ -143,6 +143,78 @@ describe('concerns', () => {
   })
 })
 
+/** Built-in TLS (#76). The server's own clock is `startedAtMs + uptime`, which
+ *  is the one the certificate's dates are on — a browser clock a day out would
+ *  otherwise move every threshold below by a day. */
+describe('concerns about the HTTPS certificate', () => {
+  const DAY = 24 * 60 * 60 * 1_000
+  /** The server's "now" in `well()`. */
+  const NOW = 1_700_000_000_000 + 3_600 * 1_000
+
+  function withTls(tls: NonNullable<InstanceStatus['tls']>): InstanceStatus {
+    return { ...well(), tls }
+  }
+
+  it('says nothing about a current certificate, or about an instance without one', () => {
+    expect(
+      concerns(withTls({ source: 'acme', domains: ['scanner.example'], notAfterMs: NOW + 60 * DAY })),
+    ).toEqual([])
+    // Behind a tunnel there is no certificate here at all — not a missing one.
+    expect(concerns(well())).toEqual([])
+  })
+
+  it('waits patiently for a first certificate, and not for a failing one', () => {
+    const waiting = concerns(withTls({ source: 'acme', domains: ['scanner.example'] }))
+    expect(waiting[0]?.health).toBe('warn')
+    expect(waiting[0]?.message).toMatch(/first HTTPS certificate/)
+
+    const failing = concerns(
+      withTls({
+        source: 'acme',
+        domains: ['scanner.example'],
+        lastError: 'could not connect',
+        lastErrorAtMs: NOW,
+      }),
+    )
+    expect(failing[0]?.health).toBe('bad')
+    expect(failing[0]?.message).toMatch(/no HTTPS certificate/)
+  })
+
+  /** A failed renewal is a warning with a month in hand and an emergency with
+   *  a week — the certificate keeps working until it does not. */
+  it('grows louder about a failing renewal as expiry nears', () => {
+    const failing = (days: number) =>
+      concerns(
+        withTls({
+          source: 'acme',
+          domains: ['scanner.example'],
+          notAfterMs: NOW + days * DAY,
+          lastError: 'the CA refused the order',
+          lastErrorAtMs: NOW,
+        }),
+      )[0]
+
+    expect(failing(25)?.health).toBe('warn')
+    expect(failing(25)?.message).toMatch(/could not be renewed/)
+    expect(failing(6)?.health).toBe('bad')
+  })
+
+  /** An Operator's own files are theirs to renew, so a certificate a week from
+   *  expiry is worth saying out loud even with nothing failing — and one past
+   *  it is the site down. */
+  it('warns of a certificate about to expire, and calls an expired one bad', () => {
+    const files = (days: number) =>
+      concerns(withTls({ source: 'files', domains: [], notAfterMs: NOW + days * DAY }))[0]
+
+    expect(files(30)).toBeUndefined()
+    expect(files(5)?.health).toBe('warn')
+    expect(files(5)?.message).toMatch(/expires in 5 days/)
+    expect(files(1.5)?.message).toMatch(/expires in 1 day\./)
+    expect(files(-1)?.health).toBe('bad')
+    expect(files(-1)?.message).toMatch(/has expired/)
+  })
+})
+
 describe('volumeOf', () => {
   it('reports what the volume holds, not what the archive does', () => {
     expect(volumeOf({ freeBytes: 25, totalBytes: 100 })).toEqual({
