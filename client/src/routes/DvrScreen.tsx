@@ -16,7 +16,7 @@ import { ExportControl } from '@/components/ExportControl'
 import { DateField, Field, controlClass } from '@/components/Field'
 import { Screen } from '@/components/layout/Screen'
 import { StarButton } from '@/components/StarButton'
-import { StatusLed } from '@/components/StatusLed'
+import { ChannelLed } from '@/components/Led'
 import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
@@ -391,7 +391,7 @@ export function DvrScreen() {
               colour carries meaning here (docs/design/brief.md) and grey
               would be a talkgroup that had one. */}
           {current && (
-            <StatusLed color={ledForCall(current)} size={12} pulse={paused} />
+            <ChannelLed color={ledForCall(current)} size={12} pulse={paused} />
           )}
           <div className="min-w-0 flex-1">
             <p className="flex items-center gap-1.5 truncate font-mono text-sm">

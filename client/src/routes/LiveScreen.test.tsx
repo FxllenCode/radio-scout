@@ -1,7 +1,8 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { axe } from 'vitest-axe'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { http, HttpResponse } from 'msw'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   advance,
@@ -13,6 +14,7 @@ import {
   selectIsAvoided,
   selectLiveCall,
   selectLiveMatrix,
+  selectMissed,
   selectPriority,
   selectQueueDepth,
 } from '@/store/live'
@@ -23,9 +25,9 @@ import {
 } from '@/store/playback'
 import { progressed, selectProgress } from '@/store/transport'
 import { makeStore, type AppStore } from '@/store/store'
-import { instanceIs, liveFeed, searchPage } from '@/test/handlers'
+import { CATALOG, ORIGIN, instanceIs, liveFeed, searchPage } from '@/test/handlers'
 import { server } from '@/test/setup'
-import { renderApp } from '@/test/utils'
+import { renderApp, routerProbe } from '@/test/utils'
 import type { Call } from '@/types'
 
 /** Everything the client asked the server for, newest last. */
@@ -76,6 +78,10 @@ function listening(...calls: Call[]): AppStore {
 
 const display = () => screen.getByRole('region', { name: 'Scanner display' })
 
+/** The screen itself — not the announcer beside it (#78), which says the same
+ *  things to a screen reader and would otherwise answer a text query twice. */
+const main = () => screen.getByRole('main')
+
 /**
  * The accessible name of every control on the screen the listener can actually
  * press — the derived enablement (#88) read back off the rendered page.
@@ -102,12 +108,12 @@ describe('LiveScreen', () => {
      *  connection being *made* is not one that has gone, and it is the state
      *  every visit opens in. Saying "no link" there would make the words
      *  worthless the rest of the time. */
-    it('says it is connecting, then that it is waiting', async () => {
+    it('says it is connecting, then that it is listening', async () => {
       renderApp('/')
 
       expect(screen.getByText(/connecting to the server/i)).toBeInTheDocument()
       expect(
-        await screen.findByText(/waiting for the first call/i),
+        await screen.findByText('Listening — nothing on the air.'),
       ).toBeInTheDocument()
     })
 
@@ -380,16 +386,6 @@ describe('LiveScreen', () => {
     ).toHaveLength(0)
   })
 
-  it('says so when the link is down', async () => {
-    server.use(
-      liveFeed.addEventListener('connection', ({ client }) => client.close()),
-    )
-
-    renderApp('/')
-
-    expect(await screen.findByText(/no link to the server/i)).toBeInTheDocument()
-  })
-
   /**
    * The LIVE FEED master toggle (#80) — rdio parity, and the one control the
    * app was missing. Pause is transport-only: the subscription keeps
@@ -443,7 +439,7 @@ describe('LiveScreen', () => {
       expect(screen.getByText('FEED OFF')).toBeInTheDocument()
       expect(screen.queryByText(/^connected$/i)).not.toBeInTheDocument()
       expect(screen.queryByText('NO LINK')).not.toBeInTheDocument()
-      expect(screen.getByText(/switched off/i)).toBeInTheDocument()
+      expect(within(main()).getByText(/switched off/i)).toBeInTheDocument()
     })
 
     /**
@@ -528,7 +524,7 @@ describe('LiveScreen', () => {
 
       expect(screen.getByText('PLAYBACK')).toBeInTheDocument()
       expect(screen.queryByText(/^connected$/i)).not.toBeInTheDocument()
-      expect(screen.getByText(/playing from the archive/i)).toBeInTheDocument()
+      expect(within(main()).getByText(/playing from the archive/i)).toBeInTheDocument()
     })
 
     /** The socket stays open with an empty subscription — this is not FEED OFF,
@@ -620,6 +616,8 @@ describe('LiveScreen', () => {
       await fallenQuiet(user)
 
       expect(within(display()).getByText('FD Dispatch')).toBeInTheDocument()
+      // Neither of the quiet's two sentences: the card is what is up.
+      expect(screen.queryByText('Listening — nothing on the air.')).toBeNull()
       expect(screen.queryByText(/waiting for the first call/i)).toBeNull()
     })
 
@@ -684,7 +682,7 @@ describe('LiveScreen', () => {
       expect(
         screen.queryByRole('region', { name: 'Scanner display' }),
       ).toBeNull()
-      expect(screen.getByText(/switched off/i)).toBeInTheDocument()
+      expect(within(main()).getByText(/switched off/i)).toBeInTheDocument()
     })
   })
 
@@ -1143,8 +1141,348 @@ describe('what the server says about the connection (#77)', () => {
     )
     renderApp('/')
 
-    expect(await screen.findByText('This scanner is full right now.')).toBeInTheDocument()
+    expect(await within(main()).findByText('This scanner is full right now.')).toBeInTheDocument()
     expect(screen.getByText('FULL')).toBeInTheDocument()
     expect(screen.queryByText('connected')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * **Feed down** is two situations a Listener acts on differently (#78): their
+ * device has no network — theirs to fix — or the server is not answering, which
+ * is nobody's on their side. rdio shows one spinner for both.
+ */
+describe('offline, or the server down (#78)', () => {
+  /** The device's network, as the browser reports it. */
+  function network(online: boolean) {
+    act(() => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => online })
+      window.dispatchEvent(new Event(online ? 'online' : 'offline'))
+    })
+  }
+
+  /** A server that takes the socket and drops it, every time. */
+  function serverDown() {
+    let tries = 0
+    server.use(
+      liveFeed.addEventListener('connection', ({ client }) => {
+        tries += 1
+        client.close()
+      }),
+    )
+    return () => tries
+  }
+
+  afterEach(() => {
+    // jsdom's own answer, back where every other test expects it.
+    delete (navigator as { onLine?: boolean }).onLine
+  })
+
+  it('says the server is not answering while this device is online', async () => {
+    serverDown()
+    renderApp('/')
+
+    expect(await screen.findByText("The server isn't answering.")).toBeInTheDocument()
+    expect(screen.getByText('NO LINK')).toBeInTheDocument()
+  })
+
+  it('says this device is offline, and not that the server is down', async () => {
+    serverDown()
+    renderApp('/')
+    await screen.findByText('NO LINK')
+
+    network(false)
+
+    expect(within(main()).getByText('This device is offline.')).toBeInTheDocument()
+    expect(screen.getByText('OFFLINE')).toBeInTheDocument()
+    expect(screen.queryByText('NO LINK')).not.toBeInTheDocument()
+  })
+
+  /** The backoff has doubled its way up while the network was gone; the
+   *  network coming back is the news it was waiting for. */
+  it('tries the server again the moment the network is back', async () => {
+    const tries = serverDown()
+    renderApp('/')
+    await screen.findByText('NO LINK')
+    network(false)
+    // Two drops in, so the wait in hand has doubled to two seconds — what the
+    // assertion below has to beat by a margin no backoff could.
+    await waitFor(() => expect(tries()).toBe(2), { timeout: 2_000 })
+
+    network(true)
+
+    await waitFor(() => expect(tries()).toBe(3), { timeout: 500 })
+  })
+})
+
+/**
+ * The quiet a Listener sees most is a working Instance between Calls (#78), and
+ * it used to tell every one of them to point a Trunk Recorder at the server.
+ */
+describe('the quiet between Calls (#78)', () => {
+  it('tells a Listener the feed is listening, not how to set it up', async () => {
+    renderApp('/')
+
+    expect(await screen.findByText('Listening — nothing on the air.')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.queryByText(/point a trunk recorder/i)).not.toBeInTheDocument(),
+    )
+  })
+
+  /** The one quiet where setup is the answer: no recorder has ever sent
+   *  anything, so there is no System to listen to. */
+  it('gives the setup instructions on an Instance with no Systems yet', async () => {
+    server.use(
+      http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json({ ...CATALOG, systems: [] })),
+    )
+    renderApp('/')
+
+    expect(await screen.findByText(/point a trunk recorder/i)).toBeInTheDocument()
+    expect(screen.getByText('Waiting for the first call…')).toBeInTheDocument()
+  })
+})
+
+/**
+ * The feed's status and a channel's color are two different things a dot was
+ * saying (#78) — and a red Talkgroup LED beside a red NO LINK dot read as the
+ * same alarm. A status is a square lamp; a channel is a round LED.
+ */
+describe('status lamp and channel LED (#78)', () => {
+  it('draws the link state as a square lamp and the channel as a round LED', async () => {
+    listening(call())
+    const header = screen.getByRole('banner')
+
+    await within(header).findByText('connected')
+    expect(within(header).getByTestId('status-lamp')).toHaveAttribute('data-shape', 'square')
+    expect(within(display()).getByTestId('channel-led')).toHaveAttribute('data-shape', 'round')
+    // And never the other way about, anywhere on the screen.
+    expect(within(header).queryByTestId('channel-led')).toBeNull()
+    expect(within(display()).queryByTestId('status-lamp')).toBeNull()
+  })
+})
+
+/**
+ * A browser that will not play sound before a tap is not a Listener who
+ * paused (#78). The first visit used to say PAUSED over a Call nobody had
+ * heard, with a queue growing silently behind it.
+ */
+describe('tap to listen (#78)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  function refuseAutoplay() {
+    return vi
+      .spyOn(HTMLMediaElement.prototype, 'play')
+      .mockRejectedValueOnce(new DOMException('needs a gesture', 'NotAllowedError'))
+  }
+
+  it('asks for a tap rather than claiming the Listener paused', async () => {
+    refuseAutoplay()
+    listening(call())
+
+    expect(await within(display()).findByRole('button', { name: 'Tap to listen' })).toBeInTheDocument()
+    expect(within(display()).queryByText('Paused')).not.toBeInTheDocument()
+  })
+
+  it('plays from the tap, and stops asking', async () => {
+    const user = userEvent.setup()
+    const play = refuseAutoplay()
+    listening(call())
+    const tap = await within(display()).findByRole('button', { name: 'Tap to listen' })
+    const before = play.mock.calls.length
+
+    await user.click(tap)
+
+    expect(play.mock.calls.length).toBeGreaterThan(before)
+    expect(within(display()).queryByRole('button', { name: 'Tap to listen' })).toBeNull()
+  })
+
+  /** Still asking when the next Call starts: the browser has not changed its
+   *  mind, and a frame of "playing" per Call would be a flicker of a lie. */
+  it('keeps asking across Calls until somebody taps', async () => {
+    const user = userEvent.setup()
+    refuseAutoplay()
+    listening(call(), call({ id: 2, talkgroupLabel: 'PD Dispatch' }))
+    await within(display()).findByRole('button', { name: 'Tap to listen' })
+
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+
+    expect(within(display()).getByText('PD Dispatch')).toBeInTheDocument()
+    expect(within(display()).getByRole('button', { name: 'Tap to listen' })).toBeInTheDocument()
+  })
+
+  /** Only the autoplay policy is a tap's to fix. A file the browser cannot
+   *  play is not, and asking for a tap would promise what a tap cannot do. */
+  it('does not ask for a tap when the audio itself is what failed', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValueOnce(
+      new DOMException('cannot decode', 'NotSupportedError'),
+    )
+    listening(call())
+
+    expect(await within(display()).findByText('Paused')).toBeInTheDocument()
+    expect(within(display()).queryByRole('button', { name: 'Tap to listen' })).toBeNull()
+  })
+})
+
+/**
+ * Honest timestamps (#78): a backlog, a Backfill, Catch-up and a Delay all play
+ * Calls minutes after the radio keyed, and a readout of `14:32:05` alone passes
+ * every one of them off as happening now.
+ */
+describe('when a Call happened (#78)', () => {
+  /** Earlier today, at a fixed hour — so the expected time is a literal. */
+  const todayAt = (hours: number, minutes: number, seconds: number) => {
+    const at = new Date()
+    at.setHours(hours, minutes, seconds, 0)
+    return at.getTime()
+  }
+
+  it('says how late a Call is being heard', () => {
+    listening(call({ timestamp: Date.now() - 4 * 60_000 - 30_000 }))
+
+    expect(within(display()).getByText('4 min ago')).toBeInTheDocument()
+  })
+
+  it('says nothing about a Call heard as it happens', () => {
+    listening(call({ timestamp: Date.now() - 5_000 }))
+
+    expect(within(display()).queryByText(/ago$/)).toBeNull()
+  })
+
+  /** Today's date is the one thing on the row a Listener already knows, and
+   *  it cost a phone the Talkgroup's name. The whole stamp is still there for
+   *  whoever asks. */
+  it('leaves today off the times it shows, and keeps the whole stamp to hand', async () => {
+    const user = userEvent.setup()
+    const at = todayAt(0, 0, 7)
+    listening(call({ timestamp: at }), call({ id: 2, timestamp: at }))
+    await user.click(screen.getByRole('button', { name: 'Skip' }))
+
+    const shown = within(display()).getByTestId('stat-time')
+    expect(shown).toHaveTextContent(/^00:00:07/)
+    const row = within(screen.getByRole('list', { name: 'Recent calls' })).getByText('00:00:07')
+    expect(row.tagName).toBe('TIME')
+    expect(row).toHaveAttribute('dateTime', new Date(at).toISOString())
+    expect(row).toHaveAttribute('title', expect.stringMatching(/^\d{4}-\d{2}-\d{2} 00:00:07$/))
+  })
+
+  it('keeps the date on a Call from another day', () => {
+    listening(call())
+
+    expect(within(display()).getByTestId('stat-time')).toHaveTextContent('2026-07-25 14:32:05')
+  })
+})
+
+/**
+ * The missed counter is the way in to what was missed (#78, from #60). With
+ * nothing reaching a Listener while they are away (ADR-0014), "what happened
+ * while I wasn't looking" has no other answer than the Archive.
+ */
+describe('the missed counter (#78)', () => {
+  const missedLink = () => screen.getByRole('link', { name: /missed/i })
+
+  it('opens Search on the gap, oldest first, and clears', async () => {
+    const user = userEvent.setup()
+    const store = listening(call({ timestamp: 1_000_000 }))
+    act(() => void store.dispatch(lagged(3)))
+
+    await user.click(missedLink())
+
+    expect(routerProbe.location).toBe('/search?after=1000000&sort=oldest')
+    expect(selectMissed(store.getState())).toBe(0)
+    await user.click(screen.getByRole('link', { name: 'Live' }))
+    expect(screen.queryByText(/missed/i)).toBeNull()
+  })
+
+  /** Nothing says when the gap began — so Search opens on the newest, where a
+   *  Listener reads backwards to find their place. */
+  it('opens Search on the newest when nothing says when the gap began', async () => {
+    const user = userEvent.setup()
+    const store = makeStore()
+    renderApp('/', store)
+    act(() => void store.dispatch(gapped()))
+
+    await user.click(missedLink())
+
+    expect(routerProbe.location).toBe('/search')
+  })
+})
+
+/**
+ * The lost affordances (#78): rdio's clock and its double-tap fullscreen —
+ * small, and missed by exactly the Listeners who leave a scanner running on a
+ * shelf or a dashboard.
+ */
+describe('the clock (#78)', () => {
+  it("shows the time now, on the Operator's clock", async () => {
+    renderApp('/')
+
+    expect(screen.getByLabelText('Time now')).toHaveTextContent(/^\d{2}:\d{2}$/)
+  })
+
+  it('reads twelve-hour where the Operator asked for it', async () => {
+    server.use(instanceIs({ timeFormat: '12h' }))
+    renderApp('/')
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Time now')).toHaveTextContent(/^\d{2}:\d{2} (AM|PM)$/),
+    )
+  })
+})
+
+describe('fullscreen (#78)', () => {
+  /** A browser that has the Fullscreen API, and a record of what was asked
+   *  of it. jsdom has none of it — which is also what iPhone Safari looks
+   *  like, and where no control is offered. */
+  function fullscreenAvailable() {
+    const asked: string[] = []
+    let element: Element | null = null
+    Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: true })
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => element })
+    document.documentElement.requestFullscreen = vi.fn(async () => {
+      asked.push('enter')
+      element = document.documentElement
+      document.dispatchEvent(new Event('fullscreenchange'))
+    })
+    document.exitFullscreen = vi.fn(async () => {
+      asked.push('exit')
+      element = null
+      document.dispatchEvent(new Event('fullscreenchange'))
+    })
+    return asked
+  }
+
+  afterEach(() => {
+    for (const key of ['fullscreenEnabled', 'fullscreenElement', 'exitFullscreen']) {
+      Reflect.deleteProperty(document, key)
+    }
+    Reflect.deleteProperty(document.documentElement, 'requestFullscreen')
+  })
+
+  it('offers no control where the browser cannot go full screen', () => {
+    renderApp('/')
+
+    expect(screen.queryByRole('button', { name: /full screen/i })).toBeNull()
+  })
+
+  it('goes full screen and back from its button', async () => {
+    const user = userEvent.setup()
+    const asked = fullscreenAvailable()
+    renderApp('/')
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }))
+
+    expect(asked).toEqual(['enter', 'exit'])
+  })
+
+  /** rdio's gesture, kept: a double-tap on the readout. */
+  it('goes full screen from a double-tap on the display', async () => {
+    const user = userEvent.setup()
+    const asked = fullscreenAvailable()
+    listening(call())
+
+    await user.dblClick(display())
+
+    expect(asked).toEqual(['enter'])
   })
 })

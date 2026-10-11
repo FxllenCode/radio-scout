@@ -196,6 +196,22 @@ export interface LiveState {
    *  listener needs to know either way. It does not clear: a gap in what someone
    *  heard does not heal. */
   gap: boolean
+  /**
+   * When the traffic this Listener missed began — the start of the gap the
+   * missed counter opens Search on (#78), or absent while nothing has been
+   * missed or nothing says when.
+   *
+   * A lower bound, always, because a search that opened *after* the first
+   * missed Call would hide exactly what it was opened to show. Where the Calls
+   * themselves are known — the cap, a jump to the newest — it is the oldest of
+   * them; where the server dropped Calls it could not name — `lagged`, a
+   * **Backfill** `gap` — it is [`newestAt`], which every one of them came
+   * after. Clears with the counter.
+   */
+  missedFrom?: number
+  /** The newest Call time this Listener has received — what a `lagged` or
+   *  `gap` notice's dropped Calls are known to have come after (#78). */
+  newestAt?: number
   /** The listener has switched the live feed **off** (CONTEXT.md **Feed off**,
    *  #80) — a hard off, not a pause.
    *
@@ -359,6 +375,14 @@ function heard(state: LiveState, call: Call) {
   if (state.sessionLog.some((one) => one.id === call.id)) return
   state.sessionLog.unshift(call)
   if (state.sessionLog.length > SESSION_LOG_LIMIT) state.sessionLog.pop()
+}
+
+/** Some traffic from `from` onwards went unheard: move the start of the
+ *  missed window back to it if it is earlier (#78). An unknown time widens
+ *  nothing — it is not evidence of when anything happened. */
+function missedSince(state: LiveState, from: number | undefined) {
+  if (from === undefined) return
+  state.missedFrom = Math.min(state.missedFrom ?? from, from)
 }
 
 /**
@@ -677,6 +701,9 @@ const liveSlice = createSlice({
       // and it should be there to replay once the feed is back.
       play(state, null)
       state.since = undefined
+      // Coming back starts from now, and so does anything it later misses: the
+      // silence they chose is not part of the gap (#78).
+      state.newestAt = undefined
     },
 
     /** Back on. The socket reconnects and subscribes fresh — with no cursor,
@@ -728,6 +755,9 @@ const liveSlice = createSlice({
         // Call's id (#94): the two are different orderings of the same Calls,
         // and a cursor over ids would step past a Call that was held back.
         state.since = Math.max(state.since ?? 0, seq)
+        if (call.timestamp !== undefined) {
+          state.newestAt = Math.max(state.newestAt ?? call.timestamp, call.timestamp)
+        }
 
         if (!wanted(state, call)) return
 
@@ -764,6 +794,7 @@ const liveSlice = createSlice({
         )
         state.queue = queue
         state.missed += dropped.length
+        for (const lost of dropped) missedSince(state, lost.timestamp)
       },
     },
 
@@ -1028,6 +1059,9 @@ const liveSlice = createSlice({
       const latest = newest(state.queue)
       if (!latest) return
       state.missed += state.queue.length - 1
+      for (const { call: skipped } of state.queue) {
+        if (skipped.id !== latest.id) missedSince(state, skipped.timestamp)
+      }
       state.queue = []
       play(state, latest)
     },
@@ -1097,6 +1131,23 @@ const liveSlice = createSlice({
      *  the same hole in their history either way. */
     gapped(state) {
       state.gap = true
+      // What the Backfill could not carry is older than everything it did, and
+      // newer than the last Call heard before the drop.
+      missedSince(state, state.newestAt)
+    },
+
+    /**
+     * The Listener went to look at what they missed (#78) — so the counter,
+     * which is "what you have not seen yet", has nothing left to say.
+     *
+     * The one way a gap clears. It still does not *heal* — those Calls were
+     * never heard — but having been shown the way to them in the Archive, the
+     * Listener has been told everything there is to tell.
+     */
+    missedCleared(state) {
+      state.missed = 0
+      state.gap = false
+      state.missedFrom = undefined
     },
 
     /** The server told us a slow connection cost us Calls (ADR-0004 `lagged`). */
@@ -1107,6 +1158,7 @@ const liveSlice = createSlice({
       // for silence they chose would make the counter a lie.
       if (!feedPlays(statusOf(state))) return
       state.missed += action.payload
+      missedSince(state, state.newestAt)
     },
   },
 
@@ -1157,6 +1209,7 @@ export const {
   greeted,
   jumpToNewest,
   lagged,
+  missedCleared,
   listenersCounted,
   playQueued,
   quietFound,
@@ -1271,6 +1324,11 @@ export const selectIsCatchingUp = (state: WithLive): boolean => state.live.catch
 
 /** Does this listener's history have a hole a **Backfill** could not fill? */
 export const selectHasGap = (state: WithLive): boolean => state.live.gap
+
+/** Where the missed Calls begin, when anything says (#78) — see
+ *  [`LiveState.missedFrom`]. */
+export const selectMissedFrom = (state: WithLive): number | undefined =>
+  state.live.missedFrom
 
 /**
  * Why the live feed is or is not delivering (#88) — the one answer the banner,

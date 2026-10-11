@@ -29,23 +29,24 @@ import { Ban, Download, Radio, RotateCcw, Share2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
+import { CallTime } from '@/components/CallTime'
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
 import { Sheet } from '@/components/Sheet'
 import { StarMark } from '@/components/StarMark'
-import { StatusLed } from '@/components/StatusLed'
+import { ChannelLed } from '@/components/Led'
 import { UnitLink } from '@/components/UnitLink'
 import { useLongPress } from '@/hooks/useLongPress'
 import { usePublicShare } from '@/hooks/usePublicShare'
 import { useShareLink } from '@/hooks/useShareLink'
+import { useNow } from '@/hooks/useNow'
 import { useStar } from '@/hooks/useStar'
-import { downloadUrl, formatCallTime } from '@/lib/archive'
+import { downloadUrl } from '@/lib/archive'
 import { systemName, talkgroupName } from '@/lib/call'
 import { feedPlays } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
 import { cn } from '@/lib/utils'
 import { useGrant } from '@/hooks/useGrant'
-import { useClock } from '@/hooks/useInstance'
 import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
@@ -59,12 +60,14 @@ import {
 import type { Call } from '@/types'
 
 export function SessionScreen() {
-  const clock = useClock()
   // The **grant** goes on the link, never through the base query: a download
   // is a navigation (#68).
   const grant = useGrant()
   const dispatch = useAppDispatch()
   const calls = useAppSelector(selectSessionLog)
+  // The log's times change their shape at midnight (#78), and that is all
+  // this screen measures from the clock.
+  const now = useNow(calls.length > 0, 60_000)
   const hold = useAppSelector(selectHold)
   // Replaying puts audio on the element, which is exactly what a Listener who
   // chose silence did not ask for (#80, #88) — `replay` refuses in the reducer
@@ -146,7 +149,7 @@ export function SessionScreen() {
                   !plays && 'opacity-40',
                 )}
               >
-                <StatusLed color={ledForCall(call)} size={10} />
+                <ChannelLed color={ledForCall(call)} size={10} />
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="flex min-w-0 items-center gap-1.5 truncate font-mono text-sm leading-tight">
                     <span className="truncate">{talkgroupName(call)}</span>
@@ -161,9 +164,11 @@ export function SessionScreen() {
                 call={call}
                 className="max-w-24 shrink-0 font-mono text-[11px] text-muted-foreground"
               />
-              <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
-                {formatCallTime(call.timestamp, clock)}
-              </time>
+              <CallTime
+                ms={call.timestamp}
+                now={now}
+                className="shrink-0 font-mono text-[11px] text-muted-foreground"
+              />
             </li>
           ))}
         </ul>

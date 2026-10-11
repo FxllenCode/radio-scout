@@ -2,6 +2,8 @@ import {
   Ban,
   FastForward,
   ListOrdered,
+  Maximize,
+  Minimize,
   Pause,
   Play,
   Power,
@@ -11,30 +13,37 @@ import {
   Users,
   Zap,
 } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 
 import { AvoidSheet } from '@/components/AvoidSheet'
 import { CallFlags } from '@/components/CallFlags'
+import { CallTime } from '@/components/CallTime'
 import { Screen } from '@/components/layout/Screen'
 import { QueueSheet } from '@/components/QueueSheet'
 import { StarButton } from '@/components/StarButton'
 import { StarMark } from '@/components/StarMark'
-import { StatusLed } from '@/components/StatusLed'
+import { ChannelLed, StatusLamp } from '@/components/Led'
 import { UnitLink } from '@/components/UnitLink'
 import { useStar } from '@/hooks/useStar'
 import { useClock, useInstance } from '@/hooks/useInstance'
 import { useDimmer } from '@/hooks/useDimmer'
+import { useFullscreen } from '@/hooks/useFullscreen'
+import { useNow } from '@/hooks/useNow'
+import { useOnline } from '@/hooks/useOnline'
 import { Button } from '@/components/ui/button'
 import { Waveform } from '@/components/Waveform'
 import { callCategory, formatFrequency, systemName, talkgroupName, unitName } from '@/lib/call'
-import { formatCallTime } from '@/lib/archive'
+import { formatClock, lateness } from '@/lib/archive'
 import { CATCHUP_RATE } from '@/lib/catchup'
 import { feedReadout, type FeedBadge, type FeedEmpty } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
+import { DEFAULT_SEARCH_URL, writeSearchUrl } from '@/lib/searchUrl'
+import { shortcutsFor, type HotkeyCommand } from '@/lib/hotkeys'
 import { isSystemHold, isTalkgroupHold } from '@/lib/selection'
 import { wayBack } from '@/lib/strip'
 import { cn } from '@/lib/utils'
+import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   advance,
@@ -53,6 +62,8 @@ import {
   selectRefused,
   selectIsPriority,
   selectMissed,
+  selectMissedFrom,
+  missedCleared,
   selectIsCatchingUp,
   selectQueueDepth,
   toggleHoldSystem,
@@ -63,6 +74,7 @@ import {
 } from '@/store/live'
 import {
   previousCall,
+  selectIsBlocked,
   selectIsLiveSource,
   selectIsPaused,
   selectProgress,
@@ -70,6 +82,10 @@ import {
   wayBackAction,
 } from '@/store/transport'
 import type { Call } from '@/types'
+
+/** How often the times on this screen are redrawn: they say minutes and
+ *  dates, so a second-by-second clock would be rendering for nothing. */
+const CLOCK_TICK_MS = 15_000
 
 /** Spec US 14's timed avoids, in minutes. */
 const AVOID_MINUTES = [30, 60, 120] as const
@@ -80,7 +96,7 @@ const AVOID_MINUTES = [30, 60, 120] as const
 function LinkState({ badge }: { badge: FeedBadge }) {
   return (
     <span className="inline-flex items-center gap-1.5">
-      <StatusLed color={badge.color} size={8} pulse={badge.pulse} />
+      <StatusLamp color={badge.color} size={8} pulse={badge.pulse} />
       {badge.label}
     </span>
   )
@@ -110,6 +126,7 @@ export function LiveScreen() {
    *  booleans, so the two can never both be up. */
   const [sheet, setSheet] = useState<'queue' | 'avoids' | null>(null)
   const paused = useAppSelector(selectIsPaused)
+  const blocked = useAppSelector(selectIsBlocked)
   // The two derived layers (#88). Between them the screen states no condition of
   // its own: `feed` says why the feed is or is not delivering, and `can` says
   // what that leaves reachable — so a control cannot be gated on a rule the
@@ -119,7 +136,15 @@ export function LiveScreen() {
   // Why the server is turning us away, when it is (#77) — so the screen says
   // "full" rather than "no link" while the retries go on.
   const refused = useAppSelector(selectRefused)
-  const readout = feedReadout(feed, status, refused)
+  // Whose fault a dead link is (#78): no network is the Listener's to fix, a
+  // server that is not answering is not.
+  const offline = !useOnline()
+  // Whether there is anything to listen *to* yet (#78). An Instance no
+  // recorder has ever reached is the one quiet where setup is the answer;
+  // every other quiet is a Listener between Calls. Unknown until the catalog
+  // lands, and read as the common case meanwhile.
+  const firstRun = useGetCatalogQuery().data?.systems.length === 0
+  const readout = feedReadout(feed, status, { refused, offline, firstRun })
   // How many are listening, when the Operator publishes it (#77) — and only
   // while live, because a count kept from a dropped socket is a number about a
   // moment that has passed.
@@ -149,6 +174,7 @@ export function LiveScreen() {
    */
   const { call: showing, ended } = useAppSelector(selectDisplay)
   const dimmer = useDimmer(showing !== null && !ended, useInstance().dimmerSecs)
+  const fullscreen = useFullscreen()
   // Asked of the Call the display is showing, so the control reads as pressed
   // for exactly the Talkgroup pressing it would act on (#58).
   const prioritized = useAppSelector((state) =>
@@ -220,6 +246,21 @@ export function LiveScreen() {
               {counted}
             </span>
           )}
+          <Clock />
+          {fullscreen.available && (
+            <button
+              type="button"
+              aria-label={fullscreen.active ? 'Exit full screen' : 'Full screen'}
+              onClick={fullscreen.toggle}
+              className="-my-3 inline-flex size-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {fullscreen.active ? (
+                <Minimize className="size-4" aria-hidden />
+              ) : (
+                <Maximize className="size-4" aria-hidden />
+              )}
+            </button>
+          )}
           <LinkState badge={readout.badge} />
         </span>
       }
@@ -232,6 +273,9 @@ export function LiveScreen() {
         data-testid="scanner-readout"
         data-dimmed={dimmer.dimmed}
         onPointerDown={dimmer.wake}
+        // rdio's gesture, kept (#78): a double-tap on the readout. Only where
+        // the browser can — the button above is the discoverable half.
+        onDoubleClick={fullscreen.available ? fullscreen.toggle : undefined}
         className={cn('transition-opacity duration-700', dimmer.dimmed && 'opacity-25')}
       >
         {showing ? (
@@ -240,6 +284,8 @@ export function LiveScreen() {
             ended={ended}
             progress={progress}
             paused={paused}
+            blocked={blocked}
+            onListen={() => dispatch(togglePause())}
             missed={missed}
             gap={gap}
           />
@@ -293,6 +339,7 @@ export function LiveScreen() {
       <div className="mt-2 grid grid-cols-3 gap-2">
         <Control
           label="Hold system"
+          hotkey="holdSystem"
           pressed={isSystemHold(hold)}
           disabled={!can.holdSystem}
           onClick={() => dispatch(toggleHoldSystem())}
@@ -301,6 +348,7 @@ export function LiveScreen() {
         </Control>
         <Control
           label="Hold talkgroup"
+          hotkey="holdTalkgroup"
           pressed={isTalkgroupHold(hold)}
           disabled={!can.holdTalkgroup}
           onClick={() => dispatch(toggleHoldTalkgroup())}
@@ -309,6 +357,7 @@ export function LiveScreen() {
         </Control>
         <Control
           label="Skip"
+          hotkey="skip"
           disabled={!can.skip}
           onClick={() => dispatch(advance())}
           icon={<SkipForward className="size-3.5" aria-hidden />}
@@ -318,6 +367,7 @@ export function LiveScreen() {
 
         <Control
           label="Replay"
+          hotkey="replay"
           disabled={!can.replay}
           // US 13 is "current, previous, and back through the last five": the
           // Call playing starts over, and with none playing the last one
@@ -329,6 +379,7 @@ export function LiveScreen() {
         </Control>
         <Control
           label={paused ? 'Resume' : 'Pause'}
+          hotkey="pause"
           disabled={!can.pause}
           onClick={() => dispatch(togglePause())}
           icon={
@@ -343,6 +394,7 @@ export function LiveScreen() {
         </Control>
         <Control
           label="Avoid"
+          hotkey="avoid"
           disabled={!can.avoid}
           onClick={() => dispatch(avoid({ until: 0 }))}
           icon={<Ban className="size-3.5" aria-hidden />}
@@ -433,6 +485,25 @@ export function LiveScreen() {
   )
 }
 
+/**
+ * The time now (#78) — rdio's clock, and a lost affordance: a scanner on a
+ * shelf is also the clock in the room. Redrawn on the minute rather than every
+ * second, because minutes are all it shows.
+ */
+function Clock() {
+  const clock = useClock()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setTimeout(() => setNow(Date.now()), 60_000 - (now % 60_000))
+    return () => clearTimeout(timer)
+  }, [now])
+  return (
+    <span aria-label="Time now" className="font-mono text-xs tabular-nums text-muted-foreground">
+      {formatClock(now, clock)}
+    </span>
+  )
+}
+
 /** The scanner readout: who is talking — or who just was — on what, and where
  *  in the Call we are. */
 function Display({
@@ -440,6 +511,8 @@ function Display({
   ended,
   progress,
   paused,
+  blocked,
+  onListen,
   missed,
   gap,
 }: {
@@ -451,10 +524,17 @@ function Display({
   ended: boolean
   progress: number
   paused: boolean
+  /** Paused because the browser wants a tap first (#78) — which the card asks
+   *  for, in place of claiming the Listener paused. */
+  blocked: boolean
+  onListen: () => void
   missed: number
   gap: boolean
 }) {
-  const clock = useClock()
+  // Coarse: an age in minutes and a date that changes at midnight are all
+  // this card measures from the clock.
+  const now = useNow(true, CLOCK_TICK_MS)
+  const late = lateness(call, now)
   const color = ledForCall(call)
 
   return (
@@ -468,7 +548,7 @@ function Display({
       <div className="flex items-start gap-3">
         {/* docs/design/brief.md state 6: paused blinks, playing is steady —
             and an ended Call is neither, so it does not blink either. */}
-        <StatusLed
+        <ChannelLed
           color={color}
           size={16}
           pulse={paused && !ended}
@@ -490,12 +570,27 @@ function Display({
             </p>
           )}
         </div>
-        {(ended || paused) && (
+        {(ended || (paused && !blocked)) && (
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
             {ended ? 'Ended' : 'Paused'}
           </span>
         )}
       </div>
+
+      {/* The browser will not play sound before a tap (#78), and a first visit
+          is exactly when it has had none — so the card asks for one, as the
+          biggest thing on it, and says why. rdio's answer is a silent screen. */}
+      {blocked && !ended && (
+        <div className="mt-4 flex flex-col items-center gap-2">
+          <Button className="h-11 w-full text-base" onClick={onListen}>
+            <Play aria-hidden />
+            Tap to listen
+          </Button>
+          <p className="text-xs text-muted-foreground">
+            Your browser needs a tap before it will play sound.
+          </p>
+        </div>
+      )}
 
       {/* Still, and back at the start: a waveform walking through a Call that
           has finished would be drawing audio nobody is hearing. */}
@@ -521,9 +616,19 @@ function Display({
           {unitName(call) === undefined ? '—' : <UnitLink call={call} />}
         </Stat>
         <Stat name="Time" testId="stat-time">
-          {formatCallTime(call.timestamp, clock)}
+          <CallTime ms={call.timestamp} now={now} />
         </Stat>
       </dl>
+
+      {/* Honest timestamps (#78): a backlog, a Backfill, Catch-up and a Delay
+          all play a Call minutes after it was said, and the time alone passes
+          every one of them off as now. Amber — the colour of the feed's other
+          states that are not a fault but are not live either. */}
+      {late && (
+        <p data-testid="lateness" className="mt-2 font-mono text-xs text-led-orange">
+          {late}
+        </p>
+      )}
 
       <Missed count={missed} gap={gap} />
     </section>
@@ -568,13 +673,36 @@ function Idle({
  * archive. So a gap says "some", and a gap *on top of* a count says the count is
  * a floor — because "3 missed" when it was really thirty is worse than admitting
  * the number is not the whole story.
+ *
+ * **And it is the way in** (#78, from #60): a link to Search on the gap, oldest
+ * first, from where it began to now — and following it clears the count, which
+ * is "what you have not seen yet". With nothing reaching a Listener while they
+ * are away (ADR-0014), the Archive is the only answer to "what happened while I
+ * wasn't looking", and this is the door to it. Open-ended rather than closed at
+ * the moment it was drawn, so a link left on screen a while still reaches the
+ * present.
  */
 function Missed({ count, gap }: { count: number; gap: boolean }) {
+  const dispatch = useAppDispatch()
+  const from = useAppSelector(selectMissedFrom)
   if (count === 0 && !gap) return null
   const how = count > 0 ? `${count}${gap ? '+' : ''}` : 'some'
+  // Nothing says when it began: newest first, where a Listener reads backwards
+  // to find their place.
+  const query = writeSearchUrl(
+    from === undefined
+      ? DEFAULT_SEARCH_URL
+      : { search: { after: from, sort: 'oldest' }, offset: 0 },
+  )
   return (
-    <p className="mt-3 font-mono text-[11px] text-led-red/80" role="status">
-      {how} missed — search the archive to catch up
+    <p className="mt-3" role="status">
+      <Link
+        to={query ? `/search?${query}` : '/search'}
+        onClick={() => dispatch(missedCleared())}
+        className="inline-flex min-h-11 items-center font-mono text-xs text-led-red underline decoration-dotted underline-offset-4"
+      >
+        {how} missed — see what you missed
+      </Link>
     </p>
   )
 }
@@ -600,9 +728,12 @@ function Stat({
   )
 }
 
-/** One control. `label` is what it's called; the children are what fits. */
+/** One control. `label` is what it's called; the children are what fits.
+ *  `hotkey` is the key that does the same from any tab (#78), said to a
+ *  screen reader in `aria-keyshortcuts` and to a pointer in the title. */
 function Control({
   label,
+  hotkey,
   pressed,
   disabled,
   onClick,
@@ -610,6 +741,7 @@ function Control({
   children,
 }: {
   label: string
+  hotkey?: HotkeyCommand
   pressed?: boolean
   disabled?: boolean
   onClick: () => void
@@ -622,6 +754,8 @@ function Control({
       size="sm"
       aria-label={label}
       aria-pressed={pressed}
+      aria-keyshortcuts={hotkey && shortcutsFor(hotkey)}
+      title={hotkey && `${label} (${shortcutsFor(hotkey).replaceAll(' ', ' or ')})`}
       disabled={disabled}
       onClick={onClick}
       className={cn(
@@ -650,7 +784,7 @@ function History({
    *  nothing would be the common case, not a corner. */
   disabled: boolean
 }) {
-  const clock = useClock()
+  const now = useNow(calls.length > 0, CLOCK_TICK_MS)
   if (calls.length === 0) return null
 
   return (
@@ -685,7 +819,7 @@ function History({
               onClick={() => onReplay(call.id)}
               className="flex min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:bg-muted/40 disabled:opacity-40"
             >
-              <StatusLed
+              <ChannelLed
                 color={ledForCall(call)}
                 size={10}
               />
@@ -719,9 +853,11 @@ function History({
               call={call}
               className="max-w-24 shrink-0 font-mono text-[11px] text-muted-foreground"
             />
-            <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
-              {formatCallTime(call.timestamp, clock)}
-            </time>
+            <CallTime
+              ms={call.timestamp}
+              now={now}
+              className="shrink-0 font-mono text-[11px] text-muted-foreground"
+            />
           </li>
         ))}
       </ul>

@@ -22,7 +22,7 @@ import { DensityRibbon } from '@/components/DensityRibbon'
 import { ExportControl } from '@/components/ExportControl'
 import { Screen } from '@/components/layout/Screen'
 import { StarButton } from '@/components/StarButton'
-import { StatusLed } from '@/components/StatusLed'
+import { ChannelLed } from '@/components/Led'
 import { UnitLink } from '@/components/UnitLink'
 import { Button } from '@/components/ui/button'
 import { callCategory, systemName, talkgroupName } from '@/lib/call'
@@ -910,7 +910,7 @@ function ResultRow({
           onChange={onSelect}
         />
       )}
-      <StatusLed
+      <ChannelLed
         color={ledForCall(call)}
         size={10}
       />
@@ -1047,7 +1047,7 @@ function NowPlaying({
     >
       {/* docs/design/brief.md state 6: a paused Call blinks, a playing one is
           steady. */}
-      <StatusLed
+      <ChannelLed
         color={ledForCall(call)}
         size={12}
         pulse={paused}

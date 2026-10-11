@@ -1,10 +1,14 @@
-import { screen } from '@testing-library/react'
+import { act, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { SKIP_WAITING } from '@/lib/serviceWorker'
 import { instanceIs, ORIGIN } from '@/test/handlers'
+import { beIosSafari, offerInstall, type FakeInstallPromptEvent } from '@/test/install'
+import { deploy, installServiceWorker } from '@/test/serviceWorker'
 import { server } from '@/test/setup'
-import { renderWithProviders } from '@/test/utils'
+import { renderApp, renderWithProviders } from '@/test/utils'
 
 import { SettingsScreen } from './SettingsScreen'
 
@@ -72,5 +76,88 @@ describe('SettingsScreen — what the Operator offers', () => {
 
     expect(screen.queryByRole('link', { name: /Reference/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /Help/ })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The install funnel, reopened (#78, from #60). The banner asks once and takes
+ * "not now" for an answer; Settings is where a Listener who changes their mind
+ * goes looking.
+ */
+describe('Settings → install', () => {
+  beforeEach(() => globalThis.localStorage?.clear())
+
+  it('offers the install a dismissed banner gave up', async () => {
+    const user = userEvent.setup()
+    renderApp('/settings')
+    let event!: FakeInstallPromptEvent
+    act(() => void (event = offerInstall()))
+    await user.click(screen.getByRole('button', { name: 'Dismiss install prompt' }))
+    expect(screen.queryByText(/install radio-scout/i)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Install app' }))
+
+    expect(event.prompted).toBe(1)
+  })
+
+  it('gives the Share-sheet steps on iOS, where there is no prompt to fire', () => {
+    beIosSafari()
+    renderApp('/settings')
+
+    const entry = screen.getByRole('listitem', { name: 'Install' })
+    expect(entry).toHaveTextContent(/share/i)
+    expect(entry).toHaveTextContent(/add to home screen/i)
+  })
+
+  /** A control that would be refused is not offered — here, an install this
+   *  browser cannot do, or one already done. */
+  it('offers nothing where there is nothing to install', () => {
+    renderApp('/settings')
+
+    expect(screen.queryByRole('listitem', { name: 'Install' })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * A waiting version, out of the way (#78). The banner can be waved off — it
+ * applies on the next cold start anyway — and the reload stays to hand here.
+ */
+describe('Settings → update', () => {
+  it('keeps the reload a dismissed update banner offered', async () => {
+    const user = userEvent.setup()
+    const container = installServiceWorker()
+    renderApp('/settings')
+    const waiting = await deploy(container)
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss update notice' }))
+    // The banner is gone; the row below says the same and stays.
+    expect(screen.queryByRole('button', { name: 'Dismiss update notice' })).not.toBeInTheDocument()
+
+    const entry = screen.getByRole('listitem', { name: 'Update' })
+    await user.click(within(entry).getByRole('button', { name: 'Reload to update' }))
+
+    expect(waiting.posted).toEqual([SKIP_WAITING])
+  })
+
+  it('says nothing about updates while there is none', () => {
+    renderApp('/settings')
+
+    expect(screen.queryByRole('listitem', { name: 'Update' })).not.toBeInTheDocument()
+  })
+})
+
+/** Offline is not unreachable (#78): one is this device, the other the server. */
+describe('Settings → server', () => {
+  afterEach(() => {
+    delete (navigator as { onLine?: boolean }).onLine
+  })
+
+  it('says this device is offline rather than that the server is unreachable', async () => {
+    server.use(http.get(`${ORIGIN}/healthz`, () => HttpResponse.error()))
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false })
+    renderApp('/settings')
+
+    expect(await screen.findByText('this device is offline')).toBeInTheDocument()
+    expect(screen.queryByText('unreachable')).not.toBeInTheDocument()
   })
 })

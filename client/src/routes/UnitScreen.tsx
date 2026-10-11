@@ -5,7 +5,8 @@ import { Link, useParams } from 'react-router-dom'
 import { CallFlags } from '@/components/CallFlags'
 import { Screen } from '@/components/layout/Screen'
 import { StarButton } from '@/components/StarButton'
-import { StatusLed } from '@/components/StatusLed'
+import { CallTime } from '@/components/CallTime'
+import { ChannelLed } from '@/components/Led'
 import { Button } from '@/components/ui/button'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
 import { downloadUrl, formatCallTime, formatDuration } from '@/lib/archive'
@@ -13,6 +14,7 @@ import { talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
 import { useGrant } from '@/hooks/useGrant'
 import { useClock } from '@/hooks/useInstance'
+import { useNow } from '@/hooks/useNow'
 import { useGetUnitHistoryQuery, useSearchCallsQuery } from '@/store/api'
 import { useAppDispatch } from '@/store/hooks'
 import { startRun } from '@/store/playback'
@@ -123,7 +125,8 @@ function spans(members: RefSpan[] | undefined): string {
 /** Where this radio talks, busiest first — the question the whole view exists
  *  for, which is why the server orders it rather than the screen. */
 function Talkgroups({ unit }: { unit: UnitHistory }) {
-  const clock = useClock()
+  // A list's times leave today off (#78); midnight is all this measures.
+  const now = useNow(true, 60_000)
   if (unit.talkgroups.length === 0) {
     return (
       <p className="mt-5 rounded-xl border border-border bg-card px-6 py-8 text-center font-mono text-sm text-muted-foreground">
@@ -152,9 +155,11 @@ function Talkgroups({ unit }: { unit: UnitHistory }) {
             <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
               {talkgroup.calls}
             </span>
-            <time className="shrink-0 text-[11px] text-muted-foreground">
-              {formatCallTime(talkgroup.lastHeardMs, clock)}
-            </time>
+            <CallTime
+              ms={talkgroup.lastHeardMs}
+              now={now}
+              className="shrink-0 text-[11px] text-muted-foreground"
+            />
           </li>
         ))}
       </ul>
@@ -174,6 +179,7 @@ function Calls({
   page: SearchPage | undefined
 }) {
   const clock = useClock()
+  const now = useNow(true, 60_000)
   // The **grant** goes on the link, never through the base query: a download
   // is a navigation (#68).
   const grant = useGrant()
@@ -191,15 +197,17 @@ function Calls({
       >
         {calls.map((call, index) => (
           <li key={call.id} className="flex items-center gap-3 px-3 py-2.5">
-            <StatusLed color={ledForCall(call)} size={10} />
+            <ChannelLed color={ledForCall(call)} size={10} />
             <div className="min-w-0 flex-1">
               <p className="flex items-center gap-1.5 truncate font-mono text-sm">
                 <span className="truncate">{talkgroupName(call)}</span>
                 <CallFlags call={call} />
               </p>
-              <time className="font-mono text-[11px] text-muted-foreground">
-                {formatCallTime(call.timestamp, clock)}
-              </time>
+              <CallTime
+                ms={call.timestamp}
+                now={now}
+                className="font-mono text-[11px] text-muted-foreground"
+              />
             </div>
             <span className="w-12 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
               {formatDuration(call.durationMs)}

@@ -12,10 +12,11 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { Screen } from '@/components/layout/Screen'
-import { StatusLed } from '@/components/StatusLed'
+import { ChannelLed } from '@/components/Led'
 import { UnlockSheet } from '@/components/UnlockSheet'
 import { Button } from '@/components/ui/button'
 import { useGrant } from '@/hooks/useGrant'
+import { useNow } from '@/hooks/useNow'
 import { useShareLink } from '@/hooks/useShareLink'
 import { useWindowedRows } from '@/hooks/useWindowedRows'
 import { useInstance } from '@/hooks/useInstance'
@@ -208,7 +209,7 @@ export function TalkgroupsScreen() {
   )
   const { on, total } = panel
   // Only while something drawn is a subtraction from the clock — see [`useNow`].
-  const now = useNow(panel.ticking)
+  const now = useNow(panel.ticking, COUNTDOWN_TICK_MS)
 
   /** Do what this control is for. Two action creators, chosen by the shape the
    *  panel handed us — never by this file working out which one applies. */
@@ -666,7 +667,7 @@ function TalkgroupRow({
           ✓
         </span>
         {selected ? (
-          <StatusLed color={row.led} size={8} className="shrink-0" />
+          <ChannelLed color={row.led} size={8} className="shrink-0" />
         ) : (
           <span
             aria-hidden
@@ -814,35 +815,6 @@ function AvoidBadge({ until, now }: { until: number; now: number }) {
       <span aria-hidden>{timed ? `${minutes}m` : 'avoid'}</span>
     </span>
   )
-}
-
-/**
- * The clock, as far as this screen needs it.
- *
- * The one thing here that ticks (#91), and it ticks for the *display* alone:
- * whether an **Avoid** is still in force is decided from its deadline, by the
- * store's own clock (`store/avoids`) and by every Call that arrives.
- *
- * One timer for the screen rather than one per row — a county panel has four
- * hundred rows, and a last-heard age on each would otherwise be four hundred
- * intervals — and it runs only while [`Panel.ticking`] says something drawn is
- * measured from a clock. A panel of switches and counts needs none, and a
- * parked phone must not redraw itself twice a minute for nothing.
- *
- * Read once on arming as well as on each tick, because a clock started an hour
- * after mount would otherwise begin by drawing every age an hour stale.
- */
-function useNow(ticking: boolean): number {
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (!ticking) return
-    setNow(Date.now())
-    const tick = setInterval(() => setNow(Date.now()), COUNTDOWN_TICK_MS)
-    return () => clearInterval(tick)
-  }, [ticking])
-
-  return now
 }
 
 function Notice({ children, role }: { children: ReactNode; role?: 'alert' }) {

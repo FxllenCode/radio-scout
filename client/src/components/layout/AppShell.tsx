@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 
 import { AccessNoticeBar } from '@/components/AccessNotice'
+import { Announcer } from '@/components/Announcer'
 import { AvoidUndoBar } from '@/components/AvoidUndo'
 import { CallPlayer } from '@/components/CallPlayer'
 import { InstallBanner } from '@/components/InstallBanner'
@@ -11,14 +12,20 @@ import { SelectionUndoBar } from '@/components/SelectionUndo'
 import { UpdateBanner } from '@/components/UpdateBanner'
 import { useAppUpdate } from '@/hooks/useAppUpdate'
 import { useCatchupQuiet } from '@/hooks/useCatchupQuiet'
+import { useHotkeys } from '@/hooks/useHotkeys'
+import { useInstall } from '@/hooks/useInstall'
+import { useLeaveGuard } from '@/hooks/useLeaveGuard'
 import { useInstance } from '@/hooks/useInstance'
 import { useStaleGrantWatch } from '@/hooks/useStaleGrantWatch'
+import { feedPlays } from '@/lib/feed'
 import { instanceName } from '@/lib/instance'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
-import { selectStrip } from '@/store/transport'
+import { selectFeedStatus } from '@/store/live'
+import { selectIsLiveSource, selectStrip } from '@/store/transport'
 
 import { BottomTabBar } from './BottomTabBar'
+import { ShellContext } from './shell'
 
 /**
  * Where the mini-player does not go.
@@ -45,7 +52,29 @@ const PLAYS_FOR_ITSELF = ['/']
  *  #56 the *readout* does too: what is playing, or why nothing is, follows the
  *  Listener between tabs instead of being a thing only the Live screen knew. */
 export function AppShell() {
-  const update = useAppUpdate()
+  const appUpdate = useAppUpdate()
+  // Ask before the tab closes on somebody listening (#78): the live feed on —
+  // or reconnecting, which is still on — or the archive playing.
+  const feed = useAppSelector(selectFeedStatus)
+  const fromArchive = !useAppSelector(selectIsLiveSource)
+  const listening = feedPlays(feed) || fromArchive
+  const standAside = useLeaveGuard(listening)
+  // Taking an update reloads the page, and that is the app leaving on the
+  // Listener's say-so — the guard must not ask them whether they meant it.
+  const update = {
+    ...appUpdate,
+    apply: () => {
+      standAside()
+      appUpdate.apply()
+    },
+  }
+  // The page's one install handle (#78): the banner offers it once, and
+  // Settings offers it again after "not now".
+  const install = useInstall()
+  // The update banner waved off, for this visit (#78). Not remembered: the
+  // version applies on the next cold start anyway, and Settings keeps the
+  // reload to hand meanwhile.
+  const [updateWaved, setUpdateWaved] = useState(false)
   // Here rather than on a screen, because Catch-up drains the listening queue
   // wherever the Listener happens to be looking — the same reason the audio
   // element and the socket are here (#59).
@@ -55,6 +84,9 @@ export function AppShell() {
   // changed is *what can be heard*, which is not a fact about the screen
   // anybody happens to be on.
   useStaleGrantWatch()
+  // The keyboard, on every tab (#78): here for the reason the audio element is
+  // — it controls what plays, and that does not stop at the Live screen.
+  useHotkeys()
   // The tab says whose scanner this is (#77) — and so does the name iOS
   // proposes when the app is added to a home screen, which is read from here.
   const name = instanceName(useInstance())
@@ -85,37 +117,44 @@ export function AppShell() {
   const docked = room ? strip : null
 
   return (
-    <div className="mx-auto flex min-h-[100dvh] w-full max-w-2xl flex-col">
-      {/* Padded past the tab bar, and past the strip on every screen that can
-          grow one — by *route*, never by whether something is playing. Keyed on
-          the strip itself, a busy channel would shove the list under the
-          Listener's thumb up and down every few seconds. A docked thing that
-          covers the last row is a small lie about what the archive holds; a
-          list that jumps while being read is a larger one. */}
-      <main className={cn('flex-1', room ? 'pb-36' : 'pb-24')}>
-        <Outlet />
-      </main>
-      {/* One docked column above the tab bar. A waiting version takes the
-          banner slot from the install offer: it is the rarer and the more
-          actionable of the two, and a listener who reloads is offered the
-          install again on the way back. The mini-player sits under whichever
-          won, closest to the thumb.
+    <ShellContext value={{ update, install }}>
+      <div className="mx-auto flex min-h-[100dvh] w-full max-w-2xl flex-col">
+        {/* Padded past the tab bar, and past the strip on every screen that can
+            grow one — by *route*, never by whether something is playing. Keyed on
+            the strip itself, a busy channel would shove the list under the
+            Listener's thumb up and down every few seconds. A docked thing that
+            covers the last row is a small lie about what the archive holds; a
+            list that jumps while being read is a larger one. */}
+        <main className={cn('flex-1', room ? 'pb-36' : 'pb-24')}>
+          <Outlet />
+        </main>
+        {/* One docked column above the tab bar. A waiting version takes the
+            banner slot from the install offer: it is the rarer and the more
+            actionable of the two, and a listener who reloads is offered the
+            install again on the way back. The mini-player sits under whichever
+            won, closest to the thumb.
 
-          The **Avoid** undo (#58) sits here rather than on the Live screen for
-          the reason the strip does: its offer has a deadline, and a Listener
-          who avoids a channel and then goes looking at Talkgroups has spent
-          none of it. It goes *below* the banners and above the player, so the
-          thing with a running clock is the closest to the thumb. */}
-      <div className="pointer-events-none fixed inset-x-0 bottom-16 z-40 mx-auto flex max-w-2xl flex-col gap-2 px-3">
-        {update.ready ? <UpdateBanner apply={update.apply} /> : <InstallBanner />}
-        <AccessNoticeBar />
-        <AvoidUndoBar />
-        <SelectionUndoBar />
-        {docked && <MiniPlayer strip={docked} />}
+            The **Avoid** undo (#58) sits here rather than on the Live screen for
+            the reason the strip does: its offer has a deadline, and a Listener
+            who avoids a channel and then goes looking at Talkgroups has spent
+            none of it. It goes *below* the banners and above the player, so the
+            thing with a running clock is the closest to the thumb. */}
+        <div className="pointer-events-none fixed inset-x-0 bottom-16 z-40 mx-auto flex max-w-2xl flex-col gap-2 px-3">
+          {update.ready && !updateWaved ? (
+            <UpdateBanner apply={update.apply} onDismiss={() => setUpdateWaved(true)} />
+          ) : (
+            <InstallBanner install={install} />
+          )}
+          <AccessNoticeBar />
+          <AvoidUndoBar />
+          <SelectionUndoBar />
+          {docked && <MiniPlayer strip={docked} />}
+        </div>
+        <BottomTabBar searchTo={lastSearch.current} />
+        <CallPlayer />
+        <LiveFeedLink />
+        <Announcer />
       </div>
-      <BottomTabBar searchTo={lastSearch.current} />
-      <CallPlayer />
-      <LiveFeedLink />
-    </div>
+    </ShellContext>
   )
 }

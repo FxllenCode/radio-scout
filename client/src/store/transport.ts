@@ -69,9 +69,22 @@ export interface TransportState {
    * otherwise be ignored the second time.
    */
   seek: { toSeconds: number; nonce: number } | null
+  /**
+   * The browser refused to start audio until somebody taps (#78) — its
+   * autoplay policy, and not a Listener who paused.
+   *
+   * Always beside `paused`, never instead of it: the element *is* paused. What
+   * this adds is whose doing it was, which decides what the screen asks for — a
+   * first visit used to read PAUSED over a Call nobody had heard. Cleared only
+   * by `resume`, the tap itself; a new Call does not clear it, because the
+   * browser has not changed its mind and a frame of "playing" per Call would be
+   * a flicker of a lie.
+   */
+  blocked: boolean
 }
 
 const initialState: TransportState = {
+  blocked: false,
   paused: false,
   position: 0,
   duration: 0,
@@ -85,10 +98,19 @@ const transportSlice = createSlice({
   reducers: {
     pause(state) {
       state.paused = true
+      // Their own pause now, whatever the browser thought before.
+      state.blocked = false
     },
 
     resume(state) {
       state.paused = false
+      state.blocked = false
+    },
+
+    /** The browser said no to `play()` without a tap — see [`blocked`]. */
+    refusedToPlay(state) {
+      state.paused = true
+      state.blocked = true
     },
 
     /** The element was handed a different Call — by either source, or by a
@@ -96,7 +118,9 @@ const transportSlice = createSlice({
      *  applied to would leave the store claiming "paused" over audible audio,
      *  and last Call's position would draw over this one's waveform. */
     sourceChanged(state) {
-      state.paused = false
+      // Still paused while the browser is still refusing: it will refuse this
+      // Call too, and until it does the store would claim it was playing.
+      state.paused = state.blocked
       state.position = 0
       state.duration = 0
       state.keepAliveSpent = false
@@ -148,6 +172,7 @@ export const {
   keepAliveExpired,
   pause,
   progressed,
+  refusedToPlay,
   resume,
   seekTo,
   sourceChanged,
@@ -186,6 +211,10 @@ export const selectUpcomingCall = (state: TransportRoot): Call | null =>
 
 export const selectIsPaused = (state: TransportRoot): boolean =>
   state.transport.paused
+
+/** Paused because the browser wants a tap, not because anybody chose to (#78). */
+export const selectIsBlocked = (state: TransportRoot): boolean =>
+  state.transport.blocked
 
 /** The seek waiting to be made, if one is — see [`TransportState.seek`]. */
 export const selectSeek = (

@@ -1,9 +1,12 @@
-import { ChevronRight, ExternalLink } from 'lucide-react'
+import { ChevronRight, ExternalLink, Share } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import { Screen } from '@/components/layout/Screen'
-import { StatusLed } from '@/components/StatusLed'
+import { useShell } from '@/components/layout/shell'
+import { Button } from '@/components/ui/button'
+import { StatusLamp } from '@/components/Led'
 import { useInstance } from '@/hooks/useInstance'
+import { useOnline } from '@/hooks/useOnline'
 import { useGetHealthQuery } from '@/store/api'
 
 /** Settings — connection/server status, audio enhancement, theme, admin (#19).
@@ -17,6 +20,12 @@ import { useGetHealthQuery } from '@/store/api'
 export function SettingsScreen() {
   const { data, isSuccess, isError, isLoading } = useGetHealthQuery()
   const online = isSuccess && data?.trim() === 'ok'
+  // Unreachable from a device with no network says nothing about the server
+  // (#78) — the Live screen's own distinction, on the row that checks it.
+  const deviceOffline = !useOnline()
+  // What a waved-off banner gave up, offered again (#78): the shell's handles,
+  // so this row and the banner can never disagree about what is on offer.
+  const { update, install } = useShell()
   // What the Operator offers their Listeners (#77): a Reference page and a
   // place to ask for help — each drawn only when there is one, because an entry
   // that leads nowhere is a control that lies.
@@ -28,10 +37,51 @@ export function SettingsScreen() {
         <li className="flex items-center justify-between px-4 py-3.5">
           <span className="text-sm">Server</span>
           <span className="inline-flex items-center gap-2 font-mono text-xs text-muted-foreground">
-            <StatusLed color={online ? 'green' : 'red'} size={8} pulse={online} />
-            {isLoading ? 'checking…' : online ? 'online' : isError ? 'unreachable' : 'unknown'}
+            <StatusLamp color={online ? 'green' : 'red'} size={8} pulse={online} />
+            {online
+              ? 'online'
+              : deviceOffline
+                ? 'this device is offline'
+                : isLoading
+                  ? 'checking…'
+                  : isError
+                    ? 'unreachable'
+                    : 'unknown'}
           </span>
         </li>
+        {/* Named rows, so a screen reader can find them by what they are. */}
+        {update.ready && (
+          <li aria-label="Update" className="flex items-center justify-between gap-3 px-4 py-3.5">
+            <span className="text-sm">A new version is ready</span>
+            <Button className="h-11" variant="secondary" onClick={update.apply}>
+              Reload to update
+            </Button>
+          </li>
+        )}
+        {install.entry !== 'none' && (
+          <li aria-label="Install" className="flex items-center justify-between gap-3 px-4 py-3.5">
+            <span className="min-w-0">
+              <span className="block text-sm">Install the app</span>
+              <span className="block text-xs text-muted-foreground">
+                {install.entry === 'prompt' ? (
+                  'Full screen, faster start, background audio'
+                ) : (
+                  // iOS has no install dialog to fire: the Share sheet is the
+                  // only way, so the row says how.
+                  <>
+                    Tap <Share className="inline size-3.5 align-text-bottom" aria-label="Share" />{' '}
+                    Share, then Add to Home Screen
+                  </>
+                )}
+              </span>
+            </span>
+            {install.entry === 'prompt' && (
+              <Button className="h-11" onClick={install.install}>
+                Install app
+              </Button>
+            )}
+          </li>
+        )}
         {reference && (
           <li>
             <Link

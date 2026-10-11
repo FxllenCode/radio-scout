@@ -378,3 +378,22 @@ describe('the session log (#58, spec US 28)', () => {
     })
   })
 })
+
+/** The log's times leave today off (#78) — the row's width belongs to the
+ *  Talkgroup — and say nothing they do not know. */
+describe('the session log, on when (#78)', () => {
+  it("shows today's Calls by time alone and anything older with its date", async () => {
+    const today = new Date()
+    today.setHours(9, 5, 0, 0)
+    await heard(
+      call(1, 1, { timestamp: today.getTime() }),
+      call(2, 2),
+      call(3, 3, { timestamp: undefined }),
+    )
+
+    expect(within(rows()[2]).getByText('09:05:00')).toBeInTheDocument()
+    expect(within(rows()[1]).getByText('2026-07-25 14:32:05')).toBeInTheDocument()
+    // A Call with no time says so, rather than inventing one.
+    expect(within(rows()[0]).getByText('—')).toBeInTheDocument()
+  })
+})

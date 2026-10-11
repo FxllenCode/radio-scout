@@ -14,7 +14,7 @@ import { UpdateBanner } from './UpdateBanner'
  *  offer competes is the shell's own decision, and is tested there. */
 function Updates() {
   const update = useAppUpdate()
-  return update.ready ? <UpdateBanner apply={update.apply} /> : null
+  return update.ready ? <UpdateBanner apply={update.apply} onDismiss={() => {}} /> : null
 }
 
 describe('UpdateBanner', () => {

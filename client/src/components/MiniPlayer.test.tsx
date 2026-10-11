@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { axe } from 'vitest-axe'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { received, selectLiveCall, turnFeedOff } from '@/store/live'
 import { enterPlaybackMode, selectPlaybackMode, startRun } from '@/store/playback'
@@ -202,5 +202,43 @@ describe('the now-playing strip', () => {
     act(() => void store.dispatch(received(call(), 1)))
 
     expect(await axe(container)).toHaveNoViolations()
+  })
+})
+
+/** The strip is the Live display's truth on every other tab (#56), so it asks
+ *  for the same tap the display does (#78) rather than offering "Resume" to a
+ *  Listener who never paused. */
+describe('the strip, before the browser allows sound (#78)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('asks for a tap, and plays from it', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValueOnce(
+      new DOMException('needs a gesture', 'NotAllowedError'),
+    )
+    const store = away('/talkgroups', call())
+
+    const tap = await within(strip()).findByRole('button', { name: 'Tap to listen' })
+    expect(within(strip()).getByText(/needs a tap/i)).toBeInTheDocument()
+
+    await user.click(tap)
+
+    expect(selectIsPaused(store.getState())).toBe(false)
+    expect(within(strip()).getByRole('button', { name: 'Pause' })).toBeInTheDocument()
+  })
+})
+
+/** A late live Call says so on every tab, as it does on Live (#78). */
+describe('the strip, on a Call heard late (#78)', () => {
+  it('says how late the live Call is', () => {
+    away('/talkgroups', call({ timestamp: Date.now() - 4 * 60_000 - 30_000 }))
+
+    expect(within(strip()).getByText('Live · 4 min ago')).toBeInTheDocument()
+  })
+
+  it('says only where it is from when the Call is current', () => {
+    away('/talkgroups', call({ timestamp: Date.now() - 5_000 }))
+
+    expect(within(strip()).getByText('Live')).toBeInTheDocument()
   })
 })

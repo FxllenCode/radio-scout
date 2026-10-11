@@ -5,7 +5,10 @@ import {
   downloadUrl,
   msToDateTimeLocal,
   formatCallTime,
+  formatClock,
   formatDuration,
+  formatRowTime,
+  lateness,
   pageSummary,
   searchParams,
   starsKept,
@@ -124,6 +127,59 @@ describe('formatCallTime', () => {
   })
 })
 
+/** A row's time (#78): the date only when it says something. A full stamp on
+ *  every row cost a phone 125 pixels of the Talkgroup's name. */
+describe('formatRowTime', () => {
+  const now = Date.parse('2026-07-25T16:00:00')
+
+  it.each([
+    ['earlier today', '2026-07-25T14:32:05', '24h', '14:32:05'],
+    ['earlier today, twelve-hour', '2026-07-25T14:32:05', '12h', '02:32:05 PM'],
+    ['the first second of today', '2026-07-25T00:00:00', '24h', '00:00:00'],
+    ['the last second of yesterday', '2026-07-24T23:59:59', '24h', '2026-07-24 23:59:59'],
+    ['last year, same date', '2025-07-25T14:32:05', '24h', '2025-07-25 14:32:05'],
+    ['yesterday, twelve-hour', '2026-07-24T09:05:00', '12h', '2026-07-24 09:05:00 AM'],
+  ] as const)('writes a call from %s as %s', (_case, at, clock, written) => {
+    expect(formatRowTime(Date.parse(at), clock, now)).toBe(written)
+  })
+
+  it('shows a dash when a call has no time', () => {
+    expect(formatRowTime(undefined, '24h', now)).toBe('—')
+    expect(formatRowTime(Number.NaN, '12h', now)).toBe('—')
+  })
+})
+
+/** How late a Call is being heard (#78): a backlog, a Backfill, Catch-up and a
+ *  Delay all play Calls minutes after the fact, and the display must not pass
+ *  one off as happening now. */
+describe('lateness', () => {
+  const now = Date.parse('2026-07-25T16:00:00')
+  const ago = (seconds: number) => now - seconds * 1000
+
+  it.each([
+    ['ended a moment ago', ago(5), undefined, null],
+    ['ended just inside the grace', ago(59), undefined, null],
+    ['ended a minute ago', ago(60), undefined, '1 min ago'],
+    ['ended four minutes ago', ago(4 * 60 + 30), undefined, '4 min ago'],
+    ['ended an hour ago', ago(60 * 60), undefined, '1 h ago'],
+    ['ended an hour and twelve minutes ago', ago(72 * 60), undefined, '1 h 12 min ago'],
+    ['ended a day ago', ago(24 * 3600), undefined, '1 d ago'],
+    ['ended three days and change ago', ago(75 * 3600), undefined, '3 d ago'],
+    // Measured from when it *ended*: a forty-second dispatch uploaded the
+    // moment it unkeyed started forty seconds ago and is not late at all.
+    ['a long call that just ended', ago(45), 40_000, null],
+    ['a long call that ended two minutes ago', ago(160), 40_000, '2 min ago'],
+    // A clock running ahead of the recorder's is not a call from the future.
+    ['stamped in the future', ago(-30), undefined, null],
+  ] as const)('a call that %s reads %s', (_case, timestamp, durationMs, said) => {
+    expect(lateness({ timestamp, durationMs }, now)).toBe(said)
+  })
+
+  it('says nothing about a call with no time', () => {
+    expect(lateness({ timestamp: undefined }, now)).toBeNull()
+  })
+})
+
 describe('pageSummary', () => {
   it('counts from one and reports the true total', () => {
     expect(pageSummary(0, 100, 421)).toBe('1–100 of 421')
@@ -174,5 +230,20 @@ describe('starsKept', () => {
     [{ kept: false, keptDays: 90 }, 'Stars do not outlast the retention window here.'],
   ])('reads %j as its sentence', (offer, sentence) => {
     expect(starsKept(offer)).toBe(sentence)
+  })
+})
+
+/** The wall clock on the Live screen (#78) — rdio's, and a lost affordance:
+ *  a scanner on a shelf is also the clock in the room. Minutes, on the
+ *  Operator's clock. */
+describe('formatClock', () => {
+  it.each([
+    ['2026-07-25T14:32:05', '24h', '14:32'],
+    ['2026-07-25T04:05:59', '24h', '04:05'],
+    ['2026-07-25T14:32:05', '12h', '02:32 PM'],
+    ['2026-07-25T00:15:00', '12h', '12:15 AM'],
+    ['2026-07-25T12:00:00', '12h', '12:00 PM'],
+  ] as const)('reads %s on a %s clock as %s', (at, clock, written) => {
+    expect(formatClock(Date.parse(at), clock)).toBe(written)
   })
 })

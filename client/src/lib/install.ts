@@ -62,8 +62,15 @@ export function needsHomeScreen(): boolean {
 }
 
 export interface Install {
-  /** What to offer right now. */
+  /** What the banner offers right now — nothing once dismissed. */
   readonly offer: InstallOffer
+  /**
+   * What the Settings entry offers (#78, from #60): [`offer`] without the
+   * dismissal. "Not now" was said to a banner; a Listener who later goes
+   * looking for the install in Settings has changed their mind, and the entry
+   * is the funnel reopened.
+   */
+  readonly entry: InstallOffer
   /** Be told when [`offer`] changes; returns the release. The browser decides
    *  when a page qualifies to be installed, and it is rarely the moment the
    *  page loaded. */
@@ -109,6 +116,16 @@ export function createInstall({
     changes.changed()
   }
 
+  /** What this browser could install right now, whatever anybody said to the
+   *  banner. */
+  const available = (): InstallOffer => {
+    if (installed || isInstalled()) return 'none'
+    if (pending) return 'prompt'
+    // No dialog, but a browser that can install: the Share sheet is the
+    // only route, so the app explains it (design brief 19).
+    return needsHomeScreen() ? 'manual' : 'none'
+  }
+
   const dismiss = () => {
     dismissed = true
     writeStored(storage, DISMISSED_KEY, 'true')
@@ -124,11 +141,11 @@ export function createInstall({
     subscribe: changes.subscribe,
 
     get offer(): InstallOffer {
-      if (dismissed || installed || isInstalled()) return 'none'
-      if (pending) return 'prompt'
-      // No dialog, but a browser that can install: the Share sheet is the
-      // only route, so the app explains it (design brief 19).
-      return needsHomeScreen() ? 'manual' : 'none'
+      return dismissed ? 'none' : available()
+    },
+
+    get entry(): InstallOffer {
+      return available()
     },
 
     async install() {

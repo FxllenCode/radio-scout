@@ -1,6 +1,6 @@
 import { AdminGate, Placeholder, SignOutButton } from '@/components/admin/AdminUi'
 import { Screen } from '@/components/layout/Screen'
-import { StatusLed } from '@/components/StatusLed'
+import { StatusLamp } from '@/components/Led'
 import { formatCallTime } from '@/lib/archive'
 import { formatBytes } from '@/lib/events'
 import type { LedColor } from '@/lib/led'
@@ -81,7 +81,7 @@ function Report({ status }: { status: InstanceStatus }) {
     <div className="mt-3 space-y-4">
       <section className="rounded-xl border border-border bg-card px-4 py-4">
         <p className="flex items-center gap-2 text-sm">
-          <StatusLed color={LED[verdict]} size={10} pulse={verdict === 'ok'} />
+          <StatusLamp color={LED[verdict]} size={10} pulse={verdict === 'ok'} />
           <span className="font-semibold">{VERDICT[verdict]}</span>
           <span className="font-mono text-xs text-muted-foreground">
             up {formatUptime(status.uptimeSeconds)} · v{status.version}
@@ -94,7 +94,7 @@ function Report({ status }: { status: InstanceStatus }) {
                 key={concern.id}
                 className="flex items-start gap-2 font-mono text-xs text-muted-foreground"
               >
-                <StatusLed color={LED[concern.health]} size={7} className="mt-1 shrink-0" />
+                <StatusLamp color={LED[concern.health]} size={7} className="mt-1 shrink-0" />
                 {concern.message}
               </li>
             ))}

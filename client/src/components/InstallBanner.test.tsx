@@ -10,7 +10,14 @@ import {
 } from '@/test/install'
 import { renderWithProviders } from '@/test/utils'
 
+import { useInstall } from '@/hooks/useInstall'
+
 import { InstallBanner } from './InstallBanner'
+
+/** The banner as the shell mounts it, over the page's one install handle. */
+function Banner() {
+  return <InstallBanner install={useInstall()} />
+}
 
 // A browser may have no storage at all (this one doesn't) — clear whatever is
 // there, so a dismissal in one test can't decide the next one.
@@ -18,7 +25,7 @@ beforeEach(() => globalThis.localStorage?.clear())
 
 describe('InstallBanner', () => {
   it('offers to install once the browser volunteers a prompt', async () => {
-    renderWithProviders(<InstallBanner />)
+    renderWithProviders(<Banner />)
     expect(screen.queryByText(/install radio-scout/i)).not.toBeInTheDocument()
 
     let event!: FakeInstallPromptEvent
@@ -36,7 +43,7 @@ describe('InstallBanner', () => {
   it('shows the Share-sheet steps where there is no install dialog', () => {
     beIosSafari()
 
-    renderWithProviders(<InstallBanner />)
+    renderWithProviders(<Banner />)
 
     expect(screen.getByText(/add to home screen/i)).toBeInTheDocument()
     expect(
@@ -45,7 +52,7 @@ describe('InstallBanner', () => {
   })
 
   it('goes away when dismissed, and does not come back', async () => {
-    renderWithProviders(<InstallBanner />)
+    renderWithProviders(<Banner />)
     act(() => void offerInstall())
 
     await userEvent.click(
@@ -58,7 +65,7 @@ describe('InstallBanner', () => {
   })
 
   it('is accessible', async () => {
-    const { container } = renderWithProviders(<InstallBanner />)
+    const { container } = renderWithProviders(<Banner />)
     act(() => void offerInstall())
 
     await expect(axe(container)).resolves.toHaveNoViolations()

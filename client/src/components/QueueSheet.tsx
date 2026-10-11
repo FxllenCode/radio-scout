@@ -43,7 +43,8 @@
 import { FastForward, Play, SkipForward, X } from 'lucide-react'
 
 import { useClock } from '@/hooks/useInstance'
-import { formatCallTime } from '@/lib/archive'
+import { useNow } from '@/hooks/useNow'
+import { formatRowTime } from '@/lib/archive'
 import { talkgroupName, systemName } from '@/lib/call'
 import {
   CATCHUP_RATE,
@@ -64,11 +65,12 @@ import {
 } from '@/store/live'
 
 import { Sheet, SheetAction } from './Sheet'
-import { StatusLed } from './StatusLed'
+import { ChannelLed } from './Led'
 import { UnitLink } from './UnitLink'
 
 export function QueueSheet({ onClose }: { onClose: () => void }) {
   const clock = useClock()
+  const now = useNow(true, 15_000)
   const dispatch = useAppDispatch()
   const queue = useAppSelector(selectQueue)
   const catchingUp = useAppSelector(selectIsCatchingUp)
@@ -128,13 +130,13 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
           >
             {queue.map((call) => (
               <li key={call.id} className="flex items-center gap-2 px-3 py-2">
-                <StatusLed color={ledForCall(call)} size={10} />
+                <ChannelLed color={ledForCall(call)} size={10} />
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate font-mono text-sm leading-tight">
                     {talkgroupName(call)}
                   </span>
                   <span className="truncate font-mono text-[10px] text-muted-foreground">
-                    {systemName(call)} · {formatCallTime(call.timestamp, clock)}
+                    {systemName(call)} · {formatRowTime(call.timestamp, clock, now)}
                   </span>
                 </span>
                 {/* Not inside a row-wide button: an anchor within a button is

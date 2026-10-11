@@ -15,7 +15,7 @@ describe('App', () => {
     ).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'LIVE' })).toBeInTheDocument()
     expect(
-      await screen.findByText(/waiting for the first call/i),
+      await screen.findByText('Listening — nothing on the air.'),
     ).toBeInTheDocument()
   })
 
@@ -39,6 +39,21 @@ describe('App', () => {
 
     expect(screen.getByText(/new version is ready/i)).toBeInTheDocument()
     expect(screen.queryByText(/install radio-scout/i)).not.toBeInTheDocument()
+  })
+
+  /** Waving the update off (#78) hands the slot back: the version still
+   *  applies on the next cold start, and the install was never answered. */
+  it('gives the slot back to the install offer once the update is waved off', async () => {
+    const user = userEvent.setup()
+    const container = installServiceWorker()
+    renderApp('/')
+    act(() => void offerInstall())
+    await deploy(container)
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss update notice' }))
+
+    expect(screen.queryByText(/new version is ready/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/install radio-scout/i)).toBeInTheDocument()
   })
 })
 

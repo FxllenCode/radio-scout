@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
 
+import { useOnline } from '@/hooks/useOnline'
+
 import {
   connectLiveFeed,
   type LiveFeedHandle,
@@ -110,6 +112,14 @@ export function LiveFeedLink() {
   useEffect(() => {
     feed.current?.subscribe(matrix)
   }, [matrix])
+
+  // The network coming back is the news a backoff is waiting for (#78). A
+  // phone that spent ten minutes in a tunnel has doubled its way to a thirty
+  // second wait, and would otherwise sit most of it out on a working network.
+  const online = useOnline()
+  useEffect(() => {
+    if (online) feed.current?.retryNow()
+  }, [online])
 
   return null
 }

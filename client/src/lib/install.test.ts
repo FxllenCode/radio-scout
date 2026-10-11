@@ -129,4 +129,49 @@ describe('install', () => {
       expect(install.offer).toBe('none')
     })
   })
+
+  /**
+   * What Settings offers (#78, from #60): the funnel, reopened. The banner's
+   * "not now" was about the banner — a Listener who later goes looking for the
+   * install has changed their mind, and the entry is where they look.
+   */
+  describe('the Settings entry', () => {
+    it('still offers the prompt the banner was dismissed over', async () => {
+      const install = createInstall({ storage: fakeStorage() })
+      const event = offerInstall()
+      install.dismiss()
+
+      expect(install.offer).toBe('none')
+      expect(install.entry).toBe('prompt')
+      expect(await install.install()).toBe('accepted')
+      expect(event.prompted).toBe(1)
+    })
+
+    it('still offers the Share-sheet steps on iOS after a dismissal', () => {
+      beIosSafari()
+      const install = createInstall({ storage: fakeStorage() })
+      install.dismiss()
+
+      expect(install.entry).toBe('manual')
+    })
+
+    /** Nothing to reopen: already installed, or a browser that cannot. */
+    it.each([
+      ['installed on iOS', () => beIosSafari({ installed: true })],
+      ['running standalone', () => beStandalone()],
+      ['a browser with no way to install', () => {}],
+    ])('offers nothing when %s', (_case, be) => {
+      be()
+
+      expect(createInstall({ storage: fakeStorage() }).entry).toBe('none')
+    })
+
+    it('offers nothing once the install has completed', () => {
+      const install = createInstall({ storage: fakeStorage() })
+      offerInstall()
+      completeInstall()
+
+      expect(install.entry).toBe('none')
+    })
+  })
 })

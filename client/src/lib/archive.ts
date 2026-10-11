@@ -94,12 +94,94 @@ export function formatCallTime(ms: number | undefined, clock: TimeFormat): strin
   if (ms === undefined) return '—'
   const at = new Date(ms)
   if (Number.isNaN(at.getTime())) return '—'
-  const pad = (value: number) => String(value).padStart(2, '0')
-  const date = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
+  return `${dateOf(at)} ${timeOf(at, clock)}`
+}
+
+const pad = (value: number) => String(value).padStart(2, '0')
+
+/** `YYYY-MM-DD`, in the listener's timezone. */
+const dateOf = (at: Date) =>
+  `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
+
+/** `HH:MM:SS` on the Operator's clock, padded either way. */
+function timeOf(at: Date, clock: TimeFormat): string {
   const rest = `${pad(at.getMinutes())}:${pad(at.getSeconds())}`
   const hours = at.getHours()
-  if (clock === '24h') return `${date} ${pad(hours)}:${rest}`
-  return `${date} ${pad(hours % 12 || 12)}:${rest} ${hours < 12 ? 'AM' : 'PM'}`
+  if (clock === '24h') return `${pad(hours)}:${rest}`
+  return `${pad(hours % 12 || 12)}:${rest} ${hours < 12 ? 'AM' : 'PM'}`
+}
+
+/**
+ * A Call's time in a list a Listener reads (#78): the date only when it is not
+ * today.
+ *
+ * [`formatCallTime`]'s full stamp on every row was 125 pixels at phone width —
+ * the single largest thing in a RECENT or search row, and the reason the
+ * Talkgroup's name was the part that gave way. A date that is today's says
+ * nothing a Listener does not already know. The full stamp is still the row's
+ * `title` and its `<time dateTime>`, so it is one hover or one screen-reader
+ * query away. The Operator's surfaces — logs, keys, shares — keep the full
+ * stamp, because an audit trail is read days later.
+ *
+ * `now` is handed in rather than read, so the answer is a function of its
+ * arguments and a test can stand on a known day.
+ */
+export function formatRowTime(
+  ms: number | undefined,
+  clock: TimeFormat,
+  now: number,
+): string {
+  if (ms === undefined) return '—'
+  const at = new Date(ms)
+  if (Number.isNaN(at.getTime())) return '—'
+  const time = timeOf(at, clock)
+  return dateOf(at) === dateOf(new Date(now)) ? time : `${dateOf(at)} ${time}`
+}
+
+/** The time now, as the Live screen's clock reads it (#78): hours and minutes
+ *  on the Operator's clock — a wall clock, not a log stamp. */
+export function formatClock(ms: number, clock: TimeFormat): string {
+  const at = new Date(ms)
+  const minutes = pad(at.getMinutes())
+  const hours = at.getHours()
+  if (clock === '24h') return `${pad(hours)}:${minutes}`
+  return `${pad(hours % 12 || 12)}:${minutes} ${hours < 12 ? 'AM' : 'PM'}`
+}
+
+/** How long after a Call ends it can arrive and still be "now" — an upload
+ *  takes seconds, a backlog takes minutes. */
+const LATE_AFTER_MS = 60_000
+
+/**
+ * How late a Call is being heard, or `null` while it is current (#78).
+ *
+ * A **Listening queue** backlog, a **Backfill**, **Catch-up** and a **Delay**
+ * all play Calls minutes after the radio keyed, and a display reading only
+ * `14:32:05` passes every one of them off as happening now — at 2 a.m. nobody
+ * does that arithmetic. So a late Call says how late, in the words a Listener
+ * would use.
+ *
+ * Measured from when the transmission **ended**, where the duration is known:
+ * a recorder uploads once the Talkgroup unkeys, so a forty-second dispatch is
+ * forty seconds "old" by its start time the instant it arrives, and calling it
+ * late would make the word mean nothing. A stamp in the future — a recorder
+ * whose clock runs ahead — is not late either.
+ */
+export function lateness(
+  call: { timestamp?: number; durationMs?: number },
+  now: number,
+): string | null {
+  if (call.timestamp === undefined) return null
+  const late = now - (call.timestamp + (call.durationMs ?? 0))
+  if (!(late >= LATE_AFTER_MS)) return null
+  const minutes = Math.floor(late / 60_000)
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.floor(minutes / 60)
+  // Past a day the minutes are noise — a Delay or a long-closed app, not a
+  // backlog anybody is counting down.
+  if (hours >= 24) return `${Math.floor(hours / 24)} d ago`
+  const rest = minutes % 60
+  return rest === 0 ? `${hours} h ago` : `${hours} h ${rest} min ago`
 }
 
 /** How long a transmission was (#42, spec US 8), in the shape a scanner

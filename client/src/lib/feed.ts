@@ -189,6 +189,21 @@ export interface FeedReadout {
 }
 
 /**
+ * What the readout knows beyond the feed's standing — each a refinement of
+ * one state's words, never a different state.
+ */
+export interface ReadoutFacts {
+  /** Why the server last turned this connection away, until it next takes one
+   *  in (#77) — the `refused` frame's slug. */
+  refused?: string | null
+  /** The device itself has no network (`navigator.onLine`, #78). */
+  offline?: boolean
+  /** The Instance has no System yet — nothing has ever been ingested — so a
+   *  quiet feed is a setup still to be done rather than a lull (#78). */
+  firstRun?: boolean
+}
+
+/**
  * Everything the screen says about why it is quiet, from one answer.
  *
  * The dot, the word and the prose are decided together and in one place, so a
@@ -202,22 +217,39 @@ export interface FeedReadout {
  * but two situations, and the first seconds of every visit are the *other* one.
  * Saying the server is unreachable while we are in the act of reaching it would
  * make the message worthless the rest of the time.
+ *
+ * **Offline outranks everything else Feed down could say** (#78). With no
+ * network a reconnect in flight is going nowhere, and a refusal the server sent
+ * before the device dropped describes a connection that no longer exists — and
+ * of all of them it is the one a Listener can do something about, so it must
+ * not read like the server's fault. rdio shows the same spinner for both.
  */
 export function feedReadout(
   status: FeedStatus,
   link: LiveStatus,
-  refused?: string | null,
+  { refused, offline, firstRun }: ReadoutFacts = {},
 ): FeedReadout {
+  if (status === 'down' && offline) return OFFLINE
   if (status === 'down' && refused) return turnedAway(refused)
   switch (status) {
     case 'live':
       return {
         badge: { label: 'connected', color: 'green', pulse: true },
-        empty: {
-          headline: 'Waiting for the first call…',
-          detail:
-            'Point a Trunk Recorder or SDRTrunk instance at this server and calls for your selected talkgroups will play here automatically.',
-        },
+        // The setup sentence only where there is setup still to do. Every
+        // other quiet is a Listener on a working Instance between Calls, and
+        // telling them to point a recorder at the server is an instruction
+        // for somebody else at the moment they wonder if something is wrong.
+        empty: firstRun
+          ? {
+              headline: 'Waiting for the first call…',
+              detail:
+                'Point a Trunk Recorder or SDRTrunk instance at this server and calls for your selected talkgroups will play here automatically.',
+            }
+          : {
+              headline: 'Listening — nothing on the air.',
+              detail:
+                'Calls on your selected talkgroups play here the moment they happen.',
+            },
       }
     // Amber and still for both of the Listener's own silences: neither is a
     // fault, and the words are what say which of them it is.
@@ -250,14 +282,29 @@ export function feedReadout(
             },
           }
         : {
+            // Not "calls are still being recorded": the device is online, so
+            // the likeliest thing that is down is the server — and then that
+            // is the one thing that is not true.
             badge: { label: 'NO LINK', color: 'red', pulse: false },
             empty: {
-              headline: 'No link to the server.',
+              headline: 'The server isn\'t answering.',
               detail:
-                'Nothing can reach you until the connection is back — it is being retried. Calls that arrive meanwhile are still recorded, and a brief gap is filled in for you.',
+                'Your connection is fine — the scanner itself is down or out of reach. This keeps retrying on its own.',
             },
           }
   }
+}
+
+/** **Feed down** because this device has no network (#78). Red, because
+ *  nothing is reaching the Listener; still, because nothing can be attempted
+ *  until it is back. */
+const OFFLINE: FeedReadout = {
+  badge: { label: 'OFFLINE', color: 'red', pulse: false },
+  empty: {
+    headline: 'This device is offline.',
+    detail:
+      'Nothing can reach you without a network. Calls are still being recorded, and the feed picks up by itself when you are back — a brief gap is filled in for you.',
+  },
 }
 
 /**

@@ -78,6 +78,10 @@ export interface LiveFeedHandle {
   subscribe(subscription: Subscription): void
   /** Close for good — no further reconnects. */
   close(): void
+  /** The network is back (#78): if a reconnect is waiting out its backoff,
+   *  make it now and start the backoff afresh. A connection that is up, or
+   *  one closed for good, is left as it is. */
+  retryNow(): void
 }
 
 const FIRST_RETRY_MS = 1_000
@@ -121,6 +125,9 @@ export function connectLiveFeed(
   }
 
   function open() {
+    // No reconnect is waiting once one is being made — which is what lets
+    // `retryNow` tell a backoff apart from a connection that is up.
+    retryTimer = undefined
     handlers.onStatus('connecting')
     socket = new WebSocket(liveFeedUrl(location, grant))
     /**
@@ -182,6 +189,12 @@ export function connectLiveFeed(
       closed = true
       clearTimeout(retryTimer)
       socket?.close()
+    },
+    retryNow() {
+      if (closed || retryTimer === undefined) return
+      clearTimeout(retryTimer)
+      retry = retryMs
+      open()
     },
   }
 }

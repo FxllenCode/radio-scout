@@ -32,6 +32,7 @@ import {
   connecting,
   disconnected,
   expireAvoids,
+  gapped,
   lagged,
   liveReducer,
   received,
@@ -52,6 +53,9 @@ import {
   selectLiveMatrix,
   selectLiveStatus,
   selectMissed,
+  selectMissedFrom,
+  selectHasGap,
+  missedCleared,
   selectPlayId,
   selectPriority,
   selectIsPriority,
@@ -1903,5 +1907,89 @@ describe('applying a Selection from a link (#61, spec US 30)', () => {
   it('is nothing to undo when no link has been applied', () => {
     const before = reduce(connected())
     expect(liveReducer(before, undoSelectionLink())).toBe(before)
+  })
+})
+
+/**
+ * Where the missed counter's gap begins (#78) — what lets it open Search on
+ * exactly the stretch the Listener did not hear.
+ *
+ * A lower bound, always: the earliest Call known dropped, or — where the server
+ * dropped Calls it could not name — the newest Call this Listener *did* get,
+ * which everything dropped came after. Never later than a Call missed, or the
+ * search would open past the start of the gap.
+ */
+describe('the missed window (#78)', () => {
+  const at = (id: number, timestamp: number): Call => ({ ...call(id), timestamp })
+
+  it('is unknown while nothing has been missed', () => {
+    const state = reduce(...arrive(at(1, 5_000)))
+
+    expect(selectMissedFrom(rootState(state))).toBeUndefined()
+  })
+
+  it('starts at the oldest Call the queue cap gave up', () => {
+    const flood = Array.from({ length: QUEUE_LIMIT + 3 }, (_, n) => at(n + 1, 10_000 + n * 1_000))
+    const state = reduce(...arrive(...flood))
+
+    // The first Call played; the next two queued were the stalest to go.
+    expect(selectMissedFrom(rootState(state))).toBe(11_000)
+  })
+
+  it('starts at the oldest Call a jump to the newest skipped', () => {
+    const state = reduce(
+      ...arrive(at(1, 1_000), at(2, 2_000), at(3, 3_000), at(4, 4_000)),
+      jumpToNewest(),
+    )
+
+    expect(selectMissedFrom(rootState(state))).toBe(2_000)
+  })
+
+  /** The server says how many it dropped, never which — so the gap starts at
+   *  the newest Call that did arrive, which every dropped one came after. */
+  it.each([
+    ['lagged', () => lagged(5)],
+    ['a Backfill gap', () => gapped()],
+  ])('starts at the newest Call heard before %s', (_case, notice) => {
+    const state = reduce(...arrive(at(1, 9_000), at(2, 7_000)), notice())
+
+    expect(selectMissedFrom(rootState(state))).toBe(9_000)
+  })
+
+  it('keeps the earliest start as more is missed', () => {
+    const state = reduce(
+      ...arrive(at(1, 1_000), at(2, 2_000), at(3, 3_000)),
+      jumpToNewest(),
+      ...arrive(at(4, 8_000)),
+      lagged(2),
+    )
+
+    expect(selectMissedFrom(rootState(state))).toBe(2_000)
+  })
+
+  /** A silence the Listener chose is not part of what they missed — the
+   *  counter's own rule (`turnFeedOff`), applied to where the gap begins. */
+  it('does not reach back past a switch-off for its start', () => {
+    const state = reduce(...arrive(at(1, 1_000)), turnFeedOff(), turnFeedOn(), lagged(2))
+
+    expect(selectMissed(rootState(state))).toBe(2)
+    expect(selectMissedFrom(rootState(state))).toBeUndefined()
+  })
+
+  it('has no start to offer when nothing was ever heard before the drop', () => {
+    const state = reduce(lagged(3))
+
+    expect(selectMissed(rootState(state))).toBe(3)
+    expect(selectMissedFrom(rootState(state))).toBeUndefined()
+  })
+
+  /** Looking at the gap is what clears it: the counter is "what you have not
+   *  seen yet", and the Listener has just gone to see it. */
+  it('clears the count, the gap and its start once looked at', () => {
+    const state = reduce(...arrive(at(1, 1_000)), lagged(4), gapped(), missedCleared())
+
+    expect(selectMissed(rootState(state))).toBe(0)
+    expect(selectHasGap(rootState(state))).toBe(false)
+    expect(selectMissedFrom(rootState(state))).toBeUndefined()
   })
 })

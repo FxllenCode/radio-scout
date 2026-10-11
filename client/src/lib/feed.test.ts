@@ -8,6 +8,7 @@ import {
   type Controls,
   type FeedBadge,
   type FeedStatus,
+  type ReadoutFacts,
 } from './feed'
 import type { LiveStatus } from './liveFeed'
 
@@ -214,14 +215,31 @@ describe('controlsFor', () => {
 const READOUT_CASES: {
   status: FeedStatus
   link: LiveStatus
+  /** The rest of what the readout is told — the device's network, and whether
+   *  the Instance has a System yet. */
+  facts?: ReadoutFacts
   badge: FeedBadge
   headline: string
   /** A phrase only this state's `detail` says. */
   says: string
 }[] = [
   {
+    // The quiet a Listener hears most: a working Instance between Calls. It
+    // used to tell every one of them to point a Trunk Recorder at the server
+    // (#78) — setup instructions for somebody else, at the moment a Listener
+    // is wondering whether anything is wrong.
     status: 'live',
     link: 'connected',
+    badge: { label: 'connected', color: 'green', pulse: true },
+    headline: 'Listening — nothing on the air.',
+    says: 'play here the moment they happen',
+  },
+  {
+    // The one quiet where the setup sentence is the right answer: no recorder
+    // has ever sent anything, so the Instance has no Systems at all.
+    status: 'live',
+    link: 'connected',
+    facts: { firstRun: true },
     badge: { label: 'connected', color: 'green', pulse: true },
     headline: 'Waiting for the first call…',
     says: 'Point a Trunk Recorder or SDRTrunk instance at this server',
@@ -245,11 +263,14 @@ const READOUT_CASES: {
     says: 'Go back to the live feed',
   },
   {
+    // The device is online and the server is not answering (#78). Not "calls
+    // are still being recorded": if the server is what is down, that is the
+    // one thing that is not true.
     status: 'down',
     link: 'offline',
     badge: { label: 'NO LINK', color: 'red', pulse: false },
-    headline: 'No link to the server.',
-    says: 'until the connection is back',
+    headline: 'The server isn\'t answering.',
+    says: 'Your connection is fine',
   },
   {
     // Still **Feed down** as far as the cause goes — but a connection being
@@ -262,7 +283,43 @@ const READOUT_CASES: {
     headline: 'Connecting to the server…',
     says: 'as soon as the connection is up',
   },
+  {
+    // The device has no network (#78): the other half of **Feed down**, and
+    // the half that is the Listener's to fix — so it must not read like the
+    // server's fault. Still, because nothing can be attempted until it is back.
+    status: 'down',
+    link: 'offline',
+    facts: { offline: true },
+    badge: { label: 'OFFLINE', color: 'red', pulse: false },
+    headline: 'This device is offline.',
+    says: 'still being recorded',
+  },
 ]
+
+/** No network is no network, however far the socket had got: a reconnect in
+ *  flight, or a refusal the server sent before the device dropped, are both
+ *  stale the moment it goes. */
+describe('feedReadout, offline', () => {
+  it.each([
+    ['connecting', undefined],
+    ['offline', undefined],
+    ['connected', 'instance-full'],
+  ] as const)('reads OFFLINE over a %s link (refused: %s)', (link, refused) => {
+    expect(feedReadout('down', link, { offline: true, refused }).badge.label).toBe('OFFLINE')
+  })
+
+  /** The Listener's own silences are theirs whatever the network is doing —
+   *  a Listener who switched off on a train is still switched off. */
+  it.each(['off', 'playback'] as const)('leaves %s its own words', (status) => {
+    expect(feedReadout(status, 'offline', { offline: true }).badge.label).not.toBe('OFFLINE')
+  })
+
+  /** A live feed is, by definition, reaching us — a stale `navigator.onLine`
+   *  does not get to say otherwise. */
+  it('never reads a delivering feed as offline', () => {
+    expect(feedReadout('live', 'connected', { offline: true }).badge.label).toBe('connected')
+  })
+})
 
 /** What a Listener turned away is told (#77): *why*, in words that say what
  *  to do about it — which for a full Instance is nothing but wait. */
@@ -272,7 +329,7 @@ describe('feedReadout, turned away', () => {
     ['access-connection-limit', 'CODE IN USE', 'Your access code is in use elsewhere.', 'another device'],
     ['something-new', 'REFUSED', 'The server turned this connection away.', 'keeps trying'],
   ])('reads %s as %s', (reason, label, headline, says) => {
-    const readout = feedReadout('down', 'connected', reason)
+    const readout = feedReadout('down', 'connected', { refused: reason })
 
     expect(readout.badge.label).toBe(label)
     // Being retried, so it pulses; not a fault on the Listener's side, so it
@@ -286,15 +343,15 @@ describe('feedReadout, turned away', () => {
   /** A refusal is about the *feed*; the Listener's own choices still speak
    *  for themselves. */
   it('leaves the Listener\'s own silences their own words', () => {
-    expect(feedReadout('off', 'connected', 'instance-full').badge.label).toBe('FEED OFF')
+    expect(feedReadout('off', 'connected', { refused: 'instance-full' }).badge.label).toBe('FEED OFF')
   })
 })
 
 describe('feedReadout', () => {
   it.each(READOUT_CASES)(
     'reads $badge.label for $status',
-    ({ status, link, badge, headline, says }) => {
-      const readout = feedReadout(status, link)
+    ({ status, link, facts, badge, headline, says }) => {
+      const readout = feedReadout(status, link, facts)
 
       expect(readout.badge).toEqual(badge)
       expect(readout.empty.headline).toBe(headline)
@@ -306,14 +363,15 @@ describe('feedReadout', () => {
    *  whether anything is wrong. */
   it('is green only when Calls are actually arriving', () => {
     const green = READOUT_CASES.filter(({ badge }) => badge.color === 'green')
-    expect(green.map(({ status }) => status)).toEqual(['live'])
+    expect(green.length).toBeGreaterThan(0)
+    expect(new Set(green.map(({ status }) => status))).toEqual(new Set(['live']))
   })
 
   /** Each state's phrase belongs to it alone, or the assertions above would pass
    *  on a readout that answered a different question. */
   it('says something different in every state', () => {
     const details = READOUT_CASES.map(
-      ({ status, link }) => feedReadout(status, link).empty.detail,
+      ({ status, link, facts }) => feedReadout(status, link, facts).empty.detail,
     )
     expect(new Set(details).size).toBe(READOUT_CASES.length)
   })

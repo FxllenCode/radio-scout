@@ -301,6 +301,47 @@ describe('live feed client', () => {
       expect(lastSub()).toEqual({ t: 'sub', all: true, sel: {}, since: 9 })
     })
 
+    /** The network coming back is news the backoff cannot have (#78): a phone
+     *  that spent five minutes in a tunnel has doubled its way to a thirty
+     *  second wait, and would sit out most of it with a working network. */
+    it('tries again at once when told the network is back', async () => {
+      let drop = true
+      onConnect = (client) => {
+        if (drop) setTimeout(() => client.close(), 0)
+      }
+      // A wait no test would sit out: only being told can bring it back.
+      connect({ retryMs: 60_000 })
+      await vi.waitFor(() => expect(connections).toBe(1))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      drop = false
+      handle!.retryNow()
+
+      await vi.waitFor(() => expect(connections).toBe(2))
+    })
+
+    it('leaves a connection that is up alone', async () => {
+      const recorder = connect()
+      await vi.waitFor(() => expect(recorder.statuses).toContain('connected'))
+
+      handle!.retryNow()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(connections).toBe(1)
+    })
+
+    it('does not come back once closed for good, whatever it is told', async () => {
+      onConnect = (client) => setTimeout(() => client.close(), 0)
+      connect({ retryMs: 60_000 })
+      await vi.waitFor(() => expect(connections).toBe(1))
+      handle!.close()
+
+      handle!.retryNow()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(connections).toBe(1)
+    })
+
     it('stops trying once the feed is closed for good', async () => {
       onConnect = (client) => setTimeout(() => client.close(), 0)
       connect({ retryMs: 1 })

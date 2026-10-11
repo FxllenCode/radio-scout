@@ -27,6 +27,7 @@ import {
   pause,
   previousCall,
   progressed,
+  refusedToPlay,
   resume,
   selectHasKeepAlive,
   selectIsBridging,
@@ -195,9 +196,15 @@ export function CallPlayer() {
     // is still the one playing: loading the next Call *also* rejects the
     // pending `play()`, and that rejection means the queue moved on, not that
     // the browser refused us.
+    //
+    // *Which* refusal decides what the screen asks for (#78): the autoplay
+    // policy is fixed by a tap, and nothing else is — a file the browser cannot
+    // decode stays a plain pause rather than promising what a tap cannot do.
     let superseded = false
-    audio.play()?.catch(() => {
-      if (!superseded) dispatch(pause())
+    audio.play()?.catch((error: unknown) => {
+      if (superseded) return
+      const policy = error instanceof DOMException && error.name === 'NotAllowedError'
+      dispatch(policy ? refusedToPlay() : pause())
     })
     return () => {
       superseded = true
