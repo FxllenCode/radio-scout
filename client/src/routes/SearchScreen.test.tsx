@@ -2284,6 +2284,22 @@ describe('Search on a phone (#78)', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  /** The sheet's Star is the row's Star: tapped once, the sheet that opens
+   *  next offers to take it back. */
+  it('stars from the sheet, and offers to unstar after', async () => {
+    const user = userEvent.setup()
+    renderApp('/search')
+    const rows = await resultRows()
+
+    await user.click(within(rows[0]).getByRole('button', { name: /^More for / }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^Star / }))
+    await user.click(within(rows[0]).getByRole('button', { name: /^More for / }))
+
+    expect(
+      await within(screen.getByRole('dialog')).findByRole('button', { name: /^Unstar / }),
+    ).toHaveTextContent('Unstar')
+  })
+
   /** An encrypted Call has no audio, and so nothing in its sheet that is
    *  about audio (spec US 9) — the links and the Star still are. */
   it('offers no audio from the sheet of an encrypted Call', async () => {

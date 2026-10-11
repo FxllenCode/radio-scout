@@ -65,7 +65,7 @@ Full rationale: [ADR-0009](docs/adr/0009-testing-strategy.md) (pyramid, integrat
 
 **The pyramid (where each layer pays off):**
 - **Backend** — unit (`#[cfg(test)] mod tests`, incl. edge-branch tables) for pure logic; **integration** (`tests/`, real HTTP/WS via the harness in `tests/common/`) for behavior + contracts. **Dual-dialect Postgres** in CI (#22: a `postgres:17` service, a database per test) and **real S3** (#35: Garage in `Backend`, RustFS in an advisory job of its own since #115, a bucket per test). rdio-scanner wire responses pinned with **insta** snapshots.
-- **Frontend** — Vitest + RTL **integration is the workhorse** (network mocked with **MSW** at the boundary — never fetch/module mocking); unit for pure logic (`store/`, `lib/`, `utils/` at per-file 100%); **Vitest Browser Mode** (real browser) for audio-player + Media-Session component wiring — **wired up in #34**, `client/src/**/*.browser.test.tsx`, `npm run test:browser`; **narrow Playwright E2E** (PWA install/offline/service-worker) — **wired up in #15**, `client/e2e/`, `npm run test:e2e`.
+- **Frontend** — Vitest + RTL **integration is the workhorse** (network mocked with **MSW** at the boundary — never fetch/module mocking); unit for pure logic (`store/`, `lib/`, `utils/` at per-file 100%); **Vitest Browser Mode** (real browser) for audio-player + Media-Session wiring (#34) and what only real CSS can measure — 44px targets, 16px fields, AA contrast (#78) — `client/src/**/*.browser.test.tsx`, `npm run test:browser`; **narrow Playwright E2E** (PWA install/offline/service-worker) — **wired up in #15**, `client/e2e/`, `npm run test:e2e`.
 - **iOS background audio, lock-screen/Control-Center controls, and Add-to-Home-Screen install are a real-device MANUAL release gate.** Playwright's WebKit is not iOS Safari and cannot validate them ([ADR-0005](docs/adr/0005-client-audio-media-session-background.md)).
 
 **The machinery** is [`docs/agents/testing.md`](docs/agents/testing.md). The rules it enforces:
@@ -205,7 +205,7 @@ npm run typecheck           # tsc -b
 npm run test                # Vitest + React Testing Library (single run)
 npm run test:watch          # Vitest watch mode
 npm run test:coverage       # Vitest with @vitest/coverage-v8 + thresholds (MSW at the network boundary)
-npm run test:browser        # Vitest Browser Mode: the audio player + Media Session in real Chromium (#34)
+npm run test:browser        # Vitest Browser Mode in real Chromium: the audio player (#34), the phone measurements (#78)
 npm run test:e2e            # Playwright: the PWA/service-worker/offline layer, over a real build
 npm run lint                # oxlint
 ```

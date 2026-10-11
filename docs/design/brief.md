@@ -9,13 +9,13 @@ Directional brief to feed into Claude Design for full mockups. Captures the desi
 - **Aesthetic:** *Modern scanner.* Clean, premium, subtly scanner-flavored — a refined status/LED indicator, crisp tabular/mono readouts, a live waveform — **not** literal skeuomorphism. "Beautiful modernized scanner."
 - **Theme:** Dark-first (used at night and in vehicles). Light mode is a later nice-to-have, not a launch requirement.
 - **Platform priority:** Mobile-first PWA, responsive up to desktop. Installable to the home screen; must feel native on a phone.
-- **Color:** Monochrome/near-black grayscale **chrome** with a single restrained accent for interactive/active/focus states. The **per-system/per-talkgroup LED colors are the primary pop of color and always carry meaning** (which service/system is talking). LED palette carried over: blue, cyan, green, magenta, orange, red, white, yellow — and, since #77, eight more after them: purple, pink, lime, teal, coral, indigo, brown, gray.
+- **Color:** Monochrome/near-black grayscale **chrome** with a single restrained accent for interactive/active/focus states. The **per-system/per-talkgroup LED colors are the primary pop of color and always carry meaning** (which service/system is talking). **Shape says which kind of light it is** (#78): a channel's LED is round, a status lamp (the feed's link, the server's health) is square — their palettes overlap, and a red Talkgroup beside a red NO LINK must not read as one alarm. LED palette carried over: blue, cyan, green, magenta, orange, red, white, yellow — and, since #77, eight more after them: purple, pink, lime, teal, coral, indigo, brown, gray.
 - **Motion:** Soft glow / subtle transitions; the live indicator and waveform convey "something is happening" without noise.
 
 ## Layout & navigation
 
 - **Mobile:** Full-screen **Live** scanner as home; a **bottom tab bar**: Live · Talkgroups · Search · Settings.
-- **Desktop:** Expands to a sidebar layout (tabs become a persistent side nav; panels can sit side-by-side).
+- **Desktop:** Expands to a sidebar layout (tabs become a persistent side nav; panels can sit side-by-side). *Built in #78: from 1024px the tabs are a side nav and the Live screen stays beside every other screen.*
 
 ## Key screens to mock
 

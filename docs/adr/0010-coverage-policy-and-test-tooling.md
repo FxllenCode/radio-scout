@@ -105,3 +105,12 @@ The ratcheting floor is *"allowed to rise, never to fall"*. That was written abo
 **In the case that prompted this, the floor did not have to move.** Measured after the removal: 100% lines, 99.69% statements, 99.73% functions, 96.61% branches, against a floor of 99/98/98/94. Branches gave up a third of a point and nothing else moved, because what was deleted was about as well covered as what remains. The permission is recorded anyway, since the next removal may not be so tidy and the honest answer then should not require re-arguing this.
 
 The alternative was to hold the number and backfill unrelated tests until it was met, which is the coverage theatre the rest of this ADR exists to reject. A rule quietly ignored once is worth less than a rule amended in the open.
+
+## Amendment (#78, 2026-10-11): Browser Mode also answers what only a stylesheet can
+
+#34 placed Browser Mode for the audio player and its Media-Session wiring. #78 gives it a second job, for the same reason it has the first: **jsdom has no stylesheet.** It has class names, so "this button is 44 pixels tall", "this field is 16px and iOS will not zoom on it" and "this grey passes AA on that card" are questions it can only answer by trusting a token — and the UI critique that opened #78 found every one of them wrong on a live instance.
+
+So the browser config compiles Tailwind, and `client/src/routes/phone.browser.test.tsx` measures the Listener's screens at 390 pixels — target size, type size inside controls, form-field size, axe-core `color-contrast` reading real colours, sideways scroll — plus two sheets, the Search fold, and the desk layout at 1280. `fetch` is answered by the jsdom suite's own MSW handlers through `getResponse`, so the fixtures stay one set at one boundary without a service worker. It stays **advisory**, like the rest of the layer: the patch gate and the floor are still the jsdom profile's.
+
+The one floor that *is* enforced in the jsdom run is the type floor, and it is read off the source (`client/src/typeFloor.test.ts`) rather than a render: nothing under 11px anywhere in the client, admin screens and sheets included. A Tailwind arbitrary size is a literal in the source or it is nowhere, and a floor nobody has to judge — "is this label part of a control?" — is one nothing slips under.
+

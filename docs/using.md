@@ -20,15 +20,39 @@ Calls play automatically as they arrive, filtered to the Talkgroups you selected
 shows what is playing — Talkgroup, System, tag and group, the waveform with playback position,
 frequency, TGID, the radio that keyed, and time — with an LED in the Talkgroup's colour.
 
+**Times say what you need and no more.** A Call from today shows its time alone; anything older
+carries its date (hover a time, or ask a screen reader, for the full stamp). And **a Call heard
+late says how late** — *4 min ago* under the time, in amber — because a backlog, a reconnect, a
+catch-up or an operator's delay can all play a Call minutes after it was said, and at 2 a.m. the
+time alone passes it off as happening now.
+
+**The first Call may ask for a tap.** Browsers will not play sound on a page nobody has touched,
+so on a fresh visit the card offers **Tap to listen** instead of playing. One tap and the feed is
+on for the rest of the visit. It is not paused — nothing you did stopped it — which is why it
+does not say *paused*.
+
+The header carries a **clock**, and — where the browser can — a **full screen** button; a
+double-tap on the readout does the same. The scanner on a shelf is also the clock in the room.
+
+While anything is listening — the live feed on, or a playback run going — closing the tab asks
+whether you meant to, so a stray Cmd-W on a quiet channel cannot end the night's listening
+without a word.
+
 The **UNIT** line is a name where anybody has given the radio one, and its id otherwise. Either
 way it is a link: tap it for that radio's history, which is where "who was that, and where else"
 gets answered. **RECENT** carries the same link on every row.
 
-Top right: **Q** is the listening queue, how many Calls are waiting behind this one, and a dot
+Top right: **Q** is the listening queue, how many Calls are waiting behind this one, and a lamp
 showing whether the live feed is connected. Tap the **Q** to see what is waiting — see
 [The queue](#the-queue) below. Underneath the card is **RECENT**, the handful that just played,
 so you can catch what you missed, with **SESSION LOG** beside it for everything else you have
 heard since you opened the app.
+
+When the app could not play you everything — a slow connection dropped Calls, the queue
+overflowed, or a reconnect could not reach back far enough — the card says **_n_ missed — see
+what you missed**. That is a link: it opens **Search** on the stretch you missed, oldest first,
+and clears the count. With nothing reaching you while the app is closed (see
+[No notifications](#no-notifications)), it is the way to *what happened while I wasn't looking*.
 
 On a multi-site system, the tag/group line also names the **Site** the Call was heard on, so
 simulcast coverage is legible. Single-site systems say nothing there, and neither do recorders
@@ -70,6 +94,29 @@ Talkgroup reads as *busy* instead of as a dead feed.
 | **30 / 60 / 120 MIN** | Avoid this Talkgroup, then bring it back automatically after that long. |
 | **PRIORITY** | Put this Talkgroup ahead of the others in the queue. See [Priority](#priority). |
 | **AVOIDING _n_** | Appears while anything is muted: the list of what, with one tap to let any of them back in. |
+
+### The keyboard, and a Stream Deck
+
+On a computer the controls have keys, and they work from **every tab** — the audio follows you
+around the app, so the keys do too:
+
+| Key | Does |
+| --- | --- |
+| **Space** or **K** | Pause / resume |
+| **N** or **→** | Skip |
+| **R** | Replay |
+| **A** | Avoid |
+| **H** | Hold this Talkgroup |
+| **Shift + H** | Hold this System |
+
+A key does exactly what its button would: where the button is greyed out — in playback mode, say
+— so is the key. Keys are ignored while you are typing in a box, and Space still presses whatever
+button you have tabbed to. Hover a control to see its key.
+
+**Stream Deck, media keys and headsets need nothing set up.** Radio-Scout answers the system's
+media controls, so a keyboard's play/pause and next keys, a headset's button, and an Elgato
+Stream Deck's **Multimedia** actions (*Play/Pause*, *Next Track*) all drive it — even when the
+window is not in front. There is no Stream Deck plugin, and none is needed.
 
 ### The queue
 
@@ -154,7 +201,7 @@ filling, and when you resume you are behind by however long you paused.
 
 **LIVE FEED off** stops everything. The Call playing stops, the queue empties, and the
 connection to the server closes — so an off feed costs no data and no battery, which matters on
-a phone. The header reads **FEED OFF** with an amber dot, so you can always tell "I switched
+a phone. The header reads **FEED OFF** with an amber lamp, so you can always tell "I switched
 this off" from **NO LINK**, which means the server went away.
 
 Two things follow from it being a real off:
@@ -170,31 +217,33 @@ Your choice is remembered per **Profile** (the `?id=` in the URL), so reloading 
 not blast you with audio you switched off. Anyone who never touches the toggle gets the feed
 live and playing, as before.
 
-### What the dot is telling you
+### What the lamp is telling you
 
 The header always names *why* the feed is or is not playing, because those reasons call for
-different reactions — and only some of them are yours to fix:
+different reactions — and only some of them are yours to fix. The status lamp is **square**; a
+channel's LED is **round**, so a red Talkgroup and a red *NO LINK* are never the same alarm.
 
-| Dot | Reads | What it means |
+| Lamp | Reads | What it means |
 | --- | --- | --- |
 | Green, pulsing | **connected** | Calls are arriving. This is the only green there is. |
 | Red, pulsing | **linking…** | Connecting, or reconnecting after a drop. Wait. |
-| Red, steady | **NO LINK** | The server is not reachable. It keeps retrying; a brief gap is filled in for you when it comes back. |
+| Red, steady | **OFFLINE** | *This device* has no network. Calls are still being recorded, and the feed reconnects the moment you are back — a brief gap is filled in for you. |
+| Red, steady | **NO LINK** | Your connection is fine, but the server is not answering. It keeps retrying on its own. |
 | Amber, steady | **FEED OFF** | You switched the feed off. Nothing is arriving, by your choice. |
 | Amber, steady | **PLAYBACK** | You are playing the archive, which the live feed is mutually exclusive with. |
 | Amber, pulsing | **FULL** | Every listening slot on this scanner is taken. You are let in on your own as soon as somebody leaves. |
 | Amber, pulsing | **CODE IN USE** | Your access code allows only so many connections at once, and they are all in use — close the app somewhere else, or wait. |
 
-The two steady amber states are the two silences you asked for; the red ones are the two you
-didn't, and the pulsing amber ones are the server saying *not yet* — none of them is something
+The two steady amber states are the two silences you asked for; the red ones are the ones you
+didn't — and of those, only **OFFLINE** is yours to fix — and the pulsing amber ones are the server saying *not yet* — none of them is something
 wrong with your connection.
 
-If the operator publishes it, a 👥 count beside the dot says how many people are listening right
+If the operator publishes it, a 👥 count beside the lamp says how many people are listening right
 now, you included.
 When nothing is playing, the panel spells the same thing out in words and says what to do about
 it.
 
-The Live screen's controls follow the dot: with the feed off or the archive playing, the
+The Live screen's controls follow the lamp: with the feed off or the archive playing, the
 per-Call controls are out of reach rather than present and inert. The **LIVE FEED** switch stays
 usable throughout — on **FEED OFF** it is the way back, and on **PLAYBACK** it still reads *on*,
 because the feed was never switched off: playback has simply borrowed the audio. The way out of
@@ -223,6 +272,11 @@ whichever of two things applies:
 When the feed is simply quiet, or the connection has briefly dropped, the strip says nothing:
 neither is something you can act on, and a bar on every screen for a lull is a bar you learn to
 ignore.
+
+**On a wide screen** — a laptop, a desktop, a tablet sideways — the tabs move down the left and
+the whole Live screen stays to the right of whatever else you open, so you can work through
+Search or the Talkgroups panel with the scanner in view and every control to hand. The strip is
+not drawn there; the scanner beside you is the player.
 
 **Hold and Avoid are opposites, and both are temporary.** Hold means "only this"; Avoid means
 "anything but this". A timed Avoid is the one to reach for when a Talkgroup is having a busy
@@ -361,6 +415,12 @@ nobody has named one, its radio id is there instead, which is still enough to te
 Tap it to open that radio's history: which talkgroups it uses, when it was first and last heard, and
 its calls. **UNIT** filters the search to one radio directly, if you have the number — and a fleet
 whose operator has grouped its radios answers as the whole apparatus, not just the one you typed.
+
+**On a phone the filters fold away** behind one **Filters** button that says how many are set,
+with a chip for each that removes it in one tap — so the results, not the form, are what you see
+first. Each result is two lines: the Talkgroup, then when, how long and who; ▶ plays it and ⋯
+holds the rest (star, links, play forward, download). On a wider screen everything is laid out
+at once.
 
 Each result plays in place, or downloads with the arrow. Encrypted Calls have no play or download
 button: they are metadata-only records, with a 🔒 badge and no audio behind them. **PLAYBACK MODE**, top right, switches
@@ -562,6 +622,9 @@ cannot install a web app.
 
 **Android (Chrome):** an install prompt appears, or menu → **Install app**.
 
+Dismissed the offer and changed your mind? **Settings → Install the app** offers it again — the
+prompt where the browser has one, the Share-sheet steps on iOS.
+
 Installing gives you a real app icon, no browser chrome, and — on iOS — the only reliable way
 to get background audio. The app shell also works offline: it opens and shows the interface
 without a connection. Audio itself needs the server, since Calls are not cached.
@@ -593,10 +656,16 @@ you missed while you were away is in **Search**, which is where it always was.
 
 <img src="images/settings.png" alt="The Settings screen" width="620">
 
-Whether the server is reachable — and, when the operator has provided them, a **Reference** page
-with the local codes and a **Help** link to the operator.
+Whether the server is reachable — or that *this device is offline*, which is a different thing —
+and, when the operator has provided them, a **Reference** page with the local codes and a
+**Help** link to the operator.
 
-**Audio enhancement**, **Theme** and **Admin** are listed but not built yet — they read "soon"
+**Install the app** appears while this browser can install it and has not, whether or not you
+dismissed the offer at the bottom of the screen. **A new version is ready** appears while one is
+waiting: the banner announcing it can be waved off, and the reload stays here until you take it —
+it also applies by itself the next time the app starts.
+
+**Audio enhancement** and **Theme** are listed but not built yet — they read "soon"
 because that is honest. Enhancement *works*, but it is configured on the server rather than per
 listener; see [operating.md](operating.md#audio-enhancement).
 
@@ -607,9 +676,13 @@ operator's to decide — its configuration file and its admin screens — not a 
 
 ## Troubleshooting
 
-**"unreachable" on the Settings screen, or the Live dot is not green.** The server is down or
+**"unreachable" on the Settings screen, or the Live lamp reads NO LINK.** The server is down or
 you have no route to it. The app shell still loads from cache when installed, which is why you
-can see this message at all.
+can see this message at all. If it says **OFFLINE** — or *this device is offline* — the problem
+is this device's network, not the server.
+
+**The first Call does not make a sound, and the card says *Tap to listen*.** The browser will
+not play audio on a page nobody has touched. Tap it once.
 
 **Nothing plays, but Calls are arriving.** Check the Talkgroups screen — a Talkgroup that is
 switched off, or Avoided, is silently skipped. `ALL ON` is the quick test.

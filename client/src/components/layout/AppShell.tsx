@@ -15,6 +15,7 @@ import { useCatchupQuiet } from '@/hooks/useCatchupQuiet'
 import { useHotkeys } from '@/hooks/useHotkeys'
 import { useInstall } from '@/hooks/useInstall'
 import { useLeaveGuard } from '@/hooks/useLeaveGuard'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { useInstance } from '@/hooks/useInstance'
 import { useStaleGrantWatch } from '@/hooks/useStaleGrantWatch'
 import { feedPlays } from '@/lib/feed'
@@ -23,6 +24,8 @@ import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { selectFeedStatus } from '@/store/live'
 import { selectIsLiveSource, selectStrip } from '@/store/transport'
+
+import { LiveScreen } from '@/routes/LiveScreen'
 
 import { BottomTabBar } from './BottomTabBar'
 import { ShellContext } from './shell'
@@ -42,9 +45,13 @@ import { ShellContext } from './shell'
  */
 const PLAYS_FOR_ITSELF = ['/']
 
+/** Wide enough for a side nav, the screen, and the Live scanner beside it
+ *  (#78) — Tailwind's `lg`. */
+const DESK = '(min-width: 1024px)'
+
 /** Mobile-first shell: a scrolling content area above a fixed bottom tab bar.
- *  On wider screens it centers to a comfortable column; the full desktop
- *  sidebar layout (brief item 29) is a later ticket.
+ *  From 1024 pixels it is the desktop layout (brief item 29, #78): the tabs go
+ *  down the side and the Live scanner stays beside every other screen.
  *
  *  The audio element and the live-feed socket live here, outside the router
  *  outlet, so playback and the listening queue survive moving between tabs
@@ -114,20 +121,49 @@ export function AppShell() {
 
   const strip = useAppSelector(selectStrip)
   const room = !PLAYS_FOR_ITSELF.includes(pathname)
-  const docked = room ? strip : null
+  /**
+   * A desk (#78, design brief item 29): the tabs go down the side, and the
+   * Live scanner sits beside every other screen — whole, controls and all —
+   * rather than a phone's column with a bottom bar centred on 1500 pixels.
+   * The panel *is* the player there, so the strip has nothing to add and is
+   * not drawn. Decided by a query rather than a class, so a phone never
+   * mounts the second scanner screen at all.
+   */
+  const desk = useMediaQuery(DESK)
+  const beside = desk && room
+  const docked = room && !desk ? strip : null
 
   return (
     <ShellContext value={{ update, install }}>
-      <div className="mx-auto flex min-h-[100dvh] w-full max-w-2xl flex-col">
+      <div
+        className={cn(
+          'mx-auto flex min-h-[100dvh] w-full',
+          desk ? 'max-w-7xl flex-row' : 'max-w-2xl flex-col',
+        )}
+      >
+        {desk && <BottomTabBar searchTo={lastSearch.current} layout="side" />}
         {/* Padded past the tab bar, and past the strip on every screen that can
             grow one — by *route*, never by whether something is playing. Keyed on
             the strip itself, a busy channel would shove the list under the
             Listener's thumb up and down every few seconds. A docked thing that
             covers the last row is a small lie about what the archive holds; a
             list that jumps while being read is a larger one. */}
-        <main className={cn('flex-1', room ? 'pb-36' : 'pb-24')}>
+        <main
+          className={cn(
+            'min-w-0 flex-1',
+            desk ? 'max-w-3xl pb-24' : room ? 'pb-36' : 'pb-24',
+          )}
+        >
           <Outlet />
         </main>
+        {beside && (
+          <aside
+            aria-label="Live"
+            className="sticky top-0 h-[100dvh] w-[26rem] shrink-0 overflow-y-auto border-l border-border pb-24"
+          >
+            <LiveScreen docked />
+          </aside>
+        )}
         {/* One docked column above the tab bar. A waiting version takes the
             banner slot from the install offer: it is the rarer and the more
             actionable of the two, and a listener who reloads is offered the
@@ -138,8 +174,14 @@ export function AppShell() {
             the reason the strip does: its offer has a deadline, and a Listener
             who avoids a channel and then goes looking at Talkgroups has spent
             none of it. It goes *below* the banners and above the player, so the
-            thing with a running clock is the closest to the thumb. */}
-        <div className="pointer-events-none fixed inset-x-0 bottom-16 z-40 mx-auto flex max-w-2xl flex-col gap-2 px-3">
+            thing with a running clock is the closest to the thumb. On a desk
+            there is no tab bar to sit above, so it takes the corner. */}
+        <div
+          className={cn(
+            'pointer-events-none fixed z-40 flex flex-col gap-2 px-3',
+            desk ? 'bottom-4 right-4 w-[26rem]' : 'inset-x-0 bottom-16 mx-auto max-w-2xl',
+          )}
+        >
           {update.ready && !updateWaved ? (
             <UpdateBanner apply={update.apply} onDismiss={() => setUpdateWaved(true)} />
           ) : (
@@ -150,7 +192,7 @@ export function AppShell() {
           <SelectionUndoBar />
           {docked && <MiniPlayer strip={docked} />}
         </div>
-        <BottomTabBar searchTo={lastSearch.current} />
+        {!desk && <BottomTabBar searchTo={lastSearch.current} />}
         <CallPlayer />
         <LiveFeedLink />
         <Announcer />

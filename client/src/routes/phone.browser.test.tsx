@@ -251,3 +251,26 @@ describe('sheets at phone width (#78)', () => {
     expect(await lowContrast(sheet)).toEqual([])
   })
 })
+
+/** The desk layout (#78, brief item 29), laid out for real. */
+describe('on a desk (#78)', () => {
+  it('puts the tabs down the left and the Live scanner to the right of the screen', async () => {
+    await page.viewport(1280, 800)
+    try {
+      const { root } = await onAPhone('/search')
+      const nav = root.querySelector('nav[aria-label="Primary"]')!.getBoundingClientRect()
+      const main = root.querySelector('main')!.getBoundingClientRect()
+      const live = root.querySelector('aside[aria-label="Live"]')!.getBoundingClientRect()
+
+      expect(nav.right).toBeLessThanOrEqual(main.left)
+      expect(live.left).toBeGreaterThanOrEqual(main.right)
+      // All three on screen at once, side by side, and nothing off its edge.
+      expect(live.right).toBeLessThanOrEqual(1280)
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(1280)
+      expect(smallTargets(root.querySelector('aside')!)).toEqual([])
+      expect(await lowContrast(root)).toEqual([])
+    } finally {
+      await page.viewport(390, 844)
+    }
+  })
+})

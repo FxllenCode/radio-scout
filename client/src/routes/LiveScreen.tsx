@@ -111,7 +111,7 @@ function LinkState({ badge }: { badge: FeedBadge }) {
  * holding and avoiding, so a narrowed feed stops arriving rather than arriving
  * and being thrown away.
  */
-export function LiveScreen() {
+export function LiveScreen({ docked = false }: { docked?: boolean } = {}) {
   const dispatch = useAppDispatch()
   const call = useAppSelector(selectLiveCall)
   const status = useAppSelector(selectLiveStatus)
@@ -193,6 +193,9 @@ export function LiveScreen() {
   return (
     <Screen
       title="LIVE"
+      // Beside another screen on a desk (#78), where it is the second heading
+      // on the page rather than the first.
+      heading={docked ? 2 : 1}
       status={
         <span className="inline-flex items-center gap-3">
           {/* The `Q` count was a number for four tickets, and this is where it
