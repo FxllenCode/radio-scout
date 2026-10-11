@@ -25,7 +25,7 @@ export function Screen({
       {name && (
         <p
           data-testid="instance-name"
-          className="mb-1 truncate font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground"
+          className="mb-1 truncate font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground"
         >
           {name}
         </p>

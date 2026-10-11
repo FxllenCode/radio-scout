@@ -1,5 +1,6 @@
 import {
   Download,
+  Ellipsis,
   FastForward,
   History,
   Link2,
@@ -9,7 +10,9 @@ import {
   Share2,
   SkipBack,
   SkipForward,
+  SlidersHorizontal,
   Square,
+  X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -17,9 +20,11 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { ActivityHeatmap } from '@/components/ActivityHeatmap'
 import { AddToEvent } from '@/components/AddToEvent'
 import { CallFlags } from '@/components/CallFlags'
+import { CallTime } from '@/components/CallTime'
 import { DateField, Field, controlClass } from '@/components/Field'
 import { DensityRibbon } from '@/components/DensityRibbon'
 import { ExportControl } from '@/components/ExportControl'
+import { Sheet, SheetAction } from '@/components/Sheet'
 import { Screen } from '@/components/layout/Screen'
 import { StarButton } from '@/components/StarButton'
 import { ChannelLed } from '@/components/Led'
@@ -45,7 +50,12 @@ import {
   totalOf,
 } from '@/lib/density'
 import { HOUR_MS, heatmapWindow } from '@/lib/heatmap'
-import { readSearchUrl, writeSearchUrl, type SearchUrl } from '@/lib/searchUrl'
+import {
+  filterChips,
+  readSearchUrl,
+  writeSearchUrl,
+  type SearchUrl,
+} from '@/lib/searchUrl'
 import { dvrLink } from '@/lib/dvr'
 import { useAdminSession } from '@/hooks/useAdminSession'
 import { useRunPageAhead } from '@/hooks/useRunPageAhead'
@@ -62,6 +72,8 @@ import {
 } from '@/store/api'
 import { useGrant } from '@/hooks/useGrant'
 import { useClock } from '@/hooks/useInstance'
+import { useNow } from '@/hooks/useNow'
+import { useStar } from '@/hooks/useStar'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   enterLiveFeed,
@@ -295,6 +307,25 @@ export function SearchScreen() {
 
   const linkMissing = useDeepLinkedCall(linkedCall, filters)
 
+  /**
+   * The filter form, unfolded on a phone (#78).
+   *
+   * Ten filters in two columns put the first result at y=755 of a 760-pixel
+   * screen, so on a phone the form folds away behind one control that says how
+   * many filters are set, and the chips beside it say which — each undone in
+   * one tap without unfolding anything. From `sm` up there is room for both, so
+   * the form is simply open and the toggle is not drawn.
+   */
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const chips = filterChips(filters, {
+    system: (ref) =>
+      options?.systems.find((one) => one.ref === ref)?.label ?? String(ref),
+    talkgroup: (systemRef, ref) =>
+      options?.talkgroups.find((one) => one.ref === ref && one.systemRef === systemRef)
+        ?.label ?? String(ref),
+    at: (ms) => formatCallTime(ms, clock),
+  })
+
   return (
     <Screen
       title="Search"
@@ -306,7 +337,7 @@ export function SearchScreen() {
             dispatch(mode === 'playback' ? enterLiveFeed() : enterPlaybackMode())
           }
           className={cn(
-            'rounded-md border px-2 py-1 font-mono text-[11px] uppercase tracking-wider transition-colors',
+            '-my-3 min-h-11 rounded-md border px-3 font-mono text-[11px] uppercase tracking-wider transition-colors',
             mode === 'playback'
               ? 'border-foreground text-foreground'
               : 'border-border text-muted-foreground',
@@ -316,10 +347,70 @@ export function SearchScreen() {
         </button>
       }
     >
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          aria-expanded={filtersOpen}
+          aria-controls="archive-filters"
+          onClick={() => setFiltersOpen((open) => !open)}
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border px-3 font-mono text-[11px] uppercase tracking-wider text-foreground transition-colors hover:bg-muted/40 sm:hidden"
+        >
+          <SlidersHorizontal className="size-3.5" aria-hidden />
+          {chips.length > 0 ? `Filters · ${chips.length} active` : 'Filters'}
+        </button>
+        {chips.map((chip) => (
+          <button
+            key={chip.label}
+            type="button"
+            aria-label={`Remove filter: ${chip.label}`}
+            onClick={() => goTo({ search: chip.without })}
+            className="inline-flex min-h-11 max-w-full items-center gap-1 rounded-md border border-border bg-muted/40 px-2.5 font-mono text-[11px] text-foreground transition-colors hover:bg-muted sm:hidden"
+          >
+            <span className="truncate">{chip.label}</span>
+            <X className="size-3.5 shrink-0" aria-hidden />
+          </button>
+        ))}
+        {/* What acts on the *results* rather than narrowing them stays out of
+            the fold — the same three controls on every width. */}
+        <div className="ml-auto flex items-center gap-2">
+          {/* Into the **DVR** (#63) with what is already filtered. This is the
+              gesture the feature is for — "rewind *this* channel" — and it is
+              why the DVR is reached from here rather than from a fifth tab. A
+              scope is always a Selection, so a Talkgroup filter becomes a
+              one-entry matrix and anything else opens on the Listener's own
+              scanner. */}
+          <Button asChild variant="outline" className="h-11 gap-1 px-3">
+            <Link
+              to={`/dvr?${dvrLink(filters)}`}
+              aria-label="Open these results in the DVR"
+            >
+              <History className="size-3.5" aria-hidden />
+              <span className="font-mono text-[11px] uppercase tracking-wider">
+                DVR
+              </span>
+            </Link>
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            aria-label="Copy link to this search"
+            className="size-11"
+            onClick={() => send({ search: filters, offset: windowOffset }, 'Radio-Scout search')}
+          >
+            <Link2 className="size-4" aria-hidden />
+          </Button>
+          {/* Taking these results away (#65, spec US 33). The *whole* of what
+              matched, not the page on screen — which is why it is handed the
+              filters and the total rather than the window. */}
+          <ExportControl search={filters} count={page.count} catalog={catalog} />
+        </div>
+      </div>
+
       <form
+        id="archive-filters"
         role="search"
         aria-label="Archive filters"
-        className="grid grid-cols-2 gap-2"
+        className={cn('mt-2 grid-cols-2 gap-2 sm:grid', filtersOpen ? 'grid' : 'hidden')}
         onSubmit={(event) => event.preventDefault()}
       >
         <DateField
@@ -507,7 +598,7 @@ export function SearchScreen() {
             <option value="starred">Starred only</option>
           </select>
           {catalog && (
-            <p className="font-mono text-[10px] text-muted-foreground">
+            <p className="font-mono text-[11px] text-muted-foreground">
               {starsKept(catalog.starred)}
             </p>
           )}
@@ -562,8 +653,7 @@ export function SearchScreen() {
               key={preset.id}
               type="button"
               variant="outline"
-              size="sm"
-              className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+              className="h-11 px-3 font-mono text-[11px] uppercase tracking-wider"
               onClick={() => updateFilters(rangeOf(preset.id, Date.now()))}
             >
               {preset.label}
@@ -572,49 +662,17 @@ export function SearchScreen() {
           <Button
             type="button"
             variant="outline"
-            size="sm"
             aria-label="Reset filters"
-            className="h-7 gap-1 px-2 font-mono text-[10px] uppercase tracking-wider"
+            className="h-11 gap-1 px-3 font-mono text-[11px] uppercase tracking-wider"
             onClick={() => setParams('')}
           >
             <RotateCcw className="size-3" aria-hidden />
             Reset
           </Button>
-          {/* Into the **DVR** (#63) with what is already filtered. This is the
-              gesture the feature is for — "rewind *this* channel" — and it is
-              why the DVR is reached from here rather than from a fifth tab. A
-              scope is always a Selection, so a Talkgroup filter becomes a
-              one-entry matrix and anything else opens on the Listener's own
-              scanner. */}
-          <Button asChild variant="outline" size="sm" className="h-7 gap-1 px-2">
-            <Link
-              to={`/dvr?${dvrLink(filters)}`}
-              aria-label="Open these results in the DVR"
-            >
-              <History className="size-3" aria-hidden />
-              <span className="font-mono text-[10px] uppercase tracking-wider">
-                DVR
-              </span>
-            </Link>
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            aria-label="Copy link to this search"
-            className="ml-auto h-7 px-2"
-            onClick={() => send({ search: filters, offset: windowOffset }, 'Radio-Scout search')}
-          >
-            <Link2 className="size-3.5" aria-hidden />
-          </Button>
-          {/* Taking these results away (#65, spec US 33). The *whole* of what
-              matched, not the page on screen — which is why it is handed the
-              filters and the total rather than the window. */}
-          <ExportControl search={filters} count={page.count} catalog={catalog} />
         </div>
 
         {options?.dateStartMs !== undefined && (
-          <p className="col-span-2 font-mono text-[11px] text-muted-foreground/70">
+          <p className="col-span-2 font-mono text-[11px] text-muted-foreground">
             Archive spans {formatCallTime(options.dateStartMs, clock)} –{' '}
             {formatCallTime(options.dateStopMs, clock)}
           </p>
@@ -662,9 +720,8 @@ export function SearchScreen() {
                   key={view.id}
                   type="button"
                   variant={chart === view.id ? 'secondary' : 'outline'}
-                  size="sm"
                   aria-pressed={chart === view.id}
-                  className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+                  className="h-11 px-3 font-mono text-[11px] uppercase tracking-wider"
                   onClick={() => setChart(view.id)}
                 >
                   {view.label}
@@ -768,7 +825,7 @@ export function SearchScreen() {
       <div className="mt-4 flex justify-between gap-2">
         <Button
           variant="outline"
-          size="sm"
+          className="h-11"
           disabled={windowOffset === 0}
           onClick={() => goTo({ offset: Math.max(0, windowOffset - PAGE_SIZE) })}
         >
@@ -776,7 +833,7 @@ export function SearchScreen() {
         </Button>
         <Button
           variant="outline"
-          size="sm"
+          className="h-11"
           disabled={!page.hasMore}
           onClick={() => goTo({ offset: windowOffset + PAGE_SIZE })}
         >
@@ -855,8 +912,17 @@ function useDeepLinkedCall(id: number | undefined, search: RunSearch): boolean {
   return isError
 }
 
-/** How a Call reads in a list: LED, Talkgroup, System·Tag·Group, time,
- *  duration. */
+/**
+ * How a Call reads in a list (#78): the Talkgroup on the first line, when and
+ * how long on the second, where on the third — and Play, the one thing a row
+ * is tapped for, beside it.
+ *
+ * It used to be one line of eleven things: name, unit, a full date, a length
+ * and six 36-pixel buttons, 601 pixels of row in a phone's 341. The name — the
+ * only thing a row is *for* — was what gave way, to zero. Now the rest of what
+ * a row offers is one tap further, in a sheet (`⋯`), on a phone; from `sm` up
+ * there is width for it, and it sits inline as it always did.
+ */
 function ResultRow({
   call,
   isCurrent,
@@ -883,20 +949,28 @@ function ResultRow({
   onSelect: () => void
 }) {
   const clock = useClock()
+  // The list's times leave today off (#78); midnight is all this measures.
+  const now = useNow(true, 60_000)
   // The **grant** goes on the link, never through the base query: a download
   // is a navigation (#68).
   const grant = useGrant()
+  const [more, setMore] = useState(false)
   const name = talkgroupName(call)
   const system = systemName(call)
   const description = `${name} on ${system} at ${formatCallTime(call.timestamp, clock)}`
+  /** Linkable whether or not there is anything to play: an encrypted Call is
+   *  still a thing worth pointing somebody at (spec US 9). What it has none of
+   *  is *audio*, which is why [`listens`] is its own block. */
+  const audible = call.audioUrl !== undefined
+  // The same gesture the other way round (#61): the list is newest first, so
+  // Play walks back through history and this walks forward from here. Offered
+  // only where there is an instant to anchor on — a Call whose time was never
+  // recorded would anchor a forward run at the beginning of the archive.
+  const forward = audible && call.timestamp !== undefined
+  const download = downloadUrl(call.id, grant)
 
   return (
-    <li
-      className={cn(
-        'flex items-center gap-3 px-3 py-2.5',
-        isCurrent && 'bg-muted/40',
-      )}
-    >
+    <li className={cn('flex items-center gap-2 px-3 py-1', isCurrent && 'bg-muted/40')}>
       {/* **The Operator's own control, and nobody else's** (#67): freezing an
           incident spends disk no policy can reclaim, so the checkbox is absent
           — not disabled — for a Listener, and the row is exactly what it was
@@ -910,107 +984,185 @@ function ResultRow({
           onChange={onSelect}
         />
       )}
-      <ChannelLed
-        color={ledForCall(call)}
-        size={10}
-      />
-      <div className="min-w-0 flex-1">
+      <ChannelLed color={ledForCall(call)} size={10} />
+      <div className="min-w-0 flex-1 py-1.5">
         <p className="flex items-center gap-1.5 truncate font-mono text-sm">
           <span className="truncate">{name}</span>
           <CallFlags call={call} />
+        </p>
+        {/* When, how long and who keyed it — the length beside the time,
+            because a kerchunk next to a dispatch is what the column was for
+            (#42, spec US 8), and the unit as a link in the sentence (#47). */}
+        <p className="truncate font-mono text-[11px] tabular-nums text-muted-foreground">
+          <CallTime ms={call.timestamp} now={now} /> ·{' '}
+          <span>{formatDuration(call.durationMs)}</span>
+          {call.unitRef !== undefined && (
+            <>
+              {' · '}
+              <UnitLink call={call} inline />
+            </>
+          )}
         </p>
         <p className="truncate font-mono text-[11px] text-muted-foreground">
           {[system, callCategory(call)].filter(Boolean).join(' · ')}
         </p>
       </div>
-      {/* Who keyed it (#47, spec US 42/44) — its own column beside the length,
-          for the reason that one is a column: a name in the same place on every
-          row is readable down the page without reading any of it, where a name
-          appended to a variable-length line is not. Truncating rather than
-          wrapping, so the column stays a column on a phone; the whole name is
-          one tap away on the radio's own history, which is what it links to. */}
-      <span className="w-20 shrink-0 truncate text-right font-mono text-[11px] text-muted-foreground">
-        <UnitLink call={call} />
-      </span>
-      <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
-        {formatCallTime(call.timestamp, clock)}
-      </time>
-      {/* Right-aligned and fixed-width so a column of lengths reads as a
-          column — which is what makes a kerchunk visible next to a dispatch
-          without reading any of the numbers (#42, spec US 8). */}
-      <span className="w-12 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
-        {formatDuration(call.durationMs)}
-      </span>
-      {/* Keeping a Call is offered on an encrypted one too (#66): a row with
-          no audio is still the record that the channel was busy, and it is
-          exactly the kind of thing an incident is assembled out of. */}
-      <StarButton call={call} describedAs={description} />
-      {/* Linkable whether or not there is anything to play, for the same
-          reason: an encrypted Call is still a thing worth pointing somebody at
-          (spec US 9). What an encrypted Call has none of is *audio* controls,
-          which is the block at the end of this row. */}
-      <Button
-        variant="outline"
-        size="icon"
-        aria-label={`Copy link to ${description}`}
-        onClick={onCopyLink}
-      >
-        <Link2 className="size-4" aria-hidden />
-      </Button>
-      {/* Two links, deliberately, because they are two different offers: the
-          one above opens this Call *in the app* and never expires, and this one
-          opens it for somebody who has never heard of this instance and stops
-          working. Offered on an encrypted Call too — that the channel was busy
-          is still a thing worth sending (spec US 9). */}
-      {onShare && (
+      {/* The rest of the row, inline where there is room for it. */}
+      <div className="hidden shrink-0 items-center gap-1 sm:flex">
+        {/* Keeping a Call is offered on an encrypted one too (#66): a row with
+            no audio is still the record that the channel was busy, and it is
+            exactly the kind of thing an incident is assembled out of. */}
+        <StarButton call={call} describedAs={description} />
         <Button
           variant="outline"
-          size="icon"
-          aria-label={`Share ${description} publicly`}
-          onClick={onShare}
+          className="size-11"
+          aria-label={`Copy link to ${description}`}
+          onClick={onCopyLink}
         >
-          <Share2 className="size-4" aria-hidden />
+          <Link2 className="size-4" aria-hidden />
         </Button>
-      )}
-      {/* The audio controls, and the only block on this row an **Encrypted
-          Call** does without: the server sends no `audioUrl` for one, so it
-          gets nothing here rather than controls that 404 (spec US 9). */}
-      {call.audioUrl && (
-        <>
+        {/* Two links, deliberately, because they are two different offers: the
+            one above opens this Call *in the app* and never expires, and this
+            one opens it for somebody who has never heard of this instance and
+            stops working. */}
+        {onShare && (
           <Button
             variant="outline"
-            size="icon"
-            aria-label={`Play ${description}`}
-            onClick={onPlay}
+            className="size-11"
+            aria-label={`Share ${description} publicly`}
+            onClick={onShare}
           >
-            <Play className="size-4" aria-hidden />
+            <Share2 className="size-4" aria-hidden />
           </Button>
-          {/* The same gesture the other way round (#61): the list is newest
-              first, so Play walks back through history and this walks forward
-              from here. Offered only where there is an instant to anchor on —
-              a Call whose time was never recorded would anchor a forward run at
-              the beginning of the archive. */}
-          {call.timestamp !== undefined && (
-            <Button
-              variant="outline"
-              size="icon"
-              aria-label={`Play forward from ${description}`}
-              onClick={onPlayForward}
-            >
-              <FastForward className="size-4" aria-hidden />
-            </Button>
-          )}
+        )}
+        {forward && (
+          <Button
+            variant="outline"
+            className="size-11"
+            aria-label={`Play forward from ${description}`}
+            onClick={onPlayForward}
+          >
+            <FastForward className="size-4" aria-hidden />
+          </Button>
+        )}
+        {audible && (
           <a
-            href={downloadUrl(call.id, grant)}
+            href={download}
             download
             aria-label={`Download ${description}`}
-            className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
+            className="inline-flex size-11 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
           >
             <Download className="size-4" aria-hidden />
           </a>
-        </>
+        )}
+      </div>
+      {/* The audio controls, and the only one an **Encrypted Call** does
+          without: the server sends no `audioUrl` for one, so it gets no Play
+          rather than a Play that 404s (spec US 9). */}
+      {audible && (
+        <Button
+          variant="outline"
+          className="size-11"
+          aria-label={`Play ${description}`}
+          onClick={onPlay}
+        >
+          <Play className="size-4" aria-hidden />
+        </Button>
+      )}
+      <Button
+        variant="outline"
+        className="size-11 sm:hidden"
+        aria-label={`More for ${name}`}
+        onClick={() => setMore(true)}
+      >
+        <Ellipsis className="size-4" aria-hidden />
+      </Button>
+      {more && (
+        <RowSheet
+          call={call}
+          title={name}
+          description={description}
+          onClose={() => setMore(false)}
+          actions={{
+            onCopyLink,
+            onShare,
+            onPlayForward: forward ? onPlayForward : undefined,
+            download: audible ? download : undefined,
+          }}
+        />
       )}
     </li>
+  )
+}
+
+/** A row's other actions, on a phone (#78) — each one closes the sheet behind
+ *  it, so the next tap lands on the list it came from. */
+function RowSheet({
+  call,
+  title,
+  description,
+  onClose,
+  actions,
+}: {
+  call: Call
+  title: string
+  description: string
+  onClose: () => void
+  actions: {
+    onCopyLink: () => void
+    onShare?: () => void
+    onPlayForward?: () => void
+    download?: string
+  }
+}) {
+  const { starred, verb, toggle } = useStar(call)
+  const then = (action: () => void) => () => {
+    action()
+    onClose()
+  }
+
+  return (
+    <Sheet title={title} onClose={onClose}>
+      <div className="grid gap-2">
+        <SheetAction onClick={then(toggle)} label={`${verb} ${description}`}>
+          {starred ? 'Unstar' : 'Star'}
+        </SheetAction>
+        <SheetAction onClick={then(actions.onCopyLink)} label={`Copy link to ${description}`}>
+          <Link2 className="size-3.5" aria-hidden />
+          Copy link
+        </SheetAction>
+        {actions.onShare && (
+          <SheetAction
+            onClick={then(actions.onShare)}
+            label={`Share ${description} publicly`}
+          >
+            <Share2 className="size-3.5" aria-hidden />
+            Share publicly
+          </SheetAction>
+        )}
+        {actions.onPlayForward && (
+          <SheetAction
+            onClick={then(actions.onPlayForward)}
+            label={`Play forward from ${description}`}
+          >
+            <FastForward className="size-3.5" aria-hidden />
+            Play forward from here
+          </SheetAction>
+        )}
+        {actions.download && (
+          <a
+            href={actions.download}
+            download
+            aria-label={`Download ${description}`}
+            onClick={onClose}
+            className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40"
+          >
+            <Download className="size-3.5" aria-hidden />
+            Download
+          </a>
+        )}
+      </div>
+    </Sheet>
   )
 }
 
@@ -1041,9 +1193,11 @@ function NowPlaying({
   onStop: () => void
 }) {
   return (
+    // Its controls drop to a line of their own on a phone (#78): six 44-pixel
+    // targets and a name do not share 358 pixels without one of them losing.
     <section
       aria-label="Now playing"
-      className="mt-4 flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
+      className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-border bg-card px-3 py-2.5"
     >
       {/* docs/design/brief.md state 6: a paused Call blinks, a playing one is
           steady. */}
@@ -1052,7 +1206,7 @@ function NowPlaying({
         size={12}
         pulse={paused}
       />
-      <div className="min-w-0 flex-1">
+      <div className="min-w-40 flex-1">
         <p className="truncate font-mono text-sm">{talkgroupName(call)}</p>
         <p className="font-mono text-[11px] text-muted-foreground">
           {/* The same sentence the mini-player says about the same Run (#56):
@@ -1066,43 +1220,45 @@ function NowPlaying({
           Call whose row may be pages away — and the moment they decide it
           mattered is this moment, not the one where they find it again. The
           Live display carries the same control for the same reason. */}
-      <StarButton call={call} describedAs={talkgroupName(call)} />
-      <Button
-        variant="outline"
-        size="icon"
-        aria-label="Previous call"
-        disabled={!hasPrevious}
-        onClick={onPrevious}
-      >
-        <SkipBack className="size-4" aria-hidden />
-      </Button>
-      {/* The same pause the lock-screen button applies (#14, spec US 15). */}
-      <Button
-        variant="outline"
-        size="icon"
-        aria-label={paused ? 'Resume' : 'Pause'}
-        onClick={onTogglePause}
-      >
-        {paused ? (
-          <Play className="size-4" aria-hidden />
-        ) : (
-          <Pause className="size-4" aria-hidden />
-        )}
-      </Button>
-      <Button
-        variant="outline"
-        size="icon"
-        // Finishing an interruption hands back to the live feed, so during one
-        // the control is named for what it actually does.
-        aria-label={interrupting ? 'Back to live feed' : 'Next call'}
-        disabled={!hasNext && !interrupting}
-        onClick={onNext}
-      >
-        <SkipForward className="size-4" aria-hidden />
-      </Button>
-      <Button variant="outline" size="icon" aria-label="Stop" onClick={onStop}>
-        <Square className="size-4" aria-hidden />
-      </Button>
+      <div className="ml-auto flex items-center gap-1">
+        <StarButton call={call} describedAs={talkgroupName(call)} />
+        <Button
+          variant="outline"
+          className="size-11"
+          aria-label="Previous call"
+          disabled={!hasPrevious}
+          onClick={onPrevious}
+        >
+          <SkipBack className="size-4" aria-hidden />
+        </Button>
+        {/* The same pause the lock-screen button applies (#14, spec US 15). */}
+        <Button
+          variant="outline"
+          className="size-11"
+          aria-label={paused ? 'Resume' : 'Pause'}
+          onClick={onTogglePause}
+        >
+          {paused ? (
+            <Play className="size-4" aria-hidden />
+          ) : (
+            <Pause className="size-4" aria-hidden />
+          )}
+        </Button>
+        <Button
+          variant="outline"
+          className="size-11"
+          // Finishing an interruption hands back to the live feed, so during one
+          // the control is named for what it actually does.
+          aria-label={interrupting ? 'Back to live feed' : 'Next call'}
+          disabled={!hasNext && !interrupting}
+          onClick={onNext}
+        >
+          <SkipForward className="size-4" aria-hidden />
+        </Button>
+        <Button variant="outline" className="size-11" aria-label="Stop" onClick={onStop}>
+          <Square className="size-4" aria-hidden />
+        </Button>
+      </div>
     </section>
   )
 }

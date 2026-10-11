@@ -143,7 +143,7 @@ function LabelsScreen({
           <div className="flex flex-1 flex-col gap-1">
             <label
               htmlFor="new-label"
-              className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
+              className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
             >
               New {noun}
             </label>

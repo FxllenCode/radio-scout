@@ -316,8 +316,7 @@ export function DvrScreen() {
               key={preset.id}
               type="button"
               variant="outline"
-              size="sm"
-              className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+              className="h-11 px-3 font-mono text-[11px] uppercase tracking-wider"
               onClick={() => {
                 const { after, before } = rangeOf(preset.id, Date.now())
                 rescope({ from: after, to: before })
@@ -329,9 +328,8 @@ export function DvrScreen() {
           <Button
             type="button"
             variant="outline"
-            size="sm"
             aria-label="Copy link to this DVR"
-            className="ml-auto h-7 px-2"
+            className="ml-auto size-11"
             onClick={() => link.share('/dvr', writeDvrUrl(view), 'Radio-Scout DVR')}
           >
             <Link2 className="size-3.5" aria-hidden />
@@ -410,7 +408,7 @@ export function DvrScreen() {
           </div>
           {current && (
             <span className="w-20 shrink-0 truncate text-right font-mono text-[11px] text-muted-foreground">
-              <UnitLink call={current} />
+              <UnitLink call={current} inline />
             </span>
           )}
         </div>
@@ -429,14 +427,18 @@ export function DvrScreen() {
             value={Math.min(playhead.position, playhead.duration || 1)}
             disabled={!current || playhead.duration === 0}
             onChange={(event) => dispatch(seekTo(Number(event.target.value)))}
-            className="h-1 w-full accent-foreground"
+            // A 4-pixel bar is a target only a mouse can hit (#78): the input
+            // is as tall as a thumb, and the bar is drawn inside it.
+            className="h-11 w-full accent-foreground"
           />
           <span className="w-12 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
             {formatDuration(playhead.position * 1000)}
           </span>
         </div>
 
-        <div className="mt-3 flex items-center gap-2">
+        {/* Wraps on a phone (#78): six 44-pixel controls and the rate
+            switch are wider than 358 pixels. */}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           {/* Keeping what the rewind turned up (#66, spec US 37) — which is the
               gesture this whole screen exists for: you go back to 2am because
               something happened, and this is how what you find survives the
@@ -449,7 +451,7 @@ export function DvrScreen() {
           />
           <Button
             variant="outline"
-            size="icon"
+            className="size-11"
             aria-label="Previous call"
             disabled={!hasPrevious}
             onClick={() => dispatch(previous())}
@@ -459,7 +461,7 @@ export function DvrScreen() {
           {current ? (
             <Button
               variant="outline"
-              size="icon"
+              className="size-11"
               aria-label={paused ? 'Resume' : 'Pause'}
               onClick={() => dispatch(togglePause())}
             >
@@ -472,7 +474,7 @@ export function DvrScreen() {
           ) : (
             <Button
               variant="outline"
-              size="icon"
+              className="size-11"
               aria-label="Play from here"
               onClick={() => void playFrom(view.at)}
             >
@@ -481,7 +483,7 @@ export function DvrScreen() {
           )}
           <Button
             variant="outline"
-            size="icon"
+            className="size-11"
             aria-label="Next call"
             disabled={!hasNext}
             onClick={() => dispatch(next())}
@@ -490,7 +492,7 @@ export function DvrScreen() {
           </Button>
           <Button
             variant="outline"
-            size="icon"
+            className="size-11"
             aria-label="Stop"
             disabled={!current}
             onClick={() => dispatch(stop())}
@@ -503,14 +505,13 @@ export function DvrScreen() {
               the queue empties, where this ends at the end of a range. */}
           <Button
             variant={hurrying ? 'secondary' : 'outline'}
-            size="sm"
             aria-pressed={hurrying}
             // The lever belongs to the Run, and the reducer wrapper clears it
             // whenever there is no Run — so offered before Play it would set a
             // flag cleared in the same dispatch, which is a control that
             // visibly does nothing.
             disabled={!current}
-            className="ml-auto h-9 gap-1 px-2 font-mono text-[10px] uppercase tracking-wider"
+            className="ml-auto h-11 gap-1 px-3 font-mono text-[11px] uppercase tracking-wider"
             onClick={() => dispatch(toggleHurry())}
           >
             <Gauge className="size-3.5" aria-hidden />

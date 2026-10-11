@@ -215,7 +215,7 @@ export function LiveScreen() {
               aria-label={`Queued calls: ${queued}`}
               disabled={!can.queue}
               onClick={() => setSheet('queue')}
-              className="inline-flex items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground transition-colors hover:text-foreground disabled:hover:text-muted-foreground"
+              className="-my-3 inline-flex min-h-11 min-w-11 items-center justify-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground transition-colors hover:text-foreground disabled:hover:text-muted-foreground"
             >
               <ListOrdered className="size-3" aria-hidden />
               Q {queued}
@@ -538,12 +538,12 @@ function Display({
   const color = ledForCall(call)
 
   return (
+    // An ended card is dimmed where dimming says something — the LED and the
+    // waveform go dark, and the name greys — rather than by fading the whole
+    // card, which took every word on it below AA contrast (#78).
     <section
       aria-label="Scanner display"
-      className={cn(
-        'rounded-xl border border-border bg-card px-4 py-4 transition-opacity',
-        ended && 'opacity-60',
-      )}
+      className="rounded-xl border border-border bg-card px-4 py-4"
     >
       <div className="flex items-start gap-3">
         {/* docs/design/brief.md state 6: paused blinks, playing is steady —
@@ -552,10 +552,15 @@ function Display({
           color={color}
           size={16}
           pulse={paused && !ended}
-          className="mt-1.5"
+          className={cn('mt-1.5 transition-opacity', ended && 'opacity-40')}
         />
         <div className="min-w-0 flex-1">
-          <p className="flex items-center gap-2 truncate font-mono text-lg leading-tight">
+          <p
+            className={cn(
+              'flex items-center gap-2 truncate font-mono text-lg leading-tight',
+              ended && 'text-muted-foreground',
+            )}
+          >
             <span className="truncate">{talkgroupName(call)}</span>
             {/* An emergency has to be legible without reading anything (#42,
                 spec US 5) — it is the flag #53 will also push on. */}
@@ -565,13 +570,13 @@ function Display({
             {systemName(call)}
           </p>
           {callCategory(call) && (
-            <p className="truncate font-mono text-[11px] text-muted-foreground/70">
+            <p className="truncate font-mono text-[11px] text-muted-foreground">
               {callCategory(call)}
             </p>
           )}
         </div>
         {(ended || (paused && !blocked)) && (
-          <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          <span className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
             {ended ? 'Ended' : 'Paused'}
           </span>
         )}
@@ -599,7 +604,7 @@ function Display({
         color={color}
         progress={ended ? 0 : progress}
         live={!paused && !ended}
-        className="mt-4"
+        className={cn('mt-4 transition-opacity', ended && 'opacity-40')}
       />
 
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 font-mono text-[11px]">
@@ -613,7 +618,7 @@ function Display({
             US 42), and a link to its history (US 44). rdio-scanner shows the
             bare number and nothing behind it. */}
         <Stat name="Unit" testId="stat-unit">
-          {unitName(call) === undefined ? '—' : <UnitLink call={call} />}
+          {unitName(call) === undefined ? '—' : <UnitLink call={call} inline />}
         </Stat>
         <Stat name="Time" testId="stat-time">
           <CallTime ms={call.timestamp} now={now} />
@@ -657,7 +662,7 @@ function Idle({
     <div className="flex flex-col items-center gap-3 rounded-xl border border-border bg-card px-6 py-12 text-center">
       <Radio className="size-6 text-muted-foreground" aria-hidden />
       <p className="font-mono text-sm text-muted-foreground">{empty.headline}</p>
-      <p className="max-w-xs text-xs text-muted-foreground/70">{empty.detail}</p>
+      <p className="max-w-xs text-xs text-muted-foreground">{empty.detail}</p>
       <Missed count={missed} gap={gap} />
     </div>
   )
@@ -718,7 +723,7 @@ function Stat({
 }) {
   return (
     <div className="flex items-baseline justify-between gap-2">
-      <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">
+      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
         {name}
       </dt>
       <dd data-testid={testId} className="tabular-nums">
@@ -759,7 +764,9 @@ function Control({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        'gap-1.5 font-mono text-[11px] uppercase tracking-wider',
+        // 44 tall (#78): the size a thumb lands on without looking, which is
+        // how a scanner's buttons are pressed.
+        'h-11 gap-1.5 font-mono text-[11px] uppercase tracking-wider',
         pressed && 'border-foreground text-foreground',
       )}
     >
@@ -798,7 +805,7 @@ function History({
             the list it extends. */}
         <Link
           to="/session"
-          className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground underline decoration-dotted underline-offset-2 transition-colors hover:text-foreground"
+          className="-my-3 inline-flex min-h-11 items-center font-mono text-[11px] uppercase tracking-wider text-muted-foreground underline decoration-dotted underline-offset-2 transition-colors hover:text-foreground"
         >
           Session log
         </Link>
@@ -812,12 +819,12 @@ function History({
           // everything: the unit is a *link* (#47) and an anchor inside a button
           // is neither valid HTML nor reachable by a screen reader. Replaying is
           // still the whole row's width minus the two things beside it.
-          <li key={`${call.id}`} className="flex items-center gap-3 px-3 py-2.5">
+          <li key={`${call.id}`} className="flex items-center gap-2 px-3 py-0.5">
             <button
               type="button"
               disabled={disabled}
               onClick={() => onReplay(call.id)}
-              className="flex min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:bg-muted/40 disabled:opacity-40"
+              className="flex min-h-11 min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:bg-muted/40 disabled:opacity-40"
             >
               <ChannelLed
                 color={ledForCall(call)}

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import { sameSearch, type RunSearch } from './run'
-import { DEFAULT_SEARCH_URL, readSearchUrl, writeSearchUrl, type SearchUrl } from './searchUrl'
+import {
+  DEFAULT_SEARCH_URL,
+  filterChips,
+  readSearchUrl,
+  writeSearchUrl,
+  type SearchUrl,
+} from './searchUrl'
 
 const read = (query: string) => readSearchUrl(new URLSearchParams(query))
 
@@ -153,5 +159,61 @@ describe('the round trip', () => {
   it.each(CASES)('comes back as the same Run: %j', (state) => {
     const back = readSearchUrl(new URLSearchParams(writeSearchUrl(state))).search
     expect(sameSearch(state.search as RunSearch, back)).toBe(true)
+  })
+})
+
+/** The filters in force, as chips (#78): what Search says it is narrowed by
+ *  while its form is folded away on a phone, each with the search it leaves
+ *  behind when cleared. */
+describe('filterChips', () => {
+  const names = {
+    system: (ref: number) => (ref === 11 ? 'Fulton County' : `System ${ref}`),
+    talkgroup: (_system: number | undefined, ref: number) =>
+      ref === 54241 ? 'FD Dispatch' : `Talkgroup ${ref}`,
+    at: (ms: number) => `t${ms}`,
+  }
+
+  it('is empty for a search that narrows nothing — sort is an order, not a filter', () => {
+    expect(filterChips({ sort: 'oldest' }, names)).toEqual([])
+  })
+
+  it.each([
+    [{ after: 5 }, 'From t5', {}],
+    [{ before: 9 }, 'To t9', {}],
+    [{ group: 'Fire' }, 'Group Fire', {}],
+    [{ tag: 'Law' }, 'Tag Law', {}],
+    [{ minDuration: 3 }, '3s or longer', {}],
+    [{ mark: 'emergency' as const }, 'Emergency', {}],
+    [{ starred: true }, 'Starred', {}],
+    [{ unit: 1602381 }, 'Unit 1602381', {}],
+    [{ system: 11, talkgroup: 54241 }, 'Talkgroup FD Dispatch', { system: 11 }],
+  ])('names %o as %s, and clears it to %o', (only, label, left) => {
+    const [chip] = filterChips({ sort: 'newest', ...only }, names).filter((one) => one.label === label)
+
+    expect(chip.without).toEqual({ sort: 'newest', ...left })
+  })
+
+  /** A Talkgroup Ref means something only inside its System, so clearing the
+   *  System takes the Talkgroup with it — what the System select does. */
+  it('clears the Talkgroup with its System', () => {
+    const chips = filterChips({ system: 11, talkgroup: 54241, tag: 'Fire' }, names)
+    const system = chips.find((one) => one.label === 'System Fulton County')!
+
+    expect(system.without).toEqual({ tag: 'Fire' })
+  })
+
+  it('keeps the order the form has', () => {
+    const chips = filterChips(
+      { unit: 1, starred: true, tag: 'Fire', system: 11, after: 1 },
+      names,
+    )
+
+    expect(chips.map((one) => one.label)).toEqual([
+      'From t1',
+      'System Fulton County',
+      'Tag Fire',
+      'Starred',
+      'Unit 1',
+    ])
   })
 })

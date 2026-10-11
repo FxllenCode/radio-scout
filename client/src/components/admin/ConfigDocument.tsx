@@ -51,7 +51,7 @@ export function ConfigDocument() {
       aria-label="Configuration document"
       className="mt-4 flex flex-col gap-2 rounded-xl border border-border bg-card px-4 py-3"
     >
-      <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
         Backup and restore
       </p>
       <p className="text-xs text-muted-foreground">

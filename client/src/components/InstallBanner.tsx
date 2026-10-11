@@ -41,14 +41,14 @@ export function InstallBanner({ install }: { install: InstallState }) {
         </p>
       </div>
       {offer === 'prompt' && (
-        <Button size="sm" onClick={install.install}>
+        <Button className="h-11" onClick={install.install}>
           Install
         </Button>
       )}
       <button
         type="button"
         aria-label="Dismiss install prompt"
-        className="shrink-0 rounded-md px-1.5 py-1 text-muted-foreground hover:text-foreground"
+        className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
         onClick={install.dismiss}
       >
         ✕

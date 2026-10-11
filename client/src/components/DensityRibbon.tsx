@@ -154,7 +154,7 @@ export function DensityRibbon({
           announcing both would say everything twice. */}
       <p
         data-testid="ribbon-at"
-        className="text-center font-mono text-[10px] text-foreground"
+        className="text-center font-mono text-[11px] text-foreground"
         aria-hidden
       >
         {readout}

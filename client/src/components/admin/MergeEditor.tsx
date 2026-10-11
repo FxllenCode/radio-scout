@@ -56,7 +56,7 @@ export function MemberRefsEditor({ row }: { row: AdminTalkgroup }) {
       aria-label="Member refs"
       className="mt-2 flex flex-col gap-2 border-t border-border pt-2"
     >
-      <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
         Also answers to
       </p>
       {held.length === 0 ? (

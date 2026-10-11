@@ -57,6 +57,8 @@ export function StarButton({
       type="button"
       variant="outline"
       size="icon"
+      // 44 (#78): it sits in every row a Listener scrolls past with a thumb.
+      className="size-11"
       aria-pressed={starred}
       aria-label={`${verb} ${describedAs}`}
       disabled={disabled || !call}

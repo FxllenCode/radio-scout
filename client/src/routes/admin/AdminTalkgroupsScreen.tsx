@@ -232,7 +232,7 @@ export function AdminTalkgroupsScreen() {
                     />
                     {row.label ?? String(row.ref)}
                     {row.blacklisted && (
-                      <span className="font-mono text-[10px] uppercase tracking-wider text-red-400">
+                      <span className="font-mono text-[11px] uppercase tracking-wider text-red-400">
                         blacklisted
                       </span>
                     )}

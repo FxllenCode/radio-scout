@@ -36,18 +36,40 @@ import type { Call } from '@/types'
  * everything, because an anchor inside a button is neither valid HTML nor
  * reachable by a screen reader.
  */
-export function UnitLink({ call, className }: { call: Call; className?: string }) {
+export function UnitLink({
+  call,
+  inline = false,
+  className,
+}: {
+  call: Call
+  /** Part of a sentence or a readout, where it is an ordinary text link
+   *  (WCAG 2.5.8's inline exception). Otherwise it is a control of its own in
+   *  a row, and a thumb gets a 44-pixel target for it (#78). */
+  inline?: boolean
+  className?: string
+}) {
   const name = unitName(call)
   const href = unitHref(call)
   if (name === undefined || href === undefined) return null
 
+  if (inline) {
+    return (
+      <Link
+        to={href}
+        aria-label={`History for unit ${name}`}
+        className={cn('underline decoration-dotted underline-offset-2', className)}
+      >
+        {name}
+      </Link>
+    )
+  }
   return (
     <Link
       to={href}
       aria-label={`History for unit ${name}`}
-      className={cn('truncate underline decoration-dotted underline-offset-2', className)}
+      className={cn('flex min-h-11 min-w-11 items-center justify-end', className)}
     >
-      {name}
+      <span className="truncate underline decoration-dotted underline-offset-2">{name}</span>
     </Link>
   )
 }

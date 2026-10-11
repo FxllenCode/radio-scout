@@ -40,7 +40,7 @@ export function AccessNoticeBar() {
       <Button
         variant="outline"
         size="sm"
-        className="h-7 shrink-0 px-2 font-mono text-[10px] uppercase tracking-wider"
+        className="h-11 shrink-0 px-3 font-mono text-[11px] uppercase tracking-wider"
         onClick={() => dispatch(staleNoticeDismissed())}
       >
         OK

@@ -53,11 +53,11 @@ export function AvoidSheet({ onClose }: { onClose: () => void }) {
                   <span className="truncate font-mono text-sm leading-tight">
                     {row.label}
                   </span>
-                  <span className="truncate font-mono text-[10px] text-muted-foreground">
+                  <span className="truncate font-mono text-[11px] text-muted-foreground">
                     {row.systemLabel} · {row.talkgroupRef}
                   </span>
                 </span>
-                <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-led-orange">
+                <span className="shrink-0 font-mono text-[11px] uppercase tracking-wider text-led-orange">
                   {row.until === 0
                     ? 'until cleared'
                     : `${avoidMinutesLeft(now, row.until)} min left`}
@@ -66,7 +66,7 @@ export function AvoidSheet({ onClose }: { onClose: () => void }) {
                   type="button"
                   aria-label={`Stop avoiding ${row.label}`}
                   onClick={() => dispatch(clearAvoid(row.key))}
-                  className="shrink-0 rounded px-2 py-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+                  className="inline-flex min-h-11 shrink-0 items-center rounded px-3 font-mono text-[11px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
                 >
                   Unmute
                 </button>

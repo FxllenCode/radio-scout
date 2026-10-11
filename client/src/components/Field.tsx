@@ -3,9 +3,13 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { dateTimeLocalToMs, msToDateTimeLocal } from '@/lib/archive'
 
 /** How every control on a filter form is drawn, so a form added later matches
- *  the ones beside it without copying a class list. */
+ *  the ones beside it without copying a class list.
+ *
+ *  44 tall, and 16px on a phone (#78): under 16px iOS Safari zooms the whole
+ *  page the moment a field is focused, and every filter on Search and the DVR
+ *  did. Compact again from `sm`, where there is a pointer and no zoom. */
 export const controlClass =
-  'w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground'
+  'min-h-11 w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-base text-foreground sm:text-xs'
 
 /** A labelled control. */
 export function Field({
@@ -21,7 +25,7 @@ export function Field({
     <div className="flex flex-col gap-1">
       <label
         htmlFor={htmlFor}
-        className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
+        className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
       >
         {label}
       </label>

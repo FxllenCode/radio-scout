@@ -50,7 +50,7 @@ export function ToneProfilesEditor({ row }: { row: AdminTalkgroup }) {
       aria-label="Tone profiles"
       className="mt-2 flex flex-col gap-2 border-t border-border pt-2"
     >
-      <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
         Paged on this channel
       </p>
       {held.length === 0 ? (

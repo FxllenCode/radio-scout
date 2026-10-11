@@ -1486,3 +1486,36 @@ describe('fullscreen (#78)', () => {
     expect(asked).toEqual(['enter'])
   })
 })
+
+/** The states #78 added, each checked whole by axe — a new control is a new
+ *  chance to ship one a screen reader cannot name. */
+describe('the Live screen, to a screen reader (#78)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    delete (navigator as { onLine?: boolean }).onLine
+  })
+
+  it('passes axe while asking for a tap', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValueOnce(
+      new DOMException('needs a gesture', 'NotAllowedError'),
+    )
+    const store = makeStore()
+    const { container } = renderApp('/', store)
+    act(() => void store.dispatch(received(call({ timestamp: Date.now() - 5 * 60_000 }), 1)))
+    await within(display()).findByRole('button', { name: 'Tap to listen' })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('passes axe offline, with Calls missed', async () => {
+    server.use(liveFeed.addEventListener('connection', ({ client }) => client.close()))
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false })
+    const store = makeStore()
+    const { container } = renderApp('/', store)
+    act(() => void store.dispatch(lagged(2)))
+    await within(main()).findByText('This device is offline.')
+
+    expect(screen.getByRole('link', { name: /missed/ })).toBeInTheDocument()
+    expect(await axe(container)).toHaveNoViolations()
+  })
+})

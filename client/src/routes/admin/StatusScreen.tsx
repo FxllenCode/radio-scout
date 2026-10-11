@@ -255,7 +255,7 @@ function Card({
 }) {
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card">
-      <h2 className="flex items-baseline justify-between gap-2 border-b border-border px-4 py-2.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <h2 className="flex items-baseline justify-between gap-2 border-b border-border px-4 py-2.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
         {title}
         {note && <span className="normal-case tracking-normal">{note}</span>}
       </h2>

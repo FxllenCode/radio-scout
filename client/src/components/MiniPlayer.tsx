@@ -90,6 +90,7 @@ function Playing({ strip }: { strip: Extract<Strip, { mode: 'playing' }> }) {
       <Button
         variant="outline"
         size="icon"
+        className="size-11"
         aria-label={blocked ? 'Tap to listen' : paused ? 'Resume' : 'Pause'}
         aria-keyshortcuts={shortcutsFor('pause')}
         onClick={() => dispatch(togglePause())}
@@ -103,6 +104,7 @@ function Playing({ strip }: { strip: Extract<Strip, { mode: 'playing' }> }) {
       <Button
         variant="outline"
         size="icon"
+        className="size-11"
         aria-label="Skip"
         aria-keyshortcuts={shortcutsFor('skip')}
         onClick={() => dispatch(nextCall(goesLive))}

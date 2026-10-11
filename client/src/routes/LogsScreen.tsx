@@ -222,14 +222,14 @@ function EventRow({ event }: { event: LogEvent }) {
         <p className="truncate pl-1 font-mono text-[11px] text-muted-foreground">
           {fields.map(([key, value]) => `${key}=${format(value)}`).join(' ')}
           {event.requestId && (
-            <span className="text-muted-foreground/70">
+            <span className="text-muted-foreground">
               {fields.length > 0 ? ' · ' : ''}
               request id {event.requestId}
             </span>
           )}
         </p>
       )}
-      <p className="truncate pl-1 font-mono text-[10px] text-muted-foreground/60">
+      <p className="truncate pl-1 font-mono text-[11px] text-muted-foreground">
         {event.target}
       </p>
     </li>

@@ -279,7 +279,7 @@ function EventEditor({
         </Field>
       )}
 
-      <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
         Calls
       </p>
       {members.length === 0 ? (

@@ -76,8 +76,11 @@ const COUNTDOWN_TICK_MS = 30_000
 /** How tall a Talkgroup row stands. A number rather than a class, because it is
  *  also what [`useWindowedRows`] measures the list in — one source of truth, so
  *  the height the browser lays out and the height the window arithmetic assumes
- *  cannot drift apart. */
-const ROW_HEIGHT = 44
+ *  cannot drift apart.
+ *
+ *  A 44-pixel target and the 1-pixel rule above it (#78): at 44 the rule took a
+ *  pixel from every switch in the list. */
+const ROW_HEIGHT = 45
 
 /**
  * Talkgroups (Select) — the live-feed selection surface (#12, spec US 19–22),
@@ -264,7 +267,7 @@ export function TalkgroupsScreen() {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+                  className="h-11 min-w-11 px-3 font-mono text-[11px] uppercase tracking-wider"
                   onClick={() => setUnlocking(true)}
                 >
                   <Lock className="size-3 shrink-0" aria-hidden />
@@ -280,7 +283,7 @@ export function TalkgroupsScreen() {
                 variant="outline"
                 size="sm"
                 aria-label="Turn everything on"
-                className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+                className="h-11 min-w-11 px-3 font-mono text-[11px] uppercase tracking-wider"
                 onClick={() => dispatch(chooseEverything(true))}
               >
                 All on
@@ -289,7 +292,7 @@ export function TalkgroupsScreen() {
                 variant="outline"
                 size="sm"
                 aria-label="Turn everything off"
-                className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+                className="h-11 min-w-11 px-3 font-mono text-[11px] uppercase tracking-wider"
                 onClick={() => dispatch(chooseEverything(false))}
               >
                 All off
@@ -301,7 +304,7 @@ export function TalkgroupsScreen() {
                 variant="outline"
                 size="sm"
                 aria-label="Copy link to this selection"
-                className="h-7 px-2"
+                className="size-11"
                 onClick={() =>
                   link.share(
                     '/talkgroups',
@@ -325,7 +328,7 @@ export function TalkgroupsScreen() {
                   size="sm"
                   aria-label="Copy station stream URL"
                   title="Station stream: play this selection in VLC, a smart speaker or a car"
-                  className="h-7 px-2"
+                  className="size-11"
                   onClick={() =>
                     link.share(
                       STATION_PATH,
@@ -350,7 +353,7 @@ export function TalkgroupsScreen() {
 
           {panel.pinned.length > 0 && (
             <section aria-label="Pinned" className="mb-5">
-              <h2 className="mb-1.5 font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/70">
+              <h2 className="mb-1.5 font-mono text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
                 Pinned
               </h2>
               <RowList rows={panel.pinned} named {...controls} />
@@ -360,7 +363,7 @@ export function TalkgroupsScreen() {
           <div className="mb-5 flex flex-col gap-3">
             {panel.categories.map(({ heading, categories }) => (
               <section key={heading} aria-label={heading}>
-                <h2 className="mb-1.5 font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/70">
+                <h2 className="mb-1.5 font-mono text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
                   {heading}
                 </h2>
                 <div className="grid grid-cols-2 gap-1.5">
@@ -417,7 +420,7 @@ function Filter({
         placeholder="Filter by name, tag or TGID"
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-9 w-full rounded-lg border border-border bg-card pl-9 pr-3 font-mono text-xs outline-none placeholder:text-muted-foreground/60 focus-visible:border-foreground/40 focus-visible:ring-[3px] focus-visible:ring-ring/30"
+        className="h-11 w-full rounded-lg border border-border bg-card pl-9 pr-3 font-mono text-base outline-none sm:text-xs placeholder:text-muted-foreground/60 focus-visible:border-foreground/40 focus-visible:ring-[3px] focus-visible:ring-ring/30"
       />
     </div>
   )
@@ -458,7 +461,7 @@ function SortToggle({
           aria-pressed={sort === option.value}
           onClick={() => onSort(option.value)}
           className={cn(
-            'h-7 px-2 font-mono text-[10px] uppercase tracking-wider transition-colors',
+            'h-11 min-w-11 px-3 font-mono text-[11px] uppercase tracking-wider transition-colors',
             sort === option.value
               ? 'bg-foreground text-background'
               : 'text-muted-foreground hover:text-foreground',
@@ -496,7 +499,7 @@ function CategoryChip({
       aria-pressed={PRESSED[state]}
       onClick={onClick}
       className={cn(
-        'flex items-center justify-between gap-2 rounded-lg border px-3 py-2 font-mono text-[11px] tracking-wide transition-colors',
+        'flex min-h-11 items-center justify-between gap-2 rounded-lg border px-3 py-2 font-mono text-[11px] tracking-wide transition-colors',
         state === 'all' && 'border-foreground bg-foreground text-background',
         state === 'some' && 'border-muted-foreground bg-muted/50 text-foreground',
         state === 'none' && 'border-border text-muted-foreground',
@@ -506,7 +509,7 @@ function CategoryChip({
         <span aria-hidden>{STATE_GLYPH[state]}</span>
         <span className="truncate">{category.label}</span>
       </span>
-      <span className="shrink-0 tabular-nums opacity-70">
+      <span className="shrink-0 tabular-nums">
         {category.on}/{category.total}
       </span>
     </button>
@@ -538,7 +541,7 @@ function SystemSection({
           type="button"
           aria-expanded={!collapsed}
           onClick={() => onShow(collapsed)}
-          className="flex items-center gap-1 font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/70 transition-colors hover:text-foreground"
+          className="flex min-h-11 items-center gap-1 font-mono text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground transition-colors hover:text-foreground"
         >
           {collapsed ? (
             <ChevronRight className="size-3" aria-hidden />
@@ -547,14 +550,14 @@ function SystemSection({
           )}
           {label}
         </button>
-        <span className="flex-1 font-mono text-[9px] tabular-nums text-muted-foreground/50">
+        <span className="flex-1 font-mono text-[11px] tabular-nums text-muted-foreground">
           {on}/{total}
         </span>
         <button
           type="button"
           aria-label={`Turn ${label} all ${allOn ? 'off' : 'on'}`}
           onClick={() => controls.onChoose(system.all)}
-          className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+          className="inline-flex min-h-11 min-w-11 items-center justify-end font-mono text-[11px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
         >
           {allOn ? 'All off' : 'All on'}
         </button>
@@ -627,7 +630,7 @@ function TalkgroupRow({
               {row.label}
             </span>
             {named && (
-              <span className="truncate font-mono text-[9px] uppercase tracking-wider text-muted-foreground/60">
+              <span className="truncate font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
                 {row.systemLabel}
               </span>
             )}
@@ -637,7 +640,7 @@ function TalkgroupRow({
               what was gated. */}
           <span
             aria-hidden
-            className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/60"
+            className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground"
           >
             {row.talkgroupRef}
           </span>
@@ -686,7 +689,7 @@ function TalkgroupRow({
           {/* A pinned row has left its section, so it says where it came from
               — otherwise two Systems' "Dispatch" are one name twice. */}
           {named && (
-            <span className="truncate font-mono text-[9px] uppercase tracking-wider text-muted-foreground/60">
+            <span className="truncate font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
               {row.systemLabel}
             </span>
           )}
@@ -695,7 +698,7 @@ function TalkgroupRow({
         <Activity row={row} sort={sort} now={now} />
         <span
           aria-hidden
-          className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/60"
+          className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground"
         >
           {row.talkgroupRef}
         </span>
@@ -712,10 +715,10 @@ function TalkgroupRow({
         aria-pressed={priority}
         onClick={() => onPriority(row.key)}
         className={cn(
-          'flex h-full shrink-0 items-center pl-1.5 pr-1 transition-colors',
+          'flex h-full w-11 shrink-0 items-center justify-center transition-colors',
           priority
             ? 'text-led-amber'
-            : 'text-muted-foreground/30 hover:text-muted-foreground',
+            : 'text-muted-foreground hover:text-foreground',
         )}
       >
         <Zap className={cn('size-3.5', priority && 'fill-current')} aria-hidden />
@@ -726,10 +729,10 @@ function TalkgroupRow({
         aria-pressed={pinned}
         onClick={() => onPin(row.key)}
         className={cn(
-          'flex h-full shrink-0 items-center pl-1 pr-2.5 transition-colors',
+          'flex h-full w-11 shrink-0 items-center justify-center transition-colors',
           pinned
             ? 'text-foreground'
-            : 'text-muted-foreground/30 hover:text-muted-foreground',
+            : 'text-muted-foreground hover:text-foreground',
         )}
       >
         <Pin className={cn('size-3.5', pinned && 'fill-current')} aria-hidden />
@@ -760,7 +763,9 @@ function Activity({ row, sort, now }: { row: PanelRow; sort: PanelSort; now: num
 
   if (row.lastCallAtMs === undefined) return null
   const ago = lastHeard(now, row.lastCallAtMs)
-  return <Measure said={`last heard ${ago} ago`} shown={ago} />
+  // "now" is not a span of time, and "last heard now ago" is what a screen
+  // reader used to say for the busiest channel on the panel (#78).
+  return <Measure said={ago === 'now' ? 'last heard just now' : `last heard ${ago} ago`} shown={ago} />
 }
 
 /** One number, twice: short enough for a 400-row list, and spelled out for
@@ -776,7 +781,7 @@ function Measure({ said, shown }: { said: string; shown: string | number }) {
       <span className="sr-only">{said}</span>
       <span
         aria-hidden
-        className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/70"
+        className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground"
       >
         {shown}
       </span>
@@ -800,7 +805,7 @@ function AvoidBadge({ until, now }: { until: number; now: number }) {
   const minutes = avoidMinutesLeft(now, until)
 
   return (
-    <span className="flex shrink-0 items-center gap-1 rounded border border-led-orange/40 bg-led-orange/10 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-led-orange">
+    <span className="flex shrink-0 items-center gap-1 rounded border border-led-orange/40 bg-led-orange/10 px-1.5 py-0.5 font-mono text-[11px] font-bold uppercase tracking-wider text-led-orange">
       <span
         aria-hidden
         data-testid={timed ? 'avoid-blink' : undefined}
@@ -834,7 +839,7 @@ function Empty() {
   return (
     <div className="rounded-xl border border-border bg-card px-6 py-12 text-center">
       <p className="font-mono text-sm text-muted-foreground">No systems yet.</p>
-      <p className="mt-1 text-xs text-muted-foreground/70">
+      <p className="mt-1 text-xs text-muted-foreground">
         Systems and talkgroups appear here automatically as calls arrive.
       </p>
     </div>

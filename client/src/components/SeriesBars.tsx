@@ -55,7 +55,7 @@ export function SeriesBars({
 export function SeriesExtent({ series }: { series: Series }) {
   const clock = useClock()
   return (
-    <div className="flex justify-between font-mono text-[10px] text-muted-foreground">
+    <div className="flex justify-between font-mono text-[11px] text-muted-foreground">
       <span>{formatCallTime(series.fromMs, clock)}</span>
       <span>{formatCallTime(series.toMs - 1, clock)}</span>
     </div>

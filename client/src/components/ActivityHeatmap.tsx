@@ -35,7 +35,7 @@ export function ActivityHeatmap({ series }: { series: Series }) {
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[19rem] border-separate border-spacing-[1px] font-mono text-[10px]">
+      <table className="w-full min-w-[19rem] border-separate border-spacing-[1px] font-mono text-[11px]">
         <caption className="sr-only">
           Calls by day of the week and hour of the day, in your local time
         </caption>

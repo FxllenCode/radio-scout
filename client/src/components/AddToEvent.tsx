@@ -135,7 +135,7 @@ export function AddToEvent({
           {busy ? 'Keeping…' : 'Keep in event'}
         </Button>
       </div>
-      <p className="font-mono text-[10px] text-muted-foreground">
+      <p className="font-mono text-[11px] text-muted-foreground">
         Keeping copies each call&rsquo;s audio, so retention never takes it.
         Deleting the event is the only thing that gives those bytes back.
       </p>

@@ -164,7 +164,7 @@ function RecorderCard({ recorder, atMs }: { recorder: RecorderView; atMs: number
 
       {recorder.calls.length > 0 && (
         <div className="px-4 py-2">
-          <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          <h3 className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
             In hand
           </h3>
           <ul className="mt-1.5 space-y-1">
@@ -176,7 +176,7 @@ function RecorderCard({ recorder, atMs }: { recorder: RecorderView; atMs: number
                 <span className="truncate">
                   {call.talkgroupLabel ?? `Talkgroup ${call.talkgroup}`}
                   {call.emergency && (
-                    <span className="ml-1.5 font-mono text-[10px] uppercase text-red-500">
+                    <span className="ml-1.5 font-mono text-[11px] uppercase text-red-500">
                       emergency
                     </span>
                   )}
@@ -194,7 +194,7 @@ function RecorderCard({ recorder, atMs }: { recorder: RecorderView; atMs: number
 
       {recorder.notRecorded.length > 0 && (
         <div className="px-4 py-2">
-          <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          <h3 className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
             Not recorded, since it connected
           </h3>
           <ul className="mt-1.5 space-y-1">
@@ -219,7 +219,7 @@ function RecorderCard({ recorder, atMs }: { recorder: RecorderView; atMs: number
         <div className="px-4 py-2">
           <h3
             id={`refused-${recorder.id}`}
-            className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
+            className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
           >
             Recently turned down
           </h3>
@@ -366,7 +366,7 @@ function Card({
 }) {
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card">
-      <h2 className="flex items-baseline justify-between gap-2 border-b border-border px-4 py-2.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <h2 className="flex items-baseline justify-between gap-2 border-b border-border px-4 py-2.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
         {title}
         {note && <span className="normal-case tracking-normal">{note}</span>}
       </h2>

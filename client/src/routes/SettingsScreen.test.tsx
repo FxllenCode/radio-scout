@@ -1,6 +1,7 @@
 import { act, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
+import { axe } from 'vitest-axe'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { SKIP_WAITING } from '@/lib/serviceWorker'
@@ -159,5 +160,19 @@ describe('Settings → server', () => {
 
     expect(await screen.findByText('this device is offline')).toBeInTheDocument()
     expect(screen.queryByText('unreachable')).not.toBeInTheDocument()
+  })
+})
+
+describe('Settings, with everything it can offer drawn (#78)', () => {
+  it('passes axe with the update and install rows up', async () => {
+    const container = installServiceWorker()
+    beIosSafari()
+    const view = renderApp('/settings')
+    await deploy(container)
+    await screen.findByText('online')
+
+    expect(screen.getByRole('listitem', { name: 'Update' })).toBeInTheDocument()
+    expect(screen.getByRole('listitem', { name: 'Install' })).toBeInTheDocument()
+    expect(await axe(view.container)).toHaveNoViolations()
   })
 })

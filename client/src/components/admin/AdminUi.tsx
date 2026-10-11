@@ -92,7 +92,7 @@ function SignIn() {
       <div className="flex flex-col gap-1">
         <label
           htmlFor="admin-password"
-          className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
+          className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
         >
           Admin password
         </label>
@@ -149,7 +149,7 @@ export function Field({
     <div className="flex flex-col gap-1">
       <label
         htmlFor={htmlFor}
-        className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
+        className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
       >
         {label}
       </label>

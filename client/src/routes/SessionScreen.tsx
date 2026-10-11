@@ -102,7 +102,7 @@ export function SessionScreen() {
         </span>
       }
     >
-      <p className="mb-4 text-xs text-muted-foreground/70">
+      <p className="mb-4 text-xs text-muted-foreground">
         Everything heard since this app was opened.{' '}
         {plays ? 'Tap to replay; press' : 'Press'} and hold for hold, avoid,
         share and download.
@@ -125,7 +125,7 @@ export function SessionScreen() {
         <div className="flex flex-col items-center gap-3 rounded-xl border border-border bg-card px-6 py-12 text-center">
           <Radio className="size-6 text-muted-foreground" aria-hidden />
           <p className="font-mono text-sm text-muted-foreground">Nothing heard yet</p>
-          <p className="max-w-xs text-xs text-muted-foreground/70">
+          <p className="max-w-xs text-xs text-muted-foreground">
             Calls appear here as they play. The archive holds everything from
             before this session — <Link to="/search" className="underline">search it</Link>.
           </p>
@@ -139,13 +139,13 @@ export function SessionScreen() {
               node rather than rewriting it — which is what keeps a finger on
               the row it went down on. */}
           {calls.map((call) => (
-            <li key={call.id} className="flex items-center gap-3 px-3 py-2.5">
+            <li key={call.id} className="flex items-center gap-2 px-3 py-0.5">
               <button
                 type="button"
                 aria-disabled={!plays}
                 {...press(call)}
                 className={cn(
-                  'flex min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:bg-muted/40',
+                  'flex min-h-11 min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:bg-muted/40',
                   !plays && 'opacity-40',
                 )}
               >
@@ -155,7 +155,7 @@ export function SessionScreen() {
                     <span className="truncate">{talkgroupName(call)}</span>
                     <CallFlags call={call} />
                   </span>
-                  <span className="truncate font-mono text-[10px] text-muted-foreground">
+                  <span className="truncate font-mono text-[11px] text-muted-foreground">
                     {systemName(call)}
                   </span>
                 </span>
@@ -304,7 +304,7 @@ function Action({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex items-center gap-3 rounded-lg border border-border px-3 py-2.5 text-left font-mono text-xs transition-colors hover:bg-muted/40 disabled:opacity-40"
+      className="flex min-h-11 items-center gap-3 rounded-lg border border-border px-3 py-2.5 text-left font-mono text-xs transition-colors hover:bg-muted/40 disabled:opacity-40"
     >
       {icon}
       {children}

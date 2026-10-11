@@ -120,6 +120,7 @@ import type { Mark, SearchQuery } from '@/types'
 import { MARKS } from '@/types'
 
 import { searchParams } from './archive'
+import { markName } from './webhook'
 import type { RunSearch } from './run'
 
 /** Everything the Search screen's URL carries. */
@@ -251,3 +252,54 @@ export function numberIn(params: URLSearchParams, key: string): number | undefin
 
 const isMark = (value: string | null): value is Mark =>
   MARKS.includes(value as Mark)
+
+/** One filter in force, as a chip: what it says, and the search without it. */
+export interface FilterChip {
+  label: string
+  without: RunSearch
+}
+
+/** How a chip names what it refers to — the screen knows the catalog, this
+ *  module does not. */
+export interface ChipNames {
+  system(ref: number): string
+  talkgroup(systemRef: number | undefined, ref: number): string
+  at(ms: number): string
+}
+
+/**
+ * The filters in force, as chips (#78) — what Search says it is narrowed by
+ * while its form is folded away on a phone, each undone in one tap.
+ *
+ * In the form's own order, so the chips read like the form. **Sort is not
+ * one**: it orders the archive and narrows nothing, so "2 active" means two
+ * things are hiding Calls. Clearing a System clears its Talkgroup too, for the
+ * reason the System select does — a Talkgroup Ref means something only inside
+ * one System.
+ */
+export function filterChips(search: RunSearch, names: ChipNames): FilterChip[] {
+  const without = (...keys: (keyof RunSearch)[]): RunSearch => {
+    const left = { ...search }
+    for (const key of keys) delete left[key]
+    return left
+  }
+  const chips: FilterChip[] = []
+  const add = (label: string, ...keys: (keyof RunSearch)[]) =>
+    chips.push({ label, without: without(...keys) })
+
+  if (search.after !== undefined) add(`From ${names.at(search.after)}`, 'after')
+  if (search.before !== undefined) add(`To ${names.at(search.before)}`, 'before')
+  if (search.system !== undefined) {
+    add(`System ${names.system(search.system)}`, 'system', 'talkgroup')
+  }
+  if (search.talkgroup !== undefined) {
+    add(`Talkgroup ${names.talkgroup(search.system, search.talkgroup)}`, 'talkgroup')
+  }
+  if (search.group) add(`Group ${search.group}`, 'group')
+  if (search.tag) add(`Tag ${search.tag}`, 'tag')
+  if (search.minDuration !== undefined) add(`${search.minDuration}s or longer`, 'minDuration')
+  if (search.mark) add(markName(search.mark), 'mark')
+  if (search.starred) add('Starred', 'starred')
+  if (search.unit !== undefined) add(`Unit ${search.unit}`, 'unit')
+  return chips
+}

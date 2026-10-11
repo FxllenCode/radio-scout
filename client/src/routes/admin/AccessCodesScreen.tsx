@@ -111,7 +111,7 @@ export function AccessCodesScreen() {
             role="status"
             className="mt-3 flex flex-col gap-1 rounded-xl border border-border bg-card px-4 py-3"
           >
-            <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+            <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
               A link that unlocks itself — shown once
             </p>
             <code className="break-all font-mono text-sm">

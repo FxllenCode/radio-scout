@@ -142,7 +142,7 @@ export function SettingsScreen() {
             className="flex items-center justify-between px-4 py-3.5 text-muted-foreground"
           >
             <span className="text-sm">{label}</span>
-            <span className="font-mono text-xs text-muted-foreground/60">soon</span>
+            <span className="font-mono text-xs text-muted-foreground">soon</span>
           </li>
         ))}
       </ul>

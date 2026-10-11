@@ -25,6 +25,10 @@ import { server } from '@/test/setup'
 import { renderApp, renderWithProviders, routerProbe } from '@/test/utils'
 import { NOTICE_MS } from '@/hooks/useShareLink'
 
+/** How tall a row stands: a 44-pixel target (#78) plus the 1-pixel rule
+ *  between rows. The list's window arithmetic is in these units. */
+const ROW = 45
+
 /** A store with storage of its own, so no test can inherit another's
  *  selection (and none depends on jsdom having local storage at all). */
 function scannerStore(): AppStore {
@@ -455,7 +459,7 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
         Number.parseInt(list.style.paddingTop || '0', 10) +
         Number.parseInt(list.style.paddingBottom || '0', 10)
 
-      expect(padding + drawn * 44).toBe(400 * 44)
+      expect(padding + drawn * ROW).toBe(400 * ROW)
     })
 
     it('draws the rows the Listener has scrolled to', async () => {
@@ -464,7 +468,7 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
 
       // jsdom lays nothing out, so the list is told where it is: a hundred
       // rows' worth of scroll above the top of the viewport.
-      scrolledTo(-100 * 44)
+      scrolledTo(-100 * ROW)
 
       expect(await screen.findByRole('switch', { name: /Channel 100/ })).toBeVisible()
       expect(screen.queryByRole('switch', { name: /Channel 001/ })).toBeNull()
@@ -576,6 +580,21 @@ describe('TalkgroupsScreen (#12, spec US 19–22)', () => {
       )
       expect(screen.getByRole('switch', { name: /Channel 003 last heard 1m ago/ }))
         .toBeVisible()
+    })
+
+    /** "now" is not a span of time (#78): the busiest channel on the panel
+     *  was being read out as "last heard now ago". */
+    it('says a channel heard this minute was heard just now', async () => {
+      const catalog = countyCatalog(1)
+      catalog.systems[0].talkgroups[0].lastCallAtMs = Date.now() - 5_000
+      server.use(http.get(`${ORIGIN}/api/catalog`, () => HttpResponse.json(catalog)))
+      const store = scannerStore()
+      store.dispatch(showSystem({ systemRef: 1, shown: true }))
+      showPanel(store)
+
+      expect(
+        await screen.findByRole('switch', { name: /Channel 001 last heard just now$/ }),
+      ).toHaveTextContent('now')
     })
 
     it('says nothing about a Talkgroup the window did not hear', async () => {

@@ -260,7 +260,7 @@ function Stat({
 }) {
   return (
     <div className="flex items-baseline justify-between gap-2">
-      <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">
+      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
         {name}
       </dt>
       <dd data-testid={testId} className="truncate tabular-nums">

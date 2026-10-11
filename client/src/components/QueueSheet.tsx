@@ -129,13 +129,13 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
             className="divide-y divide-border rounded-xl border border-border"
           >
             {queue.map((call) => (
-              <li key={call.id} className="flex items-center gap-2 px-3 py-2">
+              <li key={call.id} className="flex items-center gap-2 px-3 py-0.5">
                 <ChannelLed color={ledForCall(call)} size={10} />
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate font-mono text-sm leading-tight">
                     {talkgroupName(call)}
                   </span>
-                  <span className="truncate font-mono text-[10px] text-muted-foreground">
+                  <span className="truncate font-mono text-[11px] text-muted-foreground">
                     {systemName(call)} · {formatRowTime(call.timestamp, clock, now)}
                   </span>
                 </span>
@@ -143,13 +143,13 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
                     neither valid HTML nor reachable by a screen reader (#47). */}
                 <UnitLink
                   call={call}
-                  className="max-w-20 shrink-0 font-mono text-[10px] text-muted-foreground"
+                  className="max-w-20 shrink-0 font-mono text-[11px] text-muted-foreground"
                 />
                 <button
                   type="button"
                   aria-label={`Play ${talkgroupName(call)} now`}
                   onClick={() => play(call.id)}
-                  className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:text-foreground"
+                  className="inline-flex size-11 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
                 >
                   <Play className="size-4" aria-hidden />
                 </button>
@@ -157,7 +157,7 @@ export function QueueSheet({ onClose }: { onClose: () => void }) {
                   type="button"
                   aria-label={`Drop ${talkgroupName(call)}`}
                   onClick={() => dispatch(dropQueued(call.id))}
-                  className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:text-led-red"
+                  className="inline-flex size-11 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-led-red"
                 >
                   <X className="size-4" aria-hidden />
                 </button>

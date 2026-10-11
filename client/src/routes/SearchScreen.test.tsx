@@ -2207,3 +2207,127 @@ describe('SearchScreen — starring (#66, spec US 37)', () => {
     expect(await screen.findByText(sentence)).toBeInTheDocument()
   })
 })
+
+/**
+ * Search on a phone (#78). The critique pass measured it at 390 pixels: the
+ * first result started at y=755 of a 760-pixel screen, under ten filters, and
+ * each row laid out 601 pixels of content in 341 — so the Talkgroup's name, the
+ * one thing a row is for, was the part that collapsed to nothing.
+ *
+ * What follows is what jsdom can pin: the disclosure, its count, the chips, the
+ * sheet. That the form is folded away at phone width and open at desktop width
+ * is a stylesheet's answer, and `phone.browser.test.tsx` measures it.
+ */
+describe('Search on a phone (#78)', () => {
+  const toggle = () => screen.getByRole('button', { name: /^Filters/ })
+
+  it('folds the filters behind a disclosure that says how many are set', async () => {
+    const user = userEvent.setup()
+    renderApp('/search?tag=Fire&mark=emergency&sort=oldest')
+    await resultRows()
+
+    // Sort is an ordering, not a filter: it narrows nothing.
+    expect(toggle()).toHaveAccessibleName('Filters · 2 active')
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle()).toHaveAttribute('aria-controls', 'archive-filters')
+
+    await user.click(toggle())
+
+    expect(toggle()).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('search', { name: 'Archive filters' })).toHaveAttribute(
+      'id',
+      'archive-filters',
+    )
+  })
+
+  it('says so when nothing is filtered', async () => {
+    renderApp('/search')
+    await resultRows()
+
+    expect(toggle()).toHaveAccessibleName('Filters')
+  })
+
+  /** What is filtered, readable without unfolding the form — and each one
+   *  undone in one tap, without it. */
+  it('shows each active filter as a chip that clears it', async () => {
+    const user = userEvent.setup()
+    renderApp('/search?tag=Fire&unit=1602381&starred=true')
+    await resultRows()
+
+    expect(screen.getByRole('button', { name: 'Remove filter: Starred' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove filter: Unit 1602381' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Remove filter: Tag Fire' }))
+
+    expect(routerProbe.location).toBe('/search?starred=true&unit=1602381')
+  })
+
+  /** A row's name, its time and its one-tap Play, on two lines — and the rest
+   *  of what a row offers one tap further, in a sheet. */
+  it("opens the rest of a row's actions from ⋯", async () => {
+    const user = userEvent.setup()
+    const shared = sharesTo()
+    renderApp('/search')
+    const rows = await resultRows()
+
+    await user.click(within(rows[1]).getByRole('button', { name: /^More for / }))
+    const sheet = screen.getByRole('dialog')
+    for (const action of [/^Star /, /^Copy link /, /^Play forward /]) {
+      expect(within(sheet).getByRole('button', { name: action })).toBeInTheDocument()
+    }
+    expect(within(sheet).getByRole('link', { name: /^Download / })).toBeInTheDocument()
+
+    await user.click(within(sheet).getByRole('button', { name: /^Copy link / }))
+
+    await waitFor(() => expect(shared()).toBe('http://localhost/search?call=2'))
+    // Done with: the sheet goes, so the next tap is on the list again.
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  /** An encrypted Call has no audio, and so nothing in its sheet that is
+   *  about audio (spec US 9) — the links and the Star still are. */
+  it('offers no audio from the sheet of an encrypted Call', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get(`${ORIGIN}/api/calls`, ({ request }) =>
+        HttpResponse.json(
+          archivePage(new URL(request.url), [{ ...ARCHIVE[0], encrypted: true, audioUrl: undefined }]),
+        ),
+      ),
+    )
+    renderApp('/search')
+    const [row] = await resultRows()
+
+    expect(within(row).queryByRole('button', { name: /^Play / })).toBeNull()
+    await user.click(within(row).getByRole('button', { name: /^More for / }))
+
+    const sheet = screen.getByRole('dialog')
+    expect(within(sheet).queryByRole('button', { name: /^Play forward / })).toBeNull()
+    expect(within(sheet).queryByRole('link', { name: /^Download / })).toBeNull()
+    expect(within(sheet).getByRole('button', { name: /^Copy link / })).toBeInTheDocument()
+  })
+
+  it('names the Talkgroup on the first line and when on the second', async () => {
+    renderApp('/search')
+    const [row] = await resultRows()
+
+    const [first, second, third] = within(row).getAllByRole('paragraph')
+    // Newest first, so the archive's last Call heads the list.
+    expect(first).toHaveTextContent('Beta Dispatch')
+    expect(second.querySelector('time')).not.toBeNull()
+    expect(second).toHaveTextContent('8.3s')
+    expect(third).toHaveTextContent('Beta · Fire · Public')
+  })
+})
+
+describe('Search on a phone, to a screen reader (#78)', () => {
+  it('passes axe with filters folded behind chips and a row sheet open', async () => {
+    const user = userEvent.setup()
+    const { container } = renderApp('/search?tag=Fire&starred=true')
+    const rows = await resultRows()
+    await user.click(within(rows[0]).getByRole('button', { name: /^More for / }))
+
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(await axe(container)).toHaveNoViolations()
+  })
+})

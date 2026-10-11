@@ -95,7 +95,7 @@ export function ScopeEditor({
 
   return (
     <fieldset className="flex flex-col gap-2 rounded-lg border border-border px-3 py-2">
-      <legend className="px-1 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <legend className="px-1 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
         {legend}
       </legend>
 

@@ -55,12 +55,11 @@ export function ExportControl({
       <Button
         type="button"
         variant="outline"
-        size="sm"
         aria-label="Export these results"
-        className="h-7 px-2"
+        className="size-11"
         onClick={() => setOpen(true)}
       >
-        <Download className="size-3.5" aria-hidden />
+        <Download className="size-4" aria-hidden />
       </Button>
       {open && (
         <Sheet title="Export" onClose={() => setOpen(false)}>

@@ -79,7 +79,7 @@ export function Sheet({
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="-mr-1 rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
+            className="-my-2 -mr-3 inline-flex size-11 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
           >
             <X className="size-4" aria-hidden />
           </button>
@@ -101,19 +101,24 @@ export function Sheet({
  */
 export function SheetAction({
   onClick,
+  label,
   className,
   children,
 }: {
   onClick: () => void
+  /** Its accessible name, where the words on it say less than a screen reader
+   *  needs — "Copy link", of *what*. */
+  label?: string
   className?: string
   children: ReactNode
 }) {
   return (
     <button
       type="button"
+      aria-label={label}
       onClick={onClick}
       className={cn(
-        'flex w-full items-center justify-center gap-2 rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40',
+        'flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40',
         className,
       )}
     >

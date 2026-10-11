@@ -64,7 +64,7 @@ export function ListenersScreen() {
               variant={one.id === range.id ? 'secondary' : 'outline'}
               size="sm"
               aria-pressed={one.id === range.id}
-              className="h-7 px-2 font-mono text-[10px] uppercase tracking-wider"
+              className="h-7 px-2 font-mono text-[11px] uppercase tracking-wider"
               onClick={() => choose(one)}
             >
               {one.label}

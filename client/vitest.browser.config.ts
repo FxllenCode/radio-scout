@@ -2,6 +2,7 @@
 import path from 'node:path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import { playwright } from '@vitest/browser-playwright'
 
 /**
@@ -36,6 +37,15 @@ import { playwright } from '@vitest/browser-playwright'
  * owns the one Rust profile while the arm64 job (#38) does not. What is asserted
  * here is not line reachability; it is that a real engine accepts our bytes.
  *
+ * # What else only a real engine can answer (#78)
+ *
+ * The other thing jsdom does not have is a **stylesheet**. A class name is all
+ * it knows, so "this button is 44 pixels tall", "this field is 16px, so iOS will
+ * not zoom on it" and "this grey passes AA on that card" are questions it can
+ * only answer by trusting a token. So Tailwind is compiled here too, and
+ * `src/routes/phone.browser.test.tsx` measures the Listener's screens at phone
+ * width — geometry, type size and contrast — with axe-core reading real colours.
+ *
  * # Where the boundary is
  *
  * Chromium on a desktop. It cannot validate iOS background audio or lock-screen
@@ -43,7 +53,7 @@ import { playwright } from '@vitest/browser-playwright'
  * is the point. That stays the real-device manual gate (ADR-0005, #33).
  */
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   resolve: {
     alias: { '@': path.resolve(import.meta.dirname, './src') },
   },
