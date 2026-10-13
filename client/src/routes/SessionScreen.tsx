@@ -39,7 +39,7 @@ import { UnitLink } from '@/components/UnitLink'
 import { useLongPress } from '@/hooks/useLongPress'
 import { usePublicShare } from '@/hooks/usePublicShare'
 import { useShareLink } from '@/hooks/useShareLink'
-import { useNow } from '@/hooks/useNow'
+import { DATE_TICK_MS, useNow } from '@/hooks/useNow'
 import { useStar } from '@/hooks/useStar'
 import { downloadUrl } from '@/lib/archive'
 import { systemName, talkgroupName } from '@/lib/call'
@@ -67,7 +67,7 @@ export function SessionScreen() {
   const calls = useAppSelector(selectSessionLog)
   // The log's times change their shape at midnight (#78), and that is all
   // this screen measures from the clock.
-  const now = useNow(calls.length > 0, 60_000)
+  const now = useNow(calls.length > 0, DATE_TICK_MS)
   const hold = useAppSelector(selectHold)
   // Replaying puts audio on the element, which is exactly what a Listener who
   // chose silence did not ask for (#80, #88) — `replay` refuses in the reducer

@@ -1,4 +1,4 @@
-import { DockedBanner } from '@/components/layout/DockedBanner'
+import { DismissButton, DockedBanner } from '@/components/layout/DockedBanner'
 import { Button } from '@/components/ui/button'
 
 /**
@@ -32,14 +32,7 @@ export function UpdateBanner({
       <Button className="h-11" variant="secondary" onClick={apply}>
         Reload
       </Button>
-      <button
-        type="button"
-        aria-label="Dismiss update notice"
-        className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
-        onClick={onDismiss}
-      >
-        ✕
-      </button>
+      <DismissButton label="Dismiss update notice" onClick={onDismiss} />
     </DockedBanner>
   )
 }

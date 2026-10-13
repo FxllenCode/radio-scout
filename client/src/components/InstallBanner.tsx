@@ -1,4 +1,4 @@
-import { DockedBanner } from '@/components/layout/DockedBanner'
+import { DismissButton, DockedBanner } from '@/components/layout/DockedBanner'
 import { Button } from '@/components/ui/button'
 import type { InstallState } from '@/hooks/useInstall'
 import { useInstance } from '@/hooks/useInstance'
@@ -45,14 +45,7 @@ export function InstallBanner({ install }: { install: InstallState }) {
           Install
         </Button>
       )}
-      <button
-        type="button"
-        aria-label="Dismiss install prompt"
-        className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
-        onClick={install.dismiss}
-      >
-        ✕
-      </button>
+      <DismissButton label="Dismiss install prompt" onClick={install.dismiss} />
     </DockedBanner>
   )
 }

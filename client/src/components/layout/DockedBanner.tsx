@@ -1,5 +1,20 @@
 import type { ReactNode } from 'react'
 
+/** A docked banner's ✕ (#78) — one target a thumb can hit, shared by every
+ *  banner that can be waved off. */
+export function DismissButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      onClick={onClick}
+      className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
+    >
+      ✕
+    </button>
+  )
+}
+
 import { cn } from '@/lib/utils'
 
 /**

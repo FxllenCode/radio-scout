@@ -193,25 +193,30 @@ export interface LiveState {
    *
    *  A flag rather than a count, because the server cannot say how many it could
    *  not carry without counting the whole archive — and "some" is what the
-   *  listener needs to know either way. It does not clear: a gap in what someone
-   *  heard does not heal. */
+   *  listener needs to know either way. Nothing arriving clears it — a gap in
+   *  what someone heard does not heal — only the Listener following the
+   *  missed counter into Search does ([`missedCleared`], #78). */
   gap: boolean
   /**
    * When the traffic this Listener missed began — the start of the gap the
    * missed counter opens Search on (#78), or absent while nothing has been
    * missed or nothing says when.
    *
-   * A lower bound, always, because a search that opened *after* the first
-   * missed Call would hide exactly what it was opened to show. Where the Calls
-   * themselves are known — the cap, a jump to the newest — it is the oldest of
-   * them; where the server dropped Calls it could not name — `lagged`, a
-   * **Backfill** `gap` — it is [`newestAt`], which every one of them came
-   * after. Clears with the counter.
+   * A lower bound, because a search that opened *after* the first missed Call
+   * would hide exactly what it was opened to show. Where the Calls themselves
+   * are known — the cap, a jump to the newest — it is the oldest of them.
+   * Where the server dropped Calls it could not name — `lagged`, a **Backfill**
+   * `gap` — every one of them was sent after the newest Call that did arrive,
+   * and Calls are sent in the order they *end*: so a long one keyed *before*
+   * that Call can be among them. The gap reaches back a whole transmission
+   * ([`LONGEST_TRANSMISSION_MS`]) from the newest end heard. Clears with the
+   * counter.
    */
   missedFrom?: number
-  /** The newest Call time this Listener has received — what a `lagged` or
-   *  `gap` notice's dropped Calls are known to have come after (#78). */
-  newestAt?: number
+  /** When the newest Call this Listener has received *ended* — its start plus
+   *  its length, where known (#78). What a `lagged` or `gap` notice's dropped
+   *  Calls were sent after. */
+  newestEndAt?: number
   /** The listener has switched the live feed **off** (CONTEXT.md **Feed off**,
    *  #80) — a hard off, not a pause.
    *
@@ -375,6 +380,26 @@ function heard(state: LiveState, call: Call) {
   if (state.sessionLog.some((one) => one.id === call.id)) return
   state.sessionLog.unshift(call)
   if (state.sessionLog.length > SESSION_LOG_LIMIT) state.sessionLog.pop()
+}
+
+/**
+ * How long a transmission is allowed for when reaching back over Calls the
+ * server dropped without naming (#78) — longer than any ordinary one.
+ *
+ * A trunked transmission is seconds; a long dispatch is a minute or two, and a
+ * recorder splits a channel held open far longer. Five minutes is the reach
+ * that keeps [`LiveState.missedFrom`] a lower bound in practice, at the cost
+ * of a search that opens on a few Calls already heard — which is the cheap
+ * mistake, where opening a minute late would be the expensive one.
+ */
+export const LONGEST_TRANSMISSION_MS = 5 * 60_000
+
+/** The earliest any Call sent after the newest one received could have
+ *  started, or unknown when nothing has been received. */
+function droppedSince(state: LiveState): number | undefined {
+  return state.newestEndAt === undefined
+    ? undefined
+    : state.newestEndAt - LONGEST_TRANSMISSION_MS
 }
 
 /** Some traffic from `from` onwards went unheard: move the start of the
@@ -703,7 +728,7 @@ const liveSlice = createSlice({
       state.since = undefined
       // Coming back starts from now, and so does anything it later misses: the
       // silence they chose is not part of the gap (#78).
-      state.newestAt = undefined
+      state.newestEndAt = undefined
     },
 
     /** Back on. The socket reconnects and subscribes fresh — with no cursor,
@@ -756,7 +781,8 @@ const liveSlice = createSlice({
         // and a cursor over ids would step past a Call that was held back.
         state.since = Math.max(state.since ?? 0, seq)
         if (call.timestamp !== undefined) {
-          state.newestAt = Math.max(state.newestAt ?? call.timestamp, call.timestamp)
+          const ended = call.timestamp + (call.durationMs ?? 0)
+          state.newestEndAt = Math.max(state.newestEndAt ?? ended, ended)
         }
 
         if (!wanted(state, call)) return
@@ -1131,9 +1157,10 @@ const liveSlice = createSlice({
      *  the same hole in their history either way. */
     gapped(state) {
       state.gap = true
-      // What the Backfill could not carry is older than everything it did, and
-      // newer than the last Call heard before the drop.
-      missedSince(state, state.newestAt)
+      // What the Backfill could not carry was sent after the last Call heard
+      // before the drop — see [`LiveState.missedFrom`] for why that is a
+      // transmission's reach from its end, not its start.
+      missedSince(state, droppedSince(state))
     },
 
     /**
@@ -1158,7 +1185,7 @@ const liveSlice = createSlice({
       // for silence they chose would make the counter a lie.
       if (!feedPlays(statusOf(state))) return
       state.missed += action.payload
-      missedSince(state, state.newestAt)
+      missedSince(state, droppedSince(state))
     },
   },
 

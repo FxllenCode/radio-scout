@@ -14,7 +14,7 @@ import { talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
 import { useGrant } from '@/hooks/useGrant'
 import { useClock } from '@/hooks/useInstance'
-import { useNow } from '@/hooks/useNow'
+import { DATE_TICK_MS, useNow } from '@/hooks/useNow'
 import { useGetUnitHistoryQuery, useSearchCallsQuery } from '@/store/api'
 import { useAppDispatch } from '@/store/hooks'
 import { startRun } from '@/store/playback'
@@ -58,7 +58,7 @@ export function UnitScreen() {
         <Link
           to="/search"
           aria-label="Back to search"
-          className="inline-flex items-center gap-1"
+          className="-my-3 inline-flex min-h-11 items-center gap-1"
         >
           <ArrowLeft className="size-3.5" aria-hidden />
           Search
@@ -126,7 +126,7 @@ function spans(members: RefSpan[] | undefined): string {
  *  for, which is why the server orders it rather than the screen. */
 function Talkgroups({ unit }: { unit: UnitHistory }) {
   // A list's times leave today off (#78); midnight is all this measures.
-  const now = useNow(true, 60_000)
+  const now = useNow(true, DATE_TICK_MS)
   if (unit.talkgroups.length === 0) {
     return (
       <p className="mt-5 rounded-xl border border-border bg-card px-6 py-8 text-center font-mono text-sm text-muted-foreground">
@@ -179,7 +179,7 @@ function Calls({
   page: SearchPage | undefined
 }) {
   const clock = useClock()
-  const now = useNow(true, 60_000)
+  const now = useNow(true, DATE_TICK_MS)
   // The **grant** goes on the link, never through the base query: a download
   // is a navigation (#68).
   const grant = useGrant()
@@ -226,7 +226,7 @@ function Calls({
               <>
                 <Button
                   variant="outline"
-                  size="icon"
+                  className="size-11"
                   aria-label={`Play ${talkgroupName(call)} at ${formatCallTime(call.timestamp, clock)}`}
                   onClick={() => dispatch(startRun({ search, page, index }))}
                 >
@@ -236,7 +236,7 @@ function Calls({
                   href={downloadUrl(call.id, grant)}
                   download
                   aria-label={`Download ${talkgroupName(call)} at ${formatCallTime(call.timestamp, clock)}`}
-                  className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
+                  className="inline-flex size-11 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
                 >
                   <Download className="size-4" aria-hidden />
                 </a>

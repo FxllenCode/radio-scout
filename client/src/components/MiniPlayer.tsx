@@ -5,13 +5,13 @@ import { DockedBanner } from '@/components/layout/DockedBanner'
 import { ChannelLed, StatusLamp } from '@/components/Led'
 import { Button } from '@/components/ui/button'
 import { useInstance } from '@/hooks/useInstance'
-import { useNow } from '@/hooks/useNow'
-import { lateness } from '@/lib/archive'
+import { useLateness } from '@/hooks/useLateness'
 import { talkgroupName } from '@/lib/call'
 import { ledForCall } from '@/lib/led'
 import { shortcutsFor } from '@/lib/hotkeys'
 import type { Strip } from '@/lib/strip'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
+import { selectPlayId } from '@/store/live'
 import {
   nextCall,
   selectIsBlocked,
@@ -67,8 +67,8 @@ function Playing({ strip }: { strip: Extract<Strip, { mode: 'playing' }> }) {
   // carried to every other tab. Not for the archive, whose Calls are old by
   // definition and say where in the Run they are instead.
   const live = strip.source === 'live'
-  const now = useNow(live, 15_000)
-  const late = live ? lateness(call, now) : null
+  const heardLate = useLateness(call, useAppSelector(selectPlayId))
+  const late = live ? heardLate : null
   const detail = late ? `${strip.detail} · ${late}` : strip.detail
 
   return (
@@ -132,7 +132,7 @@ function Quiet({ strip }: { strip: Extract<Strip, { mode: 'quiet' }> }) {
         {strip.badge.label}
       </p>
       <Button
-        size="sm"
+        className="h-11"
         variant="secondary"
         onClick={() => dispatch(wayBackAction[strip.does]())}
       >

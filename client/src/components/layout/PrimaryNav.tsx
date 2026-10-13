@@ -22,7 +22,7 @@ const tabs = [
  *  `layout` is where it sits (#78): along the bottom on a phone, where the
  *  thumb is, and down the left on a desk, where there is no thumb and a bottom
  *  bar would spend a strip the width of the screen on four words. */
-export function BottomTabBar({
+export function PrimaryNav({
   searchTo = '/search',
   layout = 'bottom',
 }: {

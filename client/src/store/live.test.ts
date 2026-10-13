@@ -54,6 +54,7 @@ import {
   selectLiveStatus,
   selectMissed,
   selectMissedFrom,
+  LONGEST_TRANSMISSION_MS,
   selectHasGap,
   missedCleared,
   selectPlayId,
@@ -1921,6 +1922,8 @@ describe('applying a Selection from a link (#61, spec US 30)', () => {
  */
 describe('the missed window (#78)', () => {
   const at = (id: number, timestamp: number): Call => ({ ...call(id), timestamp })
+  /** An afternoon, so a transmission's worth of reaching back stays positive. */
+  const T = Date.parse('2026-07-25T14:00:00')
 
   it('is unknown while nothing has been missed', () => {
     const state = reduce(...arrive(at(1, 5_000)))
@@ -1945,26 +1948,42 @@ describe('the missed window (#78)', () => {
     expect(selectMissedFrom(rootState(state))).toBe(2_000)
   })
 
-  /** The server says how many it dropped, never which — so the gap starts at
-   *  the newest Call that did arrive, which every dropped one came after. */
+  /** The server says how many it dropped, never which. Every one of them was
+   *  sent after the newest Call that did arrive — but Calls are sent in the
+   *  order they *end*, so a long one that started first can be among them. The
+   *  gap therefore starts a whole transmission before the newest end heard. */
   it.each([
     ['lagged', () => lagged(5)],
     ['a Backfill gap', () => gapped()],
-  ])('starts at the newest Call heard before %s', (_case, notice) => {
-    const state = reduce(...arrive(at(1, 9_000), at(2, 7_000)), notice())
+  ])('starts a transmission before the newest end heard, on %s', (_case, notice) => {
+    const state = reduce(
+      ...arrive({ ...at(1, T + 9_000), durationMs: 4_000 }, at(2, T + 7_000)),
+      notice(),
+    )
 
-    expect(selectMissedFrom(rootState(state))).toBe(9_000)
+    expect(selectMissedFrom(rootState(state))).toBe(T + 13_000 - LONGEST_TRANSMISSION_MS)
+  })
+
+  /** The case that makes it a lower bound: a 90-second dispatch keyed first
+   *  and still going while a 5-second Call keyed, ended and was delivered. The
+   *  dispatch, dropped, must still be inside the window. */
+  it('reaches back past a long Call dropped after a short one arrived', () => {
+    const long = { start: T, ms: 90_000 }
+    const state = reduce(...arrive({ ...at(1, T + 80_000), durationMs: 5_000 }), lagged(1))
+
+    expect(selectMissedFrom(rootState(state))).toBeLessThanOrEqual(long.start)
   })
 
   it('keeps the earliest start as more is missed', () => {
     const state = reduce(
-      ...arrive(at(1, 1_000), at(2, 2_000), at(3, 3_000)),
+      ...arrive(at(1, T + 1_000), at(2, T + 2_000), at(3, T + 3_000)),
       jumpToNewest(),
-      ...arrive(at(4, 8_000)),
+      ...arrive(at(4, T + 400_000)),
       lagged(2),
     )
 
-    expect(selectMissedFrom(rootState(state))).toBe(2_000)
+    // The jump's skipped Call is older than a transmission before the lag.
+    expect(selectMissedFrom(rootState(state))).toBe(T + 2_000)
   })
 
   /** A silence the Listener chose is not part of what they missed — the

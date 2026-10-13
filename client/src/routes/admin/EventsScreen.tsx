@@ -254,10 +254,10 @@ function EventEditor({
         {downloadable && (
           <>
             <Button asChild variant="outline" size="sm">
-              <a href={eventExportUrl(event.id, 'zip')}>Download zip</a>
+              <a href={eventExportUrl(event.id, 'zip')} download>Download zip</a>
             </Button>
             <Button asChild variant="outline" size="sm">
-              <a href={eventExportUrl(event.id, 'wav')}>Download audio</a>
+              <a href={eventExportUrl(event.id, 'wav')} download>Download audio</a>
             </Button>
           </>
         )}

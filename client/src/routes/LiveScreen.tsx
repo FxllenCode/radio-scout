@@ -28,13 +28,14 @@ import { UnitLink } from '@/components/UnitLink'
 import { useStar } from '@/hooks/useStar'
 import { useClock, useInstance } from '@/hooks/useInstance'
 import { useDimmer } from '@/hooks/useDimmer'
+import { useLateness } from '@/hooks/useLateness'
+import { useReadoutFacts } from '@/hooks/useReadoutFacts'
 import { useFullscreen } from '@/hooks/useFullscreen'
-import { useNow } from '@/hooks/useNow'
-import { useOnline } from '@/hooks/useOnline'
+import { DATE_TICK_MS, useNow } from '@/hooks/useNow'
 import { Button } from '@/components/ui/button'
 import { Waveform } from '@/components/Waveform'
 import { callCategory, formatFrequency, systemName, talkgroupName, unitName } from '@/lib/call'
-import { formatClock, lateness } from '@/lib/archive'
+import { formatClock } from '@/lib/archive'
 import { CATCHUP_RATE } from '@/lib/catchup'
 import { feedReadout, type FeedBadge, type FeedEmpty } from '@/lib/feed'
 import { ledForCall } from '@/lib/led'
@@ -43,7 +44,6 @@ import { shortcutsFor, type HotkeyCommand } from '@/lib/hotkeys'
 import { isSystemHold, isTalkgroupHold } from '@/lib/selection'
 import { wayBack } from '@/lib/strip'
 import { cn } from '@/lib/utils'
-import { useGetCatalogQuery } from '@/store/api'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   advance,
@@ -55,14 +55,13 @@ import {
   selectHistory,
   selectHold,
   selectHasGap,
-  selectLiveCall,
   selectListenerCount,
   selectLiveControls,
   selectLiveStatus,
-  selectRefused,
   selectIsPriority,
   selectMissed,
   selectMissedFrom,
+  selectPlayId,
   missedCleared,
   selectIsCatchingUp,
   selectQueueDepth,
@@ -73,7 +72,7 @@ import {
   turnFeedOn,
 } from '@/store/live'
 import {
-  previousCall,
+  replayLive,
   selectIsBlocked,
   selectIsLiveSource,
   selectIsPaused,
@@ -82,10 +81,6 @@ import {
   wayBackAction,
 } from '@/store/transport'
 import type { Call } from '@/types'
-
-/** How often the times on this screen are redrawn: they say minutes and
- *  dates, so a second-by-second clock would be rendering for nothing. */
-const CLOCK_TICK_MS = 15_000
 
 /** Spec US 14's timed avoids, in minutes. */
 const AVOID_MINUTES = [30, 60, 120] as const
@@ -113,7 +108,6 @@ function LinkState({ badge }: { badge: FeedBadge }) {
  */
 export function LiveScreen({ docked = false }: { docked?: boolean } = {}) {
   const dispatch = useAppDispatch()
-  const call = useAppSelector(selectLiveCall)
   const status = useAppSelector(selectLiveStatus)
   const queued = useAppSelector(selectQueueDepth)
   const catchingUp = useAppSelector(selectIsCatchingUp)
@@ -133,18 +127,10 @@ export function LiveScreen({ docked = false }: { docked?: boolean } = {}) {
   // header above it disagrees with.
   const feed = useAppSelector(selectFeedStatus)
   const can = useAppSelector(selectLiveControls)
-  // Why the server is turning us away, when it is (#77) — so the screen says
-  // "full" rather than "no link" while the retries go on.
-  const refused = useAppSelector(selectRefused)
-  // Whose fault a dead link is (#78): no network is the Listener's to fix, a
-  // server that is not answering is not.
-  const offline = !useOnline()
-  // Whether there is anything to listen *to* yet (#78). An Instance no
-  // recorder has ever reached is the one quiet where setup is the answer;
-  // every other quiet is a Listener between Calls. Unknown until the catalog
-  // lands, and read as the common case meanwhile.
-  const firstRun = useGetCatalogQuery().data?.systems.length === 0
-  const readout = feedReadout(feed, status, { refused, offline, firstRun })
+  // Why the server is turning us away (#77), whose fault a dead link is, and
+  // whether there is anything to listen *to* yet (#78) — the same facts the
+  // announcer says, gathered once.
+  const readout = feedReadout(feed, status, useReadoutFacts())
   // How many are listening, when the Operator publishes it (#77) — and only
   // while live, because a count kept from a dropped socket is a number about a
   // moment that has passed.
@@ -372,10 +358,10 @@ export function LiveScreen({ docked = false }: { docked?: boolean } = {}) {
           label="Replay"
           hotkey="replay"
           disabled={!can.replay}
-          // US 13 is "current, previous, and back through the last five": the
-          // Call playing starts over, and with none playing the last one
-          // returns. The list below reaches further back.
-          onClick={() => dispatch(call ? replay(call.id) : previousCall())}
+          // US 13 is "current, previous, and back through the last five" —
+          // `replayLive`, which the R key shares. The list below reaches
+          // further back.
+          onClick={() => dispatch(replayLive())}
           icon={<RotateCcw className="size-3.5" aria-hidden />}
         >
           Replay
@@ -534,10 +520,10 @@ function Display({
   missed: number
   gap: boolean
 }) {
-  // Coarse: an age in minutes and a date that changes at midnight are all
-  // this card measures from the clock.
-  const now = useNow(true, CLOCK_TICK_MS)
-  const late = lateness(call, now)
+  // A date that changes at midnight is all this card measures from the clock;
+  // how late the Call was heard is measured once, as it started (#78).
+  const now = useNow(true, DATE_TICK_MS)
+  const late = useLateness(call, useAppSelector(selectPlayId))
   const color = ledForCall(call)
 
   return (
@@ -794,7 +780,7 @@ function History({
    *  nothing would be the common case, not a corner. */
   disabled: boolean
 }) {
-  const now = useNow(calls.length > 0, CLOCK_TICK_MS)
+  const now = useNow(calls.length > 0, DATE_TICK_MS)
   if (calls.length === 0) return null
 
   return (

@@ -103,9 +103,10 @@ const pad = (value: number) => String(value).padStart(2, '0')
 const dateOf = (at: Date) =>
   `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
 
-/** `HH:MM:SS` on the Operator's clock, padded either way. */
-function timeOf(at: Date, clock: TimeFormat): string {
-  const rest = `${pad(at.getMinutes())}:${pad(at.getSeconds())}`
+/** `HH:MM:SS` on the Operator's clock, padded either way — or `HH:MM` for a
+ *  wall clock. */
+function timeOf(at: Date, clock: TimeFormat, seconds = true): string {
+  const rest = seconds ? `${pad(at.getMinutes())}:${pad(at.getSeconds())}` : pad(at.getMinutes())
   const hours = at.getHours()
   if (clock === '24h') return `${pad(hours)}:${rest}`
   return `${pad(hours % 12 || 12)}:${rest} ${hours < 12 ? 'AM' : 'PM'}`
@@ -141,11 +142,7 @@ export function formatRowTime(
 /** The time now, as the Live screen's clock reads it (#78): hours and minutes
  *  on the Operator's clock — a wall clock, not a log stamp. */
 export function formatClock(ms: number, clock: TimeFormat): string {
-  const at = new Date(ms)
-  const minutes = pad(at.getMinutes())
-  const hours = at.getHours()
-  if (clock === '24h') return `${pad(hours)}:${minutes}`
-  return `${pad(hours % 12 || 12)}:${minutes} ${hours < 12 ? 'AM' : 'PM'}`
+  return timeOf(new Date(ms), clock, false)
 }
 
 /** How long after a Call ends it can arrive and still be "now" — an upload

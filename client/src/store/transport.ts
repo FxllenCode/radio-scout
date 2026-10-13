@@ -451,6 +451,19 @@ export const previousCall =
     if (last) dispatch(replay(last.id))
   }
 
+/**
+ * Replay, as the Live screen means it (spec US 13): the Call on the air starts
+ * over, and with none on the air the last one comes back.
+ *
+ * One rule for the Replay button and its key (#78) — written twice it had
+ * already drifted, the key growing a gate the button did not have.
+ */
+export const replayLive =
+  () => (dispatch: AppDispatch, getState: () => TransportRoot) => {
+    const current = selectLiveCall(getState())
+    dispatch(current ? replay(current.id) : previousCall())
+  }
+
 /** One button for both meanings, since the element has only one state. */
 export const togglePause =
   () => (dispatch: AppDispatch, getState: () => TransportRoot) => {

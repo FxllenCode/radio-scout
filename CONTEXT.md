@@ -112,7 +112,7 @@ _Avoid_: offline (the network's state, not the listener's choice), disabled, sta
 
 **Feed down**:
 The **live feed** not delivering because the connection isn't there — through no choice of the **Listener's**. The counterpart to **Feed off**, and the distinction is the whole point: Feed off is a decision and persists; Feed down is a condition and clears itself when the connection returns. A Listener is told which, because "nothing is happening" and "nothing is reaching you" call for different reactions. Feed down is itself two situations a Listener is told apart (#78): **this device is offline** — theirs to fix, and the screen says OFFLINE — or **the server isn't answering** — nobody's on their side, NO LINK. Same cause, different reactions.
-_Avoid_: offline, disconnected, dropped, stale.
+_Avoid_: offline (only the device is offline, and it is one of Feed down's two situations rather than a name for it), disconnected, dropped, stale.
 
 **Playback mode**:
 The mode where the listener plays archived calls from the searchable history instead of the live feed. Mutually exclusive with live feed.

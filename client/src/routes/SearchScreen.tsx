@@ -13,6 +13,7 @@ import {
   SlidersHorizontal,
   Square,
   X,
+  type LucideIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -24,7 +25,7 @@ import { CallTime } from '@/components/CallTime'
 import { DateField, Field, controlClass } from '@/components/Field'
 import { DensityRibbon } from '@/components/DensityRibbon'
 import { ExportControl } from '@/components/ExportControl'
-import { Sheet, SheetAction } from '@/components/Sheet'
+import { Sheet, SheetAction, sheetActionClass } from '@/components/Sheet'
 import { Screen } from '@/components/layout/Screen'
 import { StarButton } from '@/components/StarButton'
 import { ChannelLed } from '@/components/Led'
@@ -53,6 +54,7 @@ import { HOUR_MS, heatmapWindow } from '@/lib/heatmap'
 import {
   filterChips,
   readSearchUrl,
+  systemChosen,
   writeSearchUrl,
   type SearchUrl,
 } from '@/lib/searchUrl'
@@ -72,7 +74,7 @@ import {
 } from '@/store/api'
 import { useGrant } from '@/hooks/useGrant'
 import { useClock } from '@/hooks/useInstance'
-import { useNow } from '@/hooks/useNow'
+import { DATE_TICK_MS, useNow } from '@/hooks/useNow'
 import { useStar } from '@/hooks/useStar'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
@@ -317,6 +319,9 @@ export function SearchScreen() {
    * the form is simply open and the toggle is not drawn.
    */
   const [filtersOpen, setFiltersOpen] = useState(false)
+  /** One clock for every row's time (#78) — a page of fifty rows is not fifty
+   *  timers. */
+  const now = useNow(results.length > 0, DATE_TICK_MS)
   const chips = filterChips(filters, {
     system: (ref) =>
       options?.systems.find((one) => one.ref === ref)?.label ?? String(ref),
@@ -432,13 +437,10 @@ export function SearchScreen() {
             className={controlClass}
             value={filters.system ?? ''}
             onChange={(event) =>
-              updateFilters({
-                system: event.target.value
-                  ? Number(event.target.value)
-                  : undefined,
+              updateFilters(
                 // A Talkgroup Ref only means something inside its System.
-                talkgroup: undefined,
-              })
+                systemChosen(event.target.value ? Number(event.target.value) : undefined),
+              )
             }
           >
             <option value="">Any system</option>
@@ -808,6 +810,7 @@ export function SearchScreen() {
             <ResultRow
               key={call.id}
               call={call}
+              now={now}
               isCurrent={current?.id === call.id}
               selected={signedIn ? selected.includes(call.id) : undefined}
               onSelect={() => toggleSelected(call.id)}
@@ -925,6 +928,7 @@ function useDeepLinkedCall(id: number | undefined, search: RunSearch): boolean {
  */
 function ResultRow({
   call,
+  now,
   isCurrent,
   onPlay,
   onPlayForward,
@@ -934,6 +938,9 @@ function ResultRow({
   onSelect,
 }: {
   call: Call
+  /** The page's clock, which leaves today's date off the row's time (#78) —
+   *  one timer for the list, not one per row. */
+  now: number
   isCurrent: boolean
   onPlay: () => void
   onPlayForward: () => void
@@ -949,8 +956,6 @@ function ResultRow({
   onSelect: () => void
 }) {
   const clock = useClock()
-  // The list's times leave today off (#78); midnight is all this measures.
-  const now = useNow(true, 60_000)
   // The **grant** goes on the link, never through the base query: a download
   // is a navigation (#68).
   const grant = useGrant()
@@ -960,14 +965,33 @@ function ResultRow({
   const description = `${name} on ${system} at ${formatCallTime(call.timestamp, clock)}`
   /** Linkable whether or not there is anything to play: an encrypted Call is
    *  still a thing worth pointing somebody at (spec US 9). What it has none of
-   *  is *audio*, which is why [`listens`] is its own block. */
+   *  is *audio*, which is why Play, Play forward and Download need it. */
   const audible = call.audioUrl !== undefined
-  // The same gesture the other way round (#61): the list is newest first, so
-  // Play walks back through history and this walks forward from here. Offered
-  // only where there is an instant to anchor on — a Call whose time was never
-  // recorded would anchor a forward run at the beginning of the archive.
-  const forward = audible && call.timestamp !== undefined
-  const download = downloadUrl(call.id, grant)
+  /**
+   * What a row offers besides Play and its Star — **once**, and drawn two ways
+   * (#78): inline where there is width, in the `⋯` sheet on a phone. Two
+   * spellings of the four would be two places for an accessible name or a
+   * condition to drift.
+   */
+  const actions: RowAction[] = [
+    { key: 'link', label: `Copy link to ${description}`, text: 'Copy link', Icon: Link2, onClick: onCopyLink },
+    // Two links, deliberately, because they are two different offers: the one
+    // above opens this Call *in the app* and never expires, and this one opens
+    // it for somebody who has never heard of this instance and stops working.
+    ...(onShare
+      ? [{ key: 'share', label: `Share ${description} publicly`, text: 'Share publicly', Icon: Share2, onClick: onShare }]
+      : []),
+    // The same gesture the other way round (#61): the list is newest first, so
+    // Play walks back through history and this walks forward from here. Offered
+    // only where there is an instant to anchor on — a Call whose time was never
+    // recorded would anchor a forward run at the beginning of the archive.
+    ...(audible && call.timestamp !== undefined
+      ? [{ key: 'forward', label: `Play forward from ${description}`, text: 'Play forward from here', Icon: FastForward, onClick: onPlayForward }]
+      : []),
+    ...(audible
+      ? [{ key: 'download', label: `Download ${description}`, text: 'Download', Icon: Download, href: downloadUrl(call.id, grant) }]
+      : []),
+  ]
 
   return (
     <li className={cn('flex items-center gap-2 px-3 py-1', isCurrent && 'bg-muted/40')}>
@@ -1013,47 +1037,28 @@ function ResultRow({
             no audio is still the record that the channel was busy, and it is
             exactly the kind of thing an incident is assembled out of. */}
         <StarButton call={call} describedAs={description} />
-        <Button
-          variant="outline"
-          className="size-11"
-          aria-label={`Copy link to ${description}`}
-          onClick={onCopyLink}
-        >
-          <Link2 className="size-4" aria-hidden />
-        </Button>
-        {/* Two links, deliberately, because they are two different offers: the
-            one above opens this Call *in the app* and never expires, and this
-            one opens it for somebody who has never heard of this instance and
-            stops working. */}
-        {onShare && (
-          <Button
-            variant="outline"
-            className="size-11"
-            aria-label={`Share ${description} publicly`}
-            onClick={onShare}
-          >
-            <Share2 className="size-4" aria-hidden />
-          </Button>
-        )}
-        {forward && (
-          <Button
-            variant="outline"
-            className="size-11"
-            aria-label={`Play forward from ${description}`}
-            onClick={onPlayForward}
-          >
-            <FastForward className="size-4" aria-hidden />
-          </Button>
-        )}
-        {audible && (
-          <a
-            href={download}
-            download
-            aria-label={`Download ${description}`}
-            className="inline-flex size-11 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <Download className="size-4" aria-hidden />
-          </a>
+        {actions.map((action) =>
+          action.href !== undefined ? (
+            <a
+              key={action.key}
+              href={action.href}
+              download
+              aria-label={action.label}
+              className="inline-flex size-11 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <action.Icon className="size-4" aria-hidden />
+            </a>
+          ) : (
+            <Button
+              key={action.key}
+              variant="outline"
+              className="size-11"
+              aria-label={action.label}
+              onClick={action.onClick}
+            >
+              <action.Icon className="size-4" aria-hidden />
+            </Button>
+          ),
         )}
       </div>
       {/* The audio controls, and the only one an **Encrypted Call** does
@@ -1082,18 +1087,24 @@ function ResultRow({
           call={call}
           title={name}
           description={description}
+          actions={actions}
           onClose={() => setMore(false)}
-          actions={{
-            onCopyLink,
-            onShare,
-            onPlayForward: forward ? onPlayForward : undefined,
-            download: audible ? download : undefined,
-          }}
         />
       )}
     </li>
   )
 }
+
+/** One of a row's actions, as both of its drawings need it: something it
+ *  does, or — a download — somewhere it saves from. */
+type RowAction = {
+  key: string
+  /** The accessible name, which says *of what*. */
+  label: string
+  /** The words on it, in the sheet. */
+  text: string
+  Icon: LucideIcon
+} & ({ onClick: () => void; href?: undefined } | { href: string; onClick?: undefined })
 
 /** A row's other actions, on a phone (#78) — each one closes the sheet behind
  *  it, so the next tap lands on the list it came from. */
@@ -1101,19 +1112,14 @@ function RowSheet({
   call,
   title,
   description,
-  onClose,
   actions,
+  onClose,
 }: {
   call: Call
   title: string
   description: string
+  actions: RowAction[]
   onClose: () => void
-  actions: {
-    onCopyLink: () => void
-    onShare?: () => void
-    onPlayForward?: () => void
-    download?: string
-  }
 }) {
   const { starred, verb, toggle } = useStar(call)
   const then = (action: () => void) => () => {
@@ -1127,39 +1133,25 @@ function RowSheet({
         <SheetAction onClick={then(toggle)} label={`${verb} ${description}`}>
           {starred ? 'Unstar' : 'Star'}
         </SheetAction>
-        <SheetAction onClick={then(actions.onCopyLink)} label={`Copy link to ${description}`}>
-          <Link2 className="size-3.5" aria-hidden />
-          Copy link
-        </SheetAction>
-        {actions.onShare && (
-          <SheetAction
-            onClick={then(actions.onShare)}
-            label={`Share ${description} publicly`}
-          >
-            <Share2 className="size-3.5" aria-hidden />
-            Share publicly
-          </SheetAction>
-        )}
-        {actions.onPlayForward && (
-          <SheetAction
-            onClick={then(actions.onPlayForward)}
-            label={`Play forward from ${description}`}
-          >
-            <FastForward className="size-3.5" aria-hidden />
-            Play forward from here
-          </SheetAction>
-        )}
-        {actions.download && (
-          <a
-            href={actions.download}
-            download
-            aria-label={`Download ${description}`}
-            onClick={onClose}
-            className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40"
-          >
-            <Download className="size-3.5" aria-hidden />
-            Download
-          </a>
+        {actions.map((action) =>
+          action.href !== undefined ? (
+            <a
+              key={action.key}
+              href={action.href}
+              download
+              aria-label={action.label}
+              onClick={onClose}
+              className={sheetActionClass}
+            >
+              <action.Icon className="size-3.5" aria-hidden />
+              {action.text}
+            </a>
+          ) : (
+            <SheetAction key={action.key} onClick={then(action.onClick)} label={action.label}>
+              <action.Icon className="size-3.5" aria-hidden />
+              {action.text}
+            </SheetAction>
+          ),
         )}
       </div>
     </Sheet>

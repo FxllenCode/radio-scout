@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   controlsFor,
   feedReadout,
+  serverReadout,
   feedStatus,
   type ControlFacts,
   type Controls,
@@ -263,14 +264,15 @@ const READOUT_CASES: {
     says: 'Go back to the live feed',
   },
   {
-    // The device is online and the server is not answering (#78). Not "calls
-    // are still being recorded": if the server is what is down, that is the
-    // one thing that is not true.
+    // The browser says it is online and the server is not answering (#78).
+    // Not "calls are still being recorded" — if the server is what is down,
+    // that is the one thing that is not true — and not "your connection is
+    // fine" either: `navigator.onLine` promises no route to anywhere.
     status: 'down',
     link: 'offline',
     badge: { label: 'NO LINK', color: 'red', pulse: false },
     headline: 'The server isn\'t answering.',
-    says: 'Your connection is fine',
+    says: 'may be down, or this network may not reach it',
   },
   {
     // Still **Feed down** as far as the cause goes — but a connection being
@@ -374,5 +376,22 @@ describe('feedReadout', () => {
       ({ status, link, facts }) => feedReadout(status, link, facts).empty.detail,
     )
     expect(new Set(details).size).toBe(READOUT_CASES.length)
+  })
+})
+
+/** The Settings row that checks the server (#78), deciding with the feed's own
+ *  rule: a device with no network says so, rather than blaming the server. */
+describe('serverReadout', () => {
+  it.each([
+    [{ ok: true, checking: false, failed: false, offline: false }, 'online'],
+    // An answer outranks a stale `navigator.onLine`: it reached the server.
+    [{ ok: true, checking: false, failed: false, offline: true }, 'online'],
+    [{ ok: false, checking: false, failed: true, offline: true }, 'this device is offline'],
+    [{ ok: false, checking: true, failed: false, offline: true }, 'this device is offline'],
+    [{ ok: false, checking: true, failed: false, offline: false }, 'checking…'],
+    [{ ok: false, checking: false, failed: true, offline: false }, 'unreachable'],
+    [{ ok: false, checking: false, failed: false, offline: false }, 'unknown'],
+  ])('reads %o as %s', (facts, said) => {
+    expect(serverReadout(facts)).toBe(said)
   })
 })

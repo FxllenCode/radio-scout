@@ -9,9 +9,9 @@
  *
  * Pure, over the facts of one key press, so what a key means is a table rather
  * than a handler's branches. What a command then *does*, and whether it is
- * allowed, is the shell's (`hooks/useHotkeys`), which asks the same
- * `controlsFor` the buttons do — a key cannot reach a control the screen shows
- * as dead.
+ * allowed, is the shell's (`hooks/useHotkeys`): Avoid, Hold and Replay ask the
+ * same `controlsFor` their buttons do, and Pause and Skip — like the strip's
+ * two buttons — act on whatever is playing, the archive included.
  *
  * **Stream Deck and media keys need nothing here.** The Media Session already
  * answers play/pause and next from the keyboard's media keys, a headset and an

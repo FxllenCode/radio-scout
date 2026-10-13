@@ -27,7 +27,7 @@ import { selectIsLiveSource, selectStrip } from '@/store/transport'
 
 import { LiveScreen } from '@/routes/LiveScreen'
 
-import { BottomTabBar } from './BottomTabBar'
+import { PrimaryNav } from './PrimaryNav'
 import { ShellContext } from './shell'
 
 /**
@@ -141,7 +141,7 @@ export function AppShell() {
           desk ? 'max-w-7xl flex-row' : 'max-w-2xl flex-col',
         )}
       >
-        {desk && <BottomTabBar searchTo={lastSearch.current} layout="side" />}
+        {desk && <PrimaryNav searchTo={lastSearch.current} layout="side" />}
         {/* Padded past the tab bar, and past the strip on every screen that can
             grow one — by *route*, never by whether something is playing. Keyed on
             the strip itself, a busy channel would shove the list under the
@@ -192,7 +192,7 @@ export function AppShell() {
           <SelectionUndoBar />
           {docked && <MiniPlayer strip={docked} />}
         </div>
-        {!desk && <BottomTabBar searchTo={lastSearch.current} />}
+        {!desk && <PrimaryNav searchTo={lastSearch.current} />}
         <CallPlayer />
         <LiveFeedLink />
         <Announcer />

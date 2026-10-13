@@ -1,7 +1,7 @@
 import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { axe } from 'vitest-axe'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { advance, received, replay } from '@/store/live'
 import { makeStore } from '@/store/store'
@@ -92,5 +92,29 @@ describe('the announcer (#78)', () => {
     await screen.findByText('connected')
 
     expect(await axe(container)).toHaveNoViolations()
+  })
+
+  /** The page cannot make a sound until somebody taps it, and a Listener who
+   *  cannot see the button has to be told — and not read the names of Calls
+   *  that are not playing. */
+  it('says a tap is needed, and names no Call the browser will not play', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValue(
+      new DOMException('needs a gesture', 'NotAllowedError'),
+    )
+    const store = makeStore()
+    renderApp('/', store)
+    act(() => void store.dispatch(received(call(1), 1)))
+
+    await waitFor(() =>
+      expect(announcer()).toHaveTextContent(
+        'Tap to listen — your browser needs a tap before it will play sound.',
+      ),
+    )
+    act(() => {
+      store.dispatch(received(call(2, { talkgroupLabel: 'PD Dispatch' }), 2))
+      store.dispatch(advance())
+    })
+    expect(announcer()).not.toHaveTextContent('PD Dispatch')
+    vi.restoreAllMocks()
   })
 })

@@ -2,13 +2,13 @@ import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 
-import { BottomTabBar } from './BottomTabBar'
+import { PrimaryNav } from './PrimaryNav'
 
-describe('BottomTabBar', () => {
+describe('PrimaryNav', () => {
   it('renders the four primary destinations as links', () => {
     render(
       <MemoryRouter>
-        <BottomTabBar />
+        <PrimaryNav />
       </MemoryRouter>,
     )
     for (const label of ['Live', 'Talkgroups', 'Search', 'Settings']) {
@@ -19,7 +19,7 @@ describe('BottomTabBar', () => {
   it('marks the current tab active', () => {
     render(
       <MemoryRouter initialEntries={['/search']}>
-        <BottomTabBar />
+        <PrimaryNav />
       </MemoryRouter>,
     )
     expect(screen.getByRole('link', { name: 'Search' })).toHaveClass(

@@ -10,7 +10,7 @@
  */
 import type { Call } from '@/types'
 
-import { feedReadout, type FeedStatus, type ReadoutFacts } from './feed'
+import { OFFLINE, turnedAway, type FeedStatus, type ReadoutFacts } from './feed'
 import { systemName, talkgroupName, unitName } from './call'
 
 /** A Call starting, as one sentence: who, on what, keyed by whom — the order
@@ -31,8 +31,9 @@ export function callAnnouncement(call: Call, fromArchive: boolean): string {
  * reconnect loop flips between connecting and gone every few seconds, and a
  * sentence that changed with it would be re-announced on every flip for as long
  * as the server is down. The two refinements that *are* causes — this device
- * offline, the server turning us away — borrow [`feedReadout`]'s headline, so
- * the words a Listener hears are the words a sighted one reads.
+ * offline, the server turning us away — borrow the readout's own headlines
+ * ([`OFFLINE`], [`turnedAway`]), so the words a Listener hears are the words a
+ * sighted one reads.
  */
 export function feedAnnouncement(status: FeedStatus, facts: ReadoutFacts): string {
   switch (status) {
@@ -43,8 +44,8 @@ export function feedAnnouncement(status: FeedStatus, facts: ReadoutFacts): strin
     case 'playback':
       return 'Playing from the archive.'
     case 'down':
-      return facts.offline || facts.refused
-        ? feedReadout(status, 'offline', facts).empty.headline
-        : 'Lost the link to the server. Retrying.'
+      if (facts.offline) return OFFLINE.empty.headline
+      if (facts.refused) return turnedAway(facts.refused).empty.headline
+      return 'Lost the link to the server. Retrying.'
   }
 }

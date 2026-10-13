@@ -5,19 +5,11 @@ import { hotkeyFor, type HotkeyCommand } from '@/lib/hotkeys'
 import { useAppDispatch, useAppStore } from '@/store/hooks'
 import {
   avoid,
-  replay,
-  selectLiveCall,
   selectLiveControls,
   toggleHoldSystem,
   toggleHoldTalkgroup,
 } from '@/store/live'
-import {
-  nextCall,
-  previousCall,
-  selectIsLiveSource,
-  selectNowPlaying,
-  togglePause,
-} from '@/store/transport'
+import { nextCall, replayLive, selectNowPlaying, togglePause } from '@/store/transport'
 import type { AppDispatch, RootState } from '@/store/store'
 
 /**
@@ -25,11 +17,12 @@ import type { AppDispatch, RootState } from '@/store/store'
  * nothing to act on right now, which is then left to the browser (Space
  * scrolls a page with nothing playing, as it always did).
  *
- * The gates are the buttons' own (`controlsFor`, through
- * `selectLiveControls`): a key cannot reach a control the screen shows as
- * dead. Pause and Skip are the exception the mini-player already makes — they
- * act on whichever source owns the audio, live or archive, so they are gated on
- * there being audio at all.
+ * Avoid, Hold and Replay are gated exactly as their buttons are
+ * (`controlsFor`, through `selectLiveControls`). Pause and Skip are the
+ * exception the mini-player already makes: they act on whichever source owns
+ * the audio, live or archive, so they are gated on there being audio at all —
+ * which is why they still work in **Playback mode**, where the Live screen's
+ * own Pause and Skip are greyed out.
  */
 function perform(
   command: HotkeyCommand,
@@ -46,15 +39,10 @@ function perform(
     case 'skip':
       if (playing) dispatch(nextCall(goesLive))
       return playing
-    case 'replay': {
-      // The Live control's own rule (spec US 13): the Call on the air starts
-      // over, and with none on the air the last one returns.
-      const allowed = can.replay && selectIsLiveSource(state)
-      if (!allowed) return false
-      const current = selectLiveCall(state)
-      dispatch(current ? replay(current.id) : previousCall())
-      return true
-    }
+    case 'replay':
+      // The button's own rule, and its own gate.
+      if (can.replay) dispatch(replayLive())
+      return can.replay
     case 'avoid':
       if (can.avoid) dispatch(avoid({ until: 0 }))
       return can.avoid

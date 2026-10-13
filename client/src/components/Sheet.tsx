@@ -92,6 +92,12 @@ export function Sheet({
   )
 }
 
+/** How a sheet's full-width action is drawn — exported for the one that has
+ *  to be a link rather than a button (a download, #78), so the two cannot come
+ *  to differ. */
+export const sheetActionClass =
+  'flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40'
+
 /**
  * A sheet's full-width action — *Jump to newest*, *Clear all*.
  *
@@ -117,10 +123,7 @@ export function SheetAction({
       type="button"
       aria-label={label}
       onClick={onClick}
-      className={cn(
-        'flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-border py-2 font-mono text-[11px] uppercase tracking-wider transition-colors hover:bg-muted/40',
-        className,
-      )}
+      className={cn(sheetActionClass, className)}
     >
       {children}
     </button>

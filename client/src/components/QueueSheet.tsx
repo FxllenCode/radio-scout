@@ -43,7 +43,7 @@
 import { FastForward, Play, SkipForward, X } from 'lucide-react'
 
 import { useClock } from '@/hooks/useInstance'
-import { useNow } from '@/hooks/useNow'
+import { DATE_TICK_MS, useNow } from '@/hooks/useNow'
 import { formatRowTime } from '@/lib/archive'
 import { talkgroupName, systemName } from '@/lib/call'
 import {
@@ -70,7 +70,7 @@ import { UnitLink } from './UnitLink'
 
 export function QueueSheet({ onClose }: { onClose: () => void }) {
   const clock = useClock()
-  const now = useNow(true, 15_000)
+  const now = useNow(true, DATE_TICK_MS)
   const dispatch = useAppDispatch()
   const queue = useAppSelector(selectQueue)
   const catchingUp = useAppSelector(selectIsCatchingUp)

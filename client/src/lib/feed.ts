@@ -282,14 +282,15 @@ export function feedReadout(
             },
           }
         : {
-            // Not "calls are still being recorded": the device is online, so
-            // the likeliest thing that is down is the server — and then that
-            // is the one thing that is not true.
+            // Not "calls are still being recorded": the likeliest thing down
+            // is the server, and then that is the one thing that is not true.
+            // Nor "your connection is fine": the browser saying it is online
+            // promises no route to anywhere — a captive portal says it too.
             badge: { label: 'NO LINK', color: 'red', pulse: false },
             empty: {
               headline: 'The server isn\'t answering.',
               detail:
-                'Your connection is fine — the scanner itself is down or out of reach. This keeps retrying on its own.',
+                'This device has a network, but the scanner cannot be reached — it may be down, or this network may not reach it. This keeps retrying on its own.',
             },
           }
   }
@@ -298,7 +299,7 @@ export function feedReadout(
 /** **Feed down** because this device has no network (#78). Red, because
  *  nothing is reaching the Listener; still, because nothing can be attempted
  *  until it is back. */
-const OFFLINE: FeedReadout = {
+export const OFFLINE: FeedReadout = {
   badge: { label: 'OFFLINE', color: 'red', pulse: false },
   empty: {
     headline: 'This device is offline.',
@@ -319,7 +320,7 @@ const OFFLINE: FeedReadout = {
  * rdio closes the socket without a word (`client.go:61`), so its client sits in
  * a reconnect loop a Listener can only read as the network being broken.
  */
-function turnedAway(reason: string): FeedReadout {
+export function turnedAway(reason: string): FeedReadout {
   switch (reason) {
     case 'instance-full':
       return {
@@ -348,4 +349,29 @@ function turnedAway(reason: string): FeedReadout {
         },
       }
   }
+}
+
+/** What the server's health check found, as the Settings row knows it. */
+export interface ServerFacts {
+  /** It answered, and answered healthy. */
+  ok: boolean
+  /** No answer yet. */
+  checking: boolean
+  /** The check failed outright. */
+  failed: boolean
+  /** The device itself has no network ([`ReadoutFacts.offline`]). */
+  offline: boolean
+}
+
+/**
+ * The Settings row's word for the server (#78), by the rule [`feedReadout`]
+ * keeps for **Feed down**: a device with no network says so, rather than
+ * calling a server it never reached unreachable. An answer outranks even that —
+ * whatever `navigator.onLine` claims, the request got there.
+ */
+export function serverReadout({ ok, checking, failed, offline }: ServerFacts): string {
+  if (ok) return 'online'
+  if (offline) return 'this device is offline'
+  if (checking) return 'checking…'
+  return failed ? 'unreachable' : 'unknown'
 }

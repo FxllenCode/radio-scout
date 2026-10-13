@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react'
 
+/** How often a list whose times only change *shape* at midnight — today's
+ *  Calls drop their date (#78) — redraws them. A minute late at midnight is
+ *  nobody's problem; a list redrawn every second on a Pi-class phone is. */
+export const DATE_TICK_MS = 60_000
+
 /**
  * The clock, for a screen that draws something measured from it.
  *

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { StatusLamp } from '@/components/Led'
 import { useInstance } from '@/hooks/useInstance'
 import { useOnline } from '@/hooks/useOnline'
+import { serverReadout } from '@/lib/feed'
 import { useGetHealthQuery } from '@/store/api'
 
 /** Settings — connection/server status, audio enhancement, theme, admin (#19).
@@ -38,15 +39,12 @@ export function SettingsScreen() {
           <span className="text-sm">Server</span>
           <span className="inline-flex items-center gap-2 font-mono text-xs text-muted-foreground">
             <StatusLamp color={online ? 'green' : 'red'} size={8} pulse={online} />
-            {online
-              ? 'online'
-              : deviceOffline
-                ? 'this device is offline'
-                : isLoading
-                  ? 'checking…'
-                  : isError
-                    ? 'unreachable'
-                    : 'unknown'}
+            {serverReadout({
+              ok: online,
+              checking: isLoading,
+              failed: isError,
+              offline: deviceOffline,
+            })}
           </span>
         </li>
         {/* Named rows, so a screen reader can find them by what they are. */}

@@ -1,14 +1,13 @@
 import '@/index.css'
 
-import { act } from '@testing-library/react'
 import axe from 'axe-core'
 import { getResponse, HttpHandler } from 'msw'
 import { page } from 'vitest/browser'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
-import { advance, received } from '@/store/live'
+import { advance, received, turnFeedOff } from '@/store/live'
 import { makeStore, type AppStore } from '@/store/store'
-import { ARCHIVE, ORIGIN, handlers } from '@/test/handlers'
+import { ARCHIVE, ORIGIN, UNIT_HISTORY, handlers } from '@/test/handlers'
 import { renderApp } from '@/test/utils'
 
 /**
@@ -41,16 +40,26 @@ import { renderApp } from '@/test/utils'
  *  and the live-feed socket's handler is not one. */
 const HTTP = handlers.filter((handler) => handler instanceof HttpHandler)
 
+/** Requests no fixture answered — each one a screen measured on data it never
+ *  got, which is the jsdom suite's `onUnhandledRequest: 'error'` here. */
+const unanswered: string[] = []
+
 beforeAll(async () => {
   await page.viewport(390, 844)
-  const realFetch = globalThis.fetch
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const asked = new Request(input, init)
     const url = new URL(asked.url)
     // The fixtures answer at the jsdom origin; the page here has its own.
     const request = new Request(`${ORIGIN}${url.pathname}${url.search}`, asked)
-    return (await getResponse(HTTP, request)) ?? realFetch(input, init)
+    const answer = await getResponse(HTTP, request)
+    if (answer) return answer
+    unanswered.push(`${asked.method} ${url.pathname}`)
+    return new Response('no fixture answers this\n', { status: 404 })
   })
+})
+
+afterEach(() => {
+  expect(unanswered.splice(0)).toEqual([])
 })
 
 afterAll(() => {
@@ -120,28 +129,32 @@ async function lowContrast(root: Element): Promise<string[]> {
   )
 }
 
-/** Let requests settle and the screen draw what they brought. */
-async function settled(): Promise<void> {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 300))
-  })
+/** Wait for `selector` to be drawn in `root`, and hand it over — polled, as
+ *  this layer waits for everything (`setup.browser.ts`): a screen is measured
+ *  once it has drawn what it is measured on, because an empty one passes every
+ *  bar. */
+async function drawn(root: ParentNode, selector: string): Promise<Element> {
+  await expect.poll(() => root.querySelector(selector)).not.toBeNull()
+  return root.querySelector(selector)!
 }
 
 /** The app at `route` on a phone, with a Call on the air so every control
- *  that acts on one is drawn live. */
+ *  that acts on one is drawn live — returned once the screen has drawn what
+ *  [`DRAWN`] says it is about. */
 async function onAPhone(route: string): Promise<{ store: AppStore; root: Element }> {
   const store = makeStore({ storage: undefined })
   const { container } = renderApp(route, store)
-  act(() => {
-    store.dispatch(received({ ...ARCHIVE[0], timestamp: Date.now() }, 1))
-    store.dispatch(received({ ...ARCHIVE[1], timestamp: Date.now() }, 2))
-    store.dispatch(received({ ...ARCHIVE[2], timestamp: Date.now() }, 3))
-    // One finished, so RECENT has a row and the queue still has one waiting.
-    store.dispatch(advance())
-  })
-  await settled()
+  store.dispatch(received({ ...ARCHIVE[0], timestamp: Date.now() }, 1))
+  store.dispatch(received({ ...ARCHIVE[1], timestamp: Date.now() }, 2))
+  store.dispatch(received({ ...ARCHIVE[2], timestamp: Date.now() }, 3))
+  // One finished, so RECENT has a row and the queue still has one waiting.
+  store.dispatch(advance())
+  await drawn(container, DRAWN[route])
   return { store, root: container }
 }
+
+/** A radio the fixtures have a history for (`UNIT_HISTORY`). */
+const UNIT_ROUTE = `/unit/${UNIT_HISTORY.systemRef}/${UNIT_HISTORY.ref}`
 
 /** What each screen must have drawn for its measurements to mean anything — a
  *  screen still waiting on its data passes every bar by being empty. */
@@ -152,6 +165,7 @@ const DRAWN: Record<string, string> = {
   '/settings': 'main li',
   '/session': 'ul[aria-label="Session log"] li',
   '/dvr': 'main select',
+  [UNIT_ROUTE]: 'main ul li',
 }
 
 describe('at phone width (#78)', () => {
@@ -162,12 +176,8 @@ describe('at phone width (#78)', () => {
     ['Settings', '/settings'],
     ['the session log', '/session'],
     ['the DVR', '/dvr'],
+    ['a radio\'s history', UNIT_ROUTE],
   ])('%s', (_screen, route) => {
-    it('has drawn what it is measured on', async () => {
-      const { root } = await onAPhone(route)
-      expect(root.querySelector(DRAWN[route])).not.toBeNull()
-    })
-
     it('gives every control a 44 × 44 target', async () => {
       const { root } = await onAPhone(route)
       expect(smallTargets(root)).toEqual([])
@@ -228,11 +238,8 @@ describe('Search, folded on a phone and open on a desk (#78)', () => {
 describe('sheets at phone width (#78)', () => {
   it('gives every control in the queue sheet a 44 × 44 target', async () => {
     const { root } = await onAPhone('/')
-    act(() => {
-      ;(root.querySelector('button[aria-label^="Queued calls"]') as HTMLButtonElement).click()
-    })
-    await settled()
-    const sheet = document.querySelector('[role="dialog"]')!
+    ;(root.querySelector('button[aria-label^="Queued calls"]') as HTMLButtonElement).click()
+    const sheet = await drawn(document, '[role="dialog"]')
 
     expect(smallTargets(sheet)).toEqual([])
     expect(smallType(sheet)).toEqual([])
@@ -240,11 +247,8 @@ describe('sheets at phone width (#78)', () => {
 
   it("gives every control in a search row's sheet a 44 × 44 target", async () => {
     const { root } = await onAPhone('/search')
-    act(() => {
-      ;(root.querySelector('button[aria-label^="More for"]') as HTMLButtonElement).click()
-    })
-    await settled()
-    const sheet = document.querySelector('[role="dialog"]')!
+    ;(root.querySelector('button[aria-label^="More for"]') as HTMLButtonElement).click()
+    const sheet = await drawn(document, '[role="dialog"]')
 
     expect(smallTargets(sheet)).toEqual([])
     expect(smallType(sheet)).toEqual([])
@@ -272,5 +276,18 @@ describe('on a desk (#78)', () => {
     } finally {
       await page.viewport(390, 844)
     }
+  })
+})
+
+/** The strip's other mode — why nothing is playing, and the one tap back —
+ *  which a playing strip never draws (#78). */
+describe('the strip, quiet (#78)', () => {
+  it('gives its way back a 44 × 44 target', async () => {
+    const store = makeStore({ storage: undefined })
+    const { container } = renderApp('/talkgroups', store)
+    store.dispatch(turnFeedOff())
+    const strip = await drawn(container, 'section[aria-label="Mini player"]')
+
+    expect(smallTargets(strip)).toEqual([])
   })
 })

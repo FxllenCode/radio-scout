@@ -109,9 +109,11 @@ around the app, so the keys do too:
 | **H** | Hold this Talkgroup |
 | **Shift + H** | Hold this System |
 
-A key does exactly what its button would: where the button is greyed out — in playback mode, say
-— so is the key. Keys are ignored while you are typing in a box, and Space still presses whatever
-button you have tabbed to. Hover a control to see its key.
+**A**, **H** and **R** do exactly what their buttons would, and where the button is greyed out —
+in playback mode, say — so is the key. **Space** and **N** are the strip's pause and skip: they act
+on whatever is playing, so in playback mode they pause and skip the archive. Keys are ignored while
+you are typing in a box, and Space still presses whatever button you have tabbed to. Hover a
+control to see its key.
 
 **Stream Deck, media keys and headsets need nothing set up.** Radio-Scout answers the system's
 media controls, so a keyboard's play/pause and next keys, a headset's button, and an Elgato
@@ -228,7 +230,7 @@ channel's LED is **round**, so a red Talkgroup and a red *NO LINK* are never the
 | Green, pulsing | **connected** | Calls are arriving. This is the only green there is. |
 | Red, pulsing | **linking…** | Connecting, or reconnecting after a drop. Wait. |
 | Red, steady | **OFFLINE** | *This device* has no network. Calls are still being recorded, and the feed reconnects the moment you are back — a brief gap is filled in for you. |
-| Red, steady | **NO LINK** | Your connection is fine, but the server is not answering. It keeps retrying on its own. |
+| Red, steady | **NO LINK** | This device has a network, but the server cannot be reached — it may be down, or your network may not reach it (a hotel or café login page does this). It keeps retrying on its own. |
 | Amber, steady | **FEED OFF** | You switched the feed off. Nothing is arriving, by your choice. |
 | Amber, steady | **PLAYBACK** | You are playing the archive, which the live feed is mutually exclusive with. |
 | Amber, pulsing | **FULL** | Every listening slot on this scanner is taken. You are let in on your own as soon as somebody leaves. |
@@ -418,8 +420,8 @@ whose operator has grouped its radios answers as the whole apparatus, not just t
 
 **On a phone the filters fold away** behind one **Filters** button that says how many are set,
 with a chip for each that removes it in one tap — so the results, not the form, are what you see
-first. Each result is two lines: the Talkgroup, then when, how long and who; ▶ plays it and ⋯
-holds the rest (star, links, play forward, download). On a wider screen everything is laid out
+first. Each result reads the Talkgroup, then when, how long and who, then where; ▶ plays it and
+⋯ holds the rest (star, links, play forward, download). On a wider screen everything is laid out
 at once.
 
 Each result plays in place, or downloads with the arrow. Encrypted Calls have no play or download

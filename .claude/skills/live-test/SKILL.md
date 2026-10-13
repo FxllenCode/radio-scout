@@ -39,14 +39,17 @@ none, run the standard pass.
    `tabs_context_mcp` → `tabs_create_mcp` → navigate to
    `http://localhost:3000`. Screenshot before and after each interaction.
    - **Never** trigger `alert`/`confirm` — a dialog freezes the extension until
-     a human clears it.
+     a human clears it. That includes the app's leave-guard: move between
+     screens by clicking the tabs, not with `navigate`.
    - Check `read_console_messages` before calling anything a pass.
    - If the extension is not connected, stop and say so — that needs the user,
      and the rest of the loop is still worth reporting.
 5. **Report what you saw**, not what should have happened: which Calls played,
    what the queue did, what the console said, with screenshots for anything
    visual. Say plainly if something could not be checked.
-6. **Tear down — always, even if the test failed.** Kill the PID from step 2
+6. **Tear down — always, even if the test failed.** Switch the live feed off
+   before closing the tab (the leave-guard — see the doc), then kill the PID
+   from step 2
    and *verify* the port is free again. An orphaned test server outlives the
    session and quietly serves an empty throwaway database on :3000; the next
    person to wonder why their recorder's Calls vanish will be debugging your

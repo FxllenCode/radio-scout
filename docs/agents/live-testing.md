@@ -102,7 +102,10 @@ Then an agent can drive the app: create a tab, navigate to `localhost:3000`,
 screenshot, click. Two standing rules:
 
 - **Never trigger a JS dialog** (`alert`/`confirm`) — it blocks the extension
-  until a human dismisses it.
+  until a human dismisses it. That includes the app's own **leave-guard**
+  (#78): while the feed is on or the archive is playing, closing the tab or a
+  full-page `navigate` raises "Leave site?". Move between screens by clicking
+  the tabs, and switch the feed off before closing the tab.
 - **Read the console** (`read_console_messages`) before declaring a pass. A
   silent WebSocket failure or a rejected `play()` shows up there and nowhere
   else.

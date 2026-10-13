@@ -15,6 +15,7 @@ import {
   selectLiveCall,
   selectLiveMatrix,
   selectMissed,
+  LONGEST_TRANSMISSION_MS,
   selectPriority,
   selectQueueDepth,
 } from '@/store/live'
@@ -1365,6 +1366,43 @@ describe('when a Call happened (#78)', () => {
     expect(row).toHaveAttribute('title', expect.stringMatching(/^\d{4}-\d{2}-\d{2} 00:00:07$/))
   })
 
+  /** How late a Call was *heard* is a fact about the moment it started
+   *  playing. Measured from a ticking clock instead, a Call heard on time
+   *  turned "late" while it played, and an ended card kept counting. */
+  describe('as time passes', () => {
+    afterEach(() => vi.useRealTimers())
+
+    it('does not turn a Call heard on time late while it plays', () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      listening(call({ timestamp: Date.now() - 5_000, durationMs: 120_000 }))
+
+      act(() => void vi.advanceTimersByTime(3 * 60_000))
+
+      expect(within(display()).queryByTestId('lateness')).toBeNull()
+    })
+
+    it('does not count up on the card a Call left behind', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      listening(call({ timestamp: Date.now() - 5_000 }))
+      await user.click(screen.getByRole('button', { name: 'Skip' }))
+      expect(within(display()).getByText('Ended')).toBeInTheDocument()
+
+      act(() => void vi.advanceTimersByTime(10 * 60_000))
+
+      expect(within(display()).queryByTestId('lateness')).toBeNull()
+    })
+
+    it('keeps saying how late a late Call was, without counting up', () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      listening(call({ timestamp: Date.now() - 4 * 60_000 - 30_000 }))
+
+      act(() => void vi.advanceTimersByTime(5 * 60_000))
+
+      expect(within(display()).getByTestId('lateness')).toHaveTextContent('4 min ago')
+    })
+  })
+
   it('keeps the date on a Call from another day', () => {
     listening(call())
 
@@ -1382,12 +1420,17 @@ describe('the missed counter (#78)', () => {
 
   it('opens Search on the gap, oldest first, and clears', async () => {
     const user = userEvent.setup()
-    const store = listening(call({ timestamp: 1_000_000 }))
+    // Ended at 10:00:05; a dropped Call could have keyed a whole transmission
+    // before that and still been sent after it (`LONGEST_TRANSMISSION_MS`).
+    const ended = Date.parse('2026-07-25T10:00:05')
+    const store = listening(call({ timestamp: ended - 5_000, durationMs: 5_000 }))
     act(() => void store.dispatch(lagged(3)))
 
     await user.click(missedLink())
 
-    expect(routerProbe.location).toBe('/search?after=1000000&sort=oldest')
+    expect(routerProbe.location).toBe(
+      `/search?after=${ended - LONGEST_TRANSMISSION_MS}&sort=oldest`,
+    )
     expect(selectMissed(store.getState())).toBe(0)
     await user.click(screen.getByRole('link', { name: 'Live' }))
     expect(screen.queryByText(/missed/i)).toBeNull()

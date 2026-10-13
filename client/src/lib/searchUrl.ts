@@ -253,6 +253,17 @@ export function numberIn(params: URLSearchParams, key: string): number | undefin
 const isMark = (value: string | null): value is Mark =>
   MARKS.includes(value as Mark)
 
+/**
+ * Choosing a System — or clearing it — as a patch to a search: the Talkgroup
+ * goes with it, because a Talkgroup Ref means something only inside one System
+ * (rdio makes you choose the System first). The System select applies it and so
+ * does the System chip (#78), so the rule is written here once.
+ */
+export const systemChosen = (system: number | undefined): Partial<RunSearch> => ({
+  system,
+  talkgroup: undefined,
+})
+
 /** One filter in force, as a chip: what it says, and the search without it. */
 export interface FilterChip {
   label: string
@@ -273,24 +284,22 @@ export interface ChipNames {
  *
  * In the form's own order, so the chips read like the form. **Sort is not
  * one**: it orders the archive and narrows nothing, so "2 active" means two
- * things are hiding Calls. Clearing a System clears its Talkgroup too, for the
- * reason the System select does — a Talkgroup Ref means something only inside
- * one System.
+ * things are hiding Calls. Clearing a System clears its Talkgroup too
+ * ([`systemChosen`], the System select's own patch).
  */
 export function filterChips(search: RunSearch, names: ChipNames): FilterChip[] {
-  const without = (...keys: (keyof RunSearch)[]): RunSearch => {
-    const left = { ...search }
-    for (const key of keys) delete left[key]
-    return left
-  }
   const chips: FilterChip[] = []
-  const add = (label: string, ...keys: (keyof RunSearch)[]) =>
-    chips.push({ label, without: without(...keys) })
+  const clear = (label: string, patch: Partial<RunSearch>) => {
+    const without = { ...search, ...patch }
+    for (const key of Object.keys(patch) as (keyof RunSearch)[]) delete without[key]
+    chips.push({ label, without })
+  }
+  const add = (label: string, key: keyof RunSearch) => clear(label, { [key]: undefined })
 
   if (search.after !== undefined) add(`From ${names.at(search.after)}`, 'after')
   if (search.before !== undefined) add(`To ${names.at(search.before)}`, 'before')
   if (search.system !== undefined) {
-    add(`System ${names.system(search.system)}`, 'system', 'talkgroup')
+    clear(`System ${names.system(search.system)}`, systemChosen(undefined))
   }
   if (search.talkgroup !== undefined) {
     add(`Talkgroup ${names.talkgroup(search.system, search.talkgroup)}`, 'talkgroup')

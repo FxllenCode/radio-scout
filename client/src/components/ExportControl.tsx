@@ -73,6 +73,11 @@ export function ExportControl({
                   <li key={format.id}>
                     <a
                       href={exportUrl(search, format.id, grant)}
+                      // A download, not a navigation (#78): a plain link starts
+                      // leaving the page before the server says "attachment",
+                      // and the leave-guard would ask whether the Listener
+                      // meant to quit. `Content-Disposition` still names it.
+                      download
                       className="flex flex-col gap-0.5 rounded-md border border-border bg-card px-3 py-2 hover:bg-accent"
                       onClick={() => setOpen(false)}
                     >

@@ -41,8 +41,8 @@ it('opens onto the two things an export can be', async () => {
 })
 
 /** The links are what downloads: the server names the file in
- *  `Content-Disposition`, so a plain link keeps the Listener on the page and
- *  saves it under the name the export chose. */
+ *  `Content-Disposition`, so the Listener stays on the page and it is saved
+ *  under the name the export chose. */
 it('links at the search the listener is looking at', async () => {
   draw({ search: { talkgroup: 7, after: 1000 } })
 
@@ -107,4 +107,16 @@ it('closes once a format has been chosen', async () => {
   await userEvent.click(screen.getByRole('link', { name: /zip of calls/i }))
 
   expect(screen.queryByRole('link', { name: /zip of calls/i })).not.toBeInTheDocument()
+})
+
+/** A download, not a navigation (#78). Without the attribute a click starts
+ *  leaving the page before the server says "attachment", and the leave-guard
+ *  asks a Listener exporting mid-incident whether they meant to quit. The
+ *  server's `Content-Disposition` still names the file. */
+it('downloads rather than navigating away', async () => {
+  draw()
+
+  await userEvent.click(screen.getByRole('button', { name: /export/i }))
+
+  for (const link of screen.getAllByRole('link')) expect(link).toHaveAttribute('download')
 })
