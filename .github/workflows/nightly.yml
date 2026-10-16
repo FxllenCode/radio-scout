@@ -1,93 +1,195 @@
-# The slow half of ADR-0010's quality signal, off the merge path.
+# The slow half of ADR-0010's quality signal, off the merge path (#121).
 #
 # `cargo mutants` changes the code under the tests and asks whether anything
 # fails. It is the only check that answers "do the assertions bite?" — coverage
-# only answers "did the line run" — but a full run mutates the whole codebase,
-# which is hours of work no pull request should wait on. So the PR job mutates
-# only the diff (advisory, in ci.yml) and the whole surface is swept here,
-# nightly and sharded.
+# only answers "did the line run" — and it is hours of work no push should wait
+# on, so it runs here, overnight, and what it finds is filed as an issue.
 #
-# Exclusions come from `.cargo/mutants.toml`, which mirrors ADR-0010's
-# documented coverage carve-outs, so what this reports is real gaps.
+# **Two roles, one file, kept identical on `master` and `next`.** A scheduled
+# run always reads the *default branch's* copy of its workflow, and `master` is
+# frozen between releases: until #121, this swept `master`'s last release every
+# night — 57 nights on one commit, never once seeing `next`, while `next`'s copy
+# of this file checked `next` out explicitly and was never read. So on a
+# schedule this file only *dispatches*: `workflow_dispatch` runs the dispatched
+# branch's own copy, against that branch, and that run is the sweep.
+#
+# Which means the halves change in different places. **How** a sweep runs — the
+# plan, the shards, the report, and both scripts as they use them — is the
+# dispatched branch's copy, and changes with the code on `next`. **When** and
+# **which branches** — the crons, FULL_CRON, SWEPT_BRANCHES, and the dispatch
+# step with the two script calls it makes — is `master`'s copy, and changes only
+# when `master` does: at a release, or by a pull request of this file and its
+# two scripts alone, which is how #121 put the dispatcher there.
+#
+# **Incremental nightly, full weekly.** `next` has over five thousand mutants,
+# which is past what one night of free runners can sweep, and most nights a
+# ticket's worth of it changed. So each night mutates only what landed since the
+# last sweep that completed (`--in-diff`), and on Wednesdays the whole surface
+# is swept instead — the one sweep that sees what an incremental one cannot, a
+# weakened test letting a mutant survive in a file nobody touched. Either skips
+# when there is nothing new to look at.
+#
+# **Green means the sweep completed; red means it did not.** A survivor is a
+# finding, filed in "Mutation survivors on <branch>", and leaves the run green.
+# A sweep that broke — a baseline suite already red, a shard timed out or
+# cancelled — is red, and filed in "Mutation sweep broken on <branch>". Before
+# this both were the same red, every night, and so neither was read.
+#
+# The decisions live in `.github/scripts/nightly-sweep.sh` and the filing in
+# `nightly-report.sh`, where tests/nightly.rs runs them; tests/ci.rs pins this
+# file's shape. Exclusions come from `.cargo/mutants.toml`, so what this reports
+# is real gaps. It stays advisory: nothing here gates a merge or a release.
 name: Nightly
+run-name: >-
+  ${{ github.event_name == 'schedule' && 'Nightly dispatch'
+  || format('Mutation sweep ({0}) of {1}{2}', inputs.mode, github.ref_name,
+  inputs.mode == 'incremental' && inputs.baseline != ''
+  && format(' from {0}', inputs.baseline) || '') }}
 
 on:
   schedule:
-    # 07:00 UTC — overnight for the maintainer, and off the hour to stay out of
-    # GitHub's cron stampede.
+    # Off the hour, to stay out of GitHub's cron stampede. The daily tick is
+    # overnight for the maintainer; the weekly one starts earlier, because a
+    # full sweep takes every runner the repository has for hours, and Wednesday
+    # is the quietest day of the week on `next`.
     - cron: '17 7 * * *'
+    - cron: '17 4 * * 3'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: incremental sweeps what landed since the last completed sweep; full sweeps everything
+        type: choice
+        options: [incremental, full]
+        default: incremental
+      baseline:
+        description: incremental only — sweep from this commit instead (such a run is never a baseline itself)
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
+# One sweep of a branch at a time. A sweep in progress is never cancelled — a
+# full one is hours of work — so a dispatch that arrives during it waits; one
+# that arrives while another is already waiting replaces that one, which is
+# harmless, since both would sweep the same branch from the same baseline.
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # This run, for the issues that report on it.
+  RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
 jobs:
-  # Sharded **sixteen** ways. This number has now been wrong twice, in the same
-  # way, and the failure is worth writing down because it is invisible from the
-  # run status.
-  #
-  # At four it stopped finishing: 1289 mutants over four shards is ~320 each, and
-  # at the ~50 s of wall clock a mutant costs here (a build plus the whole suite,
-  # two at a time) that is over five hours — GitHub's hard ceiling for a job. On
-  # 2026-07-29 one shard finished in 4 h and the other three were killed at the
-  # limit, so three quarters of the sweep reported nothing at all. Worse, it
-  # reported nothing *quietly*: the run failed either way, because a surviving
-  # mutant is also a non-zero exit, so the timeout looked like the signal working.
-  #
-  # At eight it did it again, and the quiet is the point. Every shard reported
-  # `161 mutants tested in 3h` against a 210-minute limit, so the slow ones were
-  # killed just past it: on 2026-08-05 through 08-09, **three of eight shards
-  # were cancelled most nights** (7 every night; 3 and 5 usually; once 0 and 4)
-  # — roughly 480 mutants, 37% of the surface, swept by nobody. A red run means
-  # "gaps found", a cancelled shard also means red, and the two are
-  # indistinguishable without opening the job list. The mutant count barely grew;
-  # the *suite* did (1603 tests), taking a mutant from ~50 s to ~67 s.
-  #
-  # Sixteen puts a shard at ~80 mutants, about 1.5 h. The number to watch is the
-  # per-shard wall clock in the run summary; when it approaches three hours,
-  # double again — and check the job list for cancellations rather than trusting
-  # the run's overall colour, because that is what hid this for five nights.
-  mutants:
-    name: Mutants ${{ matrix.shard }}/16
+  # On the schedule, and only then: dispatch each branch's sweep.
+  dispatch:
+    name: Dispatch
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    # Tighter than the 5 h ceiling on purpose. A shard should take ~1.5 h, so
-    # this is generous headroom — and a shard that is going to be killed anyway
-    # should be killed early rather than holding a runner for five hours to tell
-    # us so. Deliberately *not* raised to paper over the timeouts above: a
-    # longer limit would buy a slower sweep, not a complete one, and the next
-    # growth in the suite would silently eat it again.
+    permissions:
+      actions: write
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # The branches swept, each dispatched its own run of its own copy of
+      # this file. `next` is the working branch; master moves only at a
+      # release, whose pull request has run the whole suite.
+      SWEPT_BRANCHES: next
+      # The weekly full sweep's schedule, which must be one of the crons above:
+      # the daily tick stands down on its day (tests/ci.rs holds the two together).
+      FULL_CRON: '17 4 * * 3'
+      FIRED: ${{ github.event.schedule }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Dispatch the sweeps
+        run: |
+          mode=$(.github/scripts/nightly-sweep.sh dispatch-mode "$FIRED" "$FULL_CRON" "$(date -u +%u)")
+          if [ "$mode" = skip ]; then
+            echo "::notice::today's full sweep covers what an incremental one would"
+            exit 0
+          fi
+          failed=0
+          for branch in $SWEPT_BRANCHES; do
+            if ! gh workflow run nightly.yml --ref "$branch" -f mode="$mode"; then
+              # The run that would have reported this never started, so the
+              # dispatcher reports it.
+              BRANCH=$branch .github/scripts/nightly-report.sh broken \
+                "The nightly could not dispatch the $mode sweep of \`$branch\`."
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  # What this sweep mutates: everything, what landed since the last completed
+  # sweep, or nothing at all. Counts the mutants by listing them, which reads
+  # the source and compiles nothing.
+  plan:
+    name: Plan
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      baseline: ${{ steps.plan.outputs.baseline }}
+      total: ${{ steps.plan.outputs.total }}
+      shards: ${{ steps.plan.outputs.shards }}
+      range: ${{ steps.plan.outputs.range }}
+      tickets: ${{ steps.plan.outputs.tickets }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+          BASELINE: ${{ inputs.baseline }}
+          BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: .github/scripts/nightly-sweep.sh plan
+
+  # The sweep itself, sized by the plan: about 85 mutants a shard, so a night's
+  # tickets are a shard or two and a full sweep is sixty-odd, taking every
+  # runner the repository has. The shard size is the number to tune, in
+  # nightly-sweep.sh: it has been wrong before in the quiet way — at four
+  # shards, then eight, the slowest were killed at the time limit most nights,
+  # and a cancelled shard was the same red as a survivor, so nobody saw.
+  sweep:
+    name: Mutants ${{ matrix.shard }}/${{ needs.plan.outputs.total }}
+    needs: plan
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.mode != 'skip'
+    runs-on: ubuntu-latest
+    # A shard should take about two hours. A shard heading past this is killed
+    # early rather than holding a runner to the six-hour ceiling to say so —
+    # and is reported as a broken sweep, not as a quiet one.
     timeout-minutes: 210
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
-      # The working branch, explicitly — NOT the ref that triggered this.
-      #
-      # A scheduled workflow always runs on the default branch, and between
-      # releases `master` is frozen at the last tag: sweeping it would re-prove
-      # the same released code every night and never see the version being
-      # built. That is a silent failure — a green sweep of the wrong commit
-      # reads exactly like a green sweep. The sweep is worth having only if it
-      # follows the code that is changing, which is `next` (see
-      # docs/agents/ci.md's branch note). If `next` is ever retired, this fails loudly rather than
-      # quietly sweeping the wrong branch, which is the intended failure mode.
       - uses: actions/checkout@v7
         with:
-          ref: next
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: client/package-lock.json
       # No artifact to download from another workflow, so this job builds the
-      # SPA itself — `rust-embed` needs the real one either way, or the
-      # frontend-serving tests assert the fallback page and every mutant in that
-      # area survives for the wrong reason.
+      # SPA itself — `rust-embed` needs the real one, or the frontend-serving
+      # tests assert the fallback page and every mutant in that area survives
+      # for the wrong reason.
       - run: npm ci
         working-directory: client
       - run: npm run build
@@ -99,16 +201,68 @@ jobs:
           tool: cargo-mutants,cargo-nextest
       # Every shard's unmutated baseline is the whole suite, `tests/trplugin.rs`
       # included, and that file compiles the plugin core against libcurl's
-      # headers. Without them the baseline fails and no mutant is tried; the x64
-      # image carries them by accident of another package, and this job no
-      # longer relies on that (#115).
+      # headers. Without them the baseline fails and no mutant is tried (#115).
       - name: libcurl headers, for the recorder plugin's upload core
         run: sudo apt-get update -qq && sudo apt-get install -y libcurl4-openssl-dev
       - name: Mutate
-        run: cargo mutants --shard ${{ matrix.shard }}/16 --test-tool nextest -j 2 -- --locked
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+          BASELINE: ${{ needs.plan.outputs.baseline }}
+          SHARD: ${{ matrix.shard }}
+          TOTAL: ${{ needs.plan.outputs.total }}
+        run: |
+          filter=()
+          if [ "$MODE" = incremental ]; then
+            git diff "$BASELINE...HEAD" > sweep.diff
+            filter=(--in-diff sweep.diff)
+          fi
+          status=0
+          cargo mutants "${filter[@]}" --shard "$SHARD/$TOTAL" --test-tool nextest -j 2 -- --locked || status=$?
+          .github/scripts/nightly-sweep.sh completed "$status"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-shard-${{ matrix.shard }}
           path: mutants.out/
           retention-days: 14
+
+  # File what the sweep found — or that it did not complete.
+  report:
+    name: Report
+    needs: [plan, sweep]
+    if: >-
+      always() && github.event_name == 'workflow_dispatch'
+      && needs.plan.outputs.mode != 'skip'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PLANNED: ${{ needs.plan.result }}
+      SWEPT: ${{ needs.sweep.result }}
+      TOTAL: ${{ needs.plan.outputs.total }}
+      MODE: ${{ needs.plan.outputs.mode }}
+      BRANCH: ${{ github.ref_name }}
+      RANGE: ${{ needs.plan.outputs.range }}
+      TICKETS: ${{ needs.plan.outputs.tickets }}
+    steps:
+      - uses: actions/checkout@v7
+      # Allowed to fail: when the plan broke there are no shards to download,
+      # and a shard whose results are missing is the script's to call breakage.
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: mutants-shard-*
+          path: shards
+      # The decision — breakage or survivors, and in which order — is the
+      # script's (tests/nightly.rs); this only says which jobs did not succeed.
+      # `status`, not `conclusion`: a job still running (this one) has no
+      # conclusion yet, and gh reports that as an empty string, not null.
+      - name: File it
+        run: |
+          FAILED_JOBS=$(gh run view "$GITHUB_RUN_ID" --json jobs \
+            --jq '.jobs[] | select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped") | "- \(.name): \(.conclusion)"')
+          export FAILED_JOBS
+          .github/scripts/nightly-report.sh sweep "$PLANNED" "$SWEPT" "$TOTAL" shards

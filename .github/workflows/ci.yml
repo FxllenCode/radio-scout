@@ -397,9 +397,14 @@ jobs:
   # Coverage says a line ran; mutation says an assertion would have caught it
   # changing (ADR-0010). Advisory by design — a tests-only diff yields no
   # mutants at all, so it can never be the sole gate.
+  #
+  # Not on the release pull request (#121): its diff against master is a whole
+  # version — over five thousand mutants on one runner, killed at the six-hour
+  # job limit having reported nothing — and the nightly has already swept `next`,
+  # sharded, filing what survives in "Mutation survivors on next".
   mutants:
     name: Mutation testing on the diff (advisory)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.head_ref != 'next'
     runs-on: ubuntu-latest
     needs: client
     continue-on-error: true
@@ -601,4 +606,4 @@ jobs:
       # somebody else's recorder after every call. Neither is a place to find
       # out about a quoting bug in production.
       - name: shellcheck
-        run: shellcheck .github/scripts/*.sh install.sh radio-scout-upload.sh
+        run: shellcheck .github/scripts/*.sh tests/fixtures/*.sh install.sh radio-scout-upload.sh

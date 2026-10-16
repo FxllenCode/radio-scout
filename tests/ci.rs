@@ -795,6 +795,20 @@ fn release_workflow() -> String {
     named_workflow("release.yml")
 }
 
+/// The mutation sweep's pipeline (#121).
+fn nightly_workflow() -> String {
+    named_workflow("nightly.yml")
+}
+
+/// The value a workflow gives an environment variable, unquoted.
+fn env_value(workflow: &str, key: &str) -> String {
+    workflow
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("{key}:")))
+        .map(|value| value.trim().trim_matches(['\'', '"']).to_string())
+        .unwrap_or_else(|| panic!("nothing sets `{key}`:\n{workflow}"))
+}
+
 /// A path inside the repository, from a test binary that may run anywhere.
 fn repo_file(relative: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -966,4 +980,198 @@ fn the_plugin_job_installs_every_library_the_plugins_include() {
             }
         }
     }
+}
+
+/// **On a schedule, the nightly only dispatches** (#121).
+///
+/// A scheduled run always reads the *default branch's* copy of its workflow,
+/// and `master` is frozen between releases — so a sweep that ran on the
+/// schedule swept the last release, every night, for as long as the next one
+/// took to build. For 57 nights it swept `02bf270` and never once saw `next`,
+/// while `next`'s own copy of this file checked `next` out explicitly: a copy
+/// the scheduler never read. `workflow_dispatch` is the one event that runs the
+/// *dispatched branch's* copy, against that branch, so the schedule does
+/// nothing but dispatch. The job it runs runs no cargo; every other job runs
+/// only on a dispatch; and no checkout names its own ref, because a hard-coded
+/// one is the fix that did not work.
+#[test]
+fn on_a_schedule_the_nightly_only_dispatches() {
+    let nightly = nightly_workflow();
+    let jobs = jobs(&nightly);
+    let scheduled: Vec<_> = jobs
+        .iter()
+        .filter(|(_, block)| block.contains("github.event_name == 'schedule'"))
+        .collect();
+
+    assert_eq!(
+        scheduled.len(),
+        1,
+        "one job runs on the schedule, the dispatcher: {scheduled:?}"
+    );
+    let (dispatcher, block) = scheduled[0];
+    assert!(
+        block.contains("gh workflow run nightly.yml"),
+        "`{dispatcher}` runs on the schedule without dispatching anything"
+    );
+    assert!(
+        !block.contains("cargo "),
+        "`{dispatcher}` runs cargo on the schedule, which is master's frozen code"
+    );
+    for (job, block) in &jobs {
+        if job != dispatcher {
+            assert!(
+                block.contains("github.event_name == 'workflow_dispatch'"),
+                "`{job}` can run on the schedule, against master's frozen code"
+            );
+        }
+    }
+    assert!(
+        !nightly.contains("ref: "),
+        "a checkout names its own ref; only the dispatched branch is ever swept"
+    );
+}
+
+/// **The nightly sweeps `next`**, the working branch, where everything lands
+/// between releases. One list, so a second working branch is a word added to
+/// it — and a list that lost `next` would leave every night green and sweeping
+/// nothing, which is the shape of the failure this replaced.
+#[test]
+fn the_nightly_sweeps_the_working_branch() {
+    let swept = env_value(&nightly_workflow(), "SWEPT_BRANCHES");
+
+    assert!(
+        swept.split_whitespace().any(|branch| branch == "next"),
+        "the nightly does not sweep next: {swept:?}"
+    );
+}
+
+/// The dispatcher stands the daily tick down on the full sweep's day, and
+/// reads that day off `FULL_CRON` (tests/nightly.rs) — so `FULL_CRON` has to
+/// *be* one of the schedules. Moved on one side only, its old day would lose
+/// its incremental sweep and the new one would run both.
+#[test]
+fn the_full_sweep_the_dispatcher_expects_is_one_that_is_scheduled() {
+    let nightly = nightly_workflow();
+    let full = env_value(&nightly, "FULL_CRON");
+
+    let scheduled: Vec<&str> = nightly
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- cron:"))
+        .map(|cron| cron.trim().trim_matches(['\'', '"']))
+        .collect();
+    assert!(
+        scheduled.contains(&full.as_str()),
+        "FULL_CRON is {full:?}, and the schedules are {scheduled:?}"
+    );
+}
+
+/// **A survivor leaves the sweep green** (#121). cargo-mutants exits 2 when a
+/// mutant survives, so a bare call under `set -e` turns every finding into a
+/// red shard — and red goes back to meaning both "it found something" and "it
+/// broke", which is how 57 red nights in a row came to be ignored. The step
+/// that mutates routes the status through `nightly-sweep.sh completed`, which
+/// knows 2 and 3 are findings (tests/nightly.rs).
+#[test]
+fn a_survivor_leaves_the_sweep_green() {
+    let nightly = nightly_workflow();
+    let (job, block) = jobs(&nightly)
+        .into_iter()
+        .find(|(_, block)| block.contains("cargo mutants") && block.contains("--test-tool"))
+        .expect("no job in nightly.yml mutates anything");
+
+    let mutates = block
+        .lines()
+        .find(|line| line.contains("cargo mutants"))
+        .expect("the mutate line");
+    assert!(
+        mutates.trim_end().ends_with("|| status=$?"),
+        "`{job}` runs cargo-mutants where `bash -e` stops the step at its exit status: {mutates}"
+    );
+    assert!(
+        block.contains("nightly-sweep.sh completed \"$status\""),
+        "`{job}` lets cargo-mutants' own exit status decide the shard's colour"
+    );
+}
+
+/// **A dispatch that fails is filed by the dispatcher** (#121), because the run
+/// that would otherwise say so never started. Without it, a branch that could
+/// not be dispatched is one more red schedule run nobody opens.
+#[test]
+fn a_dispatch_that_fails_is_filed_by_the_dispatcher() {
+    let nightly = nightly_workflow();
+    let (job, block) = jobs(&nightly)
+        .into_iter()
+        .find(|(_, block)| block.contains("gh workflow run"))
+        .expect("no dispatcher");
+
+    assert!(
+        block.contains("nightly-report.sh broken"),
+        "`{job}` can fail to dispatch without filing it"
+    );
+}
+
+/// **A sweep's name is what the next sweep reads its baseline from**
+/// (tests/nightly.rs, `baselines`): it knows a full sweep by `(full)` and a
+/// hand-picked range by ` from `, because those are all the run history keeps.
+/// Reword the run's name and every night would quietly lose its starting point.
+#[test]
+fn a_sweeps_name_says_what_the_next_one_reads() {
+    let nightly = nightly_workflow();
+    let name: String = nightly
+        .lines()
+        .skip_while(|line| !line.starts_with("run-name:"))
+        .take_while(|line| !line.is_empty())
+        .collect();
+
+    assert!(
+        name.contains("Mutation sweep ({0})"),
+        "the mode is not where `baselines` looks for it: {name}"
+    );
+    assert!(
+        name.contains("' from {0}'"),
+        "a hand-picked range is not named the way `baselines` passes over it: {name}"
+    );
+}
+
+/// **Every script a workflow runs by its path is executable.** A step that calls
+/// `.github/scripts/x.sh` gets exit 126 for a file without its bit — on every
+/// runner at once, and only once it is pushed. Two of #121's scripts were
+/// first written without it, and reviewed rather than run, which is what
+/// caught it.
+#[cfg(unix)]
+#[test]
+fn every_script_a_workflow_runs_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = repo_file(".github/scripts");
+    for entry in std::fs::read_dir(&dir).expect("read .github/scripts") {
+        let path = entry.expect("entry").path();
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "{} is not executable (mode {mode:o})",
+            path.display()
+        );
+    }
+}
+
+/// **The release pull request is left to the nightly** (#121). Its diff against
+/// `master` is a whole version — over five thousand mutants on one runner,
+/// killed at the six-hour job limit having reported nothing — and the weekly
+/// full sweep of `next` has already done that work, sharded.
+#[test]
+fn the_release_pull_request_is_left_to_the_nightly() {
+    let ci = ci_workflow();
+    let (_, block) = jobs(&ci)
+        .into_iter()
+        .find(|(job, _)| job == "mutants")
+        .expect("ci.yml has no diff-mutation job");
+
+    assert!(
+        block.contains("github.head_ref != 'next'"),
+        "the diff-mutation job runs on the release pull request"
+    );
 }
