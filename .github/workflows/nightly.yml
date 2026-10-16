@@ -219,11 +219,23 @@ jobs:
           status=0
           cargo mutants "${filter[@]}" --shard "$SHARD/$TOTAL" --test-tool nextest -j 2 -- --locked || status=$?
           .github/scripts/nightly-sweep.sh completed "$status"
+      # Kept under the shard's own name *inside* the artifact, so the report can
+      # merge every shard into one directory and find each at
+      # `shards/mutants-shard-<k>/` — download-artifact extracts a lone
+      # artifact straight into its path, so a layout that relied on it adding
+      # the directory broke on the first one-shard sweep (tests/ci.rs).
+      - name: Keep the results under this shard's name
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p results
+          if [ -d mutants.out ]; then mv mutants.out "results/mutants-shard-$SHARD"; fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-shard-${{ matrix.shard }}
-          path: mutants.out/
+          path: results/
           retention-days: 14
 
   # File what the sweep found — or that it did not complete.
@@ -256,6 +268,7 @@ jobs:
         with:
           pattern: mutants-shard-*
           path: shards
+          merge-multiple: true
       # The decision — breakage or survivors, and in which order — is the
       # script's (tests/nightly.rs); this only says which jobs did not succeed.
       # `status`, not `conclusion`: a job still running (this one) has no

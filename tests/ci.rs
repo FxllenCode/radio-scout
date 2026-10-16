@@ -1093,6 +1093,43 @@ fn a_survivor_leaves_the_sweep_green() {
     );
 }
 
+/// **Every shard's results land where the report reads them** (#121):
+/// `shards/mutants-shard-<k>/missed.txt`, however many shards there were.
+///
+/// `download-artifact` lays out what it fetches by how much it fetches — one
+/// artifact is extracted straight into the path, several each into a
+/// directory of its own — so a sweep with exactly one shard found its results
+/// one level up from where the report looked, and (correctly) filed itself
+/// broken on its first real run. Each shard therefore uploads its results
+/// *inside* a directory named for itself, and the report merges them all into
+/// one, which is the same layout for one shard as for sixty.
+#[test]
+fn every_shards_results_land_where_the_report_reads_them() {
+    let nightly = nightly_workflow();
+    let jobs = jobs(&nightly);
+    let (_, sweep) = jobs
+        .iter()
+        .find(|(_, block)| block.contains("cargo mutants") && block.contains("--test-tool"))
+        .expect("no job in nightly.yml mutates anything");
+    let (_, report) = jobs
+        .iter()
+        .find(|(_, block)| block.contains("nightly-report.sh sweep"))
+        .expect("no job in nightly.yml reports");
+
+    assert!(
+        sweep.contains("results/mutants-shard-$SHARD"),
+        "a shard's results are not kept under its own name:\n{sweep}"
+    );
+    assert!(
+        sweep.contains("path: results/"),
+        "a shard uploads something other than its named results:\n{sweep}"
+    );
+    assert!(
+        report.contains("merge-multiple: true"),
+        "the report's layout depends on how many shards there were:\n{report}"
+    );
+}
+
 /// **A dispatch that fails is filed by the dispatcher** (#121), because the run
 /// that would otherwise say so never started. Without it, a branch that could
 /// not be dispatched is one more red schedule run nobody opens.
