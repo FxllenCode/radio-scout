@@ -35,7 +35,9 @@ exclude_globs = [
 # (`path:line:col: <change>`). They name only as much as it takes to be
 # unambiguous: the mutations below are unique by their text alone, so none is
 # anchored to a line — an anchor that drifts is a stale exclusion, and the text
-# is what carries the meaning. Either way the failure mode is the same and it is
+# is what carries the meaning. A `$` closes one that ends in a function's name,
+# so a function whose name merely *begins* with it (`normalize_header`, a
+# `peak_` anything) is never swept up without a proof of its own. Either way the failure mode is the same and it is
 # the one we want: an entry that stops matching stops excluding, and the mutant
 # reappears in the nightly report rather than vanishing quietly.
 #
@@ -77,5 +79,18 @@ exclude_re = [
     # The `<` -> `==` mutant of the same comparison is deliberately NOT excluded:
     # that one admits essentially every frame and is killed by
     # `nothing_that_is_not_a_held_tone_is_a_tone`.
-    "replace < with <= in peak",
+    "replace < with <= in peak$",
+
+    # `normalize` scales its gain back by `ceiling / peak` when `peak > ceiling`
+    # (#99). The `>=` mutant differs on exactly one input, `peak == ceiling`,
+    # and there the correction is `gain *= ceiling / peak`. IEEE 754 division is
+    # correctly rounded, so a finite non-zero `x / x` is exactly 1.0, and
+    # `gain * 1.0` is exactly `gain`: the same bits either way. `ceiling` is a
+    # constant near 0.84, never zero; an infinite `peak` passes both comparisons
+    # and a NaN one fails both, so neither tells the two apart.
+    #
+    # Its `<` and `==` siblings are not equivalent and are not excluded: each
+    # stops the limiter firing on a Call that needs it, which every ceiling
+    # assertion in `enhance.rs` catches.
+    "replace > with >= in normalize$",
 ]

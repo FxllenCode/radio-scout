@@ -370,9 +370,10 @@ pub fn enhance(audio: &[u8], config: &EnhancementConfig) -> Result<Enhanced, Enh
 
 /// Decode anything a recorder sends — WAV, MP3, AAC in M4A — to mono f32.
 ///
-/// Channels are averaged rather than dropped: a recorder that duplicates a mono
-/// source across two channels is common, and taking one would throw away 3 dB
-/// for no reason.
+/// Channels are averaged rather than one being taken: a source a recorder put
+/// on one channel only is lost entirely if the other is the one kept, and
+/// averaged it is merely 6 dB down — which levelling restores. A mono source
+/// duplicated across both, the common case, averages to exactly itself.
 ///
 /// **Public because tone-out detection shares it** (#55). There is one decoder
 /// in this process, and it lives here because enhancement is what needed it
@@ -449,21 +450,20 @@ pub(crate) fn resample(samples: &[f32], from: u32, to: u32) -> Result<Vec<f32>, 
     let mut resampler =
         rubato::Fft::<f32>::new(from as usize, to as usize, 1024, 1, FixedSync::Input)
             .map_err(|_| EnhanceError::Failed("resample"))?;
-
-    // `process_all_into_buffer` writes at most `ceil(ratio * input)` frames,
-    // plus the resampler's own delay; the slack is trimmed by the frame count
-    // it reports, so over-allocating costs nothing but a moment.
-    let capacity = (samples.len() as f64 * to as f64 / from as f64).ceil() as usize + 2 * 1024;
-    let mut out = vec![0f32; capacity];
     let input = InterleavedSlice::new(samples, 1, samples.len())
         .map_err(|_| EnhanceError::Failed("resample"))?;
-    let mut output = InterleavedSlice::new_mut(&mut out, 1, capacity)
+
+    // rubato sizes the output itself, and trims both its delay and the padding
+    // back off. It used to be sized here, as the expected length plus a fixed
+    // 2048 frames — which is less than rubato's delay plus one chunk whenever
+    // a 1024-frame input chunk becomes more than 2048 output frames, so an
+    // upsample to the work rate refused two 8 kHz Calls in three (#99). The
+    // other callers never overran it: the station's 8 kHz to 16 kHz makes
+    // exactly 2048 frames a chunk, and export only ever downsamples.
+    let output = resampler
+        .process_all(&input, samples.len(), None)
         .map_err(|_| EnhanceError::Failed("resample"))?;
-    let (_, written) = resampler
-        .process_all_into_buffer(&input, &mut output, samples.len(), None)
-        .map_err(|_| EnhanceError::Failed("resample"))?;
-    out.truncate(written);
-    Ok(out)
+    Ok(output.take_data())
 }
 
 /// RNNoise, frame by frame.
@@ -1153,8 +1153,21 @@ mod tests {
     /// a test that shares its writer with the code under test cannot tell a
     /// wrong header from a consistently wrong one.
     fn wav(samples: &[f32], rate: u32) -> Vec<u8> {
-        let data: Vec<u8> = samples
-            .iter()
+        pcm_wav(&[samples], rate)
+    }
+
+    /// A stereo 16-bit PCM WAV, built by hand for the same reason as [`wav`].
+    fn stereo_wav(left: &[f32], right: &[f32], rate: u32) -> Vec<u8> {
+        pcm_wav(&[left, right], rate)
+    }
+
+    /// The writer under [`wav`] and [`stereo_wav`]: one plane per channel,
+    /// interleaved a frame at a time.
+    fn pcm_wav(planes: &[&[f32]], rate: u32) -> Vec<u8> {
+        let channels = planes.len() as u16;
+        let frames = planes.iter().map(|plane| plane.len()).min().unwrap_or(0);
+        let data: Vec<u8> = (0..frames)
+            .flat_map(|frame| planes.iter().map(move |plane| plane[frame]))
             .flat_map(|s| ((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes())
             .collect();
         let mut out = Vec::new();
@@ -1163,10 +1176,10 @@ mod tests {
         out.extend(b"WAVEfmt ");
         out.extend(16u32.to_le_bytes()); // PCM fmt chunk size
         out.extend(1u16.to_le_bytes()); // PCM
-        out.extend(1u16.to_le_bytes()); // mono
+        out.extend(channels.to_le_bytes());
         out.extend(rate.to_le_bytes());
-        out.extend((rate * 2).to_le_bytes()); // byte rate
-        out.extend(2u16.to_le_bytes()); // block align
+        out.extend((rate * channels as u32 * 2).to_le_bytes()); // byte rate
+        out.extend((channels * 2).to_le_bytes()); // block align
         out.extend(16u16.to_le_bytes()); // bits
         out.extend(b"data");
         out.extend((data.len() as u32).to_le_bytes());
@@ -1175,9 +1188,10 @@ mod tests {
     }
 
     /// Read a mono 16-bit WAV back — a hand-rolled reader, for the same reason
-    /// [`wav`] is a hand-rolled writer. It also *is* the assertion that the
-    /// output is a canonical WAV: a file this cannot read is one a browser
-    /// would struggle with too.
+    /// [`wav`] is a hand-rolled writer. A file this cannot read is one a
+    /// browser would struggle with too; but it walks chunks, so it reads
+    /// straight past a RIFF size or a byte rate that lies, and those are
+    /// [`an_enhanced_call_is_a_canonical_wav_to_the_byte`]'s to catch.
     fn read_wav(bytes: &[u8]) -> (Vec<f32>, u32) {
         assert_eq!(&bytes[0..4], b"RIFF", "not a RIFF file");
         assert_eq!(&bytes[8..12], b"WAVE", "not a WAVE file");
@@ -1241,6 +1255,27 @@ mod tests {
         let mut meter = ebur128::EbuR128::new(1, rate, ebur128::Mode::I).expect("meter");
         meter.add_frames_f32(&samples).expect("measure");
         meter.loudness_global().expect("integrated loudness")
+    }
+
+    /// RMS, over the samples given.
+    fn rms_of(samples: &[f32]) -> f64 {
+        let power = samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
+        (power / samples.len() as f64).sqrt()
+    }
+
+    /// The largest sample, either side of zero.
+    fn peak_in(samples: &[f32]) -> f32 {
+        samples.iter().fold(0f32, |max, s| max.max(s.abs()))
+    }
+
+    /// The largest sample of an encoded result.
+    fn peak_of(encoded: &[u8]) -> f32 {
+        peak_in(&read_wav(encoded).0)
+    }
+
+    /// An amplitude ratio, in dB.
+    fn db(ratio: f64) -> f64 {
+        20.0 * ratio.log10()
     }
 
     fn normalizing() -> EnhancementConfig {
@@ -1309,6 +1344,159 @@ mod tests {
         );
     }
 
+    /// **Stereo is averaged down to mono, at the level a listener heard it**
+    /// (#99).
+    ///
+    /// Asked of [`decode`] rather than of [`enhance`]: normalizing would level
+    /// a downmix at the wrong gain straight back to its target, and the
+    /// decoder is not only enhancement's — tone-out, quiet detection, the
+    /// station stream and export read what it returns. Two worked cases with
+    /// levels known in advance: a recorder that duplicates mono across both
+    /// channels must come out exactly as loud as one of them (a sum would be
+    /// 6 dB hot), and a source on one channel only comes out 6 dB down,
+    /// because its silent partner is averaged in rather than dropped.
+    #[rstest]
+    #[case::mono_duplicated(0.4, 0.4, 0.0)]
+    #[case::one_channel_silent(0.4, 0.0, -6.02)]
+    fn stereo_decodes_to_the_average_of_its_channels(
+        #[case] left: f64,
+        #[case] right: f64,
+        #[case] expected_db: f64,
+    ) {
+        let rate = 16_000;
+        let audio = stereo_wav(&tone(1000.0, rate, left), &tone(1000.0, rate, right), rate);
+
+        let (samples, decoded_rate) = decode(&audio).expect("a stereo WAV decodes");
+
+        assert_eq!(decoded_rate, rate);
+        assert_eq!(
+            samples.len(),
+            tone(1000.0, rate, left).len(),
+            "one sample a frame"
+        );
+        let level = db(rms_of(&samples) / rms_of(&tone(1000.0, rate, left)));
+        assert!(
+            (level - expected_db).abs() < 0.1,
+            "{level:+.2} dB against one channel; expected {expected_db:+.2}"
+        );
+    }
+
+    /// Speech, as far as a test can fake it: a 150 Hz voice with its harmonics,
+    /// opening and closing twice a second — so words at every half second plus
+    /// a quarter, and the gaps between them on every half second.
+    fn syllables(rate: u32, seconds: f64) -> Vec<f32> {
+        let n = (seconds * rate as f64) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / rate as f64;
+                let envelope = 0.5 * (1.0 - (std::f64::consts::TAU * 2.0 * t).cos());
+                let voice: f64 = (1..15)
+                    .map(|h| (std::f64::consts::TAU * 150.0 * h as f64 * t).sin() / h as f64)
+                    .sum();
+                (0.1 * envelope * voice) as f32
+            })
+            .collect()
+    }
+
+    /// White noise, from a fixed seed so every run hears the same hiss.
+    fn hiss(n: usize, amplitude: f32) -> Vec<f32> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        (0..n)
+            .map(|_| {
+                // xorshift64: enough randomness for hiss, and no dependency.
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * amplitude
+            })
+            .collect()
+    }
+
+    /// How far the gaps between [`syllables`]' words sit below the words, in
+    /// dB — the depth of the floor a listener hears between them.
+    fn floor_depth(samples: &[f32], rate: u32) -> f64 {
+        let around = |at: f64| {
+            let half = rate as f64 * 0.05;
+            let centre = at * rate as f64;
+            rms_of(&samples[(centre - half) as usize..(centre + half) as usize])
+        };
+        let words: f64 = [1.25, 1.75, 2.25, 2.75, 3.25].map(around).iter().sum();
+        let gaps: f64 = [1.0, 1.5, 2.0, 2.5, 3.0].map(around).iter().sum();
+        db(words / gaps)
+    }
+
+    /// **Denoise mode runs the denoiser, and Normalize mode does not** (#99).
+    ///
+    /// Nothing else here tells the two apart: RNNoise passes a steady tone
+    /// untouched, so every tone-based test comes out the same in either mode —
+    /// and swapping which mode denoises survived the mutation sweep. What a
+    /// denoiser does that a level control cannot is drop the hiss *between*
+    /// words while leaving the words, which is a ratio, so normalizing cannot
+    /// hide it. Measured, the floor sits some 12 dB deeper with the stage on.
+    ///
+    /// Not the question ADR-0006 leaves open — whether RNNoise improves
+    /// already-vocoded P25 for a listener is for someone listening to decide.
+    /// Only that the mode which asks for the stage is the one that gets it.
+    #[test]
+    fn only_denoise_mode_lowers_the_hiss_between_words() {
+        let rate = 16_000;
+        let speech = syllables(rate, 4.0);
+        let noisy: Vec<f32> = speech
+            .iter()
+            .zip(hiss(speech.len(), 0.05))
+            .map(|(word, hiss)| word + hiss)
+            .collect();
+        let depth = |mode| {
+            let config = EnhancementConfig {
+                mode,
+                ..EnhancementConfig::default()
+            };
+            let enhanced = enhance(&wav(&noisy, rate), &config).expect("enhance");
+            let (samples, out_rate) = read_wav(&enhanced.bytes);
+            floor_depth(&samples, out_rate)
+        };
+
+        let (levelled, denoised) = (depth(Mode::Normalize), depth(Mode::Denoise));
+
+        assert!(
+            denoised - levelled > 6.0,
+            "the floor between words is {levelled:.1} dB down levelled and \
+             {denoised:.1} dB down denoised"
+        );
+    }
+
+    /// **The denoiser hands audio back on the scale it was given** (#99).
+    ///
+    /// RNNoise works in i16 units, so [`denoise`] scales into them and back out.
+    /// Asked of the stage rather than of [`enhance`], because on any ordinary
+    /// Call the chain hides it: [`normalize`] runs after, and applies whatever
+    /// gain lands the Call on its target — so a denoiser that handed everything
+    /// back at 32767× would be levelled straight back down, and every
+    /// chain-level test would pass. It is a bug all the same, and not only in
+    /// principle: R128's absolute gate does not scale. A Call quiet enough to
+    /// fall under it keeps the level it arrived at — unless the stage in front
+    /// has made it 32767× louder, in which case it is levelled to the target
+    /// instead.
+    ///
+    /// A steady tone, because RNNoise lets one through untouched — measured at
+    /// well under a tenth of a dB — so the stage's level is the only thing
+    /// being asked about.
+    #[rstest]
+    #[case::quiet(0.05)]
+    #[case::loud(0.5)]
+    fn the_denoiser_returns_audio_at_the_level_it_was_given(#[case] amplitude: f64) {
+        let input = tone(1000.0, WORK_RATE, amplitude);
+
+        let output = denoise(&input);
+
+        assert_eq!(output.len(), input.len());
+        let change = db(rms_of(&output) / rms_of(&input));
+        assert!(
+            change.abs() < 0.5,
+            "{change:+.2} dB through the denoiser for a tone it should pass"
+        );
+    }
+
     /// Every failure carries a slug an operator can grep, including the ones
     /// built from a stage name (ADR-0011 rules 3 and 6) — and the slug is what
     /// `Display` renders, so a `%error` in a log line and a `reason=` field can
@@ -1320,6 +1508,21 @@ mod tests {
     fn every_failure_has_one_greppable_name(#[case] error: EnhanceError, #[case] expected: &str) {
         assert_eq!(error.reason(), expected);
         assert_eq!(error.to_string(), expected);
+    }
+
+    /// An output displays as the spelling an Operator writes (#99), because
+    /// that is what a refusal to boot lists as the expected set. The config
+    /// test of that message checks `contains(&output.to_string())` — which an
+    /// empty `Display` satisfies, since every message contains `""`.
+    #[rstest]
+    #[case(Output::Wav, "wav")]
+    #[case(Output::Opus, "opus")]
+    fn an_output_displays_as_it_is_spelled_in_the_file(
+        #[case] output: Output,
+        #[case] spelled: &str,
+    ) {
+        assert_eq!(output.to_string(), spelled);
+        assert_eq!(spelled.parse::<Output>(), Ok(output));
     }
 
     /// A recorder killed mid-upload leaves a header promising more audio than
@@ -1919,13 +2122,13 @@ mod tests {
         );
     }
 
-    /// The linear amplitude [`PEAK_CEILING_DBFS`] describes.
+    /// The linear amplitude of -1.5 dBFS, 10^(-1.5/20) — **written out**, not
+    /// derived from [`PEAK_CEILING_DBFS`] (#99). Derived, every ceiling
+    /// assertion here compared the constant with itself: flipping it to +1.5
+    /// put the ceiling above full scale, the limiter stopped limiting, and
+    /// every test still passed against the ceiling the mutant had chosen.
     fn ceiling() -> f32 {
-        10f32.powf((PEAK_CEILING_DBFS / 20.0) as f32)
-    }
-
-    fn peak_of(encoded: &[u8]) -> f32 {
-        read_wav(encoded).0.iter().fold(0f32, |m, s| m.max(s.abs()))
+        0.841_395
     }
 
     /// The target is a setting, so it has to be the one that is hit — a
@@ -1953,6 +2156,13 @@ mod tests {
     /// can push a spike past full scale even when the Call as a whole is quiet.
     /// A clipped sample is a worse outcome than a slightly quiet Call, so the
     /// gain gives way to the ceiling rather than the other way round.
+    ///
+    /// Pinned from both sides (#99). The Call has to land well short of its
+    /// target, which is what proves the target alone would have clipped it —
+    /// a quiet tone needing some 20 dB of gain, under spikes already at full
+    /// scale. And the peak has to land *on* the ceiling rather than merely
+    /// under it, which is what proves the ceiling is -1.5 dBFS and not
+    /// anywhere quieter.
     #[test]
     fn a_spiky_call_is_pulled_below_the_ceiling_rather_than_clipped() {
         let mut samples = tone(1000.0, 16_000, 0.02);
@@ -1962,9 +2172,14 @@ mod tests {
 
         let enhanced = enhance(&wav(&samples, 16_000), &normalizing()).expect("enhance");
 
+        let loudness = loudness_of(&enhanced.bytes);
+        assert!(
+            loudness < DEFAULT_TARGET_LUFS - 3.0,
+            "{loudness:.2} LUFS: the target, not the ceiling, set the gain"
+        );
         let peak = peak_of(&enhanced.bytes);
         assert!(
-            peak <= ceiling() + 0.001,
+            (ceiling() - 0.005..=ceiling() + 0.001).contains(&peak),
             "peaked at {peak:.4}, ceiling is {:.4}",
             ceiling()
         );
@@ -2049,7 +2264,7 @@ mod tests {
     /// agree with itself into a pass.
     #[rstest]
     #[case::trunk_recorder_wav(8_000)]
-    #[case::narrowband(16_000)]
+    #[case::wideband(16_000)]
     #[case::cd_rate(44_100)]
     #[case::the_real_archive(96_000)]
     fn every_input_rate_lands_on_eight_kilohertz_mono(#[case] rate: u32) {
@@ -2062,6 +2277,74 @@ mod tests {
         assert_eq!(enhanced.mime, "audio/wav");
         assert_eq!(enhanced.extension, "wav");
         assert!(!samples.is_empty(), "enhanced to nothing");
+    }
+
+    /// **A Call is enhanced whatever its length** (#99), which it was not.
+    ///
+    /// The upsample to [`WORK_RATE`] sized its own output buffer: the expected
+    /// length plus a fixed 2048 frames of slack. rubato needs more than that
+    /// whenever a Call's last chunk lands badly — its delay plus one whole
+    /// chunk of output — so at 8 kHz two Call lengths in three were refused
+    /// as `reason=resample`, on exactly the rate Trunk Recorder writes. The
+    /// proptest below had been finding them all along and calling them
+    /// refusals.
+    ///
+    /// Swept across one resampler chunk of lengths rather than naming a few,
+    /// because *which* lengths fail is a fact about rubato's chunking, and a
+    /// table of them would be a table of rubato's internals.
+    #[rstest]
+    #[case::trunk_recorder_wav(8_000)]
+    #[case::wideband(16_000)]
+    #[case::half_cd(22_050)]
+    fn a_call_of_any_length_is_enhanced(#[case] rate: u32) {
+        for extra in (0..1024).step_by(64) {
+            let length = rate as usize + extra;
+            let mut samples = tone(1000.0, rate, 0.2);
+            samples.truncate(length);
+
+            let enhanced = enhance(&wav(&samples, rate), &normalizing())
+                .unwrap_or_else(|error| panic!("a {length}-sample Call at {rate} Hz: {error}"));
+
+            let (out, _) = read_wav(&enhanced.bytes);
+            let expected = length * OUTPUT_RATE as usize / rate as usize;
+            assert!(
+                out.len().abs_diff(expected) <= 1,
+                "{} samples for a {length}-sample Call at {rate} Hz",
+                out.len()
+            );
+        }
+    }
+
+    /// **The header, field by field** (#99). [`read_wav`] walks chunks, so it
+    /// reads past a RIFF size or a byte rate that lies — and a browser may
+    /// not: a RIFF size that disagrees with the file is one some decoders
+    /// refuse, and a byte rate is what some players seek, and time a Call, by.
+    /// Every value is the canonical 44-byte header's, a literal, or the file's
+    /// own length.
+    #[test]
+    fn an_enhanced_call_is_a_canonical_wav_to_the_byte() {
+        let enhanced =
+            enhance(&wav(&tone(1000.0, 16_000, 0.2), 16_000), &normalizing()).expect("enhance");
+
+        let bytes = &enhanced.bytes;
+        let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(
+            u32_at(4) as usize,
+            bytes.len() - 8,
+            "RIFF size: all that follows it"
+        );
+        assert_eq!(&bytes[8..16], b"WAVEfmt ");
+        assert_eq!(u32_at(16), 16, "PCM's fmt chunk is 16 bytes");
+        assert_eq!(u16_at(20), 1, "PCM");
+        assert_eq!(u16_at(22), 1, "mono");
+        assert_eq!(u32_at(24), 8_000, "sample rate");
+        assert_eq!(u32_at(28), 16_000, "byte rate: 8000 samples of two bytes");
+        assert_eq!(u16_at(32), 2, "block align: one two-byte sample");
+        assert_eq!(u16_at(34), 16, "bits per sample");
+        assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(u32_at(40) as usize, bytes.len() - 44, "data size: the rest");
     }
 
     /// Ingest knows a Call's byte count but never its length — it has bytes,
@@ -2106,6 +2389,65 @@ mod tests {
         );
     }
 
+    /// The middle of a Call: the filters and the resampler ring at each end,
+    /// which is the chain settling rather than the level it settles at. The
+    /// ringing is milliseconds; a fifth of a second is trimmed because the
+    /// edges are not what is being measured, and two seconds leaves plenty.
+    fn steady(samples: &[f32]) -> &[f32] {
+        let edge = OUTPUT_RATE as usize / 5;
+        &samples[edge..samples.len() - edge]
+    }
+
+    /// **A known tone in, a known measurement out** (#99) — the assertion every
+    /// other test here stops short of. They prove a Call comes out levelled and
+    /// in range; this proves the *value*, against a number that owes nothing to
+    /// how the chain computes it.
+    ///
+    /// The number is BS.1770's own calibration: K-weighting is built so that a
+    /// 1 kHz sine reads its RMS level (full scale reads -3.01 LUFS). So a 1 kHz
+    /// tone normalized to T LUFS has to come out at an RMS of 10^(T/20),
+    /// whatever level it went in at — and, still being a sine, with its peak √2
+    /// above that. The *sampled* peak sits a little under the true one: at
+    /// 8 kHz a 1 kHz cycle is eight samples, so the nearest falls at worst π/8
+    /// from the crest. A sine clipped toward a square wave has a crest factor
+    /// heading for 1, and fails the lower bound.
+    ///
+    /// Through Denoise as well, because RNNoise passes a steady tone untouched —
+    /// and a denoiser *fed* at the wrong scale hears silence and returns it.
+    /// (Read back at the wrong scale, it is levelled away before this could
+    /// see it, which is why [`the_denoiser_returns_audio_at_the_level_it_was_given`]
+    /// asks the stage itself.)
+    #[rstest]
+    fn a_known_tone_comes_out_at_the_level_its_target_names(
+        #[values(Mode::Normalize, Mode::Denoise)] mode: Mode,
+        #[values(-16.0, -23.0)] target_lufs: f64,
+        #[values(0.02, 0.5)] amplitude: f64,
+    ) {
+        let config = EnhancementConfig {
+            mode,
+            target_lufs,
+            ..EnhancementConfig::default()
+        };
+
+        let enhanced = enhance(&wav(&tone(1000.0, 16_000, amplitude), 16_000), &config)
+            .expect("a tone is audio");
+
+        let (samples, _) = read_wav(&enhanced.bytes);
+        let (rms, peak) = (rms_of(steady(&samples)), peak_in(steady(&samples)) as f64);
+        let expected = 10f64.powf(target_lufs / 20.0);
+        assert!(
+            db(rms / expected).abs() < 0.2,
+            "RMS {rms:.4}; a 1 kHz tone at {target_lufs} LUFS is {expected:.4}"
+        );
+        let crest = peak / rms;
+        let sampled = std::f64::consts::SQRT_2 * (std::f64::consts::PI / 8.0).cos();
+        assert!(
+            (sampled - 0.02..=std::f64::consts::SQRT_2 + 0.02).contains(&crest),
+            "peak {peak:.4} over RMS {rms:.4} is {crest:.3}; a sine sampled eight \
+             times a cycle is between {sampled:.3} and √2"
+        );
+    }
+
     proptest! {
         /// A worker holding a queue must survive anything a recorder can put on
         /// the wire. Whatever these bytes are, enhancement either produces
@@ -2128,26 +2470,29 @@ mod tests {
             }
         }
 
-        /// The three invariants every enhanced Call has, whatever went in:
-        /// it is at the storage rate, no sample is past the ceiling, and no
-        /// sample is NaN. The last matters most — a NaN reaches a listener as
-        /// a burst of noise, and nothing downstream would catch it.
+        /// The four invariants every enhanced Call has, whatever went in: it
+        /// *is* enhanced, it is at the storage rate, no sample is past the
+        /// ceiling, and no sample is NaN. The last matters most — a NaN
+        /// reaches a listener as a burst of noise, and nothing downstream
+        /// would catch it.
         #[test]
         fn every_enhanced_call_is_finite_levelled_and_at_the_storage_rate(
             raw in proptest::collection::vec(-1.0f32..1.0, 4_000..16_000),
             rate in prop_oneof![Just(8_000u32), Just(16_000), Just(22_050), Just(44_100)],
         ) {
+            // Every one of these is audio, so every one is enhanced. This used
+            // to read `if let Ok`, on the theory that short noise could refuse
+            // as un-gateable — but an unmeasurable Call keeps its level rather
+            // than refusing, and what the `Err`s it skipped really were was
+            // the resampler refusing a third of these lengths (#99).
             let enhanced = enhance(&wav(&raw, rate), &normalizing());
+            prop_assert!(enhanced.is_ok(), "{} samples at {} Hz: {:?}", raw.len(), rate, enhanced);
 
-            // Noise this short can measure as un-gateable; that is a refusal,
-            // not a failure, and the invariants are about what *is* produced.
-            if let Ok(enhanced) = enhanced {
-                let (samples, out_rate) = read_wav(&enhanced.bytes);
-                prop_assert_eq!(out_rate, OUTPUT_RATE);
-                for sample in samples {
-                    prop_assert!(sample.is_finite(), "NaN reaches a listener as noise");
-                    prop_assert!(sample.abs() <= ceiling() + 0.001, "{} past the ceiling", sample);
-                }
+            let (samples, out_rate) = read_wav(&enhanced.expect("asserted").bytes);
+            prop_assert_eq!(out_rate, OUTPUT_RATE);
+            for sample in samples {
+                prop_assert!(sample.is_finite(), "NaN reaches a listener as noise");
+                prop_assert!(sample.abs() <= ceiling() + 0.001, "{} past the ceiling", sample);
             }
         }
     }
